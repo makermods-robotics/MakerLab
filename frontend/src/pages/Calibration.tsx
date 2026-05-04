@@ -614,14 +614,6 @@ const Calibration = () => {
                   );
                 return (
                   <div className="space-y-3">
-                    <Alert className="bg-purple-900/50 border-purple-700 text-purple-200">
-                      <Activity className="h-4 w-4" />
-                      <AlertDescription>
-                        <strong>Important:</strong> Move EACH joint through its
-                        full range. A check appears next to each joint once its
-                        range is wide enough.
-                      </AlertDescription>
-                    </Alert>
                     <div className="flex justify-center">
                       <Button
                         onClick={handleCompleteStep}
@@ -640,6 +632,14 @@ const Calibration = () => {
                         Save Calibration
                       </Button>
                     </div>
+                    <Alert className="bg-purple-900/50 border-purple-700 text-purple-200">
+                      <Activity className="h-4 w-4" />
+                      <AlertDescription>
+                        <strong>Important:</strong> Move EACH joint through its
+                        full range. A check appears next to each joint once its
+                        range is wide enough.
+                      </AlertDescription>
+                    </Alert>
                   </div>
                 );
               })()}
