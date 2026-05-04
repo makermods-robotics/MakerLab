@@ -4,6 +4,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+import math
+
 import numpy as np
 from pydantic import BaseModel
 
@@ -12,6 +14,18 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from . import dataset_browser
 
 logger = logging.getLogger(__name__)
+
+# Map dataset action motor names → URDF joint names.
+# Keep in sync with app/teleoperating.py:get_joint_positions_from_robot.
+_MOTOR_TO_URDF_JOINT = {
+    "shoulder_pan": "Rotation",
+    "shoulder_lift": "Pitch",
+    "elbow_flex": "Elbow",
+    "wrist_flex": "Wrist_Pitch",
+    "wrist_roll": "Wrist_Roll",
+    "gripper": "Jaw",
+}
+_DEG_TO_RAD = math.pi / 180.0
 
 
 class StartReplayRequest(BaseModel):
@@ -44,8 +58,17 @@ _stop_event = threading.Event()
 _ticker_thread: threading.Thread | None = None
 
 
-def _strip_pos_suffix(names: list[str]) -> list[str]:
-    return [n[:-4] if n.endswith(".pos") else n for n in names]
+def _map_action_names_to_urdf(names: list[str]) -> list[str | None]:
+    """Strip a trailing ``.pos`` suffix and map SO-101 motor names to URDF joint names.
+
+    Returns one entry per input position. Unknown motors map to ``None`` so the
+    ticker can skip them without changing column ordering.
+    """
+    out: list[str | None] = []
+    for n in names:
+        motor = n[:-4] if n.endswith(".pos") else n
+        out.append(_MOTOR_TO_URDF_JOINT.get(motor))
+    return out
 
 
 def _ticker_loop(manager) -> None:
@@ -69,7 +92,11 @@ def _ticker_loop(manager) -> None:
                     last_frame = total - 1
                     last_row = actions[last_frame] if actions is not None else None
                     last_joints = (
-                        {name: float(last_row[i]) for i, name in enumerate(joint_names)}
+                        {
+                            name: float(last_row[i]) * _DEG_TO_RAD
+                            for i, name in enumerate(joint_names)
+                            if name is not None
+                        }
                         if last_row is not None else {}
                     )
                     manager.broadcast_joint_data_sync({
@@ -87,7 +114,11 @@ def _ticker_loop(manager) -> None:
             continue
 
         row = actions[frame]
-        joints = {name: float(row[i]) for i, name in enumerate(joint_names)}
+        joints = {
+            name: float(row[i]) * _DEG_TO_RAD
+            for i, name in enumerate(joint_names)
+            if name is not None
+        }
         manager.broadcast_joint_data_sync({
             "type": "joint_update",
             "joints": joints,
@@ -139,7 +170,9 @@ def handle_start_replay(req: StartReplayRequest, manager) -> dict[str, Any]:
         action_col = [ds[i]["action"] for i in range(len(ds))]
     actions_np = np.asarray([np.asarray(a, dtype=np.float32) for a in action_col], dtype=np.float32)
 
-    joint_names = _strip_pos_suffix(assets["joint_names"])
+    joint_names = _map_action_names_to_urdf(assets["joint_names"])
+    if not any(n is not None for n in joint_names):
+        return {"success": False, "message": "Dataset has no SO-101 motor names — incompatible with this viewer."}
 
     _stop_event.clear()
     with _state_lock:
@@ -161,7 +194,7 @@ def handle_start_replay(req: StartReplayRequest, manager) -> dict[str, Any]:
 
     return {
         "success": True,
-        "joint_names": joint_names,
+        "joint_names": [n for n in joint_names if n is not None],
         "cameras": assets["cameras"],
         "fps": float(assets["fps"]),
         "num_frames": int(actions_np.shape[0]),
