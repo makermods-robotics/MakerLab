@@ -124,6 +124,13 @@ const Training = () => {
           });
           setActiveTab("monitoring");
           setLogs([]);
+          setTrainingStatus((prev) => ({
+            ...prev,
+            training_active: true,
+            current_step: 0,
+            total_steps: trainingConfig.steps,
+            available_controls: { ...prev.available_controls, stop_training: true },
+          }));
         } else {
           toast({
             title: "Error",
