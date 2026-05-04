@@ -7,6 +7,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -50,6 +51,18 @@ class JobRecord(BaseModel):
     error_message: Optional[str] = None
     metrics: TrainingMetrics = TrainingMetrics()
     runner: Literal["local"] = "local"
+    # PID of the detached subprocess; survives uvicorn --reload so a fresh
+    # registry can re-attach by tailing the log file.
+    process_pid: Optional[int] = None
+
+
+def _pid_alive(pid: int) -> bool:
+    """Return True if a process with this PID exists. Cheap; uses signal 0."""
+    try:
+        os.kill(pid, 0)
+    except (ProcessLookupError, PermissionError):
+        return False
+    return True
 
 
 @runtime_checkable
@@ -175,6 +188,11 @@ class LocalJobRunner:
         child_env = os.environ.copy()
         child_env["PYTHONUNBUFFERED"] = "1"
 
+        # start_new_session=True puts the child in its own session/process
+        # group. Without it, signals sent to the uvicorn worker (e.g. when
+        # --reload restarts it on a .py file change) cascade to the child
+        # and kill the training. With it, the child survives reloads; the
+        # next worker re-attaches via TailingJobRunner using job.json's pid.
         self._process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -182,12 +200,16 @@ class LocalJobRunner:
             universal_newlines=True,
             bufsize=1,
             env=child_env,
+            start_new_session=True,
         )
 
         self._monitor_thread = threading.Thread(
             target=self._pump_stdout, name=f"job-{job_id}-stdout", daemon=True
         )
         self._monitor_thread.start()
+
+    def pid(self) -> Optional[int]:
+        return self._process.pid if self._process is not None else None
 
     def stop(self) -> None:
         if self._process is None or self._process.poll() is not None:
@@ -263,6 +285,113 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Dict
+
+
+class TailingJobRunner:
+    """Re-attaches to a detached subprocess after a uvicorn reload.
+
+    We can't recover the original Popen object across processes, so we don't
+    own stdout. Instead we tail the persisted log file and watch the pid.
+    Implements the JobRunner Protocol so JobRegistry can use it interchangeably
+    with LocalJobRunner.
+    """
+
+    def __init__(
+        self,
+        metrics: TrainingMetrics,
+        log_file_path: Path,
+        pid: int,
+    ) -> None:
+        self._metrics = metrics
+        self._log_file_path = log_file_path
+        self._pid = pid
+        self._log_queue: "Queue[LogLine]" = Queue()
+        self._tail_thread: Optional[threading.Thread] = None
+        self._stop_event = threading.Event()
+        # Replay everything that's already on disk so the parser catches up
+        # on metrics, then tail from the current EOF.
+        self._tail_offset = 0
+
+    def start(self, job_id: str, config: TrainingRequest, output_dir: str) -> None:
+        # Required by JobRunner Protocol but irrelevant here; the subprocess
+        # we're tailing was started by a previous uvicorn worker.
+        raise RuntimeError("TailingJobRunner reattaches to an existing pid; "
+                           "use start_tailing() instead")
+
+    def start_tailing(self) -> None:
+        if self._tail_thread is not None:
+            return
+        self._tail_thread = threading.Thread(
+            target=self._tail_loop, name=f"job-tail-{self._pid}", daemon=True
+        )
+        self._tail_thread.start()
+
+    def stop(self) -> None:
+        try:
+            os.kill(self._pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        self._stop_event.set()
+
+    def is_running(self) -> bool:
+        return _pid_alive(self._pid)
+
+    def returncode(self) -> Optional[int]:
+        # We can't reap a process from another session, so we don't know the
+        # actual exit code. Return 0 once the pid is gone — the watchdog
+        # finalises as "done" rather than "failed", which is the better
+        # default for a detached training that completed normally.
+        if _pid_alive(self._pid):
+            return None
+        return 0
+
+    def stream_log_lines(self) -> List[LogLine]:
+        out: List[LogLine] = []
+        try:
+            while True:
+                out.append(self._log_queue.get_nowait())
+        except Empty:
+            pass
+        return out
+
+    def pid(self) -> Optional[int]:
+        return self._pid
+
+    # -- internals --
+
+    def _tail_loop(self) -> None:
+        """Read lines as they arrive in log_file_path. Exits when pid dies
+        AND there are no more new lines to read."""
+        try:
+            while not self._stop_event.is_set():
+                if not self._log_file_path.exists():
+                    if not _pid_alive(self._pid):
+                        return
+                    self._stop_event.wait(0.5)
+                    continue
+                with self._log_file_path.open() as f:
+                    f.seek(self._tail_offset)
+                    while not self._stop_event.is_set():
+                        raw = f.readline()
+                        if not raw:
+                            self._tail_offset = f.tell()
+                            if not _pid_alive(self._pid):
+                                return
+                            self._stop_event.wait(0.5)
+                            continue
+                        try:
+                            log_line = LogLine.model_validate_json(raw.strip())
+                        except Exception:
+                            continue
+                        parse_metrics_into(log_line.message, self._metrics)
+                        if self._log_queue.qsize() >= 1000:
+                            try:
+                                self._log_queue.get_nowait()
+                            except Empty:
+                                pass
+                        self._log_queue.put(log_line)
+        except Exception as exc:
+            logger.exception("Tailing loop error: %s", exc)
 
 
 _PERSIST_THROTTLE_SECONDS = 1.0
@@ -379,6 +508,12 @@ class JobRegistry:
                 self._persist(record, force=True)
                 raise
 
+            # Persist the pid so a fresh registry (after a uvicorn reload)
+            # can re-attach via TailingJobRunner instead of marking the job
+            # as interrupted.
+            record.process_pid = runner.pid()
+            self._persist(record, force=True)
+
             self._runners[job_id] = runner
             return record
 
@@ -467,10 +602,26 @@ class JobRegistry:
                 logger.warning("Skipping malformed job.json at %s: %s", meta, exc)
                 continue
             if record.state == "running":
-                record.state = "interrupted"
-                if record.ended_at is None:
-                    record.ended_at = time.time()
-                self._write_meta(record)
+                # Was the subprocess detached and is it still alive? If yes,
+                # re-attach via tailing the persisted log file. The watchdog
+                # will finalise the record when the pid eventually dies.
+                pid = record.process_pid
+                if pid is not None and _pid_alive(pid):
+                    logger.info(
+                        "Re-attaching to detached job %s (pid %d)", record.id, pid
+                    )
+                    runner = TailingJobRunner(
+                        record.metrics,
+                        _job_log_path(self._output_root, record.id),
+                        pid,
+                    )
+                    runner.start_tailing()
+                    self._runners[record.id] = runner
+                else:
+                    record.state = "interrupted"
+                    if record.ended_at is None:
+                        record.ended_at = time.time()
+                    self._write_meta(record)
             self._records[record.id] = record
 
     def _start_watchdog(self) -> None:
