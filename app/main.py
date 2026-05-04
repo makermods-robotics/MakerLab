@@ -381,6 +381,22 @@ def get_job_logs(job_id: str):
     return {"logs": logs}
 
 
+@app.get("/jobs/{job_id}/log-file")
+def get_job_log_file(job_id: str):
+    """Return the entire on-disk log file for a job. Drains the live queue too
+    so the next /logs poll returns only lines that arrived after this call."""
+    try:
+        logs = job_registry.read_persisted_logs(job_id)
+    except JobNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found")
+    # Best-effort drain so the frontend doesn't double-display.
+    try:
+        job_registry.drain_logs(job_id)
+    except JobNotFoundError:
+        pass
+    return {"logs": logs}
+
+
 @app.post("/jobs/{job_id}/stop")
 def stop_job(job_id: str):
     try:
@@ -576,8 +592,60 @@ def _list_avfoundation_cameras() -> Dict[int, str]:
     return names
 
 
-def _capture_cv2_thumbnail_subprocess(index: int, backend_value: int) -> str | None:
-    """Capture a thumbnail from cv2.VideoCapture(index, backend) in a fresh subprocess.
+def _capture_avfoundation_jpeg(index: int) -> bytes | None:
+    """Capture a small JPEG from AVFoundation index ``index`` via ffmpeg.
+
+    Used for similarity matching against cv2 thumbnails so we can pin the
+    right AVFoundation device name to each cv2 index. cv2 and ffmpeg
+    enumerate AVFoundation devices in different orders on macOS.
+    """
+    import subprocess
+    try:
+        result = subprocess.run(
+            [
+                "ffmpeg",
+                "-loglevel", "error",
+                "-y",
+                "-f", "avfoundation",
+                "-framerate", "30",
+                "-video_size", "640x480",
+                "-i", str(index),
+                "-frames:v", "1",
+                "-ss", "0.5",
+                "-vf", "scale=64:48",
+                "-q:v", "8",
+                "-f", "image2pipe",
+                "-vcodec", "mjpeg",
+                "pipe:1",
+            ],
+            capture_output=True,
+            timeout=8,
+        )
+        if result.returncode != 0 or not result.stdout:
+            return None
+        return result.stdout
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+
+
+def _frame_signature(jpeg: bytes):
+    """Decode a JPEG to an 8x8 grayscale signature for similarity matching."""
+    import cv2
+    import numpy as np
+    arr = np.frombuffer(jpeg, dtype=np.uint8)
+    img = cv2.imdecode(arr, cv2.IMREAD_GRAYSCALE)
+    if img is None:
+        return None
+    return cv2.resize(img, (8, 8)).astype(np.float32)
+
+
+def _signature_distance(sig_a, sig_b) -> float:
+    import numpy as np
+    return float(np.mean(np.abs(sig_a - sig_b)))
+
+
+def _capture_cv2_thumbnail_subprocess(index: int, backend_value: int) -> bytes | None:
+    """Capture a JPEG thumbnail from cv2.VideoCapture(index, backend) in a fresh subprocess.
 
     Running cv2 in a fresh process eliminates the macOS AVFoundation
     framebuffer-carryover bug that contaminates back-to-back captures within
@@ -585,10 +653,13 @@ def _capture_cv2_thumbnail_subprocess(index: int, backend_value: int) -> str | N
     lerobot will see when it opens the same (index, backend) pair during the
     recording session, so the user's selection from the dropdown is the
     camera that actually gets recorded.
+
+    Returns raw JPEG bytes (or None on failure) so the caller can both encode
+    the thumbnail for the frontend and compute a signature for similarity
+    matching against ffmpeg captures.
     """
     import subprocess
     import sys
-    import base64
 
     helper = (
         "import sys, cv2\n"
@@ -621,7 +692,7 @@ def _capture_cv2_thumbnail_subprocess(index: int, backend_value: int) -> str | N
                 f"{result.stderr.decode(errors='replace')[:300]}"
             )
             return None
-        return "data:image/jpeg;base64," + base64.b64encode(result.stdout).decode("ascii")
+        return result.stdout
     except (FileNotFoundError, subprocess.TimeoutExpired) as e:
         logger.warning(f"cv2 subprocess thumbnail unavailable for index {index}: {e}")
         return None
@@ -679,22 +750,63 @@ def get_available_cameras():
             f"avf_names={avf_names}"
         )
 
+        # 1. Capture the cv2 thumbnail for each cv2 index. This is the picture
+        #    that will actually get recorded if the user selects this index.
+        cv2_jpegs: Dict[int, bytes] = {}
+        for i in available_indices:
+            jpeg = _capture_cv2_thumbnail_subprocess(i, int(backend))
+            if jpeg is not None:
+                cv2_jpegs[i] = jpeg
+
+        # 2. On macOS, capture an ffmpeg AVFoundation frame for each named
+        #    index, then match each cv2 thumbnail to the closest ffmpeg frame
+        #    by visual similarity. cv2 and ffmpeg index AVFoundation devices
+        #    in different orders, so the name we display has to come from
+        #    whichever ffmpeg frame *looks like* this cv2 frame.
+        cv2_index_to_name: Dict[int, str] = {}
+        if system == "Darwin" and avf_names and cv2_jpegs:
+            ffmpeg_sigs: Dict[int, Any] = {}
+            for ff_idx in avf_names:
+                jpeg = _capture_avfoundation_jpeg(ff_idx)
+                if jpeg is None:
+                    continue
+                sig = _frame_signature(jpeg)
+                if sig is not None:
+                    ffmpeg_sigs[ff_idx] = sig
+
+            used_ff_indices: set = set()
+            for cv2_idx, cv2_jpeg in cv2_jpegs.items():
+                cv2_sig = _frame_signature(cv2_jpeg)
+                if cv2_sig is None:
+                    continue
+                best_ff_idx = None
+                best_distance = float("inf")
+                for ff_idx, ff_sig in ffmpeg_sigs.items():
+                    if ff_idx in used_ff_indices:
+                        continue
+                    distance = _signature_distance(cv2_sig, ff_sig)
+                    if distance < best_distance:
+                        best_distance = distance
+                        best_ff_idx = ff_idx
+                if best_ff_idx is not None:
+                    cv2_index_to_name[cv2_idx] = avf_names[best_ff_idx]
+                    used_ff_indices.add(best_ff_idx)
+                    logger.info(
+                        f"🔗 cv2 index {cv2_idx} matched ffmpeg index {best_ff_idx} "
+                        f"({avf_names[best_ff_idx]!r}) with distance {best_distance:.1f}"
+                    )
+
         for i in available_indices:
             entry = {
                 "index": i,
-                "name": avf_names.get(i, f"Camera {i}"),
+                "name": cv2_index_to_name.get(i, avf_names.get(i, f"Camera {i}")),
                 "available": True,
                 **index_props[i],
             }
 
-            # Capture the thumbnail with the *same* cv2 call lerobot will use
-            # during recording, but in a fresh subprocess so cv2's macOS
-            # framebuffer-carryover bug can't mix frames across cameras. The
-            # picture in the dropdown is then guaranteed to match what gets
-            # recorded for that index.
-            thumbnail = _capture_cv2_thumbnail_subprocess(i, int(backend))
-            if thumbnail is not None:
-                entry["thumbnail"] = thumbnail
+            jpeg = cv2_jpegs.get(i)
+            if jpeg is not None:
+                entry["thumbnail"] = "data:image/jpeg;base64," + base64.b64encode(jpeg).decode("ascii")
 
             cameras.append(entry)
 
