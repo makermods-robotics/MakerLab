@@ -312,9 +312,19 @@ const Recording = () => {
     await handleStopRecording();
   }, [handleStopRecording]);
 
-  const handlersRef = useRef({ handleExitEarly, handleRerecordEpisode, requestStopRecording });
+  const handlersRef = useRef({
+    handleExitEarly,
+    handleRerecordEpisode,
+    requestStopRecording,
+    showStopConfirm,
+  });
   useEffect(() => {
-    handlersRef.current = { handleExitEarly, handleRerecordEpisode, requestStopRecording };
+    handlersRef.current = {
+      handleExitEarly,
+      handleRerecordEpisode,
+      requestStopRecording,
+      showStopConfirm,
+    };
   });
 
   const sessionReady = recordingSessionStarted && backendStatus !== null;
@@ -333,6 +343,7 @@ const Recording = () => {
       } else if (e.key === "r" || e.key === "R") {
         handlersRef.current.handleRerecordEpisode();
       } else if (e.key === "Escape") {
+        if (handlersRef.current.showStopConfirm) return;
         handlersRef.current.requestStopRecording();
       }
     };
