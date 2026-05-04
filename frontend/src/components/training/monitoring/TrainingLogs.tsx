@@ -26,13 +26,13 @@ const TrainingLogs: React.FC<TrainingLogsProps> = ({ logs, logContainerRef }) =>
           className="bg-slate-900 rounded-lg p-4 h-96 overflow-y-auto font-mono text-sm border border-slate-700"
         >
           {logs.length === 0 ? (
-            <div className="text-slate-500 text-center py-8">
+            <div className="text-slate-500 py-8">
               No training logs yet. Start training to see output.
             </div>
           ) : (
             logs.map((log, index) => (
               <div key={index} className="flex items-start mb-1">
-                <span className="text-slate-500 mr-4">
+                <span className="text-slate-500 mr-4 select-none">
                   {new Date(log.timestamp * 1000).toLocaleTimeString()}
                 </span>
                 <span className="flex-1 text-slate-300 break-words whitespace-pre-wrap">
