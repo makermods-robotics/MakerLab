@@ -20,7 +20,7 @@ import { RobotRecord } from "@/hooks/useRobots";
 interface RecordingModalProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  robots: RobotRecord[];
+  robot: RobotRecord | null;
   datasetName: string;
   setDatasetName: (value: string) => void;
   singleTask: string;
@@ -36,7 +36,7 @@ interface RecordingModalProps {
 const RecordingModal: React.FC<RecordingModalProps> = ({
   open,
   onOpenChange,
-  robots,
+  robot,
   datasetName,
   setDatasetName,
   singleTask,
@@ -50,8 +50,6 @@ const RecordingModal: React.FC<RecordingModalProps> = ({
 }) => {
   const { auth } = useHfAuth();
 
-  const robot = robots.length === 1 ? robots[0] : null;
-  const tooMany = robots.length > 1;
   const canStart = !!robot && robot.is_clean;
 
   return (
@@ -77,28 +75,19 @@ const RecordingModal: React.FC<RecordingModalProps> = ({
               <h3 className="text-lg font-semibold text-white border-b border-gray-700 pb-2">
                 Robot Configuration
               </h3>
-              {tooMany ? (
+              {!robot ? (
                 <Alert className="bg-amber-900/40 border-amber-700 text-amber-100">
                   <AlertTriangle className="h-4 w-4" />
                   <AlertDescription>
-                    <strong>Warning:</strong> Multiple robot configurations are
-                    not supported yet. Hide all but one robot tile on the
-                    Landing page to record.
-                  </AlertDescription>
-                </Alert>
-              ) : robots.length === 0 ? (
-                <Alert className="bg-amber-900/40 border-amber-700 text-amber-100">
-                  <AlertTriangle className="h-4 w-4" />
-                  <AlertDescription>
-                    Add and configure a robot on the Landing page before
+                    Select and configure a robot on the Landing page before
                     recording.
                   </AlertDescription>
                 </Alert>
-              ) : !robot!.is_clean ? (
+              ) : !robot.is_clean ? (
                 <Alert className="bg-amber-900/40 border-amber-700 text-amber-100">
                   <AlertTriangle className="h-4 w-4" />
                   <AlertDescription>
-                    <strong>{robot!.name}</strong> is missing a calibration.
+                    <strong>{robot.name}</strong> is missing a calibration.
                     Configure it before recording.
                   </AlertDescription>
                 </Alert>
@@ -106,7 +95,7 @@ const RecordingModal: React.FC<RecordingModalProps> = ({
                 <div className="flex items-center gap-2 text-sm">
                   <CheckCircle className="w-4 h-4 text-green-400" />
                   <span className="text-slate-200">
-                    Recording with <strong>{robot!.name}</strong>
+                    Recording with <strong>{robot.name}</strong>
                   </span>
                 </div>
               )}

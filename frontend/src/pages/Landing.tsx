@@ -21,11 +21,11 @@ const Landing = () => {
   const { auth } = useHfAuth();
 
   const {
-    visibleRecords,
-    hiddenNames,
+    selectedName,
+    selectedRecord,
+    availableNames,
     isLoading: isLoadingRobots,
-    addToSession,
-    removeFromSession,
+    selectRobot,
     createRobot,
     deleteRobot,
   } = useRobots();
@@ -45,7 +45,9 @@ const Landing = () => {
   // Clear camera state and release streams when returning to landing page
   useEffect(() => {
     if (cameras.length > 0) {
-      console.log("🧹 Landing page: Cleaning up camera state from previous session");
+      console.log(
+        "🧹 Landing page: Cleaning up camera state from previous session",
+      );
       if (releaseStreamsRef.current) {
         releaseStreamsRef.current();
       }
@@ -63,13 +65,9 @@ const Landing = () => {
   }, []);
 
   const handleRecordingClick = () => {
-    // Seed the recording's camera list from the lone robot's attached cameras.
+    // Seed the recording's camera list from the selected robot's attached cameras.
     // The user can add more in the modal.
-    if (visibleRecords.length === 1) {
-      setCameras([...(visibleRecords[0].cameras ?? [])]);
-    } else {
-      setCameras([]);
-    }
+    setCameras(selectedRecord ? [...(selectedRecord.cameras ?? [])] : []);
     setShowRecordingModal(true);
   };
 
@@ -86,24 +84,15 @@ const Landing = () => {
   const handleInferenceClick = () => navigate("/inference");
 
   const handleStartRecording = async () => {
-    if (visibleRecords.length === 0) {
+    if (!selectedRecord) {
       toast({
-        title: "No robot configured",
-        description: "Add and configure a robot on the Landing page first.",
+        title: "No robot selected",
+        description: "Select or create a robot on the Landing page first.",
         variant: "destructive",
       });
       return;
     }
-    if (visibleRecords.length > 1) {
-      toast({
-        title: "Multiple robots not supported",
-        description:
-          "Multiple robot configurations are not supported yet. Hide all but one robot tile.",
-        variant: "destructive",
-      });
-      return;
-    }
-    const robot = visibleRecords[0];
+    const robot = selectedRecord;
     if (!robot.is_clean) {
       toast({
         title: "Robot not ready",
@@ -122,7 +111,9 @@ const Landing = () => {
     }
 
     const datasetRepoId =
-      auth.status === "authenticated" ? `${auth.username}/${datasetName}` : datasetName;
+      auth.status === "authenticated"
+        ? `${auth.username}/${datasetName}`
+        : datasetName;
 
     if (cameras.length > 0 && releaseStreamsRef.current) {
       console.log("🔓 Releasing camera streams before starting recording...");
@@ -135,20 +126,33 @@ const Landing = () => {
       console.log("✅ Camera streams released, proceeding with recording...");
       toast({
         title: "Camera Resources Ready",
-        description: "Camera streams released successfully. Starting recording...",
+        description:
+          "Camera streams released successfully. Starting recording...",
       });
     }
 
-    const cameraDict = cameras.reduce((acc, cam) => {
-      acc[cam.name] = {
-        type: cam.type,
-        camera_index: cam.camera_index,
-        width: cam.width,
-        height: cam.height,
-        fps: cam.fps,
-      };
-      return acc;
-    }, {} as Record<string, { type: string; camera_index?: number; width: number; height: number; fps?: number }>);
+    const cameraDict = cameras.reduce(
+      (acc, cam) => {
+        acc[cam.name] = {
+          type: cam.type,
+          camera_index: cam.camera_index,
+          width: cam.width,
+          height: cam.height,
+          fps: cam.fps,
+        };
+        return acc;
+      },
+      {} as Record<
+        string,
+        {
+          type: string;
+          camera_index?: number;
+          width: number;
+          height: number;
+          fps?: number;
+        }
+      >,
+    );
 
     const recordingConfig = {
       leader_port: robot.leader_port,
@@ -210,11 +214,11 @@ const Landing = () => {
 
       <div className="p-8 bg-gray-900 rounded-lg shadow-xl w-full max-w-4xl space-y-6 border border-gray-700">
         <RobotConfigManager
-          visibleRecords={visibleRecords}
-          hiddenNames={hiddenNames}
+          selectedName={selectedName}
+          selectedRecord={selectedRecord}
+          availableNames={availableNames}
           isLoading={isLoadingRobots}
-          addToSession={addToSession}
-          removeFromSession={removeFromSession}
+          selectRobot={selectRobot}
           createRobot={createRobot}
           deleteRobot={deleteRobot}
         />
@@ -230,7 +234,7 @@ const Landing = () => {
       <RecordingModal
         open={showRecordingModal}
         onOpenChange={handleRecordingModalClose}
-        robots={visibleRecords}
+        robot={selectedRecord}
         datasetName={datasetName}
         setDatasetName={setDatasetName}
         singleTask={singleTask}

@@ -14,22 +14,21 @@ export interface RobotRecord {
   is_clean: boolean;
 }
 
-const VISIBLE_KEY = "lelab.visibleRobots";
+const SELECTED_KEY = "lelab.selectedRobot";
 
-const readVisible = (): string[] => {
+const readSelected = (): string | null => {
   try {
-    const raw = localStorage.getItem(VISIBLE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed.filter((x) => typeof x === "string") : [];
+    const raw = localStorage.getItem(SELECTED_KEY);
+    return raw && typeof raw === "string" ? raw : null;
   } catch {
-    return [];
+    return null;
   }
 };
 
-const writeVisible = (names: string[]) => {
+const writeSelected = (name: string | null) => {
   try {
-    localStorage.setItem(VISIBLE_KEY, JSON.stringify(names));
+    if (name) localStorage.setItem(SELECTED_KEY, name);
+    else localStorage.removeItem(SELECTED_KEY);
   } catch {
     // Storage may be unavailable (private mode, quota). Failures here are non-fatal.
   }
@@ -41,7 +40,7 @@ export const useRobots = () => {
   const location = useLocation();
 
   const [records, setRecords] = useState<Record<string, RobotRecord>>({});
-  const [visibleNames, setVisibleNames] = useState<string[]>(() => readVisible());
+  const [selectedName, setSelectedName] = useState<string | null>(() => readSelected());
   const [isLoading, setIsLoading] = useState(false);
 
   // Re-fetch records when location changes (RobotConfigManager mounts only on Landing,
@@ -57,12 +56,8 @@ export const useRobots = () => {
         const next: Record<string, RobotRecord> = {};
         for (const r of data.robots ?? []) next[r.name] = r;
         setRecords(next);
-        // Prune visible names whose records vanished (deleted from another tab)
-        setVisibleNames((prev) => {
-          const pruned = prev.filter((n) => n in next);
-          if (pruned.length !== prev.length) writeVisible(pruned);
-          return pruned;
-        });
+        // Drop the selection if the underlying record vanished (deleted from another tab)
+        setSelectedName((prev) => (prev && prev in next ? prev : null));
       } catch (e) {
         if (!cancelled) {
           console.error("Failed to fetch robots:", e);
@@ -77,17 +72,17 @@ export const useRobots = () => {
     };
   }, [baseUrl, fetchWithHeaders, location.key]);
 
-  // Persist visible names to localStorage
+  // Persist selection to localStorage
   useEffect(() => {
-    writeVisible(visibleNames);
-  }, [visibleNames]);
+    writeSelected(selectedName);
+  }, [selectedName]);
 
-  const addToSession = useCallback((name: string) => {
-    setVisibleNames((prev) => (prev.includes(name) ? prev : [...prev, name]));
+  const selectRobot = useCallback((name: string) => {
+    setSelectedName(name);
   }, []);
 
-  const removeFromSession = useCallback((name: string) => {
-    setVisibleNames((prev) => prev.filter((n) => n !== name));
+  const clearSelection = useCallback(() => {
+    setSelectedName(null);
   }, []);
 
   const createRobot = useCallback(
@@ -123,7 +118,7 @@ export const useRobots = () => {
         const data = await res.json();
         if (data.robot) {
           setRecords((prev) => ({ ...prev, [name]: data.robot }));
-          setVisibleNames((prev) => (prev.includes(name) ? prev : [...prev, name]));
+          setSelectedName(name);
         }
         return true;
       } catch (e) {
@@ -149,7 +144,7 @@ export const useRobots = () => {
           const { [name]: _omit, ...rest } = prev;
           return rest;
         });
-        setVisibleNames((prev) => prev.filter((n) => n !== name));
+        setSelectedName((prev) => (prev === name ? null : prev));
         return true;
       } catch (e) {
         toast({ title: "Network error", description: String(e), variant: "destructive" });
@@ -159,23 +154,24 @@ export const useRobots = () => {
     [baseUrl, fetchWithHeaders, toast]
   );
 
-  const visibleRecords = useMemo(
-    () => visibleNames.map((n) => records[n]).filter((r): r is RobotRecord => Boolean(r)),
-    [visibleNames, records]
+  const selectedRecord = useMemo(
+    () => (selectedName ? records[selectedName] ?? null : null),
+    [selectedName, records]
   );
 
-  const hiddenNames = useMemo(
-    () => Object.keys(records).filter((n) => !visibleNames.includes(n)).sort(),
-    [records, visibleNames]
+  const availableNames = useMemo(
+    () => Object.keys(records).sort(),
+    [records]
   );
 
   return {
     records,
-    visibleRecords,
-    hiddenNames,
+    selectedName,
+    selectedRecord,
+    availableNames,
     isLoading,
-    addToSession,
-    removeFromSession,
+    selectRobot,
+    clearSelection,
     createRobot,
     deleteRobot,
   };
