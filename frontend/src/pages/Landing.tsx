@@ -6,6 +6,7 @@ import HfAuthBanner from "@/components/landing/HfAuthBanner";
 import RobotConfigManager from "@/components/landing/RobotConfigManager";
 import ActionList from "@/components/landing/ActionList";
 import RecordingModal from "@/components/landing/RecordingModal";
+import JobsSection from "@/components/jobs/JobsSection";
 
 import { Action } from "@/components/landing/types";
 import UsageInstructionsModal from "@/components/landing/UsageInstructionsModal";
@@ -224,6 +225,7 @@ const Landing = () => {
           createRobot={createRobot}
           deleteRobot={deleteRobot}
         />
+        <JobsSection />
         <ActionList actions={actions} />
       </div>
 
