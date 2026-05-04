@@ -5,8 +5,12 @@ overall state, including history persisted to disk under outputs/train/."""
 from __future__ import annotations
 
 import logging
+import os
 import re
+import subprocess
+import sys
 import threading
+import time
 from queue import Empty, Queue
 from typing import List, Literal, Optional, Protocol, runtime_checkable
 
@@ -124,6 +128,109 @@ def parse_metrics_into(line: str, metrics: TrainingMetrics) -> None:
 
     except Exception as exc:
         logger.debug("Error parsing log line %r: %s", line, exc)
+
+
+class LocalJobRunner:
+    """Run a training as a local subprocess.
+
+    The runner is single-shot: instantiate a fresh one per job. Lifetime of
+    the underlying subprocess is bounded by this object's existence in memory.
+    """
+
+    def __init__(self, metrics: TrainingMetrics) -> None:
+        self._metrics = metrics
+        self._process: Optional[subprocess.Popen] = None
+        self._log_queue: "Queue[LogLine]" = Queue()
+        self._monitor_thread: Optional[threading.Thread] = None
+        self._stop_event = threading.Event()
+
+    def start(
+        self,
+        job_id: str,
+        config: TrainingRequest,
+        output_dir: str,
+    ) -> None:
+        if self._process is not None:
+            raise RuntimeError("LocalJobRunner already started")
+
+        # Build the command via the helper that lives in training.py.
+        from .training import build_training_command  # avoid import cycle at module load
+        cmd = build_training_command(config, output_dir)
+        logger.info("Starting job %s: %s", job_id, " ".join(cmd))
+
+        # PYTHONUNBUFFERED makes the child's stdout flush per line. Without it
+        # block-buffering hides log lines from our parser for many seconds.
+        child_env = os.environ.copy()
+        child_env["PYTHONUNBUFFERED"] = "1"
+
+        self._process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            universal_newlines=True,
+            bufsize=1,
+            env=child_env,
+        )
+
+        self._monitor_thread = threading.Thread(
+            target=self._pump_stdout, name=f"job-{job_id}-stdout", daemon=True
+        )
+        self._monitor_thread.start()
+
+    def stop(self) -> None:
+        if self._process is None or self._process.poll() is not None:
+            return
+        self._stop_event.set()
+        try:
+            self._process.terminate()
+            try:
+                self._process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                logger.warning("Subprocess did not terminate in 10s, killing")
+                self._process.kill()
+                self._process.wait()
+        except Exception as exc:
+            logger.exception("Error stopping subprocess: %s", exc)
+
+    def is_running(self) -> bool:
+        return self._process is not None and self._process.poll() is None
+
+    def returncode(self) -> Optional[int]:
+        if self._process is None:
+            return None
+        return self._process.poll()
+
+    def stream_log_lines(self) -> List[LogLine]:
+        """Drain whatever has accumulated since the last call."""
+        out: List[LogLine] = []
+        try:
+            while True:
+                out.append(self._log_queue.get_nowait())
+        except Empty:
+            pass
+        return out
+
+    # -- internals --
+
+    def _pump_stdout(self) -> None:
+        assert self._process is not None
+        try:
+            for line in iter(self._process.stdout.readline, ""):
+                if self._stop_event.is_set():
+                    break
+                stripped = line.rstrip()
+                if not stripped:
+                    continue
+                parse_metrics_into(stripped, self._metrics)
+                # Cap queue so a chatty subprocess can't grow memory unbounded.
+                if self._log_queue.qsize() >= 1000:
+                    try:
+                        self._log_queue.get_nowait()
+                    except Empty:
+                        pass
+                self._log_queue.put(LogLine(timestamp=time.time(), message=stripped))
+        except Exception as exc:
+            logger.exception("Error reading subprocess stdout: %s", exc)
 
 
 # Re-exported here so callers don't need to know they came from training.py.
