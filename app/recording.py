@@ -150,7 +150,18 @@ def handle_start_recording(request: RecordingRequest, websocket_manager=None) ->
 
     try:
         import time
+        import re
         from datetime import datetime
+        # Sanitize the dataset name so push_to_hub never rejects a finished
+        # recording over an invalid character. HF repo names allow only
+        # [A-Za-z0-9._-]; everything else becomes "_".
+        if request.dataset_repo_id:
+            if "/" in request.dataset_repo_id:
+                namespace, name = request.dataset_repo_id.split("/", 1)
+                name = re.sub(r"[^A-Za-z0-9._-]", "_", name)
+                request.dataset_repo_id = f"{namespace}/{name}"
+            else:
+                request.dataset_repo_id = re.sub(r"[^A-Za-z0-9._-]", "_", request.dataset_repo_id)
         # Stamp the repo_id with a timestamp (matches lerobot-record CLI behavior),
         # so each session lands in a unique directory and the frontend gets the
         # final id back in the response and status payload.
