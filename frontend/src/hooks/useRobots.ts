@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useLocation } from "react-router-dom";
 import { useApi } from "@/contexts/ApiContext";
 import { useToast } from "@/hooks/use-toast";
+import type { CameraConfig } from "@/components/recording/CameraConfiguration";
 
 export interface RobotRecord {
   name: string;
@@ -9,6 +10,7 @@ export interface RobotRecord {
   follower_port: string;
   leader_config: string;
   follower_config: string;
+  cameras: CameraConfig[];
   is_clean: boolean;
 }
 

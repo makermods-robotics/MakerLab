@@ -326,7 +326,8 @@ def get_default_robot_config(robot_type: str, available_configs: list):
 
 # Characters disallowed in a robot name (filesystem safety)
 _INVALID_NAME_CHARS = ("/", "\\", "..")
-_ROBOT_FIELDS = ("leader_port", "follower_port", "leader_config", "follower_config")
+_ROBOT_STRING_FIELDS = ("leader_port", "follower_port", "leader_config", "follower_config")
+_ROBOT_LIST_FIELDS = ("cameras",)
 
 
 def _robot_record_path(name: str) -> str:
@@ -343,9 +344,11 @@ def is_valid_robot_name(name: str) -> bool:
 
 
 def _empty_record(name: str) -> dict:
-    record = {"name": name}
-    for field in _ROBOT_FIELDS:
+    record: dict = {"name": name}
+    for field in _ROBOT_STRING_FIELDS:
         record[field] = ""
+    for field in _ROBOT_LIST_FIELDS:
+        record[field] = []
     return record
 
 
@@ -403,8 +406,11 @@ def save_robot_record(name: str, data: dict, allow_create: bool = True) -> bool:
         return False
 
     record = existing if existing is not None else _empty_record(name)
-    for field in _ROBOT_FIELDS:
+    for field in _ROBOT_STRING_FIELDS:
         if field in data and isinstance(data[field], str):
+            record[field] = data[field]
+    for field in _ROBOT_LIST_FIELDS:
+        if field in data and isinstance(data[field], list):
             record[field] = data[field]
     record["name"] = name
 
@@ -430,11 +436,12 @@ def delete_robot_record(name: str) -> bool:
 def is_robot_record_clean(record: dict) -> bool:
     """
     A record is 'clean' when all four operational fields are populated AND both
-    referenced calibration files exist on disk.
+    referenced calibration files exist on disk. Cameras are optional and don't
+    affect cleanliness.
     """
     if not record:
         return False
-    for field in _ROBOT_FIELDS:
+    for field in _ROBOT_STRING_FIELDS:
         value = record.get(field, "")
         if not isinstance(value, str) or not value.strip():
             return False

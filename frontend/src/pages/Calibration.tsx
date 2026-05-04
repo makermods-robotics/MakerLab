@@ -32,6 +32,9 @@ import PortDetectionButton from "@/components/ui/PortDetectionButton";
 import PortDetectionModal from "@/components/ui/PortDetectionModal";
 import { useApi } from "@/contexts/ApiContext";
 import { isMotorRangeComplete } from "@/lib/calibrationTargets";
+import CameraConfiguration, {
+  CameraConfig,
+} from "@/components/recording/CameraConfiguration";
 
 interface CalibrationStatus {
   calibration_active: boolean;
@@ -61,6 +64,7 @@ interface RobotRecord {
   follower_port: string;
   leader_config: string;
   follower_config: string;
+  cameras: CameraConfig[];
   is_clean: boolean;
 }
 
@@ -77,6 +81,8 @@ const Calibration = () => {
   const [deviceType, setDeviceType] = useState<string>("teleop");
   const [port, setPort] = useState<string>("");
   const [robot, setRobot] = useState<RobotRecord | null>(null);
+  const [cameras, setCameras] = useState<CameraConfig[]>([]);
+  const cameraSaveTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   const fetchRobot = useCallback(async (): Promise<RobotRecord | null> => {
     if (!robotName) return null;
@@ -114,11 +120,43 @@ const Calibration = () => {
           ? r.leader_port || ""
           : r.follower_port || ""
       );
+      setCameras(r.cameras ?? []);
     })();
     return () => {
       cancelled = true;
     };
   }, [robotName, fetchRobot]);
+
+  // Persist camera changes back to the robot record (debounced).
+  const handleCamerasChange = (next: CameraConfig[]) => {
+    setCameras(next);
+    if (!robotName) return;
+    if (cameraSaveTimerRef.current) {
+      clearTimeout(cameraSaveTimerRef.current);
+    }
+    cameraSaveTimerRef.current = setTimeout(async () => {
+      try {
+        await fetchWithHeaders(
+          `${baseUrl}/robots/${encodeURIComponent(robotName)}`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ cameras: next }),
+          }
+        );
+      } catch (e) {
+        console.error("Failed to save cameras to robot record:", e);
+      }
+    }, 500);
+  };
+
+  useEffect(() => {
+    return () => {
+      if (cameraSaveTimerRef.current) {
+        clearTimeout(cameraSaveTimerRef.current);
+      }
+    };
+  }, []);
 
   const [showPortDetection, setShowPortDetection] = useState(false);
   const [detectionRobotType, setDetectionRobotType] = useState<
@@ -767,6 +805,23 @@ const Calibration = () => {
             </CardContent>
           </Card>
         </div>
+
+        {robotName && (
+          <Card className="bg-slate-800/60 border-slate-700 backdrop-blur-sm mt-6">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2 text-slate-200">
+                <Settings className="w-5 h-5 text-blue-400" />
+                Cameras
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <CameraConfiguration
+                cameras={cameras}
+                onCamerasChange={handleCamerasChange}
+              />
+            </CardContent>
+          </Card>
+        )}
       </div>
 
       <PortDetectionModal

@@ -63,6 +63,13 @@ const Landing = () => {
   }, []);
 
   const handleRecordingClick = () => {
+    // Seed the recording's camera list from the lone robot's attached cameras.
+    // The user can add more in the modal.
+    if (visibleRecords.length === 1) {
+      setCameras([...(visibleRecords[0].cameras ?? [])]);
+    } else {
+      setCameras([]);
+    }
     setShowRecordingModal(true);
   };
 
