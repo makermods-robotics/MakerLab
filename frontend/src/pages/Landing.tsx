@@ -184,7 +184,6 @@ const Landing = () => {
       description: "Replay and analyze recorded datasets.",
       handler: handleReplayDatasetClick,
       color: "bg-purple-500 hover:bg-purple-600",
-      isWorkInProgress: true,
     },
     {
       title: "Training",
