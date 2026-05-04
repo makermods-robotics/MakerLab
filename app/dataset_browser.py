@@ -62,7 +62,7 @@ def get_episode_list(repo_id: str) -> dict[str, Any]:
         return {"fps": fps, "episodes": []}
 
     for idx in range(len(eps)):
-        row = eps.iloc[idx]
+        row = eps[idx]
         length = int(row["length"])
         tasks = row["tasks"]
         if hasattr(tasks, "tolist"):
@@ -95,7 +95,7 @@ def get_replay_assets(repo_id: str, episode: int) -> dict[str, Any]:
         url = f"{HF_RESOLVE_BASE}/{repo_id}/resolve/main/{rel_path}"
         cameras.append({"key": vid_key, "url": url})
 
-    row = meta.episodes.iloc[episode]
+    row = meta.episodes[episode]
     num_frames = int(row["length"])
 
     return {
