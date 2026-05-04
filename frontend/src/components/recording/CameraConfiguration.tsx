@@ -81,13 +81,43 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
       .map((d) => ({ deviceId: d.deviceId, label: d.label }));
   };
 
+  const matchBrowserDeviceByName = (
+    backendName: string,
+    browserDevices: { deviceId: string; label: string }[],
+    used: Set<string>
+  ): { deviceId: string; label: string } | undefined => {
+    const normalize = (s: string) =>
+      s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+    const target = normalize(backendName);
+    if (!target) return undefined;
+    const targetTokens = target.split(" ").filter(Boolean);
+
+    let best: { dev: { deviceId: string; label: string }; score: number } | null = null;
+    for (const dev of browserDevices) {
+      if (used.has(dev.deviceId)) continue;
+      const label = normalize(dev.label);
+      if (!label) continue;
+      let score = 0;
+      if (label === target) score = 1000;
+      else if (label.includes(target) || target.includes(label)) score = 500;
+      else {
+        const labelTokens = new Set(label.split(" ").filter(Boolean));
+        score = targetTokens.filter((t) => labelTokens.has(t)).length;
+      }
+      if (score > 0 && (!best || score > best.score)) {
+        best = { dev, score };
+      }
+    }
+    return best?.dev;
+  };
+
   const fetchAvailableCameras = async () => {
     setIsLoadingCameras(true);
     try {
-      // The backend enumerates cameras through OpenCV — those are the indices
-      // that recording will actually use. Pair them positionally with the
-      // browser's deviceIds so the modal preview can target the same camera
-      // the backend will open.
+      // The backend's OpenCV indices are the source of truth — recording uses
+      // them directly. The backend now also returns reliable names (via ffmpeg
+      // AVFoundation on macOS). Match browser deviceIds to those names so the
+      // live preview opens the *same* physical camera as the thumbnail.
       const browserDevices = await enumerateBrowserVideoDevices();
       const response = await fetchWithHeaders(`${baseUrl}/available-cameras`);
 
@@ -100,20 +130,21 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
           thumbnail?: string;
         }[];
 
-        const merged: AvailableCamera[] = backendCams.map((cam, i) => ({
-          index: cam.index,
-          deviceId: browserDevices[i]?.deviceId || `fallback_${cam.index}`,
-          name: browserDevices[i]?.label || cam.name || `Camera ${cam.index}`,
-          available: cam.available,
-          thumbnail: cam.thumbnail,
-        }));
+        const used = new Set<string>();
+        const merged: AvailableCamera[] = backendCams.map((cam) => {
+          const matched = cam.name
+            ? matchBrowserDeviceByName(cam.name, browserDevices, used)
+            : undefined;
+          if (matched) used.add(matched.deviceId);
+          return {
+            index: cam.index,
+            deviceId: matched?.deviceId || `fallback_${cam.index}`,
+            name: cam.name || matched?.label || `Camera ${cam.index}`,
+            available: cam.available,
+            thumbnail: cam.thumbnail,
+          };
+        });
         setAvailableCameras(merged);
-
-        if (browserDevices.length !== backendCams.length) {
-          console.warn(
-            `Camera count mismatch: browser=${browserDevices.length}, backend=${backendCams.length}. Preview may not match the recorded camera — record a short test to verify.`
-          );
-        }
       } else {
         // Backend unreachable — fall back to browser-only detection. Indices
         // here are positional and may not match OpenCV's view of the world.
@@ -437,7 +468,7 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
                         {camera.thumbnail ? (
                           <img
                             src={camera.thumbnail}
-                            alt={`Index ${camera.index}`}
+                            alt={camera.name}
                             className="w-16 h-12 object-cover rounded border border-gray-700"
                           />
                         ) : (
@@ -445,10 +476,13 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
                             no preview
                           </div>
                         )}
-                        <span>
-                          Index {camera.index}
-                          {alreadyAdded && " (already added)"}
-                        </span>
+                        <div className="flex flex-col">
+                          <span className="font-medium">{camera.name}</span>
+                          <span className="text-xs text-gray-400">
+                            Index {camera.index}
+                            {alreadyAdded && " · already added"}
+                          </span>
+                        </div>
                       </div>
                     </SelectItem>
                   );

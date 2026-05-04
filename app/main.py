@@ -541,6 +541,41 @@ def get_available_ports():
         return {"status": "error", "message": str(e)}
 
 
+def _list_avfoundation_cameras() -> Dict[int, str]:
+    """Return {index: name} for AVFoundation video devices on macOS via ffmpeg.
+
+    The order matches OpenCV's AVFoundation backend, so the names returned
+    here can be used to label the cv2.VideoCapture indices reliably.
+    """
+    import subprocess
+    import re
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-f", "avfoundation", "-list_devices", "true", "-i", ""],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        logger.warning(f"ffmpeg AVFoundation listing unavailable: {e}")
+        return {}
+
+    names: Dict[int, str] = {}
+    in_video_section = False
+    for line in result.stderr.splitlines():
+        if "AVFoundation video devices" in line:
+            in_video_section = True
+            continue
+        if "AVFoundation audio devices" in line:
+            break
+        if not in_video_section:
+            continue
+        m = re.search(r"\[(\d+)\]\s+(.+?)\s*$", line)
+        if m:
+            names[int(m.group(1))] = m.group(2).strip()
+    return names
+
+
 @app.get("/available-cameras")
 def get_available_cameras():
     """Get all available cameras with a JPEG thumbnail per OpenCV index.
@@ -559,12 +594,15 @@ def get_available_cameras():
         # Pin the backend so the indices we hand back match what the recording
         # session will see. cv2.CAP_ANY can otherwise pick a different backend
         # on subsequent calls (notably macOS), silently reordering cameras.
-        if platform.system() == "Darwin":
+        system = platform.system()
+        if system == "Darwin":
             backend = cv2.CAP_AVFOUNDATION
-        elif platform.system() == "Linux":
+        elif system == "Linux":
             backend = cv2.CAP_V4L2
         else:
             backend = cv2.CAP_ANY
+
+        avf_names = _list_avfoundation_cameras() if system == "Darwin" else {}
 
         for i in range(10):
             cap = cv2.VideoCapture(i, backend)
@@ -586,7 +624,7 @@ def get_available_cameras():
 
             entry = {
                 "index": i,
-                "name": f"Camera {i}",
+                "name": avf_names.get(i, f"Camera {i}"),
                 "available": True,
                 "width": int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
                 "height": int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
