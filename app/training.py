@@ -16,6 +16,25 @@ import psutil
 DEFAULT_OUTPUT_DIR = "outputs/train"
 _SLUG_RE = re.compile(r"[^a-zA-Z0-9._-]+")
 
+# tqdm progress: "Training:   1%|▏         | 125/10000 [02:02<2:36:10,  1.05step/s]"
+# Captures: current_step, total_steps, eta string (HH:MM:SS or MM:SS).
+_TQDM_RE = re.compile(
+    r"Training:\s*\d+%[^|]*\|[^|]*\|\s*(\d+)/(\d+)\s*\[(?:[\d:]+)<([\d:]+)"
+)
+
+
+def _parse_duration(s: str) -> Optional[float]:
+    """Parse tqdm's HH:MM:SS or MM:SS into seconds. Returns None on '?'."""
+    parts = s.split(":")
+    try:
+        if len(parts) == 2:
+            return int(parts[0]) * 60 + int(parts[1])
+        if len(parts) == 3:
+            return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+    except ValueError:
+        return None
+    return None
+
 
 def _generate_output_dir(policy_type: str, dataset_repo_id: str) -> str:
     """Build a sortable, collision-free path under outputs/train/.
@@ -382,51 +401,57 @@ class TrainingManager:
                 break
     
     def _parse_log_line(self, line: str):
-        """Parse training metrics from log line"""
+        """Pull current_step / total_steps / ETA / loss / lr / grad_norm from
+        whichever LeRobot output line we just received.
+
+        Two complementary sources:
+          * The tqdm progress bar (`Training:  1%|...| 125/10000 [02:02<2:36:10, 1.05step/s]`)
+            fires roughly once per second and gives current_step + total_steps + ETA.
+            Without this the Progress card stays at 0 until the first
+            log_freq tick — and with the default log_freq=250, that's a
+            very long time on a slow device.
+          * The per-log_freq metric line
+            (`INFO ... step:N smpl:... loss:X grdn:Y lr:Z ...`)
+            is the only place loss / lr / grad_norm appear.
+        """
         try:
-            # Look for training metrics in the log line
-            if "step:" in line.lower() and "loss:" in line.lower():
-                # Extract step number
+            tqdm_match = _TQDM_RE.search(line)
+            if tqdm_match:
+                try:
+                    self.status.current_step = int(tqdm_match.group(1))
+                    total = int(tqdm_match.group(2))
+                    if total > 0:
+                        self.status.total_steps = total
+                    eta = _parse_duration(tqdm_match.group(3))
+                    if eta is not None:
+                        self.status.eta_seconds = eta
+                except (ValueError, IndexError):
+                    pass
+
+            # log_freq metric line — has loss/lr/grdn alongside step.
+            if "step:" in line and "loss:" in line:
                 if "step:" in line:
                     step_part = line.split("step:")[1].split()[0]
                     try:
                         self.status.current_step = int(step_part.replace(",", ""))
                     except ValueError:
                         pass
-                
-                # Extract loss
                 if "loss:" in line:
-                    loss_part = line.split("loss:")[1].split()[0]
                     try:
-                        self.status.current_loss = float(loss_part)
+                        self.status.current_loss = float(line.split("loss:")[1].split()[0])
                     except ValueError:
                         pass
-                
-                # Extract learning rate
                 if "lr:" in line:
-                    lr_part = line.split("lr:")[1].split()[0]
                     try:
-                        self.status.current_lr = float(lr_part)
+                        self.status.current_lr = float(line.split("lr:")[1].split()[0])
                     except ValueError:
                         pass
-                
-                # Extract gradient norm
                 if "grdn:" in line:
-                    grdn_part = line.split("grdn:")[1].split()[0]
                     try:
-                        self.status.grad_norm = float(grdn_part)
+                        self.status.grad_norm = float(line.split("grdn:")[1].split()[0])
                     except ValueError:
                         pass
-                
-                # Calculate ETA
-                if self.status.current_step > 0 and self.status.total_steps > 0:
-                    progress = self.status.current_step / self.status.total_steps
-                    if progress > 0:
-                        # Rough estimate based on current progress
-                        remaining_steps = self.status.total_steps - self.status.current_step
-                        # This is a very rough estimate - would need more sophisticated timing
-                        self.status.eta_seconds = remaining_steps * 0.5  # Assume 0.5s per step
-        
+
         except Exception as e:
             logger.debug(f"Error parsing log line '{line}': {e}")
     
