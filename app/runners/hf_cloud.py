@@ -103,9 +103,8 @@ def _watch():
 watch_thread = threading.Thread(target=_watch, name="ckpt-watcher", daemon=True)
 watch_thread.start()
 
-cmd = ["python", "-m", "lerobot.scripts.lerobot_train", *trainer_argv]
-print(f"[wrapper] launching trainer: {' '.join(cmd)}", flush=True)
-proc = subprocess.Popen(cmd, env=os.environ.copy())
+print(f"[wrapper] launching trainer: {' '.join(trainer_argv)}", flush=True)
+proc = subprocess.Popen(list(trainer_argv), env=os.environ.copy())
 try:
     rc = proc.wait()
 finally:
