@@ -13,6 +13,7 @@ import logging
 import os
 import re
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -36,8 +37,47 @@ class InferenceRequest(BaseModel):
 inference_active: bool = False
 _inference_proc: Optional[subprocess.Popen] = None
 _inference_started_at: Optional[float] = None
+_inference_rollout_started_at: Optional[float] = None
 _inference_meta: Dict[str, Any] = {}
 _HUB_REF_RE = re.compile(r"^(?P<repo>[^@]+)@checkpoints/(?P<step_dir>\d+)$")
+# lerobot prints this once per run, the moment its main control loop is
+# about to take over from the setup phase. We watch stdout for it so the
+# UI can present a "rollout time" separate from the multi-second policy
+# load + bus connect + camera connect setup overhead.
+_ROLLOUT_START_MARKER = "Rollout setup complete"
+
+
+def _pump_stdout(proc: subprocess.Popen, log_handle) -> None:
+    """Tee the subprocess's stdout to the log file and watch for the
+    rollout-start marker."""
+    global _inference_rollout_started_at
+    try:
+        for raw in iter(proc.stdout.readline, b""):
+            try:
+                line = raw.decode("utf-8", errors="replace")
+            except Exception:
+                continue
+            try:
+                log_handle.write(line)
+                log_handle.flush()
+            except Exception:
+                pass
+            if (
+                _inference_rollout_started_at is None
+                and _ROLLOUT_START_MARKER in line
+            ):
+                _inference_rollout_started_at = time.time()
+                logger.info(
+                    "Inference rollout main loop started after %.1fs of setup",
+                    _inference_rollout_started_at - (_inference_started_at or _inference_rollout_started_at),
+                )
+    except Exception as exc:
+        logger.exception("Inference stdout pump failed: %s", exc)
+    finally:
+        try:
+            log_handle.close()
+        except Exception:
+            pass
 
 
 def _detect_device() -> str:
@@ -95,7 +135,8 @@ def _format_cameras_arg(cameras: Dict[str, Dict[str, Any]]) -> str:
 def handle_start_inference(request: InferenceRequest) -> Dict[str, Any]:
     """Start a one-shot rollout subprocess. Returns a dict — the route
     layer turns it into a JSON response or HTTPException as appropriate."""
-    global inference_active, _inference_proc, _inference_started_at, _inference_meta
+    global inference_active, _inference_proc, _inference_started_at
+    global _inference_rollout_started_at, _inference_meta
 
     # Mutex with teleop and recording: all three drive the same serial bus.
     from .teleoperating import teleoperation_active
@@ -149,7 +190,7 @@ def handle_start_inference(request: InferenceRequest) -> Dict[str, Any]:
         proc = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
-            stdout=log_handle,
+            stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             env=env,
         )
@@ -160,6 +201,12 @@ def handle_start_inference(request: InferenceRequest) -> Dict[str, Any]:
             proc.stdin.close()
         except Exception as exc:
             logger.warning("Failed to seed stdin for inference subprocess: %s", exc)
+        threading.Thread(
+            target=_pump_stdout,
+            args=(proc, log_handle),
+            name="inference-stdout-pump",
+            daemon=True,
+        ).start()
     except Exception as exc:
         logger.exception("Failed to start inference")
         return {"success": False, "status_code": 500,
@@ -168,6 +215,7 @@ def handle_start_inference(request: InferenceRequest) -> Dict[str, Any]:
     inference_active = True
     _inference_proc = proc
     _inference_started_at = time.time()
+    _inference_rollout_started_at = None
     _inference_meta = {
         "policy_ref": request.policy_ref,
         "duration_s": request.duration_s,
@@ -178,7 +226,8 @@ def handle_start_inference(request: InferenceRequest) -> Dict[str, Any]:
 
 
 def handle_stop_inference() -> Dict[str, Any]:
-    global inference_active, _inference_proc, _inference_started_at, _inference_meta
+    global inference_active, _inference_proc, _inference_started_at
+    global _inference_rollout_started_at, _inference_meta
     if not inference_active or _inference_proc is None:
         return {"success": False, "status_code": 409, "message": "No inference is active"}
     proc = _inference_proc
@@ -195,12 +244,14 @@ def handle_stop_inference() -> Dict[str, Any]:
     inference_active = False
     _inference_proc = None
     _inference_started_at = None
+    _inference_rollout_started_at = None
     _inference_meta = {}
     return {"success": True, "message": "Inference stopped"}
 
 
 def handle_inference_status() -> Dict[str, Any]:
-    global inference_active, _inference_proc, _inference_started_at, _inference_meta
+    global inference_active, _inference_proc, _inference_started_at
+    global _inference_rollout_started_at, _inference_meta
     # If the subprocess died on its own, finalize state lazily.
     if _inference_proc is not None and _inference_proc.poll() is not None:
         rc = _inference_proc.returncode
@@ -209,7 +260,9 @@ def handle_inference_status() -> Dict[str, Any]:
         _inference_proc = None
         finished_meta = _inference_meta
         finished_started = _inference_started_at
+        finished_rollout_started = _inference_rollout_started_at
         _inference_started_at = None
+        _inference_rollout_started_at = None
         _inference_meta = {}
         return {
             "inference_active": False,
@@ -219,12 +272,22 @@ def handle_inference_status() -> Dict[str, Any]:
             "duration_s": finished_meta.get("duration_s"),
             "log_path": finished_meta.get("log_path"),
             "started_at": finished_started,
+            "rollout_started_at": finished_rollout_started,
+            "rollout_elapsed_s": 0,
+            "elapsed_s": 0,
         }
     elapsed = (time.time() - _inference_started_at) if _inference_started_at else 0
+    rollout_elapsed = (
+        time.time() - _inference_rollout_started_at
+        if _inference_rollout_started_at
+        else 0
+    )
     return {
         "inference_active": inference_active,
         "started_at": _inference_started_at,
+        "rollout_started_at": _inference_rollout_started_at,
         "elapsed_s": elapsed,
+        "rollout_elapsed_s": rollout_elapsed,
         "duration_s": _inference_meta.get("duration_s"),
         "policy_ref": _inference_meta.get("policy_ref"),
         "log_path": _inference_meta.get("log_path"),

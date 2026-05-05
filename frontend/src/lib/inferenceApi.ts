@@ -18,7 +18,9 @@ export interface StartInferenceRequest {
 export interface InferenceStatus {
   inference_active: boolean;
   started_at: number | null;
+  rollout_started_at: number | null;
   elapsed_s: number;
+  rollout_elapsed_s: number;
   duration_s: number | null;
   policy_ref: string | null;
   log_path: string | null;
