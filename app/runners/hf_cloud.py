@@ -75,11 +75,13 @@ class HfCloudJobRunner:
         self._log_file_path.parent.mkdir(parents=True, exist_ok=True)
         self._log_file = self._log_file_path.open("a", buffering=1)
 
+        # HF_TOKEN goes via `secrets` (not `env`) so it doesn't show up in
+        # the job's environment variable inspection / logs.
         job = self._api.run_job(
             image=LEROBOT_IMAGE,
             command=argv,
             flavor=self._flavor,
-            environment={"HF_TOKEN": token},
+            secrets={"HF_TOKEN": token},
         )
         self._hf_job_id = job.id
 
