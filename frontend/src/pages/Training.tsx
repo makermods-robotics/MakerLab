@@ -157,10 +157,11 @@ const ConfigurationMode: React.FC = () => {
           data.authenticated &&
           data.flavors.some((f) => f.name === "a10g-small")
         ) {
-          setTrainingConfig((prev) => ({
-            ...prev,
-            target: { runner: "hf_cloud", flavor: "a10g-small" },
-          }));
+          setTrainingConfig((prev) => {
+            // Don't overwrite a selection the user made before the fetch resolved.
+            if (prev.target.runner !== "local") return prev;
+            return { ...prev, target: { runner: "hf_cloud", flavor: "a10g-small" } };
+          });
         }
       })
       .catch(() => {
