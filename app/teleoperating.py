@@ -112,6 +112,12 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
 
     if teleoperation_active:
         return {"success": False, "message": "Teleoperation is already active"}
+    from .recording import recording_active
+    from .inferring import inference_active
+    if recording_active:
+        return {"success": False, "message": "Recording is currently active. Stop it first."}
+    if inference_active:
+        return {"success": False, "message": "Inference is currently active. Stop it first."}
 
     try:
         logger.info(f"Starting teleoperation with leader port: {request.leader_port}, follower port: {request.follower_port}")

@@ -148,6 +148,12 @@ def handle_start_recording(request: RecordingRequest, websocket_manager=None) ->
 
     if recording_active:
         return {"success": False, "message": "Recording is already active"}
+    from .teleoperating import teleoperation_active
+    from .inferring import inference_active
+    if teleoperation_active:
+        return {"success": False, "message": "Teleoperation is currently active. Stop it first."}
+    if inference_active:
+        return {"success": False, "message": "Inference is currently active. Stop it first."}
 
     # 🧹 CLEANUP: Reset all global state from previous sessions
     logger.info("🧹 CLEANUP: Resetting all recording state variables")
