@@ -5,8 +5,6 @@ import DatasetCombobox from "@/components/replay/DatasetCombobox";
 import { useApi } from "@/contexts/ApiContext";
 import { DatasetItem, listDatasets } from "@/lib/replayApi";
 
-const SPACE_WRAPPER_URL = "https://huggingface.co/spaces/lerobot/visualize_dataset";
-
 const ReplayDataset: React.FC = () => {
   const { baseUrl, fetchWithHeaders } = useApi();
   const navigate = useNavigate();
@@ -24,7 +22,13 @@ const ReplayDataset: React.FC = () => {
 
   const handleDatasetChange = (repoId: string | null) => {
     if (!repoId) return;
-    const target = `${SPACE_WRAPPER_URL}?path=${encodeURIComponent(`/${repoId}`)}`;
+    const found = datasets.find((d) => d.repo_id === repoId);
+    // Private/unknown repos bounce through huggingface.co/login?next=… so the user has a browser session before the Space tries to fetch them.
+    const needsAuth = !found || found.private;
+    const spacePath = `/spaces/lerobot/visualize_dataset?path=${encodeURIComponent(`/${repoId}`)}`;
+    const target = needsAuth
+      ? `https://huggingface.co/login?next=${encodeURIComponent(spacePath)}`
+      : `https://huggingface.co${spacePath}`;
     window.open(target, "_blank", "noopener,noreferrer");
     navigate("/");
   };

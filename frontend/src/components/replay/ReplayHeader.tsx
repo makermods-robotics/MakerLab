@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { ArrowLeft } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import Logo from "@/components/Logo";
+import HfAuthChip from "@/components/landing/HfAuthChip";
 
 const ReplayHeader: React.FC = () => {
   const navigate = useNavigate();
@@ -19,6 +20,9 @@ const ReplayHeader: React.FC = () => {
       </Button>
       <Logo />
       <h1 className="font-bold text-white text-2xl">Replay Dataset</h1>
+      <div className="ml-auto">
+        <HfAuthChip />
+      </div>
     </div>
   );
 };
