@@ -430,7 +430,7 @@ const MonitoringMode: React.FC<{ jobId: string }> = ({ jobId }) => {
                     Local
                   </span>
                 )}
-                {job.runner === "hf_cloud" && job.hf_repo_id && (
+                {job.runner === "hf_cloud" && job.hf_repo_id && job.state === "done" && (
                   <a
                     href={`https://huggingface.co/${job.hf_repo_id}`}
                     target="_blank"

@@ -119,7 +119,7 @@ class HfCloudJobRunner:
             retries = 0
             while not self._stop_event.is_set():
                 try:
-                    for raw in self._api.fetch_job_logs(self._hf_job_id):
+                    for raw in self._api.fetch_job_logs(job_id=self._hf_job_id, follow=True):
                         if self._stop_event.is_set():
                             return
                         stripped = raw.rstrip()
@@ -164,7 +164,7 @@ class HfCloudJobRunner:
             return
         self._stop_event.set()
         try:
-            self._api.cancel_job(self._hf_job_id)
+            self._api.cancel_job(job_id=self._hf_job_id)
         except Exception as exc:
             # Already-completed jobs may 404; that's fine. Watchdog will
             # finalise on its next tick.
@@ -174,7 +174,7 @@ class HfCloudJobRunner:
         if self._hf_job_id is None:
             return False
         try:
-            info = self._api.inspect_job(self._hf_job_id)
+            info = self._api.inspect_job(job_id=self._hf_job_id)
         except Exception as exc:
             logger.warning("inspect_job failed for %s: %s", self._hf_job_id, exc)
             return False

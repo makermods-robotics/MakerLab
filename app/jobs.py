@@ -646,7 +646,7 @@ class JobRegistry:
                     # Probe HF for the live status before reattaching.
                     try:
                         from huggingface_hub import HfApi
-                        info = HfApi().inspect_job(record.hf_job_id)
+                        info = HfApi().inspect_job(job_id=record.hf_job_id)
                         status = str(getattr(info, "status", "")).upper()
                     except Exception as exc:
                         logger.warning(
