@@ -487,9 +487,13 @@ class JobRegistry:
             raise ValueError("flavor is required when runner is hf_cloud")
 
         with self._lock:
-            for r in self._records.values():
-                if r.state == "running":
-                    raise JobAlreadyRunningError(r.id)
+            # Local trainings are bounded by this machine's GPU/USB resources,
+            # so at most one runs at a time. Cloud trainings each get their
+            # own remote container, so any number can be in flight in parallel.
+            if target.runner == "local":
+                for r in self._records.values():
+                    if r.state == "running" and r.runner == "local":
+                        raise JobAlreadyRunningError(r.id)
 
             job_id = _generate_job_id(config.policy_type, config.dataset_repo_id)
             job_dir = _job_dir(self._output_root, job_id)
@@ -723,7 +727,16 @@ class JobRegistry:
                 record.ended_at = time.time()
                 record.exit_code = rc
                 if rc != 0 and record.error_message is None:
-                    record.error_message = f"Subprocess exited with code {rc}"
+                    # Prefer a runner-supplied reason (e.g. HF Jobs'
+                    # 'Job timeout') over the synthetic exit-code message.
+                    reason = None
+                    get_message = getattr(runner, "terminal_message", None)
+                    if callable(get_message):
+                        try:
+                            reason = get_message()
+                        except Exception:
+                            reason = None
+                    record.error_message = reason or f"Subprocess exited with code {rc}"
                 self._runners.pop(jid, None)
             self._persist(record, force=True)
 
