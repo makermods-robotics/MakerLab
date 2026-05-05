@@ -38,6 +38,13 @@ from .teleoperating import (
     handle_get_joint_positions,
 )
 
+from .inferring import (
+    InferenceRequest,
+    handle_start_inference,
+    handle_stop_inference,
+    handle_inference_status,
+)
+
 # Import our custom calibration functionality
 from .calibrating import CalibrationRequest, calibration_manager
 
@@ -270,6 +277,33 @@ def teleoperation_status():
 def get_joint_positions():
     """Get current robot joint positions"""
     return handle_get_joint_positions()
+
+
+@app.post("/start-inference")
+def start_inference(request: InferenceRequest):
+    result = handle_start_inference(request)
+    if not result.get("success"):
+        raise HTTPException(
+            status_code=result.get("status_code", 500),
+            detail=result.get("message", "Failed to start inference"),
+        )
+    return result
+
+
+@app.post("/stop-inference")
+def stop_inference():
+    result = handle_stop_inference()
+    if not result.get("success"):
+        raise HTTPException(
+            status_code=result.get("status_code", 500),
+            detail=result.get("message", "Failed to stop inference"),
+        )
+    return result
+
+
+@app.get("/inference-status")
+def inference_status():
+    return handle_inference_status()
 
 
 @app.get("/health")
