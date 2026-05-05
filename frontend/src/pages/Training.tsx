@@ -9,6 +9,7 @@ import ConfigurationTab from "@/components/training/ConfigurationTab";
 import MonitoringStats from "@/components/training/monitoring/MonitoringStats";
 import TrainingLogs from "@/components/training/monitoring/TrainingLogs";
 import TrainingExtraGate from "@/components/training/TrainingExtraGate";
+import HfAuthBanner from "@/components/landing/HfAuthBanner";
 
 import { Button } from "@/components/ui/button";
 import { Loader2, Play, Square, Trash2, ArrowLeft } from "lucide-react";
@@ -222,13 +223,28 @@ const ConfigurationMode: React.FC = () => {
     );
   }
 
-  const startDisabled = isStarting || !trainingConfig.dataset_repo_id.trim() || runningJobExists;
-  const startTooltip = runningJobExists ? "Another training is already running" : undefined;
+  const targetRequiresAuth = trainingConfig.target.runner === "hf_cloud";
+  const targetMissingFlavor =
+    trainingConfig.target.runner === "hf_cloud" && !trainingConfig.target.flavor;
+  const startDisabled =
+    isStarting ||
+    !trainingConfig.dataset_repo_id.trim() ||
+    runningJobExists ||
+    (targetRequiresAuth && !authenticated) ||
+    targetMissingFlavor;
+  const startTooltip = runningJobExists
+    ? "Another training is already running"
+    : targetRequiresAuth && !authenticated
+    ? "Log in to Hugging Face to use cloud compute"
+    : targetMissingFlavor
+    ? "Select a hardware flavor"
+    : undefined;
 
   return (
     <div className="min-h-screen bg-slate-900 text-white p-4">
       <div className="max-w-7xl mx-auto">
         <TrainingHeader />
+        <HfAuthBanner />
         <ConfigurationTab
           config={trainingConfig}
           updateConfig={updateConfig}
