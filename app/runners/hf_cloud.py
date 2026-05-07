@@ -17,19 +17,15 @@ from queue import Empty, Queue
 from typing import List, Optional
 
 from huggingface_hub import HfApi, get_token
+from huggingface_hub.errors import RepositoryNotFoundError
 
+from ..hf_auth import cached_whoami
 from ..jobs import LogLine, TrainingMetrics, extract_wandb_run_url, parse_metrics_into
 from ..training import TrainingRequest, build_training_command
 
 logger = logging.getLogger(__name__)
 
 LEROBOT_IMAGE = "huggingface/lerobot-gpu:latest"
-
-# TODO(local-datasets): this runner assumes dataset_repo_id resolves on the Hub.
-# Local-only datasets selected from the new dataset dropdown will fail at job
-# start because the cloud GPU pod can't see ~/.cache/huggingface/lerobot.
-# Either upload the dataset before submitting, or refuse the job with a clear
-# message. See docs/superpowers/specs/2026-05-06-local-datasets-in-dropdown-design.md.
 
 # Inlined sidecar uploader for HF Jobs. Spawns the lerobot trainer as a
 # subprocess and concurrently uploads new <output_dir>/checkpoints/<step>/
@@ -198,10 +194,19 @@ class HfCloudJobRunner:
                 "HF token not found. Run 'hf auth login' before launching cloud jobs."
             )
 
-        whoami = self._api.whoami()
-        username = whoami.get("name") if isinstance(whoami, dict) else None
+        whoami = cached_whoami()
+        username = whoami.get("name") if whoami else None
         if not username:
             raise RuntimeError("Could not resolve HF username from whoami()")
+
+        # Open the log file early so dataset-upload progress is recorded
+        # before the cloud job is submitted.
+        self._log_file_path.parent.mkdir(parents=True, exist_ok=True)
+        self._log_file = self._log_file_path.open("a", buffering=1)
+
+        # Cloud pods can't see the host's LeRobot cache. If the dataset
+        # only exists locally, push it to the Hub before submitting.
+        self._ensure_dataset_on_hub(config.dataset_repo_id)
 
         # Mutate the config so build_training_command emits the right flags.
         # The mutated config is what gets persisted in JobRecord.config, so
@@ -219,9 +224,6 @@ class HfCloudJobRunner:
             "Submitting HF Cloud job %s on %s (wrapped trainer): %s",
             job_id, self._flavor, " ".join(trainer_argv),
         )
-
-        self._log_file_path.parent.mkdir(parents=True, exist_ok=True)
-        self._log_file = self._log_file_path.open("a", buffering=1)
 
         # HF_TOKEN goes via `secrets` (not `env`) so it doesn't show up in
         # the job's environment variable inspection / logs.
@@ -267,6 +269,48 @@ class HfCloudJobRunner:
             target=self._tail_loop, name=f"hf-job-{hf_job_id}-logs-reattach", daemon=True
         )
         self._tail_thread.start()
+
+    def _log_line(self, message: str) -> None:
+        """Append a wrapper-style line to the job's log file."""
+        if self._log_file is None:
+            return
+        line = LogLine(timestamp=time.time(), message=message)
+        try:
+            self._log_file.write(line.model_dump_json() + "\n")
+        except Exception as exc:
+            logger.warning("Could not write upload log line: %s", exc)
+
+    def _ensure_dataset_on_hub(self, repo_id: str) -> None:
+        """If the dataset is local-only, push it to the Hub.
+
+        The cloud pod resolves the dataset by repo_id; it can't see the
+        host's `~/.cache/huggingface/lerobot`. We push synchronously and
+        let any failure bubble up — JobRegistry.start marks the record
+        as failed with the exception message.
+        """
+        try:
+            self._api.dataset_info(repo_id)
+            return
+        except RepositoryNotFoundError:
+            pass
+
+        cache_root = Path(
+            os.environ.get("HF_LEROBOT_HOME", "~/.cache/huggingface/lerobot")
+        ).expanduser()
+        if not (cache_root / repo_id / "meta" / "info.json").is_file():
+            # Neither local nor on Hub. Let the trainer surface the error
+            # — same behaviour as before.
+            return
+
+        self._log_line(f"[upload] dataset {repo_id} not on Hub; pushing local copy...")
+        from lerobot.datasets import LeRobotDataset
+        try:
+            LeRobotDataset(repo_id).push_to_hub(tags=[], private=False)
+        except Exception as exc:
+            msg = f"Failed to upload local dataset {repo_id} to Hub: {exc}"
+            self._log_line(f"[upload] {msg}")
+            raise RuntimeError(msg) from exc
+        self._log_line(f"[upload] dataset {repo_id} uploaded.")
 
     def _tail_loop(self) -> None:
         """Consume HfApi.fetch_job_logs until it returns. Tee each line to
