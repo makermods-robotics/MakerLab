@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 LeLab is a FastAPI + React web interface wrapping the [LeRobot](https://github.com/huggingface/lerobot) framework for the SO-101 leader/follower arm. It exposes teleoperation, dataset recording, calibration, replay, and training as HTTP/WebSocket endpoints, replacing LeRobot's CLI + keyboard-driven flows.
 
-The frontend (React + Vite) lives in [`frontend/`](frontend/). The built bundle in [`frontend/dist/`](frontend/dist/) is committed and shipped inside the Python wheel as package data (`frontend.__init__.py` makes setuptools treat it as a package); [`app/main.py`](app/main.py) mounts it as `StaticFiles` at `/` so a single `lelab` process serves both API and UI on `:8000`. The `frontend/` directory is also force-pushed to the [LeLab HF Space](https://huggingface.co/spaces/lerobot/LeLab) by [`.github/workflows/sync_space.yml`](.github/workflows/sync_space.yml) — that's a separate runtime; the Space builds the [Dockerfile](frontend/Dockerfile) (which runs `npm run build` again, so committed `dist/` doesn't matter to it).
+The frontend (React + Vite) lives in [`frontend/`](frontend/). The built bundle in [`frontend/dist/`](frontend/dist/) is committed and shipped inside the Python wheel as package data (`frontend.__init__.py` makes setuptools treat it as a package); [`lelab/server.py`](lelab/server.py) mounts it as `StaticFiles` at `/` so a single `lelab` process serves both API and UI on `:8000`. The `frontend/` directory is also force-pushed to the [LeLab HF Space](https://huggingface.co/spaces/lerobot/LeLab) by [`.github/workflows/sync_space.yml`](.github/workflows/sync_space.yml) — that's a separate runtime; the Space builds the [Dockerfile](frontend/Dockerfile) (which runs `npm run build` again, so committed `dist/` doesn't matter to it).
 
 ## Common commands
 
@@ -14,7 +14,7 @@ Install (editable, requires Python ≥3.10):
 ```bash
 pip install -e .
 ```
-`lerobot` is pinned to a specific commit on `huggingface/lerobot` `main` (see [pyproject.toml](pyproject.toml)) — no PyPI release yet exposes the `lerobot-rollout` script that [app/inferring.py](app/inferring.py) shells out to. Bump the SHA when you want newer upstream changes; expect import-path drift (e.g. `lerobot.configs.dataset`, `lerobot.utils.feature_utils`, `lerobot.common.control_utils`) and adjust call sites accordingly.
+`lerobot` is pinned to a specific commit on `huggingface/lerobot` `main` (see [pyproject.toml](pyproject.toml)) — no PyPI release yet exposes the `lerobot-rollout` script that [lelab/rollout.py](lelab/rollout.py) shells out to. Bump the SHA when you want newer upstream changes; expect import-path drift (e.g. `lerobot.configs.dataset`, `lerobot.utils.feature_utils`, `lerobot.common.control_utils`) and adjust call sites accordingly.
 
 Run servers (entry point defined in [pyproject.toml](pyproject.toml)):
 ```bash
@@ -28,16 +28,15 @@ There is **no test suite, no linter config, and no build step** in this repo. Va
 
 ## Architecture
 
-### Backend module layout (`app/`)
+### Backend module layout (`lelab/`)
 
-[main.py](app/main.py) is a thin FastAPI router. Each feature lives in its own module that owns its global state and exposes `handle_*` functions plus a Pydantic request model:
+[server.py](lelab/server.py) is a thin FastAPI router. Each feature lives in its own module that owns its global state and exposes `handle_*` functions plus a Pydantic request model:
 
-- [recording.py](app/recording.py) — dataset recording (wraps `lerobot.record.record`); patches `lerobot.common.utils.control_utils` keyboard listener so frontend buttons replace arrow-key controls.
-- [teleoperating.py](app/teleoperating.py) — leader→follower teleoperation (wraps `lerobot.teleoperate`).
-- [calibrating.py](app/calibrating.py) — step-by-step web calibration with a `CalibrationManager` singleton and `_step_complete` threading.Event.
-- [replaying.py](app/replaying.py) — replay recorded episodes on the follower.
-- [training.py](app/training.py) — wraps the LeRobot training CLI as a subprocess (psutil for lifecycle, queue for log streaming).
-- [config.py](app/config.py) — shared paths and persistence: calibration JSON, saved ports, saved config selections. **Import shared constants from here, do not hardcode paths in feature modules.**
+- [record.py](lelab/record.py) — dataset recording (wraps `lerobot.record.record`); patches `lerobot.common.utils.control_utils` keyboard listener so frontend buttons replace arrow-key controls.
+- [teleoperate.py](lelab/teleoperate.py) — leader→follower teleoperation (wraps `lerobot.teleoperate`).
+- [calibrate.py](lelab/calibrate.py) — step-by-step web calibration with a `CalibrationManager` singleton and `_step_complete` threading.Event.
+- [train.py](lelab/train.py) — wraps the LeRobot training CLI as a subprocess (psutil for lifecycle, queue for log streaming).
+- [utils/config.py](lelab/utils/config.py) — shared paths and persistence: calibration JSON, saved ports, saved config selections. **Import shared constants from here, do not hardcode paths in feature modules.**
 
 ### State model
 
@@ -45,11 +44,11 @@ Each feature module owns module-level globals (e.g. `recording_active`, `teleope
 
 ### WebSocket broadcast
 
-[main.py](app/main.py#L104-L206) defines a single `ConnectionManager` with a background `_broadcast_worker` thread that drains a `queue.Queue` and forwards joint data to all `/ws/joint-data` clients via a thread-local asyncio loop. Feature modules get the manager passed in (e.g. `handle_start_teleoperation(request, manager)`) and call `manager.broadcast_joint_data_sync(data)` from their worker threads. Don't `await` from these threads — use the sync queue method.
+[server.py](lelab/server.py#L104-L206) defines a single `ConnectionManager` with a background `_broadcast_worker` thread that drains a `queue.Queue` and forwards joint data to all `/ws/joint-data` clients via a thread-local asyncio loop. Feature modules get the manager passed in (e.g. `handle_start_teleoperation(request, manager)`) and call `manager.broadcast_joint_data_sync(data)` from their worker threads. Don't `await` from these threads — use the sync queue method.
 
 ### Persistent state on disk
 
-All under `~/.cache/huggingface/lerobot/` (managed in [config.py](app/config.py)):
+All under `~/.cache/huggingface/lerobot/` (managed in [utils/config.py](lelab/utils/config.py)):
 - `calibration/teleoperators/so101_leader/*.json` — leader calibration files (also called "teleop")
 - `calibration/robots/so101_follower/*.json` — follower calibration files (also called "robot")
 - `ports/{leader,follower}_port.txt` — last-used serial ports
@@ -59,7 +58,7 @@ All under `~/.cache/huggingface/lerobot/` (managed in [config.py](app/config.py)
 
 ### Calibration files: dual-location pattern
 
-[setup_calibration_files](app/config.py#L30-L74) copies user-selected configs from `LEADER_CONFIG_PATH` / `FOLLOWER_CONFIG_PATH` into LeRobot's expected locations under `~/.cache/huggingface/lerobot/calibration/`. Recording, teleoperation, and replay all call this before starting. New features that drive a robot must do the same.
+[setup_calibration_files](lelab/utils/config.py#L30-L74) copies user-selected configs from `LEADER_CONFIG_PATH` / `FOLLOWER_CONFIG_PATH` into LeRobot's expected locations under `~/.cache/huggingface/lerobot/calibration/`. Recording, teleoperation, and replay all call this before starting. New features that drive a robot must do the same.
 
 ## Hardware target
 
