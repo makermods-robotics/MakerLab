@@ -4,21 +4,21 @@
 export const autoStartNgrok = async (): Promise<{ success: boolean; url?: string; error?: string }> => {
   try {
     console.log('🚀 Attempting to auto-start ngrok...');
-    
+
     // First check if ngrok is already running
     const existingUrl = await detectNgrokUrl();
     if (existingUrl) {
       console.log('✅ ngrok already running:', existingUrl);
       return { success: true, url: existingUrl };
     }
-    
+
     // Try to start ngrok via backend API call
     const response = await fetch('http://localhost:8000/start-ngrok', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ port: 8080 })
     });
-    
+
     if (response.ok) {
       const data = await response.json();
       if (data.success && data.url) {
@@ -26,7 +26,7 @@ export const autoStartNgrok = async (): Promise<{ success: boolean; url?: string
         return { success: true, url: data.url };
       }
     }
-    
+
     // Fallback: try to detect if ngrok started externally
     await new Promise(resolve => setTimeout(resolve, 2000)); // Wait 2 seconds
     const newUrl = await detectNgrokUrl();
@@ -34,17 +34,17 @@ export const autoStartNgrok = async (): Promise<{ success: boolean; url?: string
       console.log('✅ ngrok detected after waiting:', newUrl);
       return { success: true, url: newUrl };
     }
-    
-    return { 
-      success: false, 
-      error: 'Could not start ngrok automatically. Please run: ngrok http 8080' 
+
+    return {
+      success: false,
+      error: 'Could not start ngrok automatically. Please run: ngrok http 8080'
     };
-    
+
   } catch (error) {
     console.error('❌ Error auto-starting ngrok:', error);
-    return { 
-      success: false, 
-      error: 'Failed to start ngrok. Please run manually: ngrok http 8080' 
+    return {
+      success: false,
+      error: 'Failed to start ngrok. Please run manually: ngrok http 8080'
     };
   }
 };
@@ -58,7 +58,7 @@ const detectNgrokUrl = async (): Promise<string | null> => {
     const response = await fetch('http://localhost:4040/api/tunnels');
     if (response.ok) {
       const data = await response.json();
-      const tunnel = data.tunnels?.find((t: { config?: { addr?: string }; public_url?: string }) => 
+      const tunnel = data.tunnels?.find((t: { config?: { addr?: string }; public_url?: string }) =>
         t.config?.addr === 'http://localhost:8080' && t.public_url?.startsWith('https://')
       );
       if (tunnel?.public_url) {
@@ -81,28 +81,28 @@ export const getAccessibleFrontendAddress = async (): Promise<string> => {
   if (window.location.protocol === 'https:') {
     return window.location.origin;
   }
-  
+
   // For development with localhost, check for ngrok tunnel first
   const ngrokUrl = await detectNgrokUrl();
   if (ngrokUrl) {
     return ngrokUrl;
   }
-  
+
   const currentHostname = window.location.hostname;
   const currentPort = window.location.port;
   const currentProtocol = window.location.protocol;
-  
+
   // If already on a network IP or domain, reuse it
   if (currentHostname !== 'localhost' && currentHostname !== '127.0.0.1') {
     return `${currentProtocol}//${currentHostname}${currentPort ? `:${currentPort}` : ''}`;
   }
-  
+
   // For localhost/127.0.0.1, try to detect local network IP
   const localIP = await detectLocalNetworkIP();
   if (localIP) {
     return `${currentProtocol}//${localIP}${currentPort ? `:${currentPort}` : ''}`;
   }
-  
+
   // Fallback to current address
   return window.location.origin;
 };
@@ -116,9 +116,9 @@ export const detectLocalNetworkIP = (): Promise<string | null> => {
     const pc = new RTCPeerConnection({
       iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
     });
-    
+
     let resolved = false;
-    
+
     pc.onicecandidate = (event) => {
       if (event.candidate && !resolved) {
         const candidate = event.candidate.candidate;
@@ -127,7 +127,7 @@ export const detectLocalNetworkIP = (): Promise<string | null> => {
         if (ipMatch) {
           const ip = ipMatch[1];
           // Check if it's a local network IP
-          if (ip.startsWith('192.168.') || ip.startsWith('10.') || 
+          if (ip.startsWith('192.168.') || ip.startsWith('10.') ||
               (ip.startsWith('172.') && parseInt(ip.split('.')[1]) >= 16 && parseInt(ip.split('.')[1]) <= 31)) {
             resolved = true;
             pc.close();
@@ -136,11 +136,11 @@ export const detectLocalNetworkIP = (): Promise<string | null> => {
         }
       }
     };
-    
+
     // Create a data channel to trigger ICE gathering
     pc.createDataChannel('ip-detection');
     pc.createOffer().then(offer => pc.setLocalDescription(offer));
-    
+
     // Timeout after 3 seconds
     setTimeout(() => {
       if (!resolved) {
@@ -173,4 +173,4 @@ export const generatePhoneCameraQR = async (webrtcId: string): Promise<string> =
  */
 export const generateWebRTCId = (): string => {
   return `phone_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-}; 
+};

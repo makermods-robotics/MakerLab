@@ -129,17 +129,17 @@ const MetricsPanel: React.FC<MetricsPanelProps> = ({
                         <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
                         <XAxis hide />
                         <YAxis fontSize={12} stroke="#9CA3AF" />
-                        <Tooltip 
-                          contentStyle={{ 
-                            backgroundColor: '#1F2937', 
+                        <Tooltip
+                          contentStyle={{
+                            backgroundColor: '#1F2937',
                             border: '1px solid #374151',
                             color: '#fff'
-                          }} 
+                          }}
                         />
-                        <Line 
-                          type="monotone" 
-                          dataKey={sensor} 
-                          stroke={index % 2 === 1 ? '#ff6b35' : '#ffdd44'} 
+                        <Line
+                          type="monotone"
+                          dataKey={sensor}
+                          stroke={index % 2 === 1 ? '#ff6b35' : '#ffdd44'}
                           strokeWidth={2}
                           dot={false}
                         />
@@ -161,17 +161,17 @@ const MetricsPanel: React.FC<MetricsPanelProps> = ({
                       <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
                       <XAxis hide />
                       <YAxis fontSize={12} stroke="#9CA3AF" />
-                      <Tooltip 
-                        contentStyle={{ 
-                          backgroundColor: '#1F2937', 
+                      <Tooltip
+                        contentStyle={{
+                          backgroundColor: '#1F2937',
                           border: '1px solid #374151',
                           color: '#fff'
-                        }} 
+                        }}
                       />
-                      <Line 
-                        type="monotone" 
-                        dataKey={motor} 
-                        stroke={index % 2 === 0 ? '#ff6b35' : '#ffdd44'} 
+                      <Line
+                        type="monotone"
+                        dataKey={motor}
+                        stroke={index % 2 === 0 ? '#ff6b35' : '#ffdd44'}
                         strokeWidth={2}
                         dot={false}
                       />

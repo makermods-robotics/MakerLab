@@ -8,7 +8,7 @@ export const useAutoSave = () => {
 
   const savePortAutomatically = useCallback(async (robotType: 'leader' | 'follower', port: string) => {
     if (!port.trim()) return;
-    
+
     try {
       await fetchWithHeaders(`${baseUrl}/save-robot-port`, {
         method: 'POST',
@@ -28,7 +28,7 @@ export const useAutoSave = () => {
 
   const saveConfigAutomatically = useCallback(async (robotType: 'leader' | 'follower', configName: string) => {
     if (!configName.trim()) return;
-    
+
     try {
       await fetchWithHeaders(`${baseUrl}/save-robot-config`, {
         method: 'POST',
@@ -61,7 +61,7 @@ export const useAutoSave = () => {
 
   const debouncedSaveConfig = useCallback((robotType: 'leader' | 'follower', configName: string, delay: number = 1000) => {
     const key = `${robotType}_config`;
-    
+
     // Clear existing timeout for this robotType config
     if (configTimeoutRefs.current[key]) {
       clearTimeout(configTimeoutRefs.current[key]);

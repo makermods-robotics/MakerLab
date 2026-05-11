@@ -29,10 +29,11 @@ import signal
 import subprocess
 import threading
 import time
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from queue import Empty, Queue
-from typing import Callable, Literal, Protocol, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel
 
@@ -633,9 +634,7 @@ class JobRegistry:
         """Register a single observer fired when registry state changes."""
         self._on_change = callback
 
-    def set_on_progress(
-        self, callback: Callable[[builtins.list[dict]], None] | None
-    ) -> None:
+    def set_on_progress(self, callback: Callable[[builtins.list[dict]], None] | None) -> None:
         """Register an observer fired each watchdog tick with one dict per
         running job. Quiet when no job runs: a tick with no running jobs
         produces no callback."""

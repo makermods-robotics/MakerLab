@@ -307,23 +307,23 @@ Error generating stack: `+o.message+`
     margin-right: `).concat(s,"px ").concat(r,`;
     `),n==="padding"&&"padding-right: ".concat(s,"px ").concat(r,";")].filter(Boolean).join(""),`
   }
-  
+
   .`).concat(Kv,` {
     right: `).concat(s,"px ").concat(r,`;
   }
-  
+
   .`).concat(Yv,` {
     margin-right: `).concat(s,"px ").concat(r,`;
   }
-  
+
   .`).concat(Kv," .").concat(Kv,` {
     right: 0 `).concat(r,`;
   }
-  
+
   .`).concat(Yv," .").concat(Yv,` {
     margin-right: 0 `).concat(r,`;
   }
-  
+
   body[`).concat(md,`] {
     `).concat(Nq,": ").concat(s,`px;
   }
@@ -434,10 +434,10 @@ For more information, see https://radix-ui.com/primitives/docs/components/${e.do
 #endif`,kte=`#ifdef USE_AOMAP
 	float ambientOcclusion = ( texture2D( aoMap, vAoMapUv ).r - 1.0 ) * aoMapIntensity + 1.0;
 	reflectedLight.indirectDiffuse *= ambientOcclusion;
-	#if defined( USE_CLEARCOAT ) 
+	#if defined( USE_CLEARCOAT )
 		clearcoatSpecularIndirect *= ambientOcclusion;
 	#endif
-	#if defined( USE_SHEEN ) 
+	#if defined( USE_SHEEN )
 		sheenSpecularIndirect *= ambientOcclusion;
 	#endif
 	#if defined( USE_ENVMAP ) && defined( STANDARD )
@@ -922,7 +922,7 @@ vec4 sRGBTransferOETF( in vec4 value ) {
 	#else
 		uniform sampler2D envMap;
 	#endif
-	
+
 #endif`,une=`#ifdef USE_ENVMAP
 	uniform float reflectivity;
 	#if defined( USE_BUMPMAP ) || defined( USE_NORMALMAP ) || defined( PHONG ) || defined( LAMBERT )
@@ -939,7 +939,7 @@ vec4 sRGBTransferOETF( in vec4 value ) {
 		#define ENV_WORLDPOS
 	#endif
 	#ifdef ENV_WORLDPOS
-		
+
 		varying vec3 vWorldPosition;
 	#else
 		varying vec3 vReflect;
@@ -2188,7 +2188,7 @@ gl_Position = projectionMatrix * mvPosition;`,sre=`#ifdef DITHERING
 	float getPointShadow( sampler2D shadowMap, vec2 shadowMapSize, float shadowIntensity, float shadowBias, float shadowRadius, vec4 shadowCoord, float shadowCameraNear, float shadowCameraFar ) {
 		float shadow = 1.0;
 		vec3 lightToPosition = shadowCoord.xyz;
-		
+
 		float lightToPositionLength = length( lightToPosition );
 		if ( lightToPositionLength - shadowCameraFar <= 0.0 && lightToPositionLength - shadowCameraNear >= 0.0 ) {
 			float dp = ( lightToPositionLength - shadowCameraNear ) / ( shadowCameraFar - shadowCameraNear );			dp += shadowBias;
@@ -4174,9 +4174,9 @@ No loader available`)}}const Rae=new xt,Nae=()=>{};class Oae extends HTMLElement
 `)),e.indexOf(`\\
 `)!==-1&&(e=e.replace(/\\\n/g,""));const r=e.split(`
 `);let i=[];for(let s=0,l=r.length;s<l;s++){const c=r[s].trimStart();if(c.length===0)continue;const d=c.charAt(0);if(d!=="#")if(d==="v"){const u=c.split(F2);switch(u[0]){case"v":n.vertices.push(parseFloat(u[1]),parseFloat(u[2]),parseFloat(u[3])),u.length>=7?(bv.setRGB(parseFloat(u[4]),parseFloat(u[5]),parseFloat(u[6]),en),n.colors.push(bv.r,bv.g,bv.b)):n.colors.push(void 0,void 0,void 0);break;case"vn":n.normals.push(parseFloat(u[1]),parseFloat(u[2]),parseFloat(u[3]));break;case"vt":n.uvs.push(parseFloat(u[1]),parseFloat(u[2]));break}}else if(d==="f"){const f=c.slice(1).trim().split(F2),h=[];for(let v=0,g=f.length;v<g;v++){const m=f[v];if(m.length>0){const x=m.split("/");h.push(x)}}const y=h[0];for(let v=1,g=h.length-1;v<g;v++){const m=h[v],x=h[v+1];n.addFace(y[0],m[0],x[0],y[1],m[1],x[1],y[2],m[2],x[2])}}else if(d==="l"){const u=c.substring(1).trim().split(" ");let f=[];const h=[];if(c.indexOf("/")===-1)f=u;else for(let y=0,v=u.length;y<v;y++){const g=u[y].split("/");g[0]!==""&&f.push(g[0]),g[1]!==""&&h.push(g[1])}n.addLineGeometry(f,h)}else if(d==="p"){const f=c.slice(1).trim().split(" ");n.addPointGeometry(f)}else if((i=_se.exec(c))!==null){const u=(" "+i[0].slice(1).trim()).slice(1);n.startObject(u)}else if(Sse.test(c))n.object.startMaterial(c.substring(7).trim(),n.materialLibraries);else if(wse.test(c))n.materialLibraries.push(c.substring(7).trim());else if(Ese.test(c))console.warn('THREE.OBJLoader: Rendering identifier "usemap" not supported. Textures must be defined in MTL files.');else if(d==="s"){if(i=c.split(" "),i.length>1){const f=i[1].trim().toLowerCase();n.object.smooth=f!=="0"&&f!=="off"}else n.object.smooth=!0;const u=n.object.currentMaterial();u&&(u.smooth=n.object.smooth)}else{if(c==="\0")continue;console.warn('THREE.OBJLoader: Unexpected line: "'+c+'"')}}n.finalize();const o=new fa;if(o.materialLibraries=[].concat(n.materialLibraries),!(n.objects.length===1&&n.objects[0].geometry.vertices.length===0)===!0)for(let s=0,l=n.objects.length;s<l;s++){const c=n.objects[s],d=c.geometry,u=c.materials,f=d.type==="Line",h=d.type==="Points";let y=!1;if(d.vertices.length===0)continue;const v=new Sr;v.setAttribute("position",new tn(d.vertices,3)),d.normals.length>0&&v.setAttribute("normal",new tn(d.normals,3)),d.colors.length>0&&(y=!0,v.setAttribute("color",new tn(d.colors,3))),d.hasUVIndices===!0&&v.setAttribute("uv",new tn(d.uvs,2));const g=[];for(let x=0,b=u.length;x<b;x++){const S=u[x],w=S.name+"_"+S.smooth+"_"+y;let E=n.materials[w];if(this.materials!==null){if(E=this.materials.create(S.name),f&&E&&!(E instanceof wc)){const T=new wc;Yr.prototype.copy.call(T,E),T.color.copy(E.color),E=T}else if(h&&E&&!(E instanceof td)){const T=new td({size:10,sizeAttenuation:!1});Yr.prototype.copy.call(T,E),T.color.copy(E.color),T.map=E.map,E=T}}E===void 0&&(f?E=new wc:h?E=new td({size:1,sizeAttenuation:!1}):E=new Vo,E.name=S.name,E.flatShading=!S.smooth,E.vertexColors=y,n.materials[w]=E),g.push(E)}let m;if(g.length>1){for(let x=0,b=u.length;x<b;x++){const S=u[x];v.addGroup(S.groupStart,S.groupCount,x)}f?m=new Vy(v,g):h?m=new ay(v,g):m=new Pn(v,g)}else f?m=new Vy(v,g[0]):h?m=new ay(v,g[0]):m=new Pn(v,g[0]);m.name=c.name,o.add(m)}else if(n.vertices.length>0){const s=new td({size:1,sizeAttenuation:!1}),l=new Sr;l.setAttribute("position",new tn(n.vertices,3)),n.colors.length>0&&n.colors[0]!==void 0&&(l.setAttribute("color",new tn(n.colors,3)),s.vertexColors=!0);const c=new ay(l,s);o.add(c)}return o}}const Ase=(t,e,n)=>{var i;let r=(i=t.split(/\./g).pop())==null?void 0:i.toLowerCase();if(t.startsWith("blob:")&&t.includes("#.")){const o=t.split("#.").pop();o&&(r=o.toLowerCase())}if(!r){console.error(`Could not determine file extension for: ${t}`),n(null,new Error(`Unsupported file format: ${t}`));return}switch(r){case"gltf":case"glb":new Bae(e).load(t,o=>n(o.scene),null,o=>n(null,o));break;case"obj":new Mse(e).load(t,o=>n(o),null,o=>n(null,o));break;case"dae":new R4(e).load(t,o=>n(o.scene),null,o=>n(null,o));break;case"stl":console.log(`🔧 Loading STL file: ${t}`),new P4(e).load(t,o=>{console.log(`✅ STL loaded successfully: ${t}`);const a=new Vo,s=new Pn(o,a);n(s)},o=>{console.log(`📊 STL loading progress: ${t}`,o)},o=>{console.error(`❌ STL loading failed: ${t}`,o),console.log(`🔄 Creating fallback geometry for: ${t}`);const a=new ru(.05,.05,.05),s=new Vo({color:16739125,transparent:!0,opacity:.7}),l=new Pn(a,s);n(l)});break;default:n(null,new Error(`Unsupported file format: ${r}`))}};function Cse(t,e){t.innerHTML="";const n=document.createElement("urdf-viewer");n.classList.add("w-full","h-full"),t.appendChild(n),n.setAttribute("up","Z"),Ose(n,"#2c2b3a"),n.setAttribute("highlight-color","#df6dd4"),n.setAttribute("auto-redraw","true");const r=new _4(14079702,1);n.scene.add(r);const i=new Jx(16777215,.8);return i.position.set(5,30,5),i.castShadow=!0,n.scene.add(i),n}function Pse(t,e){"loadMeshFunc"in t&&(t.loadMeshFunc=(n,r,i)=>{const o=e?e(n):n;try{Ase(o,r,(a,s)=>{s?(console.warn(`Error loading mesh ${o}:`,s),i(null)):i(a)})}catch(a){console.error(`Exception loading mesh ${o}:`,a),i(null,a)}})}function Rse(t,e){const n=i=>{e(i.detail)},r=()=>{e(null)};return t.addEventListener("joint-mouseover",n),t.addEventListener("joint-mouseout",r),()=>{t.removeEventListener("joint-mouseover",n),t.removeEventListener("joint-mouseout",r)}}function Nse(t,e,n,r,i=[]){const o=e.startsWith("blob:")&&!e.includes("#.")?e+"#.urdf":e;t.setAttribute("urdf",o),t.setAttribute("package",n);const a=()=>{if(i.length>0){const s=i[0];s&&(r(s),Br.info("Trying alternative model...",{description:`First model failed to load. Trying ${s.split("/").pop()||"alternative model"}`,duration:2e3}))}};return t.addEventListener("error",a),()=>{t.removeEventListener("error",a)}}function Ose(t,e){const n=t.parentElement;n&&(n.style.backgroundColor=e)}typeof window<"u"&&!customElements.get("urdf-viewer")&&customElements.define("urdf-viewer",jae);const Ise=()=>{const t=_.useRef(null),[e,n]=_.useState(null),{registerUrdfProcessor:r,alternativeUrdfModels:i,isDefaultModel:o}=hA();_.useState(o);const a=_.useRef(null),s=_.useRef(null),l=_.useRef(!1),{isConnected:c}=Uae({viewerRef:s,enabled:o}),[d,u]=_.useState(null),[f,h]=_.useState(null),y=_.useRef(""),v=_.useMemo(()=>({loadUrdf:m=>{u(m)},setUrlModifierFunc:m=>{h(()=>m)},getPackage:()=>y.current}),[]);_.useEffect(()=>{r(v)},[r,v]);const g=_.useCallback(m=>{if(console.log(`🔗 defaultUrlModifier called with: ${m}`),m.startsWith("package://so_arm_description/meshes/")){const x=m.replace("package://so_arm_description/meshes/","/so-101-urdf/meshes/");return console.log(`🔗 Modified URL (package): ${x}`),x}if(m.includes("so_arm_description/meshes/")){const x=m.replace(/.*so_arm_description\/meshes\//,"/so-101-urdf/meshes/");return console.log(`🔗 Modified URL (partial): ${x}`),x}if(m.includes("/so-101-urdf/so_arm_description/meshes/")){const x=m.replace("/so-101-urdf/so_arm_description/meshes/","/so-101-urdf/meshes/");return console.log(`🔗 Modified URL (problematic path): ${x}`),x}if(m.endsWith(".stl")&&!m.startsWith("/")&&!m.startsWith("http")){const x=`/so-101-urdf/meshes/${m}`;return console.log(`🔗 Modified URL (relative): ${x}`),x}return console.log(`🔗 Unmodified URL: ${m}`),m},[]);return _.useEffect(()=>{if(!t.current)return;const m=Cse(t.current);s.current=m,Pse(m,o?g:f);const b=o?"/so-101-urdf/urdf/so101_new_calib.urdf":d||"";o&&(y.current="/");let S=()=>{};b&&(S=Nse(m,b,y.current,u,i));const w=Rse(m,n),E=M=>{if(!M||!M.robot){console.log("[RobotViewer] Cannot fit to view: No viewer or robot available");return}try{const A=new Jo().setFromObject(M.robot),P=new re;A.getCenter(P);const R=new re;A.getSize(R);const O=Math.max(R.x,R.y,R.z);M.camera.position.copy(P);const L=new re;M.up==="+Z"||M.up==="Z"||M.up==="+Y"||M.up,L.set(1,1,1),L.normalize().multiplyScalar(O*1.3),M.camera.position.add(L),M.controls.target.copy(P),M.controls.update(),M.redraw(),console.log("[RobotViewer] Robot auto-fitted to view")}catch(A){console.error("[RobotViewer] Error fitting robot to view:",A)}},T=()=>{E(m)},C=()=>{l.current=!0,"setJointValue"in m&&a.current&&(a.current(),a.current=null),T()};return m.addEventListener("urdf-processed",C),()=>{a.current&&(a.current(),a.current=null),l.current=!1,w(),S(),m.removeEventListener("urdf-processed",C)}},[o,d,f,g,i]),p.jsxs("div",{className:He("w-full h-full transition-all duration-300 ease-in-out relative","bg-gradient-to-br from-gray-900 to-gray-800"),children:[p.jsx("div",{ref:t,className:"w-full h-full"}),e&&p.jsxs("div",{className:"absolute bottom-4 right-4 bg-black/70 text-white px-3 py-2 rounded-md text-sm font-mono z-10",children:["Joint: ",e]}),o&&p.jsx("div",{className:"absolute top-4 right-4 z-10",children:p.jsxs("div",{className:`flex items-center gap-2 px-3 py-2 rounded-md text-sm font-mono ${c?"bg-green-900/70 text-green-300":"bg-red-900/70 text-red-300"}`,children:[p.jsx("div",{className:`w-2 h-2 rounded-full ${c?"bg-green-400":"bg-red-400"}`}),c?"Live Robot Data":"Disconnected"]})})]})},Dse=()=>{const{registerUrdfProcessor:t}=hA(),e=_.useMemo(()=>({loadUrdf:n=>(console.log("📂 URDF path set:",n),n),setUrlModifierFunc:n=>(console.log("🔗 URL modifier function set"),n),getPackage:()=>""}),[]);return _.useEffect(()=>{console.log("🔧 Registering URDF processor"),t(e)},[t,e]),null},eb=({className:t,iconOnly:e=!1})=>p.jsxs("div",{className:He("flex items-center gap-2",t),children:[p.jsx("img",{src:"/lovable-uploads/5e648747-34b7-4d8f-93fd-4dbd00aeeefc.png",alt:"LeLab Logo",className:"h-8 w-8"}),!e&&p.jsx("span",{className:"font-bold text-white text-2xl",children:"LeLab"})]}),Lse=({onGoBack:t,className:e})=>p.jsx("div",{className:He("w-full p-2 sm:p-4 space-y-4 lg:space-y-0 lg:space-x-4 flex flex-col lg:flex-row",e),children:p.jsxs("div",{className:"bg-gray-900 rounded-lg p-4 flex-1 flex flex-col",children:[p.jsxs("div",{className:"flex items-center gap-4 mb-4",children:[p.jsx(Ye,{variant:"ghost",size:"icon",onClick:t,className:"text-gray-400 hover:text-white hover:bg-gray-800 flex-shrink-0",children:p.jsx(ml,{className:"h-5 w-5"})}),p.jsx(eb,{iconOnly:!0}),p.jsx("div",{className:"w-px h-6 bg-gray-700"}),p.jsx("h2",{className:"text-xl font-medium text-gray-200",children:"Teleoperation"})]}),p.jsxs("div",{className:"flex-1 bg-black rounded border border-gray-800 min-h-[50vh] lg:min-h-0",children:[p.jsx(Dse,{}),p.jsx(Ise,{})]})]})}),kse=()=>{const t=uo(),{toast:e}=Er(),{baseUrl:n,fetchWithHeaders:r}=Ln(),i=async()=>{try{console.log("🛑 Stopping teleoperation...");const o=await r(`${n}/stop-teleoperation`,{method:"POST"});if(o.ok){const a=await o.json();console.log("✅ Teleoperation stopped:",a.message),e({title:"Teleoperation Stopped",description:a.message||"Robot teleoperation has been stopped successfully."})}else{const a=await o.text();console.warn("⚠️ Failed to stop teleoperation:",o.status,a),e({title:"Warning",description:`Failed to stop teleoperation properly. Status: ${o.status}`,variant:"destructive"})}}catch(o){console.error("❌ Error stopping teleoperation:",o),e({title:"Error",description:"Failed to communicate with the robot server.",variant:"destructive"})}finally{t("/")}};return p.jsx("div",{className:"min-h-screen bg-black flex items-center justify-center p-2 sm:p-4",children:p.jsx("div",{className:"w-full h-[95vh] flex",children:p.jsx(Lse,{onGoBack:i,className:"lg:w-full"})})})},jse=Fm("inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2",{variants:{variant:{default:"border-transparent bg-primary text-primary-foreground hover:bg-primary/80",secondary:"border-transparent bg-secondary text-secondary-foreground hover:bg-secondary/80",destructive:"border-transparent bg-destructive text-destructive-foreground hover:bg-destructive/80",outline:"text-foreground"}},defaultVariants:{variant:"default"}});function Use({className:t,variant:e,...n}){return p.jsx("div",{className:He(jse({variant:e}),t),...n})}var Fse="Separator",H2="horizontal",Bse=["horizontal","vertical"],L4=_.forwardRef((t,e)=>{const{decorative:n,orientation:r=H2,...i}=t,o=$se(r)?r:H2,s=n?{role:"none"}:{"aria-orientation":o==="vertical"?o:void 0,role:"separator"};return p.jsx(nt.div,{"data-orientation":o,...s,...i,ref:e})});L4.displayName=Fse;function $se(t){return Bse.includes(t)}var k4=L4;const nc=_.forwardRef(({className:t,orientation:e="horizontal",decorative:n=!0,...r},i)=>p.jsx(k4,{ref:i,decorative:n,orientation:e,className:He("shrink-0 bg-border",e==="horizontal"?"h-[1px] w-full":"h-full w-[1px]",t),...r}));nc.displayName=k4.displayName;const zse=({onClick:t,robotType:e,className:n=""})=>p.jsxs(Ye,{type:"button",onClick:t,variant:"outline",size:"sm",className:`
-        h-8 px-2 
-        border-gray-600 hover:border-blue-500 
-        text-gray-400 hover:text-blue-400 
+        h-8 px-2
+        border-gray-600 hover:border-blue-500
+        text-gray-400 hover:text-blue-400
         bg-gray-800 hover:bg-gray-700
         transition-all duration-200
         ${n}

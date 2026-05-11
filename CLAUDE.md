@@ -11,12 +11,15 @@ The frontend (React + Vite) lives in [`frontend/`](frontend/). The built bundle 
 ## Common commands
 
 Install (editable, requires Python ≥3.10):
+
 ```bash
 pip install -e .
 ```
+
 `lerobot` is pinned to a specific commit on `huggingface/lerobot` `main` (see [pyproject.toml](pyproject.toml)) — no PyPI release yet exposes the `lerobot-rollout` script that [lelab/rollout.py](lelab/rollout.py) shells out to. Bump the SHA when you want newer upstream changes; expect import-path drift (e.g. `lerobot.configs.dataset`, `lerobot.utils.feature_utils`, `lerobot.common.control_utils`) and adjust call sites accordingly.
 
 Run servers (entry point defined in [pyproject.toml](pyproject.toml)):
+
 ```bash
 lelab          # uvicorn on :8000, serves built frontend at /, opens browser
 lelab --dev    # spawns Vite dev (:8080) + uvicorn --reload (:8000), opens browser to :8080
@@ -49,6 +52,7 @@ Each feature module owns module-level globals (e.g. `recording_active`, `teleope
 ### Persistent state on disk
 
 All under `~/.cache/huggingface/lerobot/` (managed in [utils/config.py](lelab/utils/config.py)):
+
 - `calibration/teleoperators/so101_leader/*.json` — leader calibration files (also called "teleop")
 - `calibration/robots/so101_follower/*.json` — follower calibration files (also called "robot")
 - `ports/{leader,follower}_port.txt` — last-used serial ports

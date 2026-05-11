@@ -26,25 +26,25 @@ const Index = () => {
     let audioContext: AudioContext | null = null;
     const getPermissions = async () => {
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({ 
-          video: true, 
-          audio: true 
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: true,
+          audio: true
         });
-        
+
         streamRef.current = stream;
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
         }
-        
+
         setHasPermissions(true);
-        
+
         const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
         if (AudioContextClass) {
           audioContext = new AudioContextClass();
           const analyser = audioContext.createAnalyser();
           const source = audioContext.createMediaStreamSource(stream);
           source.connect(analyser);
-          
+
           let animationFrameId: number;
           const dataArray = new Uint8Array(analyser.frequencyBinCount);
           const updateMicLevel = () => {
