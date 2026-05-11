@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import logging
+import types
 
 from huggingface_hub import HfApi, get_token, login as hf_login, whoami
 from huggingface_hub.errors import HfHubHTTPError, LocalTokenNotFoundError
@@ -25,6 +26,20 @@ LOGIN_COMMAND = "hf auth login"
 # app so its in-process whoami cache (cache=True) actually hits — otherwise
 # polling endpoints like /jobs/hub would burn the rate limit on every tick.
 _WHOAMI_API = HfApi()
+
+# HfApi.run_job() internally calls self.whoami(token=token) WITHOUT cache=True
+# to resolve the namespace, which burns the /whoami-v2 rate limit on every
+# job submission. Bind a shim on this shared instance that defaults cache=True
+# so every HfApi method on _WHOAMI_API (run_job, inspect_job's lazy whoami,
+# etc.) hits the in-process cache once a token has been validated.
+_orig_whoami = HfApi.whoami
+
+
+def _whoami_default_cache(self, token=None, *, cache=True):
+    return _orig_whoami(self, token=token, cache=cache)
+
+
+_WHOAMI_API.whoami = types.MethodType(_whoami_default_cache, _WHOAMI_API)
 
 
 def cached_whoami() -> dict | None:

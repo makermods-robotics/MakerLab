@@ -222,8 +222,8 @@ class LocalJobRunner:
         if self._process is not None:
             raise RuntimeError("LocalJobRunner already started")
 
-        # Build the command via the helper that lives in training.py.
-        from .training import build_training_command  # avoid import cycle at module load
+        # Build the command via the helper that lives in train.py.
+        from .train import build_training_command  # avoid import cycle at module load
 
         cmd = build_training_command(config, output_dir)
         logger.info("Starting job %s: %s", job_id, " ".join(cmd))
@@ -547,7 +547,7 @@ def _read_checkpoint_config(record: JobRecord, ckpt: JobCheckpoint) -> dict[str,
 
 def _generate_job_id(policy_type: str, dataset_repo_id: str) -> str:
     """Build a sortable, collision-free job id from policy type and dataset slug."""
-    from .training import _SLUG_RE
+    from .train import _SLUG_RE
 
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     dataset_slug = _SLUG_RE.sub("_", dataset_repo_id).strip("_") or "dataset"
@@ -759,13 +759,13 @@ class JobRegistry:
     def _list_cloud_cached(self, repo_id: str | None) -> builtins.list[JobCheckpoint]:
         if not repo_id:
             return []
-        from huggingface_hub import HfApi  # lazy: keeps unit-test imports cheap
+        from .utils.hf_auth import shared_hf_api  # lazy: keeps unit-test imports cheap
 
         now = time.time()
         cached = self._cloud_ckpt_cache.get(repo_id)
         if cached is not None and cached[0] > now:
             return cached[1]
-        result = _list_hub_checkpoints(HfApi(), repo_id)
+        result = _list_hub_checkpoints(shared_hf_api(), repo_id)
         self._cloud_ckpt_cache[repo_id] = (now + _CLOUD_CKPT_TTL_SECONDS, result)
         return result
 
@@ -860,9 +860,9 @@ class JobRegistry:
                 elif record.runner == "hf_cloud" and record.hf_job_id and record.hf_flavor:
                     # Probe HF for the live status before reattaching.
                     try:
-                        from huggingface_hub import HfApi
+                        from .utils.hf_auth import shared_hf_api
 
-                        info = HfApi().inspect_job(job_id=record.hf_job_id)
+                        info = shared_hf_api().inspect_job(job_id=record.hf_job_id)
                         # info.status is a JobStatus dataclass; the stage
                         # string lives on .stage.
                         status_obj = getattr(info, "status", None)

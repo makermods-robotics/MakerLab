@@ -30,12 +30,12 @@ import time
 from pathlib import Path
 from queue import Empty, Queue
 
-from huggingface_hub import HfApi, get_token
+from huggingface_hub import get_token
 from huggingface_hub.errors import RepositoryNotFoundError
 
 from ..jobs import LogLine, TrainingMetrics, extract_wandb_run_url, parse_metrics_into
 from ..train import TrainingRequest, build_training_command
-from ..utils.hf_auth import cached_whoami
+from ..utils.hf_auth import cached_whoami, shared_hf_api
 
 logger = logging.getLogger(__name__)
 
@@ -184,7 +184,10 @@ class HfCloudJobRunner:
         self._metrics = metrics
         self._log_file_path = log_file_path
         self._flavor = flavor
-        self._api = HfApi()
+        # Shared HfApi: its in-process whoami cache covers run_job's
+        # internal self.whoami(token=...) call too (see utils/hf_auth.py),
+        # so submitting many jobs doesn't hammer /whoami-v2.
+        self._api = shared_hf_api()
         self._hf_job_id: str | None = None
         self._hf_job_url: str | None = None
         self._log_queue: Queue[LogLine] = Queue()
@@ -329,9 +332,11 @@ class HfCloudJobRunner:
         """Consume HfApi.fetch_job_logs until it returns. Tee each line to
         the log file and the in-memory queue, and update metrics inline.
 
-        On disconnect, retry up to 3 times with exponential backoff. After
-        that, exit the loop; the registry watchdog will catch the eventual
-        terminal state via inspect_job.
+        The log stream IS the event source for terminal state: when the
+        generator returns (or retries exhaust), the job is over and we
+        resolve the final stage via a single inspect_job call. The
+        registry watchdog never polls inspect_job; it just reads the
+        in-memory _terminal_status that this loop sets.
         """
         assert self._hf_job_id is not None
         try:
@@ -373,55 +378,61 @@ class HfCloudJobRunner:
                     logger.info("HF log tail disconnected (retry %d/3): %s", retries, exc)
                     self._stop_event.wait(2**retries)
         finally:
+            # Tail thread is exiting for any reason (clean stream end, retry
+            # exhaustion, stop()). Resolve the terminal stage once so the
+            # watchdog can finalise the record without polling inspect_job.
+            self._finalize_terminal_status()
             if self._log_file is not None:
                 with contextlib.suppress(Exception):
                     self._log_file.close()
                 self._log_file = None
 
+    def _finalize_terminal_status(self) -> None:
+        """One-shot resolve of the job's terminal stage after the log stream
+        ends. Idempotent — stop() may pre-set _terminal_status to CANCELED."""
+        if self._terminal_status is not None:
+            return
+        if self._hf_job_id is None:
+            return
+        try:
+            info = self._api.inspect_job(job_id=self._hf_job_id)
+            status_obj = getattr(info, "status", None)
+            stage = getattr(status_obj, "stage", None) if status_obj is not None else None
+            stage_str = str(stage).upper() if stage is not None else "ERROR"
+            message = getattr(status_obj, "message", None)
+            if message:
+                self._terminal_message = str(message)
+        except Exception as exc:
+            # API unreachable at finalisation time: default to ERROR so the
+            # record doesn't stay stuck in "running". The persisted log file
+            # still records what happened.
+            logger.warning("inspect_job at finalisation failed for %s: %s", self._hf_job_id, exc)
+            stage_str = "ERROR"
+        self._terminal_status = stage_str
+
     def stop(self) -> None:
         if self._hf_job_id is None:
             return
+        # Pre-set CANCELED so the tail loop's _finalize_terminal_status is
+        # a no-op and the watchdog finalises as canceled regardless of
+        # whether inspect_job can be reached.
+        if self._terminal_status is None:
+            self._terminal_status = "CANCELED"
         self._stop_event.set()
         try:
             self._api.cancel_job(job_id=self._hf_job_id)
         except Exception as exc:
-            # Already-completed jobs may 404; that's fine. Watchdog will
-            # finalise on its next tick.
+            # Already-completed jobs may 404; that's fine.
             logger.info("cancel_job(%s) ignored: %s", self._hf_job_id, exc)
 
     def is_running(self) -> bool:
+        # State is driven by the log stream: _terminal_status is None
+        # until _tail_loop's finally block resolves the final stage.
         if self._hf_job_id is None:
             return False
-        try:
-            info = self._api.inspect_job(job_id=self._hf_job_id)
-        except Exception as exc:
-            logger.warning("inspect_job failed for %s: %s", self._hf_job_id, exc)
-            return False
-        # info.status is a JobStatus dataclass; the actual stage string
-        # ("RUNNING", "COMPLETED", "ERROR", transient values like
-        # "QUEUED"/"SCHEDULING", …) lives on .stage. Documented terminal
-        # values: COMPLETED, CANCELED, ERROR, DELETED. We also accept
-        # CANCELLED/FAILED in case the API surfaces alternative spellings.
-        # Anything else — including unknown future states — is treated as
-        # alive so we don't prematurely finalise a healthy job.
-        status_obj = getattr(info, "status", None)
-        stage = getattr(status_obj, "stage", None) if status_obj is not None else None
-        stage_str = str(stage).upper() if stage is not None else ""
-        terminal = {"COMPLETED", "CANCELED", "CANCELLED", "ERROR", "FAILED", "DELETED"}
-        if stage_str in terminal:
-            self._terminal_status = stage_str
-            message = getattr(status_obj, "message", None)
-            if message:
-                self._terminal_message = str(message)
-            return False
-        return True
+        return self._terminal_status is None
 
     def returncode(self) -> int | None:
-        if self._hf_job_id is None:
-            return None
-        # If we haven't yet observed the terminal status, ask now.
-        if self._terminal_status is None and self.is_running():
-            return None
         if self._terminal_status is None:
             return None
         return 0 if self._terminal_status == "COMPLETED" else 1
