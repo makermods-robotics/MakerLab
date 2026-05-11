@@ -46,7 +46,7 @@ const RobotTile: React.FC<RobotTileProps> = ({
 
   return (
     <div className="bg-gray-800 rounded-lg border border-gray-700 p-3 flex flex-col gap-2 relative">
-      <div className="flex items-start gap-2">
+      <div className="flex items-center gap-2">
         <div className="flex-1 min-w-0">
           <RobotSelector
             selectedName={selectedName}
@@ -56,8 +56,17 @@ const RobotTile: React.FC<RobotTileProps> = ({
             isLoading={isLoading}
           />
         </div>
+        {status && (
+          <p
+            className={`text-xs truncate shrink-0 ${
+              robot!.is_clean ? "text-green-400" : "text-amber-400"
+            }`}
+          >
+            {status}
+          </p>
+        )}
         {robot && (
-          <div className="flex items-center gap-1">
+          <div className="flex items-center gap-1 shrink-0">
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
@@ -89,16 +98,6 @@ const RobotTile: React.FC<RobotTileProps> = ({
           </div>
         )}
       </div>
-
-      {status && (
-        <p
-          className={`text-xs text-center truncate ${
-            robot!.is_clean ? "text-green-400" : "text-amber-400"
-          }`}
-        >
-          {status}
-        </p>
-      )}
 
       {robot && (
         <Tooltip>
