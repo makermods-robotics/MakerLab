@@ -105,6 +105,20 @@ class JobCheckpoint(BaseModel):
     ref: str
 
 
+class MetricsHistoryPoint(BaseModel):
+    """One (step, metrics) sample reconstructed from a job's log.jsonl.
+
+    Used by GET /jobs/{id}/metrics-history to seed the monitoring charts.
+    A point is emitted for each log line that carried a `step: ... loss: ...`
+    payload (the log-freq lines from lerobot). Tqdm progress lines are
+    skipped — they carry step + ETA but no loss/lr/grdn."""
+
+    step: int
+    loss: float | None = None
+    lr: float | None = None
+    grad_norm: float | None = None
+
+
 def _pid_alive(pid: int) -> bool:
     """Return True if a process with this PID exists. Cheap; uses signal 0."""
     try:
@@ -782,6 +796,53 @@ class JobRegistry:
                     continue  # skip a malformed line rather than 500ing
         return out
 
+    def read_metrics_history(self, job_id: str) -> builtins.list[MetricsHistoryPoint]:
+        """Reconstruct the per-step loss/lr/grad-norm series from log.jsonl.
+
+        Used by the frontend on Monitoring-page mount to seed the curves so
+        they survive page reloads, navigation, and lelab restarts. Re-parses
+        on every call; cache later if a slow file ever shows up.
+        """
+        with self._lock:
+            if job_id not in self._records:
+                raise JobNotFoundError(job_id)
+        path = _job_log_path(self._output_root, job_id)
+        if not path.exists():
+            return []
+        points: list[MetricsHistoryPoint] = []
+        with path.open() as f:
+            for raw in f:
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    log_line = LogLine.model_validate_json(raw)
+                except Exception:
+                    continue  # skip malformed line, same as read_persisted_logs
+                msg = log_line.message
+                # Only the log-freq lines carry per-step metric values.
+                # Tqdm lines have a step but no loss/lr — skip them so we
+                # don't emit a flat-line point per tqdm tick.
+                if "step:" not in msg or "loss:" not in msg:
+                    continue
+                fresh = TrainingMetrics()
+                parse_metrics_into(msg, fresh)
+                if fresh.current_step <= 0:
+                    continue
+                point = MetricsHistoryPoint(
+                    step=fresh.current_step,
+                    loss=fresh.current_loss,
+                    lr=fresh.current_lr,
+                    grad_norm=fresh.grad_norm,
+                )
+                # Dedupe by step: overwrite on consecutive same-step lines.
+                if points and points[-1].step == point.step:
+                    points[-1] = point
+                else:
+                    points.append(point)
+        points.sort(key=lambda p: p.step)
+        return points
+
     def list_checkpoints(self, job_id: str) -> builtins.list[JobCheckpoint]:
         """Return checkpoints saved for this job, ascending by step.
 
@@ -1026,6 +1087,7 @@ __all__ = [
     "LogLine",
     "JobRecord",
     "JobCheckpoint",
+    "MetricsHistoryPoint",
     "JobRunner",
     "LocalJobRunner",
     "JobRegistry",
