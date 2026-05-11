@@ -65,6 +65,7 @@ yarn-error.log*
 .superpowers/
 .worktrees/
 outputs/
+docs/
 
 # Self-signed dev certs (regenerate per HTTPS_SETUP.md)
 certs/
