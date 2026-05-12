@@ -299,6 +299,10 @@ class CalibrationManager:
             logger.info("Calibration completed successfully")
             self._cleanup_and_finish("Calibration completed successfully", status="completed")
 
+        except CalibrationDiscontinuityError as e:
+            logger.error(f"Calibration discontinuity: {e}")
+            self._update_status(error=str(e))
+            self._cleanup_and_finish(str(e), status="error")
         except Exception as e:
             logger.error(f"Calibration error: {e}")
             logger.error(traceback.format_exc())
