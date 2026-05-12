@@ -312,9 +312,7 @@ class HfCloudJobRunner:
     def _start_worker_threads(self, label: str) -> None:
         """Start the log tail and status poll threads. Both run for the
         life of the runner; the status poller is what marks the job terminal."""
-        self._tail_thread = threading.Thread(
-            target=self._tail_loop, name=f"hf-job-{label}-logs", daemon=True
-        )
+        self._tail_thread = threading.Thread(target=self._tail_loop, name=f"hf-job-{label}-logs", daemon=True)
         self._tail_thread.start()
         self._status_thread = threading.Thread(
             target=self._status_poll_loop, name=f"hf-job-{label}-status", daemon=True
