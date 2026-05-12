@@ -344,6 +344,18 @@ const Calibration = () => {
   };
 
   useEffect(() => {
+    if (
+      calibrationStatus.status === "error" &&
+      calibrationStatus.error?.startsWith("Motor discontinuity detected")
+    ) {
+      demoVideoRef.current?.scrollIntoView({
+        behavior: "smooth",
+        block: "center",
+      });
+    }
+  }, [calibrationStatus.status, calibrationStatus.error]);
+
+  useEffect(() => {
     let interval: NodeJS.Timeout;
 
     if (isPolling) {
