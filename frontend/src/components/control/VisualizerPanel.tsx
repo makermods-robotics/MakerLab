@@ -8,11 +8,14 @@ import Logo from "@/components/Logo";
 interface VisualizerPanelProps {
   onGoBack: () => void;
   className?: string;
+  /** Optional content rendered as a column beside the 3D viewer (e.g. a camera panel). */
+  rightSlot?: React.ReactNode;
 }
 
 const VisualizerPanel: React.FC<VisualizerPanelProps> = ({
   onGoBack,
   className,
+  rightSlot,
 }) => {
   return (
     <div
@@ -39,6 +42,9 @@ const VisualizerPanel: React.FC<VisualizerPanelProps> = ({
           <UrdfViewer />
         </div>
       </div>
+      {rightSlot && (
+        <div className="lg:w-96 flex flex-col">{rightSlot}</div>
+      )}
     </div>
   );
 };
