@@ -2,7 +2,6 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
   Select,
@@ -36,11 +35,11 @@ import {
   Circle,
   Camera,
   ShieldQuestion,
+  Hand,
+  RefreshCw,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import Logo from "@/components/Logo";
-import PortDetectionButton from "@/components/ui/PortDetectionButton";
-import PortDetectionModal from "@/components/ui/PortDetectionModal";
 import { useApi } from "@/contexts/ApiContext";
 import { isMotorRangeComplete } from "@/lib/calibrationTargets";
 import CameraConfiguration, {
@@ -106,6 +105,9 @@ const Calibration = () => {
   const calibrationConfigName =
     (assignedConfig?.trim() ? assignedConfig : robotName) ?? "";
   const [overwritePromptOpen, setOverwritePromptOpen] = useState(false);
+  const [wiggling, setWiggling] = useState(false);
+  const [availablePorts, setAvailablePorts] = useState<string[]>([]);
+  const [portsLoading, setPortsLoading] = useState(false);
   const [cameras, setCameras] = useState<CameraConfig[]>([]);
   // Off by default so merely opening the calibration page never grabs a camera.
   // The user explicitly starts a scan, which is when cameras are turned on,
@@ -129,6 +131,25 @@ const Calibration = () => {
       return null;
     }
   }, [robotName, baseUrl, fetchWithHeaders]);
+
+  // List the USB-serial ports for the dropdown (filtered to arm-like devices by
+  // the backend). Refreshable so plugging in an arm and rescanning works.
+  const fetchPorts = useCallback(async () => {
+    setPortsLoading(true);
+    try {
+      const res = await fetchWithHeaders(`${baseUrl}/available-ports`);
+      const data = await res.json();
+      setAvailablePorts(Array.isArray(data.ports) ? data.ports : []);
+    } catch (e) {
+      console.error("Failed to list ports:", e);
+    } finally {
+      setPortsLoading(false);
+    }
+  }, [baseUrl, fetchWithHeaders]);
+
+  useEffect(() => {
+    fetchPorts();
+  }, [fetchPorts]);
 
   // Initial fetch + form prefill on arrival.
   useEffect(() => {
@@ -187,11 +208,6 @@ const Calibration = () => {
     };
   }, []);
 
-  const [showPortDetection, setShowPortDetection] = useState(false);
-  const [detectionRobotType, setDetectionRobotType] = useState<
-    "leader" | "follower"
-  >("leader");
-
   const [calibrationStatus, setCalibrationStatus] = useState<CalibrationStatus>(
     {
       calibration_active: false,
@@ -246,6 +262,35 @@ const Calibration = () => {
       }
     } catch (error) {
       console.error("Error polling status:", error);
+    }
+  };
+
+  const handleWiggle = async () => {
+    if (!port) {
+      toast({
+        title: "Missing port",
+        description: "Enter or detect the port first, then wiggle to confirm the arm.",
+        variant: "destructive",
+      });
+      return;
+    }
+    setWiggling(true);
+    try {
+      const res = await fetchWithHeaders(`${baseUrl}/wiggle`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ port }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        toast({ title: "Wiggling gripper", description: data.message });
+      } else {
+        toast({ title: "Wiggle failed", description: data.message, variant: "destructive" });
+      }
+    } catch (e) {
+      toast({ title: "Wiggle failed", description: String(e), variant: "destructive" });
+    } finally {
+      setWiggling(false);
     }
   };
 
@@ -464,12 +509,6 @@ const Calibration = () => {
     })();
   }, [calibrationStatus.status, fetchRobot]);
 
-  const handlePortDetection = () => {
-    const robotType = deviceType === "robot" ? "follower" : "leader";
-    setDetectionRobotType(robotType);
-    setShowPortDetection(true);
-  };
-
   // Write the port for the current side straight into the robot record, so a
   // re-detected USB port (which shuffles on reboot/reconnect) sticks without
   // needing a full re-calibration. Mirrors the camera write-back above.
@@ -496,11 +535,6 @@ const Calibration = () => {
     },
     [robotName, deviceType, robot, baseUrl, fetchWithHeaders]
   );
-
-  const handlePortDetected = (detectedPort: string) => {
-    setPort(detectedPort);
-    persistPort(detectedPort);
-  };
 
   const getStatusDisplay = () => {
     switch (calibrationStatus.status) {
@@ -624,19 +658,61 @@ const Calibration = () => {
                   Port *
                 </Label>
                 <div className="flex gap-2">
-                  <Input
-                    id="port"
+                  <Select
                     value={port}
-                    onChange={(e) => setPort(e.target.value)}
-                    onBlur={(e) => persistPort(e.target.value)}
-                    placeholder="/dev/tty.usbmodem..."
-                    className="bg-slate-700 border-slate-600 text-white rounded-md flex-1"
-                  />
-                  <PortDetectionButton
-                    onClick={handlePortDetection}
-                    robotType={deviceType === "robot" ? "follower" : "leader"}
-                    className="border-slate-600 hover:border-blue-500 text-slate-400 hover:text-blue-400 bg-slate-700 hover:bg-slate-600"
-                  />
+                    onValueChange={(v) => {
+                      setPort(v);
+                      persistPort(v);
+                    }}
+                  >
+                    <SelectTrigger
+                      id="port"
+                      className="bg-slate-700 border-slate-600 text-white rounded-md flex-1"
+                    >
+                      <SelectValue
+                        placeholder={
+                          availablePorts.length
+                            ? "Select a port"
+                            : "No arms detected — plug in & refresh"
+                        }
+                      />
+                    </SelectTrigger>
+                    <SelectContent className="bg-slate-800 border-slate-700 text-white">
+                      {availablePorts.map((p) => (
+                        <SelectItem key={p} value={p} className="text-white">
+                          {p}
+                        </SelectItem>
+                      ))}
+                      {/* Keep a persisted port selectable even if it's unplugged. */}
+                      {port && !availablePorts.includes(port) && (
+                        <SelectItem value={port} className="text-white">
+                          {port} (saved, not detected)
+                        </SelectItem>
+                      )}
+                    </SelectContent>
+                  </Select>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="icon"
+                    onClick={fetchPorts}
+                    disabled={portsLoading}
+                    title="Rescan ports"
+                    className="border-slate-600 hover:border-blue-500 text-slate-400 hover:text-blue-400 bg-slate-700 hover:bg-slate-600 shrink-0"
+                  >
+                    <RefreshCw className={`w-4 h-4 ${portsLoading ? "animate-spin" : ""}`} />
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={handleWiggle}
+                    disabled={!port || wiggling}
+                    title="Move the gripper on this port to see which arm it is"
+                    className="border-slate-600 hover:border-yellow-500 text-slate-400 hover:text-yellow-400 bg-slate-700 hover:bg-slate-600 shrink-0"
+                  >
+                    <Hand className="w-4 h-4 mr-1" />
+                    {wiggling ? "Wiggling…" : "Wiggle"}
+                  </Button>
                 </div>
               </div>
 
@@ -1030,13 +1106,6 @@ const Calibration = () => {
           </Card>
         )}
       </div>
-
-      <PortDetectionModal
-        open={showPortDetection}
-        onOpenChange={setShowPortDetection}
-        robotType={detectionRobotType}
-        onPortDetected={handlePortDetected}
-      />
     </div>
   );
 };

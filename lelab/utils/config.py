@@ -173,9 +173,15 @@ def find_available_ports():
     if platform.system() == "Windows":
         # List COM ports using pyserial
         ports = [port.device for port in list_ports.comports()]
-    else:  # Linux/macOS
-        # List /dev/tty* ports for Unix-based systems
-        ports = [str(path) for path in Path("/dev").glob("tty*")]
+    else:
+        # Linux/macOS: globbing all of /dev/tty* returns dozens of pseudo-ttys
+        # and Bluetooth/debug devices. Restrict to USB-serial adapters — the only
+        # thing an SO-101 arm shows up as — and keep the tty.* naming the rest of
+        # the code (and saved robot records) use.
+        #   macOS:  /dev/tty.usbmodem*  /dev/tty.usbserial*
+        #   Linux:  /dev/ttyUSB*        /dev/ttyACM*
+        patterns = ("tty.usbmodem*", "tty.usbserial*", "ttyUSB*", "ttyACM*")
+        ports = [str(path) for pattern in patterns for path in Path("/dev").glob(pattern)]
     return sorted(ports)
 
 

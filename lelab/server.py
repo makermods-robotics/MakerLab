@@ -40,6 +40,7 @@ from . import datasets as dataset_browser
 
 # Import our custom calibration functionality
 from .calibrate import CalibrationRequest, calibration_manager
+from .wiggle import wiggle_gripper
 from .jobs import (
     JobAlreadyRunningError,
     JobNotFoundError,
@@ -991,6 +992,16 @@ def get_available_ports():
     except Exception as e:
         logger.error(f"Error getting available ports: {e}")
         return {"status": "error", "message": str(e)}
+
+
+class WiggleRequest(BaseModel):
+    port: str
+
+
+@app.post("/wiggle")
+async def wiggle(request: WiggleRequest):
+    """Wiggle the gripper on a port so the user can see which arm it is."""
+    return await wiggle_gripper(request.port)
 
 
 # Runs in a fresh Python — see _avfoundation_cameras_in_cv2_order for why.
