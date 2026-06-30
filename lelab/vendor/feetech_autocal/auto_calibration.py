@@ -222,7 +222,7 @@ class FeetechCalibrationMixin:
     def _prepare_motors_for_range_measure(self, motors: list[str]) -> None:
         """Prepare for range measurement: clear overload, disable torque, set Phase(BIT4=0),
         Homing_Offset=0, constant-speed mode, then enable torque."""
-        from .feetech import OperatingMode
+        from lerobot.motors.feetech import OperatingMode
 
         for m in motors:
             self._safe_stop_and_clear_overload(m)
