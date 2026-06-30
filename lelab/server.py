@@ -39,6 +39,7 @@ from starlette.types import Scope
 from . import datasets as dataset_browser
 
 # Import our custom calibration functionality
+from .auto_calibrate import AutoCalibrationRequest, auto_calibration_manager
 from .calibrate import CalibrationRequest, calibration_manager
 from .wiggle import wiggle_gripper
 from .jobs import (
@@ -803,6 +804,27 @@ def calibration_status():
 def complete_calibration_step():
     """Complete the current calibration step"""
     return calibration_manager.complete_step()
+
+
+# --- Auto-calibration (drives the arm under torque; runs the vendored script) ---
+
+
+@app.post("/start-auto-calibration")
+def start_auto_calibration(request: AutoCalibrationRequest):
+    """Start auto-calibration as a subprocess. The arm moves on its own."""
+    return auto_calibration_manager.start(request)
+
+
+@app.post("/stop-auto-calibration")
+def stop_auto_calibration():
+    """Stop a running auto-calibration."""
+    return auto_calibration_manager.stop()
+
+
+@app.get("/auto-calibration-status")
+def auto_calibration_status():
+    """Current auto-calibration state + streamed log lines."""
+    return auto_calibration_manager.get_status()
 
 
 @app.get("/calibration-configs/{device_type}")

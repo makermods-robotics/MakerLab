@@ -37,6 +37,7 @@ import {
   ShieldQuestion,
   Hand,
   RefreshCw,
+  Wand2,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import Logo from "@/components/Logo";
@@ -126,6 +127,14 @@ const Calibration = () => {
     : [];
   const [overwritePromptOpen, setOverwritePromptOpen] = useState(false);
   const [wiggling, setWiggling] = useState(false);
+  const [autoCalPromptOpen, setAutoCalPromptOpen] = useState(false);
+  const [autoCal, setAutoCal] = useState<{
+    active: boolean;
+    status: string;
+    message: string;
+    error: string | null;
+    logs: string[];
+  }>({ active: false, status: "idle", message: "", error: null, logs: [] });
   const [availablePorts, setAvailablePorts] = useState<string[]>([]);
   const [portsLoading, setPortsLoading] = useState(false);
   const [cameras, setCameras] = useState<CameraConfig[]>([]);
@@ -311,6 +320,81 @@ const Calibration = () => {
       toast({ title: "Wiggle failed", description: String(e), variant: "destructive" });
     } finally {
       setWiggling(false);
+    }
+  };
+
+  // Resume the auto-cal panel if a run is in progress (e.g. page reload).
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetchWithHeaders(`${baseUrl}/auto-calibration-status`);
+        const data = await res.json();
+        setAutoCal(data);
+      } catch {
+        // ignore
+      }
+    })();
+  }, [baseUrl, fetchWithHeaders]);
+
+  // Poll auto-cal status + logs while a run is active.
+  useEffect(() => {
+    if (!autoCal.active) return;
+    const id = setInterval(async () => {
+      try {
+        const res = await fetchWithHeaders(`${baseUrl}/auto-calibration-status`);
+        const data = await res.json();
+        setAutoCal(data);
+        if (!data.active) {
+          if (data.status === "completed") {
+            toast({ title: "Auto-calibration complete" });
+            fetchRobot();
+          } else if (data.status === "failed") {
+            toast({
+              title: "Auto-calibration failed",
+              description: data.error || "See the log.",
+              variant: "destructive",
+            });
+          }
+        }
+      } catch {
+        // transient; keep polling
+      }
+    }, 600);
+    return () => clearInterval(id);
+  }, [autoCal.active, baseUrl, fetchWithHeaders, fetchRobot, toast]);
+
+  const startAutoCalibration = async () => {
+    setAutoCalPromptOpen(false);
+    if (!robotName || !port) return;
+    try {
+      const res = await fetchWithHeaders(`${baseUrl}/start-auto-calibration`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          device_type: deviceType,
+          port,
+          config_file: calibrationConfigName,
+          robot_name: robotName,
+          arm,
+        }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setAutoCal({ active: true, status: "running", message: "", error: null, logs: [] });
+        toast({ title: "Auto-calibration started", description: "The arm is moving — keep the workspace clear." });
+      } else {
+        toast({ title: "Couldn't start auto-calibration", description: data.message, variant: "destructive" });
+      }
+    } catch (e) {
+      toast({ title: "Couldn't start auto-calibration", description: String(e), variant: "destructive" });
+    }
+  };
+
+  const stopAutoCalibration = async () => {
+    try {
+      await fetchWithHeaders(`${baseUrl}/stop-auto-calibration`, { method: "POST" });
+    } catch (e) {
+      console.error("Failed to stop auto-calibration:", e);
     }
   };
 
@@ -786,16 +870,7 @@ const Calibration = () => {
               <Separator className="bg-slate-700" />
 
               <div className="flex flex-col gap-3">
-                {!calibrationStatus.calibration_active ? (
-                  <Button
-                    onClick={() => handleStartCalibration()}
-                    className="w-full bg-blue-600 hover:bg-blue-700 text-white rounded-full py-6 text-lg"
-                    disabled={!robotName || !deviceType || !port}
-                  >
-                    <Play className="w-5 h-5 mr-2" />
-                    Start Calibration
-                  </Button>
-                ) : (
+                {calibrationStatus.calibration_active ? (
                   <Button
                     onClick={handleStopCalibration}
                     variant="destructive"
@@ -804,8 +879,81 @@ const Calibration = () => {
                     <Square className="w-5 h-5 mr-2" />
                     Cancel Calibration
                   </Button>
+                ) : autoCal.active ? (
+                  <Button
+                    onClick={stopAutoCalibration}
+                    variant="destructive"
+                    className="w-full rounded-full py-6 text-lg"
+                  >
+                    <Square className="w-5 h-5 mr-2" />
+                    Stop auto-calibration
+                  </Button>
+                ) : (
+                  <>
+                    <Button
+                      onClick={() => handleStartCalibration()}
+                      className="w-full bg-blue-600 hover:bg-blue-700 text-white rounded-full py-6 text-lg"
+                      disabled={!robotName || !deviceType || !port}
+                    >
+                      <Play className="w-5 h-5 mr-2" />
+                      Start Calibration
+                    </Button>
+                    <Button
+                      onClick={() => setAutoCalPromptOpen(true)}
+                      variant="outline"
+                      disabled={!robotName || !deviceType || !port}
+                      className="w-full border-purple-500/50 text-purple-300 hover:bg-purple-900/20 hover:text-purple-200 rounded-full py-5"
+                    >
+                      <Wand2 className="w-5 h-5 mr-2" />
+                      Auto-calibrate
+                    </Button>
+                  </>
+                )}
+
+                {autoCal.logs.length > 0 && autoCal.status !== "idle" && (
+                  <div className="bg-slate-900 rounded border border-slate-700 p-2 max-h-40 overflow-auto text-xs font-mono text-slate-300 whitespace-pre-wrap">
+                    {autoCal.status === "completed" && (
+                      <div className="text-green-400 mb-1">✓ Auto-calibration complete</div>
+                    )}
+                    {(autoCal.status === "failed" || autoCal.status === "stopped") && (
+                      <div className="text-red-400 mb-1">
+                        {autoCal.status === "stopped" ? "Stopped" : `Failed: ${autoCal.error ?? ""}`}
+                      </div>
+                    )}
+                    {autoCal.logs.slice(-120).map((line, i) => (
+                      <div key={i}>{line}</div>
+                    ))}
+                  </div>
                 )}
               </div>
+
+              <Dialog open={autoCalPromptOpen} onOpenChange={setAutoCalPromptOpen}>
+                <DialogContent className="bg-slate-900 border-slate-800 text-white">
+                  <DialogHeader>
+                    <DialogTitle>Auto-calibrate — the arm will move</DialogTitle>
+                    <DialogDescription className="text-slate-400">
+                      The arm will <strong>move on its own under power</strong> to find each
+                      joint's range. Clear the workspace and keep hands away. This will
+                      save/replace the calibration <strong>"{calibrationConfigName}"</strong>.
+                    </DialogDescription>
+                  </DialogHeader>
+                  <DialogFooter className="flex gap-2 justify-end">
+                    <Button
+                      variant="outline"
+                      className="border-slate-600 text-slate-300"
+                      onClick={() => setAutoCalPromptOpen(false)}
+                    >
+                      Cancel
+                    </Button>
+                    <Button
+                      className="bg-purple-600 hover:bg-purple-700 text-white"
+                      onClick={startAutoCalibration}
+                    >
+                      Start auto-calibration
+                    </Button>
+                  </DialogFooter>
+                </DialogContent>
+              </Dialog>
 
               <Dialog open={overwritePromptOpen} onOpenChange={setOverwritePromptOpen}>
                 <DialogContent className="bg-slate-900 border-slate-800 text-white">
