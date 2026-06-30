@@ -97,6 +97,14 @@ const Calibration = () => {
   const [deviceType, setDeviceType] = useState<string>("teleop");
   const [port, setPort] = useState<string>("");
   const [robot, setRobot] = useState<RobotRecord | null>(null);
+
+  // Default a calibration to the config the robot already uses for this side, so
+  // recalibrating updates the in-use config rather than spawning a new one named
+  // after the robot. Falls back to the robot name when no config is assigned yet.
+  const assignedConfig =
+    deviceType === "teleop" ? robot?.leader_config : robot?.follower_config;
+  const calibrationConfigName =
+    (assignedConfig?.trim() ? assignedConfig : robotName) ?? "";
   const [overwritePromptOpen, setOverwritePromptOpen] = useState(false);
   const [cameras, setCameras] = useState<CameraConfig[]>([]);
   // Off by default so merely opening the calibration page never grabs a camera.
@@ -262,7 +270,7 @@ const Calibration = () => {
     const request: CalibrationRequest = {
       device_type: deviceType,
       port: port,
-      config_file: robotName,
+      config_file: calibrationConfigName,
       robot_name: robotName,
       overwrite,
     };
@@ -661,9 +669,9 @@ const Calibration = () => {
                   <DialogHeader>
                     <DialogTitle>Overwrite existing calibration?</DialogTitle>
                     <DialogDescription className="text-slate-400">
-                      A calibration named "{robotName}" already exists for this side.
-                      Continuing will replace it when calibration completes. To keep it,
-                      cancel and rename the existing config first.
+                      A calibration named "{calibrationConfigName}" already exists for
+                      this side. Continuing will replace its data when calibration
+                      completes. To keep it, cancel and download or rename it first.
                     </DialogDescription>
                   </DialogHeader>
                   <DialogFooter className="flex gap-2 justify-end">
