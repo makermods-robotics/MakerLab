@@ -15,7 +15,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { RobotRecord } from "@/hooks/useRobots";
+import { RobotRecord, RobotMode } from "@/hooks/useRobots";
 import RobotSelector from "./RobotSelector";
 
 interface RobotTileProps {
@@ -28,6 +28,7 @@ interface RobotTileProps {
   onConfigure: (name: string) => void;
   onTeleop: (robot: RobotRecord) => void;
   onRename: (oldName: string, newName: string) => Promise<boolean>;
+  onSetMode: (name: string, mode: RobotMode) => Promise<boolean>;
   onDelete: (name: string) => void;
 }
 
@@ -41,6 +42,7 @@ const RobotTile: React.FC<RobotTileProps> = ({
   onConfigure,
   onTeleop,
   onRename,
+  onSetMode,
   onDelete,
 }) => {
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -135,6 +137,30 @@ const RobotTile: React.FC<RobotTileProps> = ({
           </div>
         )}
       </div>
+
+      {robot && (
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-gray-400 shrink-0">Arms</span>
+          <div className="flex rounded-md border border-gray-700 overflow-hidden text-xs">
+            {(["single", "bimanual"] as const).map((m) => (
+              <button
+                key={m}
+                type="button"
+                onClick={() => {
+                  if (robot.mode !== m) onSetMode(robot.name, m);
+                }}
+                className={`px-3 py-1 transition-colors ${
+                  robot.mode === m
+                    ? "bg-blue-600 text-white"
+                    : "bg-gray-900 text-gray-400 hover:text-white"
+                }`}
+              >
+                {m === "single" ? "Single" : "Bimanual"}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       {robot && (
         <Tooltip>

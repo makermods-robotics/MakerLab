@@ -32,6 +32,7 @@ const Landing = () => {
     selectRobot,
     createRobot,
     renameRobot,
+    setRobotMode,
     deleteRobot,
   } = useRobots();
 
@@ -240,6 +241,7 @@ const Landing = () => {
             selectRobot={selectRobot}
             createRobot={createRobot}
             renameRobot={renameRobot}
+            setRobotMode={setRobotMode}
             deleteRobot={deleteRobot}
           />
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">

@@ -4,12 +4,21 @@ import { useApi } from "@/contexts/ApiContext";
 import { useToast } from "@/hooks/use-toast";
 import type { CameraConfig } from "@/components/recording/CameraConfiguration";
 
+export type RobotMode = "single" | "bimanual";
+
 export interface RobotRecord {
   name: string;
+  mode: RobotMode;
+  // Primary pair (single mode), or the LEFT arm pair (bimanual mode).
   leader_port: string;
   follower_port: string;
   leader_config: string;
   follower_config: string;
+  // Right arm pair — populated only in bimanual mode.
+  right_leader_port: string;
+  right_follower_port: string;
+  right_leader_config: string;
+  right_follower_config: string;
   cameras: CameraConfig[];
   is_clean: boolean;
 }
@@ -201,6 +210,32 @@ export const useRobots = () => {
     [baseUrl, fetchWithHeaders, toast]
   );
 
+  const setRobotMode = useCallback(
+    async (name: string, mode: RobotMode): Promise<boolean> => {
+      try {
+        const res = await fetchWithHeaders(`${baseUrl}/robots/${encodeURIComponent(name)}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ mode }),
+        });
+        if (!res.ok) {
+          const text = await res.text();
+          toast({ title: "Failed to change mode", description: text, variant: "destructive" });
+          return false;
+        }
+        const data = await res.json();
+        if (data.robot) {
+          setRecords((prev) => ({ ...prev, [name]: data.robot }));
+        }
+        return true;
+      } catch (e) {
+        toast({ title: "Network error", description: String(e), variant: "destructive" });
+        return false;
+      }
+    },
+    [baseUrl, fetchWithHeaders, toast]
+  );
+
   const selectedRecord = useMemo(
     () => (selectedName ? records[selectedName] ?? null : null),
     [selectedName, records]
@@ -221,6 +256,7 @@ export const useRobots = () => {
     clearSelection,
     createRobot,
     renameRobot,
+    setRobotMode,
     deleteRobot,
   };
 };
