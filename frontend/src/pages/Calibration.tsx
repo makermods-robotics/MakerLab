@@ -107,13 +107,13 @@ const Calibration = () => {
       : isRight ? "right_follower_config" : "follower_config"
   ) as keyof RobotRecord;
 
-  // Default a calibration to the config the robot already uses for this arm, so
-  // recalibrating updates the in-use config rather than spawning a new one.
-  // Fresh bimanual arms get a "<robot>_<arm>" name so left/right never collide.
   const assignedConfig = robot ? (robot[configField] as string) : "";
-  const defaultConfigName = isBimanual ? `${robotName}_${arm}` : robotName;
-  const calibrationConfigName =
-    (assignedConfig?.trim() ? assignedConfig : defaultConfigName) ?? "";
+  // Bimanual MUST follow lerobot's "<base>_left"/"<base>_right" convention, so
+  // the name is forced to "<robot>_<arm>" regardless of any assigned config.
+  // Single-arm recalibration reuses the in-use config (or the robot name).
+  const calibrationConfigName = isBimanual
+    ? `${robotName}_${arm}`
+    : ((assignedConfig?.trim() ? assignedConfig : robotName) ?? "");
 
   // Ports already assigned to the OTHER arms of this robot — each physical arm
   // needs its own serial port, so these are greyed out in the dropdown.
@@ -988,43 +988,72 @@ const Calibration = () => {
                   <div className="text-sm font-medium text-slate-300">
                     Robot calibration
                   </div>
-                  {(isBimanual
-                    ? ([
-                        { label: "Left Leader (Teleoperator)", device: "teleop", cfgField: "leader_config", sibling: "right_leader_config" },
-                        { label: "Left Follower (Robot)", device: "robot", cfgField: "follower_config", sibling: "right_follower_config" },
-                        { label: "Right Leader (Teleoperator)", device: "teleop", cfgField: "right_leader_config", sibling: "leader_config" },
-                        { label: "Right Follower (Robot)", device: "robot", cfgField: "right_follower_config", sibling: "follower_config" },
-                      ] as const)
+                  {isBimanual
+                    ? // Bimanual configs are fixed by lerobot's convention
+                      // ("<robot>_left"/"<robot>_right"), so there's no config
+                      // picker — each arm just shows its convention name + whether
+                      // it's been calibrated to it.
+                      ([
+                        { label: "Left Leader (Teleoperator)", cfgField: "leader_config", side: "left" },
+                        { label: "Left Follower (Robot)", cfgField: "follower_config", side: "left" },
+                        { label: "Right Leader (Teleoperator)", cfgField: "right_leader_config", side: "right" },
+                        { label: "Right Follower (Robot)", cfgField: "right_follower_config", side: "right" },
+                      ] as const).map((row) => {
+                        const expected = `${robotName}_${row.side}`;
+                        const current = (robot[row.cfgField] as string) || "";
+                        const compliant = current === expected;
+                        return (
+                          <div key={row.label}>
+                            <div className="flex items-center gap-2 text-sm">
+                              {compliant ? (
+                                <CheckCircle className="w-4 h-4 text-green-400" />
+                              ) : (
+                                <Circle className="w-4 h-4 text-slate-500" />
+                              )}
+                              <span className={compliant ? "text-slate-200" : "text-slate-400"}>
+                                {row.label}
+                              </span>
+                              <span className="ml-auto font-mono text-xs text-slate-500">
+                                {expected}
+                              </span>
+                            </div>
+                            {!compliant && (
+                              <div className="ml-6 text-xs text-amber-400">
+                                {current
+                                  ? `Currently "${current}" — recalibrate this arm to use ${expected}.`
+                                  : "Not calibrated yet — calibrate this arm."}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })
                     : ([
-                        { label: "Leader (Teleoperator)", device: "teleop", cfgField: "leader_config", sibling: undefined },
-                        { label: "Follower (Robot)", device: "robot", cfgField: "follower_config", sibling: undefined },
-                      ] as const)
-                  ).map((row) => {
-                    const cfg = (robot[row.cfgField] as string) || "";
-                    const sibling = row.sibling ? ((robot[row.sibling] as string) || "") : undefined;
-                    return (
-                      <div key={row.label}>
-                        <div className="flex items-center gap-2 text-sm">
-                          {cfg ? (
-                            <CheckCircle className="w-4 h-4 text-green-400" />
-                          ) : (
-                            <Circle className="w-4 h-4 text-slate-500" />
-                          )}
-                          <span className={cfg ? "text-slate-200" : "text-slate-400"}>
-                            {row.label}
-                          </span>
-                        </div>
-                        <CalibrationLibrary
-                          device={row.device}
-                          assignedConfig={cfg}
-                          configField={row.cfgField}
-                          excludeConfig={sibling}
-                          robotName={robotName}
-                          onAssigned={fetchRobot}
-                        />
-                      </div>
-                    );
-                  })}
+                        { label: "Leader (Teleoperator)", device: "teleop", cfgField: "leader_config" },
+                        { label: "Follower (Robot)", device: "robot", cfgField: "follower_config" },
+                      ] as const).map((row) => {
+                        const cfg = (robot[row.cfgField] as string) || "";
+                        return (
+                          <div key={row.label}>
+                            <div className="flex items-center gap-2 text-sm">
+                              {cfg ? (
+                                <CheckCircle className="w-4 h-4 text-green-400" />
+                              ) : (
+                                <Circle className="w-4 h-4 text-slate-500" />
+                              )}
+                              <span className={cfg ? "text-slate-200" : "text-slate-400"}>
+                                {row.label}
+                              </span>
+                            </div>
+                            <CalibrationLibrary
+                              device={row.device}
+                              assignedConfig={cfg}
+                              configField={row.cfgField}
+                              robotName={robotName}
+                              onAssigned={fetchRobot}
+                            />
+                          </div>
+                        );
+                      })}
                 </div>
               )}
             </CardContent>

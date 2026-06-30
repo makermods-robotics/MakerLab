@@ -16,6 +16,7 @@ import logging
 import math
 import threading
 import time
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel
@@ -25,7 +26,12 @@ from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
 from lerobot.teleoperators.bi_so_leader import BiSOLeader, BiSOLeaderConfig
 from lerobot.teleoperators.so_leader import SO101Leader, SO101LeaderConfig
 
-from .utils.config import setup_calibration_files
+from .utils.config import (
+    FOLLOWER_CONFIG_PATH,
+    LEADER_CONFIG_PATH,
+    bimanual_base,
+    setup_calibration_files,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -158,28 +164,31 @@ def _connect_bimanual(request: TeleoperateRequest):
     """Build, connect, and configure a bimanual leader+follower pair.
 
     Each side is a lerobot BiSO* device wrapping two SO101 arms (left = the
-    primary leader/follower pair, right = the right_* pair). Returns
-    (robot, teleop_device) connected, or raises RuntimeError after disconnecting
-    any device it opened. The high-level worker loop is identical to single-arm.
+    primary leader/follower pair, right = the right_* pair). lerobot loads each
+    sub-arm's calibration as "<base>_left/right.json" from the side's dir, so we
+    set the BiSO id to that base and let lerobot load it. Returns
+    (robot, teleop_device) connected, or raises after disconnecting any device.
     """
-    # Stage all four calibration files; returns the stem ids lerobot loads by.
-    left_leader_id, left_follower_id = setup_calibration_files(
-        request.leader_config, request.follower_config
-    )
-    right_leader_id, right_follower_id = setup_calibration_files(
-        request.right_leader_config, request.right_follower_config
-    )
+    # Validate the four files exist and follow lerobot's "<base>_left/right" naming.
+    setup_calibration_files(request.leader_config, request.follower_config)
+    setup_calibration_files(request.right_leader_config, request.right_follower_config)
+    follower_base = bimanual_base(request.follower_config, request.right_follower_config, "follower")
+    leader_base = bimanual_base(request.leader_config, request.right_leader_config, "leader")
 
     robot = BiSOFollower(
         BiSOFollowerConfig(
-            left_arm_config=SO101FollowerConfig(port=request.follower_port, id=left_follower_id),
-            right_arm_config=SO101FollowerConfig(port=request.right_follower_port, id=right_follower_id),
+            id=follower_base,
+            calibration_dir=Path(FOLLOWER_CONFIG_PATH),
+            left_arm_config=SO101FollowerConfig(port=request.follower_port),
+            right_arm_config=SO101FollowerConfig(port=request.right_follower_port),
         )
     )
     teleop_device = BiSOLeader(
         BiSOLeaderConfig(
-            left_arm_config=SO101LeaderConfig(port=request.leader_port, id=left_leader_id),
-            right_arm_config=SO101LeaderConfig(port=request.right_leader_port, id=right_leader_id),
+            id=leader_base,
+            calibration_dir=Path(LEADER_CONFIG_PATH),
+            left_arm_config=SO101LeaderConfig(port=request.leader_port),
+            right_arm_config=SO101LeaderConfig(port=request.right_leader_port),
         )
     )
 
@@ -199,7 +208,8 @@ def _connect_bimanual(request: TeleoperateRequest):
                     "Make sure it's plugged in and powered on, then try again."
                 ) from e
 
-        # Write calibration to each arm, then cameras + configure both sides.
+        # Each sub-arm auto-loaded its calibration in __init__ (id=<base>_side);
+        # register it on the bus, then cameras + configure both sides.
         for arm in (robot.left_arm, robot.right_arm, teleop_device.left_arm, teleop_device.right_arm):
             arm.bus.write_calibration(arm.calibration)
         for cam in robot.cameras.values():

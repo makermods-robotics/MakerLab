@@ -563,6 +563,26 @@ _SINGLE_PORT_FIELDS = ("leader_port", "follower_port")
 _BIMANUAL_PORT_FIELDS = ("right_leader_port", "right_follower_port")
 
 
+def bimanual_base(left_config: str, right_config: str, side: str) -> str:
+    """
+    Derive the lerobot BiSO base id from a pair of config names.
+
+    lerobot names a bimanual robot's two arm calibration files "<base>_left.json"
+    and "<base>_right.json" from a single base id. LeLab stores the two names
+    separately, so they must follow that convention. Returns the base, or raises
+    a clear RuntimeError naming the offending side.
+    """
+    left = left_config[: -len(".json")] if left_config.endswith(".json") else left_config
+    right = right_config[: -len(".json")] if right_config.endswith(".json") else right_config
+    if left.endswith("_left") and right == f"{left[: -len('_left')]}_right":
+        return left[: -len("_left")]
+    raise RuntimeError(
+        f"Bimanual {side} calibrations must be named '<base>_left' and '<base>_right' "
+        f"to match lerobot's convention, but got '{left}' and '{right}'. Recalibrate "
+        f"those arms (the default names already follow this)."
+    )
+
+
 def port_slot_conflict(record: dict) -> str | None:
     """
     Return a serial port assigned to more than one arm of this robot, or None.

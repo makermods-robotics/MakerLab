@@ -18,6 +18,7 @@ import shutil
 import threading
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel
@@ -32,7 +33,13 @@ from lerobot.scripts.lerobot_record import RecordConfig
 from lerobot.teleoperators.bi_so_leader import BiSOLeaderConfig
 from lerobot.teleoperators.so_leader import SO101LeaderConfig
 
-from .utils.config import setup_calibration_files, with_lelab_tag
+from .utils.config import (
+    FOLLOWER_CONFIG_PATH,
+    LEADER_CONFIG_PATH,
+    bimanual_base,
+    setup_calibration_files,
+    with_lelab_tag,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -158,25 +165,27 @@ def create_record_config(request: RecordingRequest) -> RecordConfig:
     camera_configs = _build_camera_configs(request.cameras, _platform_backend())
 
     if request.mode == "bimanual":
-        # Build a lerobot BiSO leader+follower pair from the two arm pairs. Cameras
-        # go on the left follower arm (BiSOFollower exposes them prefixed "left_*").
-        left_leader_id, left_follower_id = setup_calibration_files(
-            request.leader_config, request.follower_config
-        )
-        right_leader_id, right_follower_id = setup_calibration_files(
-            request.right_leader_config, request.right_follower_config
-        )
+        # Build a lerobot BiSO leader+follower pair. lerobot loads each sub-arm's
+        # calibration as "<base>_left/right.json" from the side's dir, so set the
+        # BiSO id to that base + the side's calibration_dir and let it auto-load
+        # (otherwise the sub-arms have no calibration and connect() would try to
+        # interactively recalibrate — which hangs the record thread). Cameras go
+        # on the left follower arm (exposed prefixed "left_*").
+        setup_calibration_files(request.leader_config, request.follower_config)
+        setup_calibration_files(request.right_leader_config, request.right_follower_config)
+        follower_base = bimanual_base(request.follower_config, request.right_follower_config, "follower")
+        leader_base = bimanual_base(request.leader_config, request.right_leader_config, "leader")
         robot_config = BiSOFollowerConfig(
-            left_arm_config=SO101FollowerConfig(
-                port=request.follower_port, id=left_follower_id, cameras=camera_configs
-            ),
-            right_arm_config=SO101FollowerConfig(
-                port=request.right_follower_port, id=right_follower_id
-            ),
+            id=follower_base,
+            calibration_dir=Path(FOLLOWER_CONFIG_PATH),
+            left_arm_config=SO101FollowerConfig(port=request.follower_port, cameras=camera_configs),
+            right_arm_config=SO101FollowerConfig(port=request.right_follower_port),
         )
         teleop_config = BiSOLeaderConfig(
-            left_arm_config=SO101LeaderConfig(port=request.leader_port, id=left_leader_id),
-            right_arm_config=SO101LeaderConfig(port=request.right_leader_port, id=right_leader_id),
+            id=leader_base,
+            calibration_dir=Path(LEADER_CONFIG_PATH),
+            left_arm_config=SO101LeaderConfig(port=request.leader_port),
+            right_arm_config=SO101LeaderConfig(port=request.right_leader_port),
         )
     else:
         # Setup calibration files
@@ -661,7 +670,10 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict) -> LeRobotDatase
     # 🔧 ROBOT CONNECTION: Connect with enhanced error handling for camera conflicts
     try:
         logger.info("🔧 ROBOT CONNECTION: Attempting to connect robot...")
-        robot.connect()
+        # Calibration is already on disk (loaded via the configs above), so never
+        # let connect() drop into interactive recalibration — that would hang the
+        # headless record thread (the "stuck on preparing session" symptom).
+        robot.connect(calibrate=False)
         logger.info("✅ ROBOT CONNECTION: Robot connected successfully")
     except Exception as e:
         logger.error(f"❌ ROBOT CONNECTION: Failed to connect robot: {e}")
