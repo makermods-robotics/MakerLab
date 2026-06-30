@@ -394,6 +394,25 @@ def test_config_slot_conflict_detects_same_side_duplicate() -> None:
     assert cfg.config_slot_conflict({**base, "right_follower_config": "F1"}) == "follower"
 
 
+def test_port_slot_conflict_detects_shared_port() -> None:
+    from lelab.utils import config as cfg
+
+    # Single: leader and follower must differ.
+    assert cfg.port_slot_conflict({"mode": "single", "leader_port": "/dev/a", "follower_port": "/dev/b"}) is None
+    assert cfg.port_slot_conflict({"mode": "single", "leader_port": "/dev/a", "follower_port": "/dev/a"}) == "/dev/a"
+
+    # Bimanual: all four must differ, across sides.
+    base = {
+        "mode": "bimanual",
+        "leader_port": "/dev/a", "follower_port": "/dev/b",
+        "right_leader_port": "/dev/c", "right_follower_port": "/dev/d",
+    }
+    assert cfg.port_slot_conflict(base) is None
+    assert cfg.port_slot_conflict({**base, "right_follower_port": "/dev/a"}) == "/dev/a"
+    # Empty ports are ignored.
+    assert cfg.port_slot_conflict({"mode": "bimanual", "leader_port": "", "follower_port": ""}) is None
+
+
 def test_config_slot_conflict_ignores_single_mode_and_cross_side() -> None:
     from lelab.utils import config as cfg
 

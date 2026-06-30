@@ -113,6 +113,17 @@ const Calibration = () => {
   const defaultConfigName = isBimanual ? `${robotName}_${arm}` : robotName;
   const calibrationConfigName =
     (assignedConfig?.trim() ? assignedConfig : defaultConfigName) ?? "";
+
+  // Ports already assigned to the OTHER arms of this robot — each physical arm
+  // needs its own serial port, so these are greyed out in the dropdown.
+  const otherArmPorts = robot
+    ? (
+        ["leader_port", "follower_port", "right_leader_port", "right_follower_port"] as const
+      )
+        .filter((f) => f !== portField)
+        .map((f) => (robot[f] as string) || "")
+        .filter(Boolean)
+    : [];
   const [overwritePromptOpen, setOverwritePromptOpen] = useState(false);
   const [wiggling, setWiggling] = useState(false);
   const [availablePorts, setAvailablePorts] = useState<string[]>([]);
@@ -539,12 +550,21 @@ const Calibration = () => {
           }
         );
         const data = await res.json();
-        if (data.robot) setRobot(data.robot);
+        if (res.ok && data.robot) {
+          setRobot(data.robot);
+        } else if (!res.ok) {
+          // Backstop for the same-port-on-two-arms guard (409).
+          toast({
+            title: "Couldn't assign port",
+            description: data.message || "Failed to save the port.",
+            variant: "destructive",
+          });
+        }
       } catch (e) {
         console.error("Failed to save port to robot record:", e);
       }
     },
-    [robotName, portField, robot, baseUrl, fetchWithHeaders]
+    [robotName, portField, robot, baseUrl, fetchWithHeaders, toast]
   );
 
   const getStatusDisplay = () => {
@@ -710,11 +730,26 @@ const Calibration = () => {
                       />
                     </SelectTrigger>
                     <SelectContent className="bg-slate-800 border-slate-700 text-white">
-                      {availablePorts.map((p) => (
-                        <SelectItem key={p} value={p} className="text-white">
-                          {p}
-                        </SelectItem>
-                      ))}
+                      {availablePorts.map((p) => {
+                        const usedByOtherArm = otherArmPorts.includes(p);
+                        return (
+                          <SelectItem
+                            key={p}
+                            value={p}
+                            disabled={usedByOtherArm}
+                            className="text-white"
+                          >
+                            <span className="flex items-center gap-2">
+                              {p}
+                              {usedByOtherArm && (
+                                <span className="text-[10px] uppercase tracking-wide text-amber-400 border border-amber-500/40 rounded px-1">
+                                  other arm
+                                </span>
+                              )}
+                            </span>
+                          </SelectItem>
+                        );
+                      })}
                       {/* Keep a persisted port selectable even if it's unplugged. */}
                       {port && !availablePorts.includes(port) && (
                         <SelectItem value={port} className="text-white">

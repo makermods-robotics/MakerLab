@@ -97,6 +97,7 @@ from .utils.config import (
     is_valid_robot_name,
     config_slot_conflict,
     list_robot_records,
+    port_slot_conflict,
     rename_calibration_config,
     rename_robot_record,
     save_imported_calibration,
@@ -1304,6 +1305,25 @@ def upsert_robot(name: str, data: dict, create: bool = False):
                     "status": "error",
                     "message": f"That {side} config is already assigned to the other {side} arm. "
                     "Each physical arm needs its own calibration — pick a different config.",
+                },
+            )
+
+    # Reject assigning one serial port to more than one arm — each physical arm
+    # is its own USB device. Checked when the request touches a port or the mode.
+    port_fields = ("mode", "leader_port", "follower_port", "right_leader_port", "right_follower_port")
+    if any(f in body for f in port_fields):
+        existing = get_robot_record(name) or {}
+        prospective = {"mode": body["mode"] if body.get("mode") in ("single", "bimanual") else existing.get("mode", "single")}
+        for f in ("leader_port", "follower_port", "right_leader_port", "right_follower_port"):
+            prospective[f] = body[f] if isinstance(body.get(f), str) else existing.get(f, "")
+        dup_port = port_slot_conflict(prospective)
+        if dup_port:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "status": "error",
+                    "message": f"Port {dup_port} is already assigned to another arm of this robot. "
+                    "Each arm needs its own serial port.",
                 },
             )
 

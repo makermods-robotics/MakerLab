@@ -98,6 +98,17 @@ def test_upsert_robot_rejects_same_side_config_conflict(
     assert client.post("/robots/bi", json={"cameras": []}).status_code == 200
 
 
+def test_upsert_robot_rejects_shared_port(client: TestClient, tmp_lerobot_home) -> None:
+    """Two arms can't share a serial port (each is its own USB device)."""
+    client.post("/robots/p?create=true", json={"leader_port": "/dev/a"})
+    # follower on the same port as leader -> 409.
+    resp = client.post("/robots/p", json={"follower_port": "/dev/a"})
+    assert resp.status_code == 409
+    assert "/dev/a" in resp.json()["message"]
+    # A distinct port is fine.
+    assert client.post("/robots/p", json={"follower_port": "/dev/b"}).status_code == 200
+
+
 @pytest.mark.parametrize("unsafe_name", ["evil..name", "..config", "back\\door"])
 def test_download_calibration_config_rejects_unsafe_name(
     client: TestClient, unsafe_name: str

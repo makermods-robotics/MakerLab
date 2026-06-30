@@ -556,6 +556,35 @@ def config_slot_conflict(record: dict) -> str | None:
     return None
 
 
+# Port fields per mode. Unlike configs (which may legitimately share a name
+# across leader/follower dirs), a serial PORT is one physical USB device, so
+# every arm's port must be distinct — across BOTH sides.
+_SINGLE_PORT_FIELDS = ("leader_port", "follower_port")
+_BIMANUAL_PORT_FIELDS = ("right_leader_port", "right_follower_port")
+
+
+def port_slot_conflict(record: dict) -> str | None:
+    """
+    Return a serial port assigned to more than one arm of this robot, or None.
+
+    Two physical arms can't share a port, so all of a robot's ports must differ —
+    leader vs follower in single mode, and all four in bimanual mode. Empty ports
+    are ignored (not yet set).
+    """
+    fields = _SINGLE_PORT_FIELDS + (
+        _BIMANUAL_PORT_FIELDS if record.get("mode") == "bimanual" else ()
+    )
+    seen: set[str] = set()
+    for field in fields:
+        port = record.get(field, "")
+        if not isinstance(port, str) or not port.strip():
+            continue
+        if port in seen:
+            return port
+        seen.add(port)
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Calibration config import
 # ---------------------------------------------------------------------------
