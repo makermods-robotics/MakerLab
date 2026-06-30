@@ -16,6 +16,14 @@ import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
   ArrowLeft,
   Settings,
   Activity,
@@ -38,6 +46,7 @@ import { isMotorRangeComplete } from "@/lib/calibrationTargets";
 import CameraConfiguration, {
   CameraConfig,
 } from "@/components/recording/CameraConfiguration";
+import CalibrationLibrary from "@/components/calibration/CalibrationLibrary";
 
 const DISCONTINUITY_ERROR_PREFIX = "Motor discontinuity detected";
 
@@ -61,6 +70,7 @@ interface CalibrationRequest {
   port: string;
   config_file: string;
   robot_name: string | null;
+  overwrite?: boolean; // must be true to replace an existing config of the same name
 }
 
 interface RobotRecord {
@@ -87,6 +97,7 @@ const Calibration = () => {
   const [deviceType, setDeviceType] = useState<string>("teleop");
   const [port, setPort] = useState<string>("");
   const [robot, setRobot] = useState<RobotRecord | null>(null);
+  const [overwritePromptOpen, setOverwritePromptOpen] = useState(false);
   const [cameras, setCameras] = useState<CameraConfig[]>([]);
   // Off by default so merely opening the calibration page never grabs a camera.
   // The user explicitly starts a scan, which is when cameras are turned on,
@@ -230,7 +241,7 @@ const Calibration = () => {
     }
   };
 
-  const handleStartCalibration = async () => {
+  const handleStartCalibration = async (overwrite = false) => {
     if (!robotName) {
       toast({
         title: "No robot selected",
@@ -253,6 +264,7 @@ const Calibration = () => {
       port: port,
       config_file: robotName,
       robot_name: robotName,
+      overwrite,
     };
 
     // Optimistically mark as active so the unmount cleanup will fire even if
@@ -269,11 +281,16 @@ const Calibration = () => {
       const result = await response.json();
 
       if (result.success) {
+        setOverwritePromptOpen(false);
         toast({
           title: "Calibration Started",
           description: `Calibration started for ${deviceType}`,
         });
         setIsPolling(true);
+      } else if (result.code === "name_taken") {
+        // Existing config of the same name — confirm before overwriting.
+        calibrationActiveRef.current = false;
+        setOverwritePromptOpen(true);
       } else {
         calibrationActiveRef.current = false;
         toast({
@@ -620,7 +637,7 @@ const Calibration = () => {
               <div className="flex flex-col gap-3">
                 {!calibrationStatus.calibration_active ? (
                   <Button
-                    onClick={handleStartCalibration}
+                    onClick={() => handleStartCalibration()}
                     className="w-full bg-blue-600 hover:bg-blue-700 text-white rounded-full py-6 text-lg"
                     disabled={!robotName || !deviceType || !port}
                   >
@@ -639,40 +656,84 @@ const Calibration = () => {
                 )}
               </div>
 
+              <Dialog open={overwritePromptOpen} onOpenChange={setOverwritePromptOpen}>
+                <DialogContent className="bg-slate-900 border-slate-800 text-white">
+                  <DialogHeader>
+                    <DialogTitle>Overwrite existing calibration?</DialogTitle>
+                    <DialogDescription className="text-slate-400">
+                      A calibration named "{robotName}" already exists for this side.
+                      Continuing will replace it when calibration completes. To keep it,
+                      cancel and rename the existing config first.
+                    </DialogDescription>
+                  </DialogHeader>
+                  <DialogFooter className="flex gap-2 justify-end">
+                    <Button
+                      variant="outline"
+                      className="border-slate-600 text-slate-300"
+                      onClick={() => setOverwritePromptOpen(false)}
+                    >
+                      Cancel
+                    </Button>
+                    <Button
+                      className="bg-red-500 hover:bg-red-600 text-white"
+                      onClick={() => handleStartCalibration(true)}
+                    >
+                      Overwrite & calibrate
+                    </Button>
+                  </DialogFooter>
+                </DialogContent>
+              </Dialog>
+
               {robot && (
                 <div className="space-y-2 pt-2">
                   <div className="text-sm font-medium text-slate-300">
                     Robot calibration
                   </div>
-                  <div className="flex items-center gap-2 text-sm">
-                    {robot.leader_config ? (
-                      <CheckCircle className="w-4 h-4 text-green-400" />
-                    ) : (
-                      <Circle className="w-4 h-4 text-slate-500" />
-                    )}
-                    <span
-                      className={
-                        robot.leader_config ? "text-slate-200" : "text-slate-400"
-                      }
-                    >
-                      Leader (Teleoperator)
-                    </span>
+                  <div>
+                    <div className="flex items-center gap-2 text-sm">
+                      {robot.leader_config ? (
+                        <CheckCircle className="w-4 h-4 text-green-400" />
+                      ) : (
+                        <Circle className="w-4 h-4 text-slate-500" />
+                      )}
+                      <span
+                        className={
+                          robot.leader_config ? "text-slate-200" : "text-slate-400"
+                        }
+                      >
+                        Leader (Teleoperator)
+                      </span>
+                    </div>
+                    <CalibrationLibrary
+                      device="teleop"
+                      assignedConfig={robot.leader_config}
+                      robotName={robotName}
+                      onAssigned={fetchRobot}
+                    />
                   </div>
-                  <div className="flex items-center gap-2 text-sm">
-                    {robot.follower_config ? (
-                      <CheckCircle className="w-4 h-4 text-green-400" />
-                    ) : (
-                      <Circle className="w-4 h-4 text-slate-500" />
-                    )}
-                    <span
-                      className={
-                        robot.follower_config
-                          ? "text-slate-200"
-                          : "text-slate-400"
-                      }
-                    >
-                      Follower (Robot)
-                    </span>
+                  <div>
+                    <div className="flex items-center gap-2 text-sm">
+                      {robot.follower_config ? (
+                        <CheckCircle className="w-4 h-4 text-green-400" />
+                      ) : (
+                        <Circle className="w-4 h-4 text-slate-500" />
+                      )}
+                      <span
+                        className={
+                          robot.follower_config
+                            ? "text-slate-200"
+                            : "text-slate-400"
+                        }
+                      >
+                        Follower (Robot)
+                      </span>
+                    </div>
+                    <CalibrationLibrary
+                      device="robot"
+                      assignedConfig={robot.follower_config}
+                      robotName={robotName}
+                      onAssigned={fetchRobot}
+                    />
                   </div>
                 </div>
               )}

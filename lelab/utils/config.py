@@ -368,6 +368,13 @@ def get_robot_record(name: str) -> dict | None:
     record = _empty_record(name)
     record.update({k: v for k, v in data.items() if k in record})
     record["name"] = name
+    # Canonical config names are STEMS (no .json). Older records stored the
+    # filename with the extension — normalize on read so every consumer sees the
+    # same form. The on-disk file keeps its .json.
+    for field in ("leader_config", "follower_config"):
+        value = record.get(field, "")
+        if isinstance(value, str) and value.endswith(".json"):
+            record[field] = value[: -len(".json")]
     return record
 
 
@@ -477,6 +484,123 @@ def is_robot_record_clean(record: dict) -> bool:
         value = record.get(field, "")
         if not isinstance(value, str) or not value.strip():
             return False
-    leader_path = os.path.join(LEADER_CONFIG_PATH, record["leader_config"])
-    follower_path = os.path.join(FOLLOWER_CONFIG_PATH, record["follower_config"])
+    # Config fields are stems; the file on disk is "<stem>.json". Tolerate a
+    # stored value that still carries the extension (defensive).
+    def _file_for(base: str, name: str) -> str:
+        stem = name[: -len(".json")] if name.endswith(".json") else name
+        return os.path.join(base, f"{stem}.json")
+
+    leader_path = _file_for(LEADER_CONFIG_PATH, record["leader_config"])
+    follower_path = _file_for(FOLLOWER_CONFIG_PATH, record["follower_config"])
     return os.path.exists(leader_path) and os.path.exists(follower_path)
+
+
+# ---------------------------------------------------------------------------
+# Calibration config import
+# ---------------------------------------------------------------------------
+
+# A lerobot motor calibration entry has exactly these integer fields.
+_CALIBRATION_MOTOR_FIELDS = ("id", "drive_mode", "homing_offset", "range_min", "range_max")
+
+
+def calibration_dir_for_device(device_type: str) -> str | None:
+    """Map an API device_type ("teleop"/"robot") to its calibration dir, or None."""
+    if device_type == "robot":
+        return FOLLOWER_CONFIG_PATH
+    if device_type == "teleop":
+        return LEADER_CONFIG_PATH
+    return None
+
+
+def validate_calibration_data(data: object) -> tuple[bool, str]:
+    """
+    Check that `data` looks like a lerobot motor calibration: a non-empty dict of
+    motor_name -> {id, drive_mode, homing_offset, range_min, range_max} with
+    integer values. Returns (ok, human_readable_reason). Validating here means a
+    bad import fails loudly at upload instead of later inside teleop/calibration.
+    """
+    if not isinstance(data, dict) or not data:
+        return False, "Calibration must be a non-empty object of motors."
+    for motor, fields in data.items():
+        if not isinstance(fields, dict):
+            return False, f"Motor '{motor}' must be an object."
+        for key in _CALIBRATION_MOTOR_FIELDS:
+            if key not in fields:
+                return False, f"Motor '{motor}' is missing '{key}'."
+            value = fields[key]
+            # bool is a subclass of int; a JSON true/false here is not valid.
+            if not isinstance(value, int) or isinstance(value, bool):
+                return False, f"Motor '{motor}' field '{key}' must be an integer."
+    return True, ""
+
+
+def save_imported_calibration(device_type: str, name: str, data: object) -> tuple[bool, str, str]:
+    """
+    Validate and persist an uploaded calibration as <name>.json under the side's
+    config dir. Never overwrites an existing file. Returns (ok, reason, name)
+    where `name` is the normalized config name (extension stripped). Reason codes:
+    "invalid_device", "invalid_name", "invalid_data:<msg>", "name_taken", "".
+    """
+    config_path = calibration_dir_for_device(device_type)
+    if config_path is None:
+        return False, "invalid_device", ""
+
+    name = name.strip()
+    # Accept either a stem or a "<name>.json" filename (records carry the ext).
+    if name.endswith(".json"):
+        name = name[: -len(".json")]
+    if not is_valid_robot_name(name):
+        return False, "invalid_name", name
+
+    ok, msg = validate_calibration_data(data)
+    if not ok:
+        return False, f"invalid_data:{msg}", name
+
+    os.makedirs(config_path, exist_ok=True)
+    file_path = os.path.join(config_path, f"{name}.json")
+    if os.path.exists(file_path):
+        return False, "name_taken", name
+
+    _atomic_write_text(file_path, json.dumps(data, indent=2))
+    logger.info(f"Imported calibration {device_type}/{name}")
+    return True, "", name
+
+
+def rename_calibration_config(device_type: str, old_name: str, new_name: str) -> tuple[bool, str]:
+    """
+    Rename a calibration config file within a side's dir. Never overwrites an
+    existing target. Robot records that referenced the old name (on this side)
+    are repointed to the new name so they stay valid. Returns (ok, reason):
+    "invalid_device", "invalid_name", "not_found", "name_taken", "".
+    """
+    config_path = calibration_dir_for_device(device_type)
+    if config_path is None:
+        return False, "invalid_device"
+
+    old_stem = old_name[: -len(".json")] if old_name.endswith(".json") else old_name
+    new_stem = new_name.strip()
+    if new_stem.endswith(".json"):
+        new_stem = new_stem[: -len(".json")]
+    if not is_valid_robot_name(old_stem) or not is_valid_robot_name(new_stem):
+        return False, "invalid_name"
+
+    old_path = os.path.join(config_path, f"{old_stem}.json")
+    if not os.path.exists(old_path):
+        return False, "not_found"
+    if old_stem == new_stem:
+        return True, ""  # no-op
+
+    new_path = os.path.join(config_path, f"{new_stem}.json")
+    if os.path.exists(new_path):
+        return False, "name_taken"
+
+    os.rename(old_path, new_path)
+
+    # Repoint any robot records that used the old config on this side.
+    field = "leader_config" if device_type == "teleop" else "follower_config"
+    for rec in list_robot_records():
+        if rec.get(field) == old_stem:
+            save_robot_record(rec["name"], {field: new_stem}, allow_create=False)
+
+    logger.info(f"Renamed calibration {device_type}/{old_stem} -> {new_stem}")
+    return True, ""

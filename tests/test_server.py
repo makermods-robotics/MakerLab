@@ -81,6 +81,98 @@ def test_delete_calibration_config_rejects_unsafe_name(client: TestClient, unsaf
     assert "Invalid configuration name" in body["message"]
 
 
+@pytest.mark.parametrize("unsafe_name", ["evil..name", "..config", "back\\door"])
+def test_download_calibration_config_rejects_unsafe_name(
+    client: TestClient, unsafe_name: str
+) -> None:
+    response = client.get(f"/calibration-configs/teleop/{unsafe_name}/download")
+    assert response.status_code == 400
+    assert "Invalid configuration name" in response.json()["message"]
+
+
+def test_download_calibration_config_rejects_bad_device_type(client: TestClient) -> None:
+    response = client.get("/calibration-configs/bogus/arm/download")
+    assert response.status_code == 400
+
+
+def test_download_calibration_config_returns_file(
+    client: TestClient, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A leader config downloads byte-for-byte as a raw JSON attachment."""
+    leader_dir = tmp_path / "leader"
+    leader_dir.mkdir()
+    (leader_dir / "armA.json").write_text('{"shoulder_pan": {"id": 1}}')
+    # server.py binds its own LEADER_CONFIG_PATH at import — patch that one.
+    monkeypatch.setattr("lelab.server.LEADER_CONFIG_PATH", str(leader_dir))
+
+    response = client.get("/calibration-configs/teleop/armA/download")
+    assert response.status_code == 200
+    assert response.headers["content-disposition"] == 'attachment; filename="armA.json"'
+    assert response.json() == {"shoulder_pan": {"id": 1}}
+
+
+def test_download_calibration_config_accepts_dot_json_suffix(
+    client: TestClient, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Robot records store config names with the .json extension; passing that
+    form must resolve to the file, not "<name>.json.json"."""
+    leader_dir = tmp_path / "leader"
+    leader_dir.mkdir()
+    (leader_dir / "so101.json").write_text('{"shoulder_pan": {"id": 1}}')
+    monkeypatch.setattr("lelab.server.LEADER_CONFIG_PATH", str(leader_dir))
+
+    response = client.get("/calibration-configs/teleop/so101.json/download")
+    assert response.status_code == 200
+    assert response.headers["content-disposition"] == 'attachment; filename="so101.json"'
+
+
+def test_download_calibration_config_missing_returns_404(
+    client: TestClient, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    leader_dir = tmp_path / "leader"
+    leader_dir.mkdir()
+    monkeypatch.setattr("lelab.server.LEADER_CONFIG_PATH", str(leader_dir))
+
+    response = client.get("/calibration-configs/teleop/nope/download")
+    assert response.status_code == 404
+
+
+_GOOD_CALIBRATION = {
+    "shoulder_pan": {"id": 1, "drive_mode": 0, "homing_offset": 1927, "range_min": 741, "range_max": 3472},
+}
+
+
+def test_upload_calibration_config_rejects_bad_device_type(client: TestClient) -> None:
+    response = client.post(
+        "/calibration-configs/bogus/upload", json={"name": "x", "data": _GOOD_CALIBRATION}
+    )
+    assert response.status_code == 400
+
+
+def test_upload_calibration_config_rejects_malformed_data(client: TestClient) -> None:
+    response = client.post(
+        "/calibration-configs/teleop/upload", json={"name": "x", "data": {"m": {"id": 1}}}
+    )
+    assert response.status_code == 400
+    assert "missing" in response.json()["message"]
+
+
+def test_upload_calibration_config_writes_then_409_on_collision(
+    client: TestClient, tmp_lerobot_home
+) -> None:
+    """First upload writes; a second under the same name is rejected (no overwrite)."""
+    first = client.post(
+        "/calibration-configs/teleop/upload", json={"name": "armA", "data": _GOOD_CALIBRATION}
+    )
+    assert first.status_code == 200
+    assert first.json()["name"] == "armA"
+
+    second = client.post(
+        "/calibration-configs/teleop/upload", json={"name": "armA", "data": _GOOD_CALIBRATION}
+    )
+    assert second.status_code == 409
+
+
 def _spa_mounted(client: TestClient) -> bool:
     return any(getattr(route, "name", None) == "frontend" for route in client.app.routes)
 

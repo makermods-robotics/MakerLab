@@ -95,7 +95,9 @@ from .utils.config import (
     is_robot_record_clean,
     is_valid_robot_name,
     list_robot_records,
+    rename_calibration_config,
     rename_robot_record,
+    save_imported_calibration,
     save_robot_port,
     save_robot_record,
 )
@@ -293,9 +295,14 @@ job_registry.set_on_progress(manager.notify_job_progress)
 
 @app.get("/get-configs")
 def get_configs():
-    # Get all available calibration configs
-    leader_configs = [os.path.basename(f) for f in glob.glob(os.path.join(LEADER_CONFIG_PATH, "*.json"))]
-    follower_configs = [os.path.basename(f) for f in glob.glob(os.path.join(FOLLOWER_CONFIG_PATH, "*.json"))]
+    # Get all available calibration configs as STEMS (no .json) — the canonical
+    # user-facing name. The .json is only the on-disk filename.
+    leader_configs = [
+        os.path.splitext(os.path.basename(f))[0] for f in glob.glob(os.path.join(LEADER_CONFIG_PATH, "*.json"))
+    ]
+    follower_configs = [
+        os.path.splitext(os.path.basename(f))[0] for f in glob.glob(os.path.join(FOLLOWER_CONFIG_PATH, "*.json"))
+    ]
 
     return {"leader_configs": leader_configs, "follower_configs": follower_configs}
 
@@ -870,6 +877,104 @@ def delete_calibration_config(device_type: str, config_name: str):
     except Exception as e:
         logger.error(f"Error deleting calibration config: {e}")
         return {"success": False, "message": str(e)}
+
+
+@app.get("/calibration-configs/{device_type}/{config_name}/download")
+def download_calibration_config(device_type: str, config_name: str):
+    """
+    Download one arm's calibration as a raw lerobot calibration JSON file.
+
+    The file IS lerobot's own calibration file (no LeLab wrapper), so it's
+    drop-in: shareable, hand-copyable, and re-importable anywhere. The arm's
+    side/name are supplied by the caller on re-import, not stored in the file.
+    """
+    if device_type == "robot":
+        config_path = FOLLOWER_CONFIG_PATH
+    elif device_type == "teleop":
+        config_path = LEADER_CONFIG_PATH
+    else:
+        return JSONResponse(status_code=400, content={"success": False, "message": "Invalid device type"})
+
+    # config_name is interpolated into a filename, so reject path-traversal
+    # characters before touching the filesystem (same guard as delete).
+    if not is_valid_robot_name(config_name):
+        return JSONResponse(status_code=400, content={"success": False, "message": "Invalid configuration name"})
+
+    # Robot records store config names WITH the .json extension while this
+    # resource is otherwise stem-based; accept either form so callers that pass
+    # `robot.leader_config` ("so101.json") don't resolve to "so101.json.json".
+    if config_name.endswith(".json"):
+        config_name = config_name[: -len(".json")]
+
+    file_path = os.path.join(config_path, f"{config_name}.json")
+    if not os.path.exists(file_path):
+        return JSONResponse(status_code=404, content={"success": False, "message": "Configuration file not found"})
+
+    try:
+        with open(file_path, "rb") as f:
+            data = f.read()
+    except OSError as e:
+        logger.error(f"Error reading calibration config {file_path}: {e}")
+        return JSONResponse(status_code=500, content={"success": False, "message": str(e)})
+
+    return Response(
+        content=data,
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{config_name}.json"'},
+    )
+
+
+@app.post("/calibration-configs/{device_type}/upload")
+def upload_calibration_config(device_type: str, body: dict):
+    """
+    Import a calibration into a side's config dir. Body: {"name": "...",
+    "data": {<raw lerobot calibration>}}. The data is shape-validated; an
+    existing name is never overwritten (409 → caller renames).
+    """
+    name = (body or {}).get("name", "")
+    data = (body or {}).get("data")
+    if not isinstance(name, str):
+        return JSONResponse(status_code=400, content={"success": False, "message": "name must be a string"})
+
+    ok, reason, saved = save_imported_calibration(device_type, name, data)
+    if ok:
+        return {"success": True, "name": saved}
+
+    if reason == "invalid_device":
+        return JSONResponse(status_code=400, content={"success": False, "message": "Invalid device type"})
+    if reason == "invalid_name":
+        return JSONResponse(status_code=400, content={"success": False, "message": "Invalid configuration name"})
+    if reason == "name_taken":
+        return JSONResponse(
+            status_code=409,
+            content={"success": False, "message": f"A config named '{saved}' already exists. Choose a different name."},
+        )
+    if reason.startswith("invalid_data:"):
+        return JSONResponse(status_code=400, content={"success": False, "message": reason.split(":", 1)[1]})
+    return JSONResponse(status_code=500, content={"success": False, "message": "Import failed"})
+
+
+@app.post("/calibration-configs/{device_type}/{config_name}/rename")
+def rename_calibration_config_endpoint(device_type: str, config_name: str, body: dict):
+    """
+    Rename a calibration config file. Body: {"new_name": "..."}. Never
+    overwrites; robot records referencing the old name are repointed.
+    """
+    new_name = (body or {}).get("new_name", "")
+    if not isinstance(new_name, str):
+        return JSONResponse(status_code=400, content={"success": False, "message": "new_name must be a string"})
+
+    ok, reason = rename_calibration_config(device_type, config_name, new_name)
+    if ok:
+        return {"success": True, "name": new_name.strip().removesuffix(".json")}
+
+    status_code, message = {
+        "invalid_device": (400, "Invalid device type"),
+        "invalid_name": (400, "Invalid configuration name"),
+        "not_found": (404, "Configuration file not found"),
+        "name_taken": (409, "A config with that name already exists. Choose a different name."),
+    }.get(reason, (500, "Rename failed"))
+    return JSONResponse(status_code=status_code, content={"success": False, "message": message})
 
 
 # ============================================================================

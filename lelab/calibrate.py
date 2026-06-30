@@ -20,6 +20,7 @@ but adapted for the web interface with step-by-step guidance.
 """
 
 import logging
+import os
 import threading
 import time
 import traceback
@@ -37,6 +38,8 @@ from lerobot.teleoperators import (
     make_teleoperator_from_config,
 )
 from lerobot.utils.utils import init_logging
+
+from .utils.config import calibration_dir_for_device, save_robot_record
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +77,7 @@ class CalibrationRequest:
     port: str
     config_file: str
     robot_name: str | None = None  # When set, write port + config back into the robot record on success
+    overwrite: bool = False  # Must be explicitly true to replace an existing config file of the same name
 
 
 class CalibrationManager:
@@ -156,6 +160,20 @@ class CalibrationManager:
         try:
             if self.status.calibration_active:
                 return {"success": False, "message": "Calibration already active"}
+
+            # Refuse to silently overwrite an existing config file. Completing a
+            # calibration saves "<config_file>.json"; if that name is taken, the
+            # caller must pass overwrite=True (after confirming) or pick another
+            # name. Lets the frontend warn before any data is clobbered.
+            config_dir = calibration_dir_for_device(request.device_type)
+            if config_dir is not None and not request.overwrite:
+                stem = request.config_file[:-5] if request.config_file.endswith(".json") else request.config_file
+                if os.path.exists(os.path.join(config_dir, f"{stem}.json")):
+                    return {
+                        "success": False,
+                        "code": "name_taken",
+                        "message": f"A calibration named '{stem}' already exists. Overwrite it or choose a different name.",
+                    }
 
             # Reset status and clear any previous calibration data
             self._start_positions = {}
@@ -505,12 +523,15 @@ class CalibrationManager:
         # update the robot's port + config field for the side that was just calibrated.
         request = self._current_request
         if request is not None and request.robot_name:
-            from .utils.config import save_robot_record
-
+            # Store the config as a STEM (no .json) — that's the canonical
+            # user-facing name and the id lerobot uses; the extension is only the
+            # on-disk filename. (Records used to store "<name>.json"; reads now
+            # normalize old ones, so this stays consistent.)
+            config_stem = request.config_file[:-5] if request.config_file.endswith(".json") else request.config_file
             if request.device_type == "teleop":
-                patch = {"leader_port": request.port, "leader_config": f"{request.config_file}.json"}
+                patch = {"leader_port": request.port, "leader_config": config_stem}
             else:
-                patch = {"follower_port": request.port, "follower_config": f"{request.config_file}.json"}
+                patch = {"follower_port": request.port, "follower_config": config_stem}
             try:
                 save_robot_record(request.robot_name, patch, allow_create=False)
             except Exception as e:

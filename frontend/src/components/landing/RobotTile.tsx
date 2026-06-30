@@ -66,6 +66,9 @@ const RobotTile: React.FC<RobotTileProps> = ({
 
   return (
     <div className="bg-gray-800 rounded-lg border border-gray-700 p-3 flex flex-col gap-2 relative">
+      <h3 className="font-semibold text-lg text-left h-10 flex items-center">
+        Robot arm configuration
+      </h3>
       <div className="flex items-center gap-2">
         <div className="flex-1 min-w-0">
           <RobotSelector
