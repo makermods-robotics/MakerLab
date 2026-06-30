@@ -20,7 +20,9 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from lerobot.robots.bi_so_follower import BiSOFollower, BiSOFollowerConfig
 from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
+from lerobot.teleoperators.bi_so_leader import BiSOLeader, BiSOLeaderConfig
 from lerobot.teleoperators.so_leader import SO101Leader, SO101LeaderConfig
 
 from .utils.config import setup_calibration_files
@@ -60,6 +62,12 @@ class TeleoperateRequest(BaseModel):
     follower_port: str
     leader_config: str
     follower_config: str
+    # Bimanual: the primary pair above is the LEFT arm; these add the right arm.
+    mode: str = "single"
+    right_leader_port: str = ""
+    right_follower_port: str = ""
+    right_leader_config: str = ""
+    right_follower_config: str = ""
 
 
 def get_joint_positions_from_robot(robot) -> dict[str, float]:
@@ -88,7 +96,13 @@ def get_joint_positions_from_robot(robot) -> dict[str, float]:
         joint_positions: dict[str, float] = {}
         debug_rows = []
         for motor_name, urdf_joint_name in motor_to_urdf_mapping.items():
+            # Single-arm uses "<motor>.pos"; a bimanual BiSO robot prefixes both
+            # arms ("left_<motor>.pos"/"right_<motor>.pos"). The single-arm 3D
+            # viewer tracks one arm, so fall back to the left arm here — the full
+            # dual-arm viewer is handled separately.
             motor_key = f"{motor_name}.pos"
+            if motor_key not in observation and f"left_{motor_key}" in observation:
+                motor_key = f"left_{motor_key}"
             if motor_key not in observation:
                 logger.warning(f"Motor {motor_key} not found in observation")
                 joint_positions[urdf_joint_name] = 0.0
@@ -136,6 +150,66 @@ def _safe_disconnect(device) -> None:
         logger.warning(f"Error disconnecting device during cleanup: {e}")
 
 
+def _connect_bimanual(request: TeleoperateRequest):
+    """Build, connect, and configure a bimanual leader+follower pair.
+
+    Each side is a lerobot BiSO* device wrapping two SO101 arms (left = the
+    primary leader/follower pair, right = the right_* pair). Returns
+    (robot, teleop_device) connected, or raises RuntimeError after disconnecting
+    any device it opened. The high-level worker loop is identical to single-arm.
+    """
+    # Stage all four calibration files; returns the stem ids lerobot loads by.
+    left_leader_id, left_follower_id = setup_calibration_files(
+        request.leader_config, request.follower_config
+    )
+    right_leader_id, right_follower_id = setup_calibration_files(
+        request.right_leader_config, request.right_follower_config
+    )
+
+    robot = BiSOFollower(
+        BiSOFollowerConfig(
+            left_arm_config=SO101FollowerConfig(port=request.follower_port, id=left_follower_id),
+            right_arm_config=SO101FollowerConfig(port=request.right_follower_port, id=right_follower_id),
+        )
+    )
+    teleop_device = BiSOLeader(
+        BiSOLeaderConfig(
+            left_arm_config=SO101LeaderConfig(port=request.leader_port, id=left_leader_id),
+            right_arm_config=SO101LeaderConfig(port=request.right_leader_port, id=right_leader_id),
+        )
+    )
+
+    try:
+        # Connect each of the four buses, naming the one that fails.
+        for arm, label, port in (
+            (robot.left_arm, "left follower", request.follower_port),
+            (robot.right_arm, "right follower", request.right_follower_port),
+            (teleop_device.left_arm, "left leader", request.leader_port),
+            (teleop_device.right_arm, "right leader", request.right_leader_port),
+        ):
+            try:
+                arm.bus.connect()
+            except Exception as e:
+                raise RuntimeError(
+                    f"Could not connect to the {label} arm on {port}. "
+                    "Make sure it's plugged in and powered on, then try again."
+                ) from e
+
+        # Write calibration to each arm, then cameras + configure both sides.
+        for arm in (robot.left_arm, robot.right_arm, teleop_device.left_arm, teleop_device.right_arm):
+            arm.bus.write_calibration(arm.calibration)
+        for cam in robot.cameras.values():
+            cam.connect()
+        robot.configure()
+        teleop_device.configure()
+        logger.info("Successfully connected to both bimanual arms")
+        return robot, teleop_device
+    except Exception:
+        _safe_disconnect(robot)
+        _safe_disconnect(teleop_device)
+        raise
+
+
 def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=None) -> dict[str, Any]:
     """Handle start teleoperation request.
 
@@ -164,61 +238,64 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
             f"Starting teleoperation with leader port: {request.leader_port}, follower port: {request.follower_port}"
         )
 
-        # Setup calibration files
-        leader_config_name, follower_config_name = setup_calibration_files(
-            request.leader_config, request.follower_config
-        )
+        if request.mode == "bimanual":
+            robot, teleop_device = _connect_bimanual(request)
+        else:
+            # Setup calibration files
+            leader_config_name, follower_config_name = setup_calibration_files(
+                request.leader_config, request.follower_config
+            )
 
-        # Create robot and teleop configs
-        robot_config = SO101FollowerConfig(
-            port=request.follower_port,
-            id=follower_config_name,
-        )
+            # Create robot and teleop configs
+            robot_config = SO101FollowerConfig(
+                port=request.follower_port,
+                id=follower_config_name,
+            )
 
-        teleop_config = SO101LeaderConfig(
-            port=request.leader_port,
-            id=leader_config_name,
-        )
+            teleop_config = SO101LeaderConfig(
+                port=request.leader_port,
+                id=leader_config_name,
+            )
 
-        # Connect synchronously. If either device fails to connect, clean up the
-        # other (so its serial port is released) and report the error — do NOT
-        # leave the caller thinking teleoperation started.
-        logger.info("Initializing robot and teleop device...")
-        robot = SO101Follower(robot_config)
-        teleop_device = SO101Leader(teleop_config)
+            # Connect synchronously. If either device fails to connect, clean up the
+            # other (so its serial port is released) and report the error — do NOT
+            # leave the caller thinking teleoperation started.
+            logger.info("Initializing robot and teleop device...")
+            robot = SO101Follower(robot_config)
+            teleop_device = SO101Leader(teleop_config)
 
-        # Connect each arm separately so the error names which one failed and
-        # tells the user what to do, instead of a generic "failed to start".
-        logger.info("Connecting to follower arm...")
-        try:
-            robot.bus.connect()
-        except Exception as e:
-            raise RuntimeError(
-                f"Could not connect to the follower arm on {request.follower_port}. "
-                "Make sure it's plugged in and powered on, then try again."
-            ) from e
+            # Connect each arm separately so the error names which one failed and
+            # tells the user what to do, instead of a generic "failed to start".
+            logger.info("Connecting to follower arm...")
+            try:
+                robot.bus.connect()
+            except Exception as e:
+                raise RuntimeError(
+                    f"Could not connect to the follower arm on {request.follower_port}. "
+                    "Make sure it's plugged in and powered on, then try again."
+                ) from e
 
-        logger.info("Connecting to leader arm...")
-        try:
-            teleop_device.bus.connect()
-        except Exception as e:
-            raise RuntimeError(
-                f"Could not connect to the leader arm on {request.leader_port}. "
-                "Make sure it's plugged in and powered on, then try again."
-            ) from e
+            logger.info("Connecting to leader arm...")
+            try:
+                teleop_device.bus.connect()
+            except Exception as e:
+                raise RuntimeError(
+                    f"Could not connect to the leader arm on {request.leader_port}. "
+                    "Make sure it's plugged in and powered on, then try again."
+                ) from e
 
-        # Write calibration to motors' memory
-        logger.info("Writing calibration to motors...")
-        robot.bus.write_calibration(robot.calibration)
-        teleop_device.bus.write_calibration(teleop_device.calibration)
+            # Write calibration to motors' memory
+            logger.info("Writing calibration to motors...")
+            robot.bus.write_calibration(robot.calibration)
+            teleop_device.bus.write_calibration(teleop_device.calibration)
 
-        # Connect cameras and configure motors
-        logger.info("Connecting cameras and configuring motors...")
-        for cam in robot.cameras.values():
-            cam.connect()
-        robot.configure()
-        teleop_device.configure()
-        logger.info("Successfully connected to both devices")
+            # Connect cameras and configure motors
+            logger.info("Connecting cameras and configuring motors...")
+            for cam in robot.cameras.values():
+                cam.connect()
+            robot.configure()
+            teleop_device.configure()
+            logger.info("Successfully connected to both devices")
 
         current_robot = robot
         current_teleop = teleop_device

@@ -27,6 +27,19 @@ def test_teleoperate_request_rejects_missing_fields() -> None:
         TeleoperateRequest()
 
 
+def test_teleoperate_request_defaults_to_single_arm() -> None:
+    """A single-arm request omits the bimanual fields; they default safely."""
+    from lelab.teleoperate import TeleoperateRequest
+
+    req = TeleoperateRequest(
+        leader_port="/dev/l", follower_port="/dev/f",
+        leader_config="L", follower_config="F",
+    )
+    assert req.mode == "single"
+    assert req.right_leader_port == ""
+    assert req.right_follower_config == ""
+
+
 def test_handle_teleoperation_status_returns_dict() -> None:
     from lelab.teleoperate import handle_teleoperation_status
 

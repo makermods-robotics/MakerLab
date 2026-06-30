@@ -46,6 +46,12 @@ const RobotConfigManager: React.FC<RobotConfigManagerProps> = ({
           follower_port: robot.follower_port,
           leader_config: robot.leader_config,
           follower_config: robot.follower_config,
+          // Bimanual: include the mode + right arm so the backend builds a BiSO pair.
+          mode: robot.mode,
+          right_leader_port: robot.right_leader_port,
+          right_follower_port: robot.right_follower_port,
+          right_leader_config: robot.right_leader_config,
+          right_follower_config: robot.right_follower_config,
         }),
       });
       const data = await res.json();
