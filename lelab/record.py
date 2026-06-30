@@ -24,10 +24,12 @@ from pydantic import BaseModel
 
 from lerobot.configs.dataset import DatasetRecordConfig
 from lerobot.datasets import LeRobotDataset
+from lerobot.robots.bi_so_follower import BiSOFollowerConfig
 from lerobot.robots.so_follower import SO101FollowerConfig
 
 # Import the main record functionality to reuse it
 from lerobot.scripts.lerobot_record import RecordConfig
+from lerobot.teleoperators.bi_so_leader import BiSOLeaderConfig
 from lerobot.teleoperators.so_leader import SO101LeaderConfig
 
 from .utils.config import setup_calibration_files, with_lelab_tag
@@ -58,6 +60,12 @@ class RecordingRequest(BaseModel):
     follower_port: str
     leader_config: str
     follower_config: str
+    # Bimanual: the primary pair above is the LEFT arm; these add the right arm.
+    mode: str = "single"
+    right_leader_port: str = ""
+    right_follower_port: str = ""
+    right_leader_config: str = ""
+    right_follower_config: str = ""
     dataset_repo_id: str
     single_task: str
     num_episodes: int = 5
@@ -145,27 +153,49 @@ def _build_camera_configs(cameras: dict, default_backend) -> dict:
 
 def create_record_config(request: RecordingRequest) -> RecordConfig:
     """Create a RecordConfig from the recording request"""
-    # Setup calibration files
-    leader_config_name, follower_config_name = setup_calibration_files(
-        request.leader_config, request.follower_config
-    )
-
     # Convert the frontend camera dict into OpenCVCameraConfig objects. Backend
     # defaults to the platform pin unless the request overrides it per camera.
     camera_configs = _build_camera_configs(request.cameras, _platform_backend())
 
-    # Create robot config
-    robot_config = SO101FollowerConfig(
-        port=request.follower_port,
-        id=follower_config_name,
-        cameras=camera_configs,
-    )
+    if request.mode == "bimanual":
+        # Build a lerobot BiSO leader+follower pair from the two arm pairs. Cameras
+        # go on the left follower arm (BiSOFollower exposes them prefixed "left_*").
+        left_leader_id, left_follower_id = setup_calibration_files(
+            request.leader_config, request.follower_config
+        )
+        right_leader_id, right_follower_id = setup_calibration_files(
+            request.right_leader_config, request.right_follower_config
+        )
+        robot_config = BiSOFollowerConfig(
+            left_arm_config=SO101FollowerConfig(
+                port=request.follower_port, id=left_follower_id, cameras=camera_configs
+            ),
+            right_arm_config=SO101FollowerConfig(
+                port=request.right_follower_port, id=right_follower_id
+            ),
+        )
+        teleop_config = BiSOLeaderConfig(
+            left_arm_config=SO101LeaderConfig(port=request.leader_port, id=left_leader_id),
+            right_arm_config=SO101LeaderConfig(port=request.right_leader_port, id=right_leader_id),
+        )
+    else:
+        # Setup calibration files
+        leader_config_name, follower_config_name = setup_calibration_files(
+            request.leader_config, request.follower_config
+        )
 
-    # Create teleop config
-    teleop_config = SO101LeaderConfig(
-        port=request.leader_port,
-        id=leader_config_name,
-    )
+        # Create robot config
+        robot_config = SO101FollowerConfig(
+            port=request.follower_port,
+            id=follower_config_name,
+            cameras=camera_configs,
+        )
+
+        # Create teleop config
+        teleop_config = SO101LeaderConfig(
+            port=request.leader_port,
+            id=leader_config_name,
+        )
 
     # Create dataset config
     dataset_config = DatasetRecordConfig(
@@ -655,26 +685,33 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict) -> LeRobotDatase
     # Ensure calibration is properly loaded and applied to the devices
     logger.info("Applying calibration to devices")
 
-    # Write calibration to motors' memory (similar to teleoperation code)
-    if hasattr(robot, "bus") and robot.calibration is not None:
-        try:
-            logger.info("Writing robot calibration to motors...")
-            robot.bus.write_calibration(robot.calibration)
-            logger.info("Robot calibration applied successfully")
-        except Exception as e:
-            logger.error(f"Error writing robot calibration: {e}")
-    else:
-        logger.warning("Robot bus or calibration not available - calibration may not be applied")
+    # Write calibration to motors' memory (similar to teleoperation code). A
+    # single-arm device has its own .bus/.calibration; a bimanual BiSO device
+    # exposes left_arm/right_arm sub-arms instead, so write each of those.
+    def _write_calibration(device, label: str) -> None:
+        if device is None:
+            return
+        sub_arms = [
+            a
+            for a in (getattr(device, "left_arm", None), getattr(device, "right_arm", None))
+            if a is not None
+        ]
+        targets = sub_arms if sub_arms else [device]
+        wrote = False
+        for target in targets:
+            if hasattr(target, "bus") and getattr(target, "calibration", None) is not None:
+                try:
+                    target.bus.write_calibration(target.calibration)
+                    wrote = True
+                except Exception as e:
+                    logger.error(f"Error writing {label} calibration: {e}")
+        if wrote:
+            logger.info(f"{label.capitalize()} calibration applied successfully")
+        else:
+            logger.warning(f"{label.capitalize()} bus or calibration not available - calibration may not be applied")
 
-    if teleop is not None and hasattr(teleop, "bus") and teleop.calibration is not None:
-        try:
-            logger.info("Writing teleop calibration to motors...")
-            teleop.bus.write_calibration(teleop.calibration)
-            logger.info("Teleop calibration applied successfully")
-        except Exception as e:
-            logger.error(f"Error writing teleop calibration: {e}")
-    else:
-        logger.warning("Teleop bus or calibration not available - calibration may not be applied")
+    _write_calibration(robot, "robot")
+    _write_calibration(teleop, "teleop")
 
     # Start with episode 1 - but track it properly
     current_episode = 1

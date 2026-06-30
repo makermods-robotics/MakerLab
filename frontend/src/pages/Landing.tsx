@@ -204,6 +204,12 @@ const Landing = () => {
       follower_port: robot.follower_port,
       leader_config: robot.leader_config,
       follower_config: robot.follower_config,
+      // Bimanual: forward mode + the right arm so the backend records a BiSO pair.
+      mode: robot.mode,
+      right_leader_port: robot.right_leader_port,
+      right_follower_port: robot.right_follower_port,
+      right_leader_config: robot.right_leader_config,
+      right_follower_config: robot.right_follower_config,
       dataset_repo_id: datasetRepoId,
       single_task: singleTask,
       num_episodes: numEpisodes,
