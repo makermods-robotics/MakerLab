@@ -154,6 +154,53 @@ export const useRobots = () => {
     [baseUrl, fetchWithHeaders, toast]
   );
 
+  const renameRobot = useCallback(
+    async (oldName: string, rawNew: string): Promise<boolean> => {
+      const newName = rawNew.trim();
+      if (!newName) {
+        toast({ title: "Missing name", description: "Robot name cannot be empty.", variant: "destructive" });
+        return false;
+      }
+      if (newName === oldName) return true; // no-op
+      if (/[/\\]|\.\./.test(newName)) {
+        toast({ title: "Invalid name", description: "Robot names cannot contain '/', '\\', or '..'", variant: "destructive" });
+        return false;
+      }
+      try {
+        const res = await fetchWithHeaders(`${baseUrl}/robots/${encodeURIComponent(oldName)}/rename`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ new_name: newName }),
+        });
+        if (res.status === 409) {
+          toast({
+            title: "Already exists",
+            description: `A robot named "${newName}" already exists. Choose a different name.`,
+            variant: "destructive",
+          });
+          return false;
+        }
+        if (!res.ok) {
+          const text = await res.text();
+          toast({ title: "Failed to rename", description: text, variant: "destructive" });
+          return false;
+        }
+        const data = await res.json();
+        // Swap the key oldName → newName in the local map, preserving order roughly.
+        setRecords((prev) => {
+          const { [oldName]: _omit, ...rest } = prev;
+          return data.robot ? { ...rest, [newName]: data.robot } : rest;
+        });
+        setSelectedName((prev) => (prev === oldName ? newName : prev));
+        return true;
+      } catch (e) {
+        toast({ title: "Network error", description: String(e), variant: "destructive" });
+        return false;
+      }
+    },
+    [baseUrl, fetchWithHeaders, toast]
+  );
+
   const selectedRecord = useMemo(
     () => (selectedName ? records[selectedName] ?? null : null),
     [selectedName, records]
@@ -173,6 +220,7 @@ export const useRobots = () => {
     selectRobot,
     clearSelection,
     createRobot,
+    renameRobot,
     deleteRobot,
   };
 };

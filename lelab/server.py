@@ -95,6 +95,7 @@ from .utils.config import (
     is_robot_record_clean,
     is_valid_robot_name,
     list_robot_records,
+    rename_robot_record,
     save_robot_port,
     save_robot_record,
 )
@@ -1183,6 +1184,30 @@ def upsert_robot(name: str, data: dict, create: bool = False):
     except Exception as e:
         logger.error(f"Error upserting robot {name}: {e}")
         return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
+
+
+@app.post("/robots/{name}/rename")
+def rename_robot(name: str, data: dict):
+    """
+    Rename a robot record. Body: {"new_name": "..."}. Calibration files are not
+    affected (they're keyed by config name, not robot name).
+    """
+    new_name = (data or {}).get("new_name", "")
+    if not isinstance(new_name, str):
+        return JSONResponse(status_code=400, content={"status": "error", "message": "new_name must be a string"})
+    new_name = new_name.strip()
+
+    ok, reason = rename_robot_record(name, new_name)
+    if ok:
+        record = get_robot_record(new_name)
+        return {"status": "success", "robot": _record_with_clean(record) if record else None}
+
+    status_code, message = {
+        "invalid_name": (400, "Invalid robot name"),
+        "not_found": (404, "Robot not found"),
+        "name_taken": (409, "A robot with that name already exists"),
+    }.get(reason, (500, "Rename failed"))
+    return JSONResponse(status_code=status_code, content={"status": "error", "message": message})
 
 
 @app.delete("/robots/{name}")

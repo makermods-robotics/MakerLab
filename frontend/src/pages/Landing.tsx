@@ -31,6 +31,7 @@ const Landing = () => {
     isLoading: isLoadingRobots,
     selectRobot,
     createRobot,
+    renameRobot,
     deleteRobot,
   } = useRobots();
 
@@ -238,6 +239,7 @@ const Landing = () => {
             isLoading={isLoadingRobots}
             selectRobot={selectRobot}
             createRobot={createRobot}
+            renameRobot={renameRobot}
             deleteRobot={deleteRobot}
           />
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">

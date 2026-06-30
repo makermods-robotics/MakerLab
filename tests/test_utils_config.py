@@ -145,6 +145,63 @@ def test_robot_record_merges_fields(tmp_lerobot_home: Path) -> None:
     assert loaded["follower_port"] == "/dev/b"
 
 
+def test_rename_robot_record_moves_file_and_preserves_fields(
+    tmp_lerobot_home: Path,
+) -> None:
+    from lelab.utils import config as cfg
+
+    cfg.save_robot_record("old_name", {"leader_port": "/dev/a"}, allow_create=True)
+
+    ok, reason = cfg.rename_robot_record("old_name", "new_name")
+    assert ok and reason == ""
+
+    # Old gone, new present with fields and updated name.
+    assert cfg.get_robot_record("old_name") is None
+    moved = cfg.get_robot_record("new_name")
+    assert moved is not None
+    assert moved["name"] == "new_name"
+    assert moved["leader_port"] == "/dev/a"
+
+
+def test_rename_robot_record_noop_when_names_equal(tmp_lerobot_home: Path) -> None:
+    from lelab.utils import config as cfg
+
+    cfg.save_robot_record("same", {"leader_port": "/dev/a"}, allow_create=True)
+    ok, reason = cfg.rename_robot_record("same", "same")
+    assert ok and reason == ""
+    assert cfg.get_robot_record("same") is not None
+
+
+def test_rename_robot_record_rejects_missing_source(tmp_lerobot_home: Path) -> None:
+    from lelab.utils import config as cfg
+
+    ok, reason = cfg.rename_robot_record("ghost", "whatever")
+    assert not ok and reason == "not_found"
+
+
+def test_rename_robot_record_rejects_existing_target(tmp_lerobot_home: Path) -> None:
+    from lelab.utils import config as cfg
+
+    cfg.save_robot_record("a", {"leader_port": "/dev/a"}, allow_create=True)
+    cfg.save_robot_record("b", {"leader_port": "/dev/b"}, allow_create=True)
+
+    ok, reason = cfg.rename_robot_record("a", "b")
+    assert not ok and reason == "name_taken"
+    # Both records untouched.
+    assert cfg.get_robot_record("a")["leader_port"] == "/dev/a"
+    assert cfg.get_robot_record("b")["leader_port"] == "/dev/b"
+
+
+def test_rename_robot_record_rejects_invalid_target(tmp_lerobot_home: Path) -> None:
+    from lelab.utils import config as cfg
+
+    cfg.save_robot_record("valid", {"leader_port": "/dev/a"}, allow_create=True)
+    ok, reason = cfg.rename_robot_record("valid", "../escape")
+    assert not ok and reason == "invalid_name"
+    # Source record must survive a rejected rename.
+    assert cfg.get_robot_record("valid") is not None
+
+
 def test_setup_calibration_files_copies_configs(
     tmp_lerobot_home: Path,
 ) -> None:

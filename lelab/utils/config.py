@@ -433,6 +433,38 @@ def delete_robot_record(name: str) -> bool:
     return True
 
 
+def rename_robot_record(old_name: str, new_name: str) -> tuple[bool, str]:
+    """
+    Rename a robot record file. Returns (ok, reason).
+
+    `reason` is a machine-readable code on failure: "invalid_name" (either name
+    fails validation), "not_found" (no record under old_name), or "name_taken"
+    (a record already exists under new_name). On success reason is "".
+
+    Renaming the *robot* record never touches calibration files: those live under
+    config-name paths (leader_config / follower_config), independent of the robot
+    record's name. A no-op rename (old == new) succeeds.
+    """
+    if not is_valid_robot_name(old_name) or not is_valid_robot_name(new_name):
+        return False, "invalid_name"
+
+    record = get_robot_record(old_name)
+    if record is None:
+        return False, "not_found"
+
+    if old_name == new_name:
+        return True, ""
+
+    if os.path.exists(_robot_record_path(new_name)):
+        return False, "name_taken"
+
+    record["name"] = new_name
+    _atomic_write_text(_robot_record_path(new_name), json.dumps(record, indent=2))
+    os.remove(_robot_record_path(old_name))
+    logger.info(f"Renamed robot record {old_name} -> {new_name}")
+    return True, ""
+
+
 def is_robot_record_clean(record: dict) -> bool:
     """
     A record is 'clean' when all four operational fields are populated AND both

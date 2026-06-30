@@ -12,6 +12,7 @@ interface RobotConfigManagerProps {
   isLoading: boolean;
   selectRobot: (name: string) => void;
   createRobot: (name: string) => Promise<boolean>;
+  renameRobot: (oldName: string, newName: string) => Promise<boolean>;
   deleteRobot: (name: string) => Promise<boolean>;
 }
 
@@ -22,6 +23,7 @@ const RobotConfigManager: React.FC<RobotConfigManagerProps> = ({
   isLoading,
   selectRobot,
   createRobot,
+  renameRobot,
   deleteRobot,
 }) => {
   const navigate = useNavigate();
@@ -80,6 +82,7 @@ const RobotConfigManager: React.FC<RobotConfigManagerProps> = ({
       onCreateNew={createRobot}
       onConfigure={handleConfigure}
       onTeleop={handleTeleop}
+      onRename={renameRobot}
       onDelete={deleteRobot}
     />
   );

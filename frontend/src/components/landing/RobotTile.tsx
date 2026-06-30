@@ -1,6 +1,7 @@
 import React, { useState } from "react";
-import { Settings, Trash2 } from "lucide-react";
+import { Pencil, Settings, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import {
   Tooltip,
   TooltipContent,
@@ -26,6 +27,7 @@ interface RobotTileProps {
   onCreateNew: (name: string) => Promise<boolean>;
   onConfigure: (name: string) => void;
   onTeleop: (robot: RobotRecord) => void;
+  onRename: (oldName: string, newName: string) => Promise<boolean>;
   onDelete: (name: string) => void;
 }
 
@@ -38,9 +40,27 @@ const RobotTile: React.FC<RobotTileProps> = ({
   onCreateNew,
   onConfigure,
   onTeleop,
+  onRename,
   onDelete,
 }) => {
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [renameOpen, setRenameOpen] = useState(false);
+  const [renameValue, setRenameValue] = useState("");
+  const [renaming, setRenaming] = useState(false);
+
+  const openRename = () => {
+    if (!robot) return;
+    setRenameValue(robot.name);
+    setRenameOpen(true);
+  };
+
+  const submitRename = async () => {
+    if (!robot) return;
+    setRenaming(true);
+    const ok = await onRename(robot.name, renameValue);
+    setRenaming(false);
+    if (ok) setRenameOpen(false);
+  };
   const status = robot ? (robot.is_clean ? "Ready" : "Needs configuration") : null;
   const teleopDisabled = !robot || !robot.is_clean;
 
@@ -67,6 +87,20 @@ const RobotTile: React.FC<RobotTileProps> = ({
         )}
         {robot && (
           <div className="flex items-center gap-1 shrink-0">
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  className="h-8 w-8 text-gray-300 hover:text-white"
+                  onClick={openRename}
+                  aria-label="Rename robot"
+                >
+                  <Pencil className="w-4 h-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Rename robot config</TooltipContent>
+            </Tooltip>
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
@@ -120,6 +154,49 @@ const RobotTile: React.FC<RobotTileProps> = ({
             <TooltipContent>Configure the robot first.</TooltipContent>
           )}
         </Tooltip>
+      )}
+
+      {robot && (
+        <Dialog open={renameOpen} onOpenChange={setRenameOpen}>
+          <DialogContent className="bg-gray-900 border-gray-800 text-white">
+            <DialogHeader>
+              <DialogTitle>Rename robot config</DialogTitle>
+              <DialogDescription className="text-gray-400">
+                Renames the saved robot config only. Calibration files are not
+                affected and stay reusable.
+              </DialogDescription>
+            </DialogHeader>
+            <Input
+              value={renameValue}
+              onChange={(e) => setRenameValue(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  void submitRename();
+                }
+              }}
+              autoFocus
+              placeholder="New name"
+              className="bg-gray-800 border-gray-700 text-white"
+            />
+            <DialogFooter className="flex gap-2 justify-end">
+              <Button
+                variant="outline"
+                className="border-gray-600 text-gray-300"
+                onClick={() => setRenameOpen(false)}
+              >
+                Cancel
+              </Button>
+              <Button
+                className="bg-yellow-500 hover:bg-yellow-600 text-white"
+                disabled={renaming || !renameValue.trim() || renameValue.trim() === robot.name}
+                onClick={submitRename}
+              >
+                {renaming ? "Renaming…" : "Rename"}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
       )}
 
       {robot && (
