@@ -32,6 +32,17 @@ interface CalibrationLibraryProps {
   assignedConfig?: string;
   /** Robot record to reassign when "Use for this robot" is clicked. */
   robotName?: string;
+  /**
+   * Which record field "Use for this robot" assigns to. Defaults to the
+   * primary field for the device (leader_config / follower_config); bimanual
+   * right-arm rows pass right_leader_config / right_follower_config.
+   */
+  configField?: string;
+  /**
+   * A config already used by the OTHER same-side arm — greyed out here so you
+   * can't point two physical arms at one calibration (the proactive guard).
+   */
+  excludeConfig?: string;
   /** Called after a successful reassignment so the parent can refetch the robot. */
   onAssigned?: () => void | Promise<void>;
 }
@@ -45,6 +56,8 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
   device,
   assignedConfig,
   robotName,
+  configField,
+  excludeConfig,
   onAssigned,
 }) => {
   const { baseUrl, fetchWithHeaders } = useApi();
@@ -136,7 +149,7 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
     if (!selected || !robotName) return;
     setAssigning(true);
     try {
-      const field = device === "teleop" ? "leader_config" : "follower_config";
+      const field = configField ?? (device === "teleop" ? "leader_config" : "follower_config");
       const res = await fetchWithHeaders(
         `${baseUrl}/robots/${encodeURIComponent(robotName)}`,
         {
@@ -157,7 +170,7 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
     } finally {
       setAssigning(false);
     }
-  }, [selected, robotName, device, baseUrl, fetchWithHeaders, toast, onAssigned]);
+  }, [selected, robotName, device, configField, baseUrl, fetchWithHeaders, toast, onAssigned]);
 
   const openRename = useCallback(() => {
     if (!selected) return;
@@ -223,18 +236,31 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
           <SelectValue placeholder={empty ? "No saved configs" : "Select a config"} />
         </SelectTrigger>
         <SelectContent className="bg-slate-800 border-slate-700 text-white">
-          {configs.map((c) => (
-            <SelectItem key={c.name} value={c.name} className="text-white">
-              <span className="flex items-center gap-2">
-                {c.name}
-                {c.name === assignedConfig && (
-                  <span className="text-[10px] uppercase tracking-wide text-green-400 border border-green-500/40 rounded px-1">
-                    in use
-                  </span>
-                )}
-              </span>
-            </SelectItem>
-          ))}
+          {configs.map((c) => {
+            const usedByOtherArm = !!excludeConfig && c.name === excludeConfig;
+            return (
+              <SelectItem
+                key={c.name}
+                value={c.name}
+                disabled={usedByOtherArm}
+                className="text-white"
+              >
+                <span className="flex items-center gap-2">
+                  {c.name}
+                  {c.name === assignedConfig && (
+                    <span className="text-[10px] uppercase tracking-wide text-green-400 border border-green-500/40 rounded px-1">
+                      in use
+                    </span>
+                  )}
+                  {usedByOtherArm && (
+                    <span className="text-[10px] uppercase tracking-wide text-amber-400 border border-amber-500/40 rounded px-1">
+                      other arm
+                    </span>
+                  )}
+                </span>
+              </SelectItem>
+            );
+          })}
         </SelectContent>
       </Select>
 

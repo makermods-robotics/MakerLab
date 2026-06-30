@@ -46,6 +46,7 @@ import CameraConfiguration, {
   CameraConfig,
 } from "@/components/recording/CameraConfiguration";
 import CalibrationLibrary from "@/components/calibration/CalibrationLibrary";
+import { RobotRecord } from "@/hooks/useRobots";
 
 const DISCONTINUITY_ERROR_PREFIX = "Motor discontinuity detected";
 
@@ -70,16 +71,7 @@ interface CalibrationRequest {
   config_file: string;
   robot_name: string | null;
   overwrite?: boolean; // must be true to replace an existing config of the same name
-}
-
-interface RobotRecord {
-  name: string;
-  leader_port: string;
-  follower_port: string;
-  leader_config: string;
-  follower_config: string;
-  cameras: CameraConfig[];
-  is_clean: boolean;
+  arm?: "left" | "right"; // which arm of a bimanual robot ("left" = the single pair)
 }
 
 const Calibration = () => {
@@ -94,16 +86,33 @@ const Calibration = () => {
   const demoVideoRef = useRef<HTMLDivElement>(null);
 
   const [deviceType, setDeviceType] = useState<string>("teleop");
+  const [arm, setArm] = useState<"left" | "right">("left");
   const [port, setPort] = useState<string>("");
   const [robot, setRobot] = useState<RobotRecord | null>(null);
 
-  // Default a calibration to the config the robot already uses for this side, so
-  // recalibrating updates the in-use config rather than spawning a new one named
-  // after the robot. Falls back to the robot name when no config is assigned yet.
-  const assignedConfig =
-    deviceType === "teleop" ? robot?.leader_config : robot?.follower_config;
+  const isBimanual = robot?.mode === "bimanual";
+  // In single (or left) mode the primary leader/follower fields are used; in
+  // bimanual mode the right arm uses the right_* fields. Maps the current
+  // device_type + arm to the record's port and config field names.
+  const isRight = arm === "right";
+  const portField = (
+    deviceType === "teleop"
+      ? isRight ? "right_leader_port" : "leader_port"
+      : isRight ? "right_follower_port" : "follower_port"
+  ) as keyof RobotRecord;
+  const configField = (
+    deviceType === "teleop"
+      ? isRight ? "right_leader_config" : "leader_config"
+      : isRight ? "right_follower_config" : "follower_config"
+  ) as keyof RobotRecord;
+
+  // Default a calibration to the config the robot already uses for this arm, so
+  // recalibrating updates the in-use config rather than spawning a new one.
+  // Fresh bimanual arms get a "<robot>_<arm>" name so left/right never collide.
+  const assignedConfig = robot ? (robot[configField] as string) : "";
+  const defaultConfigName = isBimanual ? `${robotName}_${arm}` : robotName;
   const calibrationConfigName =
-    (assignedConfig?.trim() ? assignedConfig : robotName) ?? "";
+    (assignedConfig?.trim() ? assignedConfig : defaultConfigName) ?? "";
   const [overwritePromptOpen, setOverwritePromptOpen] = useState(false);
   const [wiggling, setWiggling] = useState(false);
   const [availablePorts, setAvailablePorts] = useState<string[]>([]);
@@ -318,6 +327,7 @@ const Calibration = () => {
       config_file: calibrationConfigName,
       robot_name: robotName,
       overwrite,
+      arm,
     };
 
     // Optimistically mark as active so the unmount cleanup will fire even if
@@ -481,11 +491,17 @@ const Calibration = () => {
 
   const handleDeviceTypeChange = (next: string) => {
     setDeviceType(next);
-    if (!robot) return;
-    setPort(
-      next === "teleop" ? robot.leader_port || "" : robot.follower_port || ""
-    );
+    // Port is re-synced from the record by the device/arm effect below.
   };
+
+  // Keep the port field in sync with the selected device_type + arm's saved
+  // port whenever either changes (single uses leader/follower; bimanual right
+  // uses the right_* fields). Port is a dropdown, so overwriting it is safe.
+  useEffect(() => {
+    if (!robot) return;
+    setPort((robot[portField] as string) || "");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deviceType, arm, robot]);
 
   // Refresh the robot record when a calibration completes so the checklist
   // flips to ✓ for the side that was just saved, and advance Device Type to
@@ -501,11 +517,7 @@ const Calibration = () => {
         ? "robot"
         : "teleop";
       setDeviceType(nextDevice);
-      setPort(
-        nextDevice === "teleop"
-          ? r.leader_port || ""
-          : r.follower_port || ""
-      );
+      // Port re-syncs via the device/arm effect.
     })();
   }, [calibrationStatus.status, fetchRobot]);
 
@@ -515,16 +527,15 @@ const Calibration = () => {
   const persistPort = useCallback(
     async (nextPort: string) => {
       if (!robotName || !nextPort) return;
-      const field = deviceType === "robot" ? "follower_port" : "leader_port";
       // Skip redundant writes when the value already matches the record.
-      if (robot && robot[field] === nextPort) return;
+      if (robot && robot[portField] === nextPort) return;
       try {
         const res = await fetchWithHeaders(
           `${baseUrl}/robots/${encodeURIComponent(robotName)}`,
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ [field]: nextPort }),
+            body: JSON.stringify({ [portField]: nextPort }),
           }
         );
         const data = await res.json();
@@ -533,7 +544,7 @@ const Calibration = () => {
         console.error("Failed to save port to robot record:", e);
       }
     },
-    [robotName, deviceType, robot, baseUrl, fetchWithHeaders]
+    [robotName, portField, robot, baseUrl, fetchWithHeaders]
   );
 
   const getStatusDisplay = () => {
@@ -649,6 +660,27 @@ const Calibration = () => {
                   </SelectContent>
                 </Select>
               </div>
+
+              {isBimanual && (
+                <div className="space-y-2">
+                  <Label htmlFor="arm" className="text-sm font-medium text-slate-300">
+                    Arm *
+                  </Label>
+                  <Select value={arm} onValueChange={(v) => setArm(v as "left" | "right")}>
+                    <SelectTrigger className="bg-slate-700 border-slate-600 text-white rounded-md">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent className="bg-slate-800 border-slate-700 text-white">
+                      <SelectItem value="left" className="hover:bg-slate-700">
+                        Left arm
+                      </SelectItem>
+                      <SelectItem value="right" className="hover:bg-slate-700">
+                        Right arm
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
 
               <div className="space-y-2">
                 <Label
@@ -773,52 +805,43 @@ const Calibration = () => {
                   <div className="text-sm font-medium text-slate-300">
                     Robot calibration
                   </div>
-                  <div>
-                    <div className="flex items-center gap-2 text-sm">
-                      {robot.leader_config ? (
-                        <CheckCircle className="w-4 h-4 text-green-400" />
-                      ) : (
-                        <Circle className="w-4 h-4 text-slate-500" />
-                      )}
-                      <span
-                        className={
-                          robot.leader_config ? "text-slate-200" : "text-slate-400"
-                        }
-                      >
-                        Leader (Teleoperator)
-                      </span>
-                    </div>
-                    <CalibrationLibrary
-                      device="teleop"
-                      assignedConfig={robot.leader_config}
-                      robotName={robotName}
-                      onAssigned={fetchRobot}
-                    />
-                  </div>
-                  <div>
-                    <div className="flex items-center gap-2 text-sm">
-                      {robot.follower_config ? (
-                        <CheckCircle className="w-4 h-4 text-green-400" />
-                      ) : (
-                        <Circle className="w-4 h-4 text-slate-500" />
-                      )}
-                      <span
-                        className={
-                          robot.follower_config
-                            ? "text-slate-200"
-                            : "text-slate-400"
-                        }
-                      >
-                        Follower (Robot)
-                      </span>
-                    </div>
-                    <CalibrationLibrary
-                      device="robot"
-                      assignedConfig={robot.follower_config}
-                      robotName={robotName}
-                      onAssigned={fetchRobot}
-                    />
-                  </div>
+                  {(isBimanual
+                    ? ([
+                        { label: "Left Leader (Teleoperator)", device: "teleop", cfgField: "leader_config", sibling: "right_leader_config" },
+                        { label: "Left Follower (Robot)", device: "robot", cfgField: "follower_config", sibling: "right_follower_config" },
+                        { label: "Right Leader (Teleoperator)", device: "teleop", cfgField: "right_leader_config", sibling: "leader_config" },
+                        { label: "Right Follower (Robot)", device: "robot", cfgField: "right_follower_config", sibling: "follower_config" },
+                      ] as const)
+                    : ([
+                        { label: "Leader (Teleoperator)", device: "teleop", cfgField: "leader_config", sibling: undefined },
+                        { label: "Follower (Robot)", device: "robot", cfgField: "follower_config", sibling: undefined },
+                      ] as const)
+                  ).map((row) => {
+                    const cfg = (robot[row.cfgField] as string) || "";
+                    const sibling = row.sibling ? ((robot[row.sibling] as string) || "") : undefined;
+                    return (
+                      <div key={row.label}>
+                        <div className="flex items-center gap-2 text-sm">
+                          {cfg ? (
+                            <CheckCircle className="w-4 h-4 text-green-400" />
+                          ) : (
+                            <Circle className="w-4 h-4 text-slate-500" />
+                          )}
+                          <span className={cfg ? "text-slate-200" : "text-slate-400"}>
+                            {row.label}
+                          </span>
+                        </div>
+                        <CalibrationLibrary
+                          device={row.device}
+                          assignedConfig={cfg}
+                          configField={row.cfgField}
+                          excludeConfig={sibling}
+                          robotName={robotName}
+                          onAssigned={fetchRobot}
+                        />
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </CardContent>

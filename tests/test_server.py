@@ -81,6 +81,23 @@ def test_delete_calibration_config_rejects_unsafe_name(client: TestClient, unsaf
     assert "Invalid configuration name" in body["message"]
 
 
+def test_upsert_robot_rejects_same_side_config_conflict(
+    client: TestClient, tmp_lerobot_home
+) -> None:
+    """Assigning one config to both same-side arms of a bimanual robot is a 409."""
+    client.post(
+        "/robots/bi?create=true",
+        json={"mode": "bimanual", "leader_config": "L1", "right_leader_config": "L2"},
+    )
+    # right leader = left leader -> conflict.
+    resp = client.post("/robots/bi", json={"right_leader_config": "L1"})
+    assert resp.status_code == 409
+    assert "leader" in resp.json()["message"]
+
+    # A non-slot edit (cameras) is never blocked.
+    assert client.post("/robots/bi", json={"cameras": []}).status_code == 200
+
+
 @pytest.mark.parametrize("unsafe_name", ["evil..name", "..config", "back\\door"])
 def test_download_calibration_config_rejects_unsafe_name(
     client: TestClient, unsafe_name: str

@@ -78,6 +78,7 @@ class CalibrationRequest:
     config_file: str
     robot_name: str | None = None  # When set, write port + config back into the robot record on success
     overwrite: bool = False  # Must be explicitly true to replace an existing config file of the same name
+    arm: Literal["left", "right"] = "left"  # Which arm of a bimanual robot; "left" is also the single-arm pair
 
 
 class CalibrationManager:
@@ -528,10 +529,17 @@ class CalibrationManager:
             # on-disk filename. (Records used to store "<name>.json"; reads now
             # normalize old ones, so this stays consistent.)
             config_stem = request.config_file[:-5] if request.config_file.endswith(".json") else request.config_file
+            # Pick the record fields for this side AND arm. For a bimanual robot
+            # the right arm writes the right_* fields; "left" is also the single
+            # robot's only pair.
+            is_right = request.arm == "right"
             if request.device_type == "teleop":
-                patch = {"leader_port": request.port, "leader_config": config_stem}
+                port_field = "right_leader_port" if is_right else "leader_port"
+                config_field = "right_leader_config" if is_right else "leader_config"
             else:
-                patch = {"follower_port": request.port, "follower_config": config_stem}
+                port_field = "right_follower_port" if is_right else "follower_port"
+                config_field = "right_follower_config" if is_right else "follower_config"
+            patch = {port_field: request.port, config_field: config_stem}
             try:
                 save_robot_record(request.robot_name, patch, allow_create=False)
             except Exception as e:

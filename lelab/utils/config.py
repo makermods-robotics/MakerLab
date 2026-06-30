@@ -535,6 +535,27 @@ def is_robot_record_clean(record: dict) -> bool:
     return all(os.path.exists(p) for p in config_files)
 
 
+def config_slot_conflict(record: dict) -> str | None:
+    """
+    Detect when a bimanual record points two same-side arms at the SAME config.
+
+    The two leader slots share the so_leader dir and the two follower slots share
+    so_follower, so an identical config name on both = one physical arm's
+    calibration on two arms (at least one is wrong). Returns "leader"/"follower"
+    for the offending side, or None. Single mode (one slot per side) never
+    conflicts. A leader and follower sharing a name is fine — different dirs.
+    """
+    if record.get("mode") != "bimanual":
+        return None
+    leader = record.get("leader_config", "")
+    if leader and leader == record.get("right_leader_config", ""):
+        return "leader"
+    follower = record.get("follower_config", "")
+    if follower and follower == record.get("right_follower_config", ""):
+        return "follower"
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Calibration config import
 # ---------------------------------------------------------------------------
@@ -636,11 +657,17 @@ def rename_calibration_config(device_type: str, old_name: str, new_name: str) ->
 
     os.rename(old_path, new_path)
 
-    # Repoint any robot records that used the old config on this side.
-    field = "leader_config" if device_type == "teleop" else "follower_config"
+    # Repoint any robot records that used the old config on this side — both the
+    # primary/left slot and the bimanual right slot live in the same dir.
+    fields = (
+        ("leader_config", "right_leader_config")
+        if device_type == "teleop"
+        else ("follower_config", "right_follower_config")
+    )
     for rec in list_robot_records():
-        if rec.get(field) == old_stem:
-            save_robot_record(rec["name"], {field: new_stem}, allow_create=False)
+        patch = {f: new_stem for f in fields if rec.get(f) == old_stem}
+        if patch:
+            save_robot_record(rec["name"], patch, allow_create=False)
 
     logger.info(f"Renamed calibration {device_type}/{old_stem} -> {new_stem}")
     return True, ""

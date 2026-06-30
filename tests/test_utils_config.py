@@ -291,6 +291,25 @@ def test_rename_calibration_config_moves_and_repoints_records(tmp_lerobot_home: 
     assert cfg.get_robot_record("bot")["leader_config"] == "armB"
 
 
+def test_rename_calibration_config_repoints_right_arm_slot(tmp_lerobot_home: Path) -> None:
+    """Renaming a config repoints the bimanual right slot, not just the left."""
+    from lelab.utils import config as cfg
+
+    (Path(cfg.LEADER_CONFIG_PATH) / "armA.json").write_text("{}")
+    cfg.save_robot_record(
+        "bi",
+        {"mode": "bimanual", "leader_config": "armX", "right_leader_config": "armA"},
+        allow_create=True,
+    )
+
+    ok, reason = cfg.rename_calibration_config("teleop", "armA", "armB")
+    assert ok and reason == ""
+
+    rec = cfg.get_robot_record("bi")
+    assert rec["right_leader_config"] == "armB"
+    assert rec["leader_config"] == "armX"  # the other slot is untouched
+
+
 def test_rename_calibration_config_never_overwrites(tmp_lerobot_home: Path) -> None:
     from lelab.utils import config as cfg
 
@@ -360,6 +379,30 @@ def test_bimanual_record_clean_requires_all_four_calibrations(tmp_lerobot_home: 
     (Path(cfg.LEADER_CONFIG_PATH) / "RL.json").write_text("{}")
     (Path(cfg.FOLLOWER_CONFIG_PATH) / "RF.json").write_text("{}")
     assert cfg.is_robot_record_clean(record) is True
+
+
+def test_config_slot_conflict_detects_same_side_duplicate() -> None:
+    from lelab.utils import config as cfg
+
+    base = {
+        "mode": "bimanual",
+        "leader_config": "L1", "follower_config": "F1",
+        "right_leader_config": "L2", "right_follower_config": "F2",
+    }
+    assert cfg.config_slot_conflict(base) is None
+    assert cfg.config_slot_conflict({**base, "right_leader_config": "L1"}) == "leader"
+    assert cfg.config_slot_conflict({**base, "right_follower_config": "F1"}) == "follower"
+
+
+def test_config_slot_conflict_ignores_single_mode_and_cross_side() -> None:
+    from lelab.utils import config as cfg
+
+    # Single mode never conflicts (one slot per side).
+    assert cfg.config_slot_conflict({"mode": "single", "leader_config": "X", "right_leader_config": "X"}) is None
+    # Same name across sides is fine — different directories.
+    assert cfg.config_slot_conflict({"mode": "bimanual", "leader_config": "X", "follower_config": "X"}) is None
+    # Empty slots don't count as a conflict.
+    assert cfg.config_slot_conflict({"mode": "bimanual", "leader_config": "", "right_leader_config": ""}) is None
 
 
 def test_is_robot_record_clean_with_stem_configs(tmp_lerobot_home: Path) -> None:

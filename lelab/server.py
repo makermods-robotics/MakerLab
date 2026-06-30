@@ -95,6 +95,7 @@ from .utils.config import (
     get_saved_robot_port,
     is_robot_record_clean,
     is_valid_robot_name,
+    config_slot_conflict,
     list_robot_records,
     rename_calibration_config,
     rename_robot_record,
@@ -1283,6 +1284,29 @@ def upsert_robot(name: str, data: dict, create: bool = False):
     """
     if not is_valid_robot_name(name):
         return JSONResponse(status_code=400, content={"status": "error", "message": "Invalid robot name"})
+
+    # Reject assigning the same calibration to both same-side arms of a bimanual
+    # robot — that would point two physical arms at one calibration. Only checked
+    # when the request actually touches a config slot or the mode, so unrelated
+    # edits (cameras, ports) aren't blocked even on a pre-existing conflict.
+    body = data or {}
+    slot_fields = ("mode", "leader_config", "follower_config", "right_leader_config", "right_follower_config")
+    if any(f in body for f in slot_fields):
+        existing = get_robot_record(name) or {}
+        prospective = {"mode": body["mode"] if body.get("mode") in ("single", "bimanual") else existing.get("mode", "single")}
+        for f in ("leader_config", "follower_config", "right_leader_config", "right_follower_config"):
+            prospective[f] = body[f] if isinstance(body.get(f), str) else existing.get(f, "")
+        side = config_slot_conflict(prospective)
+        if side:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "status": "error",
+                    "message": f"That {side} config is already assigned to the other {side} arm. "
+                    "Each physical arm needs its own calibration — pick a different config.",
+                },
+            )
+
     try:
         if create:
             if get_robot_record(name) is not None:
