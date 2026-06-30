@@ -310,6 +310,58 @@ def test_rename_calibration_config_missing_source(tmp_lerobot_home: Path) -> Non
     assert not ok and reason == "not_found"
 
 
+def test_record_defaults_to_single_mode(tmp_lerobot_home: Path) -> None:
+    """A legacy record with no `mode` key reads back as single, with empty right_*."""
+    from lelab.utils import config as cfg
+
+    cfg.save_robot_record("legacy", {"leader_config": "L"}, allow_create=True)
+    rec = cfg.get_robot_record("legacy")
+    assert rec["mode"] == "single"
+    assert rec["right_leader_config"] == ""
+
+
+def test_save_record_persists_bimanual_mode(tmp_lerobot_home: Path) -> None:
+    from lelab.utils import config as cfg
+
+    cfg.save_robot_record(
+        "bi",
+        {"mode": "bimanual", "right_leader_config": "RL"},
+        allow_create=True,
+    )
+    rec = cfg.get_robot_record("bi")
+    assert rec["mode"] == "bimanual"
+    assert rec["right_leader_config"] == "RL"
+
+
+def test_save_record_rejects_unknown_mode(tmp_lerobot_home: Path) -> None:
+    from lelab.utils import config as cfg
+
+    cfg.save_robot_record("weird", {"mode": "nonsense"}, allow_create=True)
+    assert cfg.get_robot_record("weird")["mode"] == "single"
+
+
+def test_bimanual_record_clean_requires_all_four_calibrations(tmp_lerobot_home: Path) -> None:
+    from lelab.utils import config as cfg
+
+    record = {
+        "name": "bi",
+        "mode": "bimanual",
+        "leader_port": "/dev/ll", "follower_port": "/dev/lf",
+        "leader_config": "LL", "follower_config": "LF",
+        "right_leader_port": "/dev/rl", "right_follower_port": "/dev/rf",
+        "right_leader_config": "RL", "right_follower_config": "RF",
+    }
+    # Only the left pair's files exist -> not clean.
+    (Path(cfg.LEADER_CONFIG_PATH) / "LL.json").write_text("{}")
+    (Path(cfg.FOLLOWER_CONFIG_PATH) / "LF.json").write_text("{}")
+    assert cfg.is_robot_record_clean(record) is False
+
+    # Add the right pair's files -> clean.
+    (Path(cfg.LEADER_CONFIG_PATH) / "RL.json").write_text("{}")
+    (Path(cfg.FOLLOWER_CONFIG_PATH) / "RF.json").write_text("{}")
+    assert cfg.is_robot_record_clean(record) is True
+
+
 def test_is_robot_record_clean_with_stem_configs(tmp_lerobot_home: Path) -> None:
     """A record storing stems is clean when "<stem>.json" exists on disk."""
     from lelab.utils import config as cfg

@@ -333,8 +333,23 @@ def get_default_robot_config(robot_type: str, available_configs: list):
 
 # Characters disallowed in a robot name (filesystem safety)
 _INVALID_NAME_CHARS = ("/", "\\", "..")
-_ROBOT_STRING_FIELDS = ("leader_port", "follower_port", "leader_config", "follower_config")
+
+# The primary leader/follower pair. In bimanual mode this is the LEFT arm pair;
+# in single mode it's the only pair. Reusing these keeps existing records valid.
+_SINGLE_CONFIG_FIELDS = ("leader_port", "follower_port", "leader_config", "follower_config")
+# The RIGHT arm pair — populated only when mode == "bimanual".
+_BIMANUAL_CONFIG_FIELDS = (
+    "right_leader_port",
+    "right_follower_port",
+    "right_leader_config",
+    "right_follower_config",
+)
+_ROBOT_STRING_FIELDS = _SINGLE_CONFIG_FIELDS + _BIMANUAL_CONFIG_FIELDS
 _ROBOT_LIST_FIELDS = ("cameras",)
+# Config-name fields whose stored value may carry a ".json" extension to strip.
+_CONFIG_NAME_FIELDS = ("leader_config", "follower_config", "right_leader_config", "right_follower_config")
+_VALID_MODES = ("single", "bimanual")
+_DEFAULT_MODE = "single"
 
 
 def _robot_record_path(name: str) -> str:
@@ -351,7 +366,7 @@ def is_valid_robot_name(name: str) -> bool:
 
 
 def _empty_record(name: str) -> dict:
-    record: dict = {"name": name}
+    record: dict = {"name": name, "mode": _DEFAULT_MODE}
     for field in _ROBOT_STRING_FIELDS:
         record[field] = ""
     for field in _ROBOT_LIST_FIELDS:
@@ -377,10 +392,13 @@ def get_robot_record(name: str) -> dict | None:
     # Canonical config names are STEMS (no .json). Older records stored the
     # filename with the extension — normalize on read so every consumer sees the
     # same form. The on-disk file keeps its .json.
-    for field in ("leader_config", "follower_config"):
+    for field in _CONFIG_NAME_FIELDS:
         value = record.get(field, "")
         if isinstance(value, str) and value.endswith(".json"):
             record[field] = value[: -len(".json")]
+    # Guard against an unknown mode on disk.
+    if record.get("mode") not in _VALID_MODES:
+        record["mode"] = _DEFAULT_MODE
     return record
 
 
@@ -426,6 +444,9 @@ def save_robot_record(name: str, data: dict, allow_create: bool = True) -> bool:
     for field in _ROBOT_LIST_FIELDS:
         if field in data and isinstance(data[field], list):
             record[field] = data[field]
+    if data.get("mode") in _VALID_MODES:
+        record["mode"] = data["mode"]
+    record.setdefault("mode", _DEFAULT_MODE)
     record["name"] = name
 
     path = _robot_record_path(name)
@@ -480,25 +501,38 @@ def rename_robot_record(old_name: str, new_name: str) -> tuple[bool, str]:
 
 def is_robot_record_clean(record: dict) -> bool:
     """
-    A record is 'clean' when all four operational fields are populated AND both
-    referenced calibration files exist on disk. Cameras are optional and don't
-    affect cleanliness.
+    A record is 'clean' when every operational field for its mode is populated AND
+    every referenced calibration file exists on disk. Cameras are optional.
+
+    - single   : the leader/follower pair (4 fields, 2 calibration files).
+    - bimanual : that pair (= left arm) plus the right pair (8 fields, 4 files).
     """
     if not record:
         return False
-    for field in _ROBOT_STRING_FIELDS:
-        value = record.get(field, "")
-        if not isinstance(value, str) or not value.strip():
-            return False
+
     # Config fields are stems; the file on disk is "<stem>.json". Tolerate a
     # stored value that still carries the extension (defensive).
     def _file_for(base: str, name: str) -> str:
         stem = name[: -len(".json")] if name.endswith(".json") else name
         return os.path.join(base, f"{stem}.json")
 
-    leader_path = _file_for(LEADER_CONFIG_PATH, record["leader_config"])
-    follower_path = _file_for(FOLLOWER_CONFIG_PATH, record["follower_config"])
-    return os.path.exists(leader_path) and os.path.exists(follower_path)
+    bimanual = record.get("mode") == "bimanual"
+    required_fields = _SINGLE_CONFIG_FIELDS + (_BIMANUAL_CONFIG_FIELDS if bimanual else ())
+    for field in required_fields:
+        value = record.get(field, "")
+        if not isinstance(value, str) or not value.strip():
+            return False
+
+    config_files = [
+        _file_for(LEADER_CONFIG_PATH, record["leader_config"]),
+        _file_for(FOLLOWER_CONFIG_PATH, record["follower_config"]),
+    ]
+    if bimanual:
+        config_files += [
+            _file_for(LEADER_CONFIG_PATH, record["right_leader_config"]),
+            _file_for(FOLLOWER_CONFIG_PATH, record["right_follower_config"]),
+        ]
+    return all(os.path.exists(p) for p in config_files)
 
 
 # ---------------------------------------------------------------------------
