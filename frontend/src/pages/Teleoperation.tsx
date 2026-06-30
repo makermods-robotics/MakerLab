@@ -3,11 +3,16 @@ import { useNavigate } from "react-router-dom";
 import VisualizerPanel from "@/components/control/VisualizerPanel";
 import { useToast } from "@/hooks/use-toast";
 import { useApi } from "@/contexts/ApiContext";
+import { useRobots } from "@/hooks/useRobots";
 
 const TeleoperationPage = () => {
   const navigate = useNavigate();
   const { toast } = useToast();
   const { baseUrl, fetchWithHeaders } = useApi();
+  // The teleop session is for the currently-selected robot; show two arms when
+  // it's bimanual.
+  const { selectedRecord } = useRobots();
+  const bimanual = selectedRecord?.mode === "bimanual";
 
   // Stop teleoperation exactly once, however the user leaves, so the back
   // button, an in-app link, and the unmount safety net can't double-stop or
@@ -69,7 +74,7 @@ const TeleoperationPage = () => {
   return (
     <div className="min-h-screen bg-black flex items-center justify-center p-2 sm:p-4">
       <div className="w-full h-[95vh] flex">
-        <VisualizerPanel onGoBack={handleGoBack} className="lg:w-full" />
+        <VisualizerPanel onGoBack={handleGoBack} className="lg:w-full" bimanual={bimanual} />
       </div>
     </div>
   );

@@ -8,11 +8,14 @@ import Logo from "@/components/Logo";
 interface VisualizerPanelProps {
   onGoBack: () => void;
   className?: string;
+  /** Render a second arm viewer (driven by the "joints_right" stream). */
+  bimanual?: boolean;
 }
 
 const VisualizerPanel: React.FC<VisualizerPanelProps> = ({
   onGoBack,
   className,
+  bimanual = false,
 }) => {
   return (
     <div
@@ -35,9 +38,26 @@ const VisualizerPanel: React.FC<VisualizerPanelProps> = ({
           <div className="w-px h-6 bg-gray-700" />
           <h2 className="text-xl font-medium text-gray-200">Teleoperation</h2>
         </div>
-        <div className="flex-1 bg-black rounded border border-gray-800 min-h-[50vh] lg:min-h-0">
-          <UrdfViewer />
-        </div>
+        {bimanual ? (
+          <div className="flex-1 flex flex-col sm:flex-row gap-2 min-h-[50vh] lg:min-h-0">
+            <div className="flex-1 flex flex-col">
+              <span className="text-xs text-gray-400 mb-1">Left arm</span>
+              <div className="flex-1 bg-black rounded border border-gray-800 min-h-[25vh]">
+                <UrdfViewer jointsKey="joints" />
+              </div>
+            </div>
+            <div className="flex-1 flex flex-col">
+              <span className="text-xs text-gray-400 mb-1">Right arm</span>
+              <div className="flex-1 bg-black rounded border border-gray-800 min-h-[25vh]">
+                <UrdfViewer jointsKey="joints_right" />
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className="flex-1 bg-black rounded border border-gray-800 min-h-[50vh] lg:min-h-0">
+            <UrdfViewer />
+          </div>
+        )}
       </div>
     </div>
   );

@@ -70,12 +70,16 @@ class TeleoperateRequest(BaseModel):
     right_follower_config: str = ""
 
 
-def get_joint_positions_from_robot(robot) -> dict[str, float]:
+def get_joint_positions_from_robot(robot, prefix: str = "", calibration=None) -> dict[str, float]:
     """
     Extract current joint positions from the robot and convert to URDF joint format.
 
     Args:
-        robot: The robot instance (SO101Follower)
+        robot: The robot instance (SO101Follower, or a BiSO* arm).
+        prefix: Motor-key prefix in the observation. "" for single-arm; for a
+            bimanual BiSO robot pass "left_"/"right_" to pull one arm.
+        calibration: Calibration dict to use for the URDF correction. Defaults to
+            ``robot.calibration``; for a BiSO robot pass the sub-arm's calibration.
 
     Returns:
         Dictionary mapping URDF joint names to radian values
@@ -91,18 +95,18 @@ def get_joint_positions_from_robot(robot) -> dict[str, float]:
 
     try:
         observation = robot.get_observation()
-        calibration = robot.calibration or {}
+        calibration = calibration if calibration is not None else (getattr(robot, "calibration", None) or {})
 
         joint_positions: dict[str, float] = {}
         debug_rows = []
         for motor_name, urdf_joint_name in motor_to_urdf_mapping.items():
             # Single-arm uses "<motor>.pos"; a bimanual BiSO robot prefixes both
-            # arms ("left_<motor>.pos"/"right_<motor>.pos"). The single-arm 3D
-            # viewer tracks one arm, so fall back to the left arm here — the full
-            # dual-arm viewer is handled separately.
-            motor_key = f"{motor_name}.pos"
-            if motor_key not in observation and f"left_{motor_key}" in observation:
-                motor_key = f"left_{motor_key}"
+            # arms ("left_<motor>.pos"/"right_<motor>.pos"). Callers pass the
+            # prefix for bimanual; when unset, fall back to the left arm so a
+            # single-arm caller still gets something from a BiSO robot.
+            motor_key = f"{prefix}{motor_name}.pos"
+            if motor_key not in observation and not prefix and f"left_{motor_name}.pos" in observation:
+                motor_key = f"left_{motor_name}.pos"
             if motor_key not in observation:
                 logger.warning(f"Motor {motor_key} not found in observation")
                 joint_positions[urdf_joint_name] = 0.0
@@ -302,6 +306,10 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
 
         # Stream the arms in the background; the worker owns disconnect so stop()
         # does not race the serial bus from the request thread.
+        # A bimanual BiSO robot exposes left_arm/right_arm; broadcast both arms'
+        # joints so the frontend can drive two 3D viewers.
+        is_bimanual = hasattr(robot, "left_arm") and hasattr(robot, "right_arm")
+
         def teleoperation_worker():
             global teleoperation_active, current_robot, current_teleop
 
@@ -317,12 +325,21 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
                     current_time = time.time()
                     if current_time - last_broadcast_time >= broadcast_interval:
                         try:
-                            joint_positions = get_joint_positions_from_robot(robot)
+                            if is_bimanual:
+                                joint_positions = get_joint_positions_from_robot(
+                                    robot, prefix="left_", calibration=robot.left_arm.calibration
+                                )
+                            else:
+                                joint_positions = get_joint_positions_from_robot(robot)
                             joint_data = {
                                 "type": "joint_update",
                                 "joints": joint_positions,
                                 "timestamp": current_time,
                             }
+                            if is_bimanual:
+                                joint_data["joints_right"] = get_joint_positions_from_robot(
+                                    robot, prefix="right_", calibration=robot.right_arm.calibration
+                                )
                             if websocket_manager and websocket_manager.active_connections:
                                 websocket_manager.broadcast_joint_data_sync(joint_data)
                             last_broadcast_time = current_time
