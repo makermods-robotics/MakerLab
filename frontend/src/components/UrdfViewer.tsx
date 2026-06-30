@@ -31,7 +31,12 @@ interface UrdfViewerElement extends HTMLElement {
   setJointValue?: (jointName: string, value: number) => void;
 }
 
-const UrdfViewer: React.FC = () => {
+interface UrdfViewerProps {
+  /** Which joint stream to follow — "joints" (default) or "joints_right" (bimanual). */
+  jointsKey?: string;
+}
+
+const UrdfViewer: React.FC<UrdfViewerProps> = ({ jointsKey = "joints" }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const [highlightedJoint, setHighlightedJoint] = useState<string | null>(null);
   const { registerUrdfProcessor, alternativeUrdfModels, isDefaultModel } =
@@ -45,6 +50,7 @@ const UrdfViewer: React.FC = () => {
   const { isConnected: isWebSocketConnected } = useRealTimeJoints({
     viewerRef,
     enabled: isDefaultModel, // Only enable WebSocket for default model
+    jointsKey,
   });
 
   // Add state for custom URDF path

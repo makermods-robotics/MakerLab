@@ -2,7 +2,6 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
   Select,
@@ -16,6 +15,14 @@ import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
   ArrowLeft,
   Settings,
   Activity,
@@ -28,16 +35,19 @@ import {
   Circle,
   Camera,
   ShieldQuestion,
+  Hand,
+  RefreshCw,
+  Wand2,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import Logo from "@/components/Logo";
-import PortDetectionButton from "@/components/ui/PortDetectionButton";
-import PortDetectionModal from "@/components/ui/PortDetectionModal";
 import { useApi } from "@/contexts/ApiContext";
 import { isMotorRangeComplete } from "@/lib/calibrationTargets";
 import CameraConfiguration, {
   CameraConfig,
 } from "@/components/recording/CameraConfiguration";
+import CalibrationLibrary from "@/components/calibration/CalibrationLibrary";
+import { RobotRecord } from "@/hooks/useRobots";
 
 const DISCONTINUITY_ERROR_PREFIX = "Motor discontinuity detected";
 
@@ -61,16 +71,8 @@ interface CalibrationRequest {
   port: string;
   config_file: string;
   robot_name: string | null;
-}
-
-interface RobotRecord {
-  name: string;
-  leader_port: string;
-  follower_port: string;
-  leader_config: string;
-  follower_config: string;
-  cameras: CameraConfig[];
-  is_clean: boolean;
+  overwrite?: boolean; // must be true to replace an existing config of the same name
+  arm?: "left" | "right"; // which arm of a bimanual robot ("left" = the single pair)
 }
 
 const Calibration = () => {
@@ -85,8 +87,56 @@ const Calibration = () => {
   const demoVideoRef = useRef<HTMLDivElement>(null);
 
   const [deviceType, setDeviceType] = useState<string>("teleop");
+  const [arm, setArm] = useState<"left" | "right">("left");
   const [port, setPort] = useState<string>("");
   const [robot, setRobot] = useState<RobotRecord | null>(null);
+
+  const isBimanual = robot?.mode === "bimanual";
+  // In single (or left) mode the primary leader/follower fields are used; in
+  // bimanual mode the right arm uses the right_* fields. Maps the current
+  // device_type + arm to the record's port and config field names.
+  const isRight = arm === "right";
+  const portField = (
+    deviceType === "teleop"
+      ? isRight ? "right_leader_port" : "leader_port"
+      : isRight ? "right_follower_port" : "follower_port"
+  ) as keyof RobotRecord;
+  const configField = (
+    deviceType === "teleop"
+      ? isRight ? "right_leader_config" : "leader_config"
+      : isRight ? "right_follower_config" : "follower_config"
+  ) as keyof RobotRecord;
+
+  const assignedConfig = robot ? (robot[configField] as string) : "";
+  // Bimanual MUST follow lerobot's "<base>_left"/"<base>_right" convention, so
+  // the name is forced to "<robot>_<arm>" regardless of any assigned config.
+  // Single-arm recalibration reuses the in-use config (or the robot name).
+  const calibrationConfigName = isBimanual
+    ? `${robotName}_${arm}`
+    : ((assignedConfig?.trim() ? assignedConfig : robotName) ?? "");
+
+  // Ports already assigned to the OTHER arms of this robot — each physical arm
+  // needs its own serial port, so these are greyed out in the dropdown.
+  const otherArmPorts = robot
+    ? (
+        ["leader_port", "follower_port", "right_leader_port", "right_follower_port"] as const
+      )
+        .filter((f) => f !== portField)
+        .map((f) => (robot[f] as string) || "")
+        .filter(Boolean)
+    : [];
+  const [overwritePromptOpen, setOverwritePromptOpen] = useState(false);
+  const [wiggling, setWiggling] = useState(false);
+  const [autoCalPromptOpen, setAutoCalPromptOpen] = useState(false);
+  const [autoCal, setAutoCal] = useState<{
+    active: boolean;
+    status: string;
+    message: string;
+    error: string | null;
+    logs: string[];
+  }>({ active: false, status: "idle", message: "", error: null, logs: [] });
+  const [availablePorts, setAvailablePorts] = useState<string[]>([]);
+  const [portsLoading, setPortsLoading] = useState(false);
   const [cameras, setCameras] = useState<CameraConfig[]>([]);
   // Off by default so merely opening the calibration page never grabs a camera.
   // The user explicitly starts a scan, which is when cameras are turned on,
@@ -110,6 +160,25 @@ const Calibration = () => {
       return null;
     }
   }, [robotName, baseUrl, fetchWithHeaders]);
+
+  // List the USB-serial ports for the dropdown (filtered to arm-like devices by
+  // the backend). Refreshable so plugging in an arm and rescanning works.
+  const fetchPorts = useCallback(async () => {
+    setPortsLoading(true);
+    try {
+      const res = await fetchWithHeaders(`${baseUrl}/available-ports`);
+      const data = await res.json();
+      setAvailablePorts(Array.isArray(data.ports) ? data.ports : []);
+    } catch (e) {
+      console.error("Failed to list ports:", e);
+    } finally {
+      setPortsLoading(false);
+    }
+  }, [baseUrl, fetchWithHeaders]);
+
+  useEffect(() => {
+    fetchPorts();
+  }, [fetchPorts]);
 
   // Initial fetch + form prefill on arrival.
   useEffect(() => {
@@ -168,11 +237,6 @@ const Calibration = () => {
     };
   }, []);
 
-  const [showPortDetection, setShowPortDetection] = useState(false);
-  const [detectionRobotType, setDetectionRobotType] = useState<
-    "leader" | "follower"
-  >("leader");
-
   const [calibrationStatus, setCalibrationStatus] = useState<CalibrationStatus>(
     {
       calibration_active: false,
@@ -230,7 +294,111 @@ const Calibration = () => {
     }
   };
 
-  const handleStartCalibration = async () => {
+  const handleWiggle = async () => {
+    if (!port) {
+      toast({
+        title: "Missing port",
+        description: "Enter or detect the port first, then wiggle to confirm the arm.",
+        variant: "destructive",
+      });
+      return;
+    }
+    setWiggling(true);
+    try {
+      const res = await fetchWithHeaders(`${baseUrl}/wiggle`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ port }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        toast({ title: "Wiggling gripper", description: data.message });
+      } else {
+        toast({ title: "Wiggle failed", description: data.message, variant: "destructive" });
+      }
+    } catch (e) {
+      toast({ title: "Wiggle failed", description: String(e), variant: "destructive" });
+    } finally {
+      setWiggling(false);
+    }
+  };
+
+  // Resume the auto-cal panel if a run is in progress (e.g. page reload).
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetchWithHeaders(`${baseUrl}/auto-calibration-status`);
+        const data = await res.json();
+        setAutoCal(data);
+      } catch {
+        // ignore
+      }
+    })();
+  }, [baseUrl, fetchWithHeaders]);
+
+  // Poll auto-cal status + logs while a run is active.
+  useEffect(() => {
+    if (!autoCal.active) return;
+    const id = setInterval(async () => {
+      try {
+        const res = await fetchWithHeaders(`${baseUrl}/auto-calibration-status`);
+        const data = await res.json();
+        setAutoCal(data);
+        if (!data.active) {
+          if (data.status === "completed") {
+            toast({ title: "Auto-calibration complete" });
+            fetchRobot();
+          } else if (data.status === "failed") {
+            toast({
+              title: "Auto-calibration failed",
+              description: data.error || "See the log.",
+              variant: "destructive",
+            });
+          }
+        }
+      } catch {
+        // transient; keep polling
+      }
+    }, 600);
+    return () => clearInterval(id);
+  }, [autoCal.active, baseUrl, fetchWithHeaders, fetchRobot, toast]);
+
+  const startAutoCalibration = async () => {
+    setAutoCalPromptOpen(false);
+    if (!robotName || !port) return;
+    try {
+      const res = await fetchWithHeaders(`${baseUrl}/start-auto-calibration`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          device_type: deviceType,
+          port,
+          config_file: calibrationConfigName,
+          robot_name: robotName,
+          arm,
+        }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setAutoCal({ active: true, status: "running", message: "", error: null, logs: [] });
+        toast({ title: "Auto-calibration started", description: "The arm is moving — keep the workspace clear." });
+      } else {
+        toast({ title: "Couldn't start auto-calibration", description: data.message, variant: "destructive" });
+      }
+    } catch (e) {
+      toast({ title: "Couldn't start auto-calibration", description: String(e), variant: "destructive" });
+    }
+  };
+
+  const stopAutoCalibration = async () => {
+    try {
+      await fetchWithHeaders(`${baseUrl}/stop-auto-calibration`, { method: "POST" });
+    } catch (e) {
+      console.error("Failed to stop auto-calibration:", e);
+    }
+  };
+
+  const handleStartCalibration = async (overwrite = false) => {
     if (!robotName) {
       toast({
         title: "No robot selected",
@@ -251,8 +419,10 @@ const Calibration = () => {
     const request: CalibrationRequest = {
       device_type: deviceType,
       port: port,
-      config_file: robotName,
+      config_file: calibrationConfigName,
       robot_name: robotName,
+      overwrite,
+      arm,
     };
 
     // Optimistically mark as active so the unmount cleanup will fire even if
@@ -269,11 +439,16 @@ const Calibration = () => {
       const result = await response.json();
 
       if (result.success) {
+        setOverwritePromptOpen(false);
         toast({
           title: "Calibration Started",
           description: `Calibration started for ${deviceType}`,
         });
         setIsPolling(true);
+      } else if (result.code === "name_taken") {
+        // Existing config of the same name — confirm before overwriting.
+        calibrationActiveRef.current = false;
+        setOverwritePromptOpen(true);
       } else {
         calibrationActiveRef.current = false;
         toast({
@@ -411,11 +586,17 @@ const Calibration = () => {
 
   const handleDeviceTypeChange = (next: string) => {
     setDeviceType(next);
-    if (!robot) return;
-    setPort(
-      next === "teleop" ? robot.leader_port || "" : robot.follower_port || ""
-    );
+    // Port is re-synced from the record by the device/arm effect below.
   };
+
+  // Keep the port field in sync with the selected device_type + arm's saved
+  // port whenever either changes (single uses leader/follower; bimanual right
+  // uses the right_* fields). Port is a dropdown, so overwriting it is safe.
+  useEffect(() => {
+    if (!robot) return;
+    setPort((robot[portField] as string) || "");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deviceType, arm, robot]);
 
   // Refresh the robot record when a calibration completes so the checklist
   // flips to ✓ for the side that was just saved, and advance Device Type to
@@ -431,19 +612,9 @@ const Calibration = () => {
         ? "robot"
         : "teleop";
       setDeviceType(nextDevice);
-      setPort(
-        nextDevice === "teleop"
-          ? r.leader_port || ""
-          : r.follower_port || ""
-      );
+      // Port re-syncs via the device/arm effect.
     })();
   }, [calibrationStatus.status, fetchRobot]);
-
-  const handlePortDetection = () => {
-    const robotType = deviceType === "robot" ? "follower" : "leader";
-    setDetectionRobotType(robotType);
-    setShowPortDetection(true);
-  };
 
   // Write the port for the current side straight into the robot record, so a
   // re-detected USB port (which shuffles on reboot/reconnect) sticks without
@@ -451,31 +622,34 @@ const Calibration = () => {
   const persistPort = useCallback(
     async (nextPort: string) => {
       if (!robotName || !nextPort) return;
-      const field = deviceType === "robot" ? "follower_port" : "leader_port";
       // Skip redundant writes when the value already matches the record.
-      if (robot && robot[field] === nextPort) return;
+      if (robot && robot[portField] === nextPort) return;
       try {
         const res = await fetchWithHeaders(
           `${baseUrl}/robots/${encodeURIComponent(robotName)}`,
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ [field]: nextPort }),
+            body: JSON.stringify({ [portField]: nextPort }),
           }
         );
         const data = await res.json();
-        if (data.robot) setRobot(data.robot);
+        if (res.ok && data.robot) {
+          setRobot(data.robot);
+        } else if (!res.ok) {
+          // Backstop for the same-port-on-two-arms guard (409).
+          toast({
+            title: "Couldn't assign port",
+            description: data.message || "Failed to save the port.",
+            variant: "destructive",
+          });
+        }
       } catch (e) {
         console.error("Failed to save port to robot record:", e);
       }
     },
-    [robotName, deviceType, robot, baseUrl, fetchWithHeaders]
+    [robotName, portField, robot, baseUrl, fetchWithHeaders, toast]
   );
-
-  const handlePortDetected = (detectedPort: string) => {
-    setPort(detectedPort);
-    persistPort(detectedPort);
-  };
 
   const getStatusDisplay = () => {
     switch (calibrationStatus.status) {
@@ -591,6 +765,27 @@ const Calibration = () => {
                 </Select>
               </div>
 
+              {isBimanual && (
+                <div className="space-y-2">
+                  <Label htmlFor="arm" className="text-sm font-medium text-slate-300">
+                    Arm *
+                  </Label>
+                  <Select value={arm} onValueChange={(v) => setArm(v as "left" | "right")}>
+                    <SelectTrigger className="bg-slate-700 border-slate-600 text-white rounded-md">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent className="bg-slate-800 border-slate-700 text-white">
+                      <SelectItem value="left" className="hover:bg-slate-700">
+                        Left arm
+                      </SelectItem>
+                      <SelectItem value="right" className="hover:bg-slate-700">
+                        Right arm
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
+
               <div className="space-y-2">
                 <Label
                   htmlFor="port"
@@ -599,35 +794,83 @@ const Calibration = () => {
                   Port *
                 </Label>
                 <div className="flex gap-2">
-                  <Input
-                    id="port"
+                  <Select
                     value={port}
-                    onChange={(e) => setPort(e.target.value)}
-                    onBlur={(e) => persistPort(e.target.value)}
-                    placeholder="/dev/tty.usbmodem..."
-                    className="bg-slate-700 border-slate-600 text-white rounded-md flex-1"
-                  />
-                  <PortDetectionButton
-                    onClick={handlePortDetection}
-                    robotType={deviceType === "robot" ? "follower" : "leader"}
-                    className="border-slate-600 hover:border-blue-500 text-slate-400 hover:text-blue-400 bg-slate-700 hover:bg-slate-600"
-                  />
+                    onValueChange={(v) => {
+                      setPort(v);
+                      persistPort(v);
+                    }}
+                  >
+                    <SelectTrigger
+                      id="port"
+                      className="bg-slate-700 border-slate-600 text-white rounded-md flex-1"
+                    >
+                      <SelectValue
+                        placeholder={
+                          availablePorts.length
+                            ? "Select a port"
+                            : "No arms detected — plug in & refresh"
+                        }
+                      />
+                    </SelectTrigger>
+                    <SelectContent className="bg-slate-800 border-slate-700 text-white">
+                      {availablePorts.map((p) => {
+                        const usedByOtherArm = otherArmPorts.includes(p);
+                        return (
+                          <SelectItem
+                            key={p}
+                            value={p}
+                            disabled={usedByOtherArm}
+                            className="text-white"
+                          >
+                            <span className="flex items-center gap-2">
+                              {p}
+                              {usedByOtherArm && (
+                                <span className="text-[10px] uppercase tracking-wide text-amber-400 border border-amber-500/40 rounded px-1">
+                                  other arm
+                                </span>
+                              )}
+                            </span>
+                          </SelectItem>
+                        );
+                      })}
+                      {/* Keep a persisted port selectable even if it's unplugged. */}
+                      {port && !availablePorts.includes(port) && (
+                        <SelectItem value={port} className="text-white">
+                          {port} (saved, not detected)
+                        </SelectItem>
+                      )}
+                    </SelectContent>
+                  </Select>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="icon"
+                    onClick={fetchPorts}
+                    disabled={portsLoading}
+                    title="Rescan ports"
+                    className="border-slate-600 hover:border-blue-500 text-slate-400 hover:text-blue-400 bg-slate-700 hover:bg-slate-600 shrink-0"
+                  >
+                    <RefreshCw className={`w-4 h-4 ${portsLoading ? "animate-spin" : ""}`} />
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={handleWiggle}
+                    disabled={!port || wiggling}
+                    title="Move the gripper on this port to see which arm it is"
+                    className="border-slate-600 hover:border-yellow-500 text-slate-400 hover:text-yellow-400 bg-slate-700 hover:bg-slate-600 shrink-0"
+                  >
+                    <Hand className="w-4 h-4 mr-1" />
+                    {wiggling ? "Wiggling…" : "Wiggle"}
+                  </Button>
                 </div>
               </div>
 
               <Separator className="bg-slate-700" />
 
               <div className="flex flex-col gap-3">
-                {!calibrationStatus.calibration_active ? (
-                  <Button
-                    onClick={handleStartCalibration}
-                    className="w-full bg-blue-600 hover:bg-blue-700 text-white rounded-full py-6 text-lg"
-                    disabled={!robotName || !deviceType || !port}
-                  >
-                    <Play className="w-5 h-5 mr-2" />
-                    Start Calibration
-                  </Button>
-                ) : (
+                {calibrationStatus.calibration_active ? (
                   <Button
                     onClick={handleStopCalibration}
                     variant="destructive"
@@ -636,44 +879,181 @@ const Calibration = () => {
                     <Square className="w-5 h-5 mr-2" />
                     Cancel Calibration
                   </Button>
+                ) : autoCal.active ? (
+                  <Button
+                    onClick={stopAutoCalibration}
+                    variant="destructive"
+                    className="w-full rounded-full py-6 text-lg"
+                  >
+                    <Square className="w-5 h-5 mr-2" />
+                    Stop auto-calibration
+                  </Button>
+                ) : (
+                  <>
+                    <Button
+                      onClick={() => handleStartCalibration()}
+                      className="w-full bg-blue-600 hover:bg-blue-700 text-white rounded-full py-6 text-lg"
+                      disabled={!robotName || !deviceType || !port}
+                    >
+                      <Play className="w-5 h-5 mr-2" />
+                      Start Calibration
+                    </Button>
+                    <Button
+                      onClick={() => setAutoCalPromptOpen(true)}
+                      variant="outline"
+                      disabled={!robotName || !deviceType || !port}
+                      className="w-full border-purple-500/50 text-purple-300 hover:bg-purple-900/20 hover:text-purple-200 rounded-full py-5"
+                    >
+                      <Wand2 className="w-5 h-5 mr-2" />
+                      Auto-calibrate
+                    </Button>
+                  </>
+                )}
+
+                {autoCal.logs.length > 0 && autoCal.status !== "idle" && (
+                  <div className="bg-slate-900 rounded border border-slate-700 p-2 max-h-40 overflow-auto text-xs font-mono text-slate-300 whitespace-pre-wrap">
+                    {autoCal.status === "completed" && (
+                      <div className="text-green-400 mb-1">✓ Auto-calibration complete</div>
+                    )}
+                    {(autoCal.status === "failed" || autoCal.status === "stopped") && (
+                      <div className="text-red-400 mb-1">
+                        {autoCal.status === "stopped" ? "Stopped" : `Failed: ${autoCal.error ?? ""}`}
+                      </div>
+                    )}
+                    {autoCal.logs.slice(-120).map((line, i) => (
+                      <div key={i}>{line}</div>
+                    ))}
+                  </div>
                 )}
               </div>
+
+              <Dialog open={autoCalPromptOpen} onOpenChange={setAutoCalPromptOpen}>
+                <DialogContent className="bg-slate-900 border-slate-800 text-white">
+                  <DialogHeader>
+                    <DialogTitle>Auto-calibrate — the arm will move</DialogTitle>
+                    <DialogDescription className="text-slate-400">
+                      The arm will <strong>move on its own under power</strong> to find each
+                      joint's range. Clear the workspace and keep hands away. This will
+                      save/replace the calibration <strong>"{calibrationConfigName}"</strong>.
+                    </DialogDescription>
+                  </DialogHeader>
+                  <DialogFooter className="flex gap-2 justify-end">
+                    <Button
+                      variant="outline"
+                      className="border-slate-600 text-slate-300"
+                      onClick={() => setAutoCalPromptOpen(false)}
+                    >
+                      Cancel
+                    </Button>
+                    <Button
+                      className="bg-purple-600 hover:bg-purple-700 text-white"
+                      onClick={startAutoCalibration}
+                    >
+                      Start auto-calibration
+                    </Button>
+                  </DialogFooter>
+                </DialogContent>
+              </Dialog>
+
+              <Dialog open={overwritePromptOpen} onOpenChange={setOverwritePromptOpen}>
+                <DialogContent className="bg-slate-900 border-slate-800 text-white">
+                  <DialogHeader>
+                    <DialogTitle>Overwrite existing calibration?</DialogTitle>
+                    <DialogDescription className="text-slate-400">
+                      A calibration named "{calibrationConfigName}" already exists for
+                      this side. Continuing will replace its data when calibration
+                      completes. To keep it, cancel and download or rename it first.
+                    </DialogDescription>
+                  </DialogHeader>
+                  <DialogFooter className="flex gap-2 justify-end">
+                    <Button
+                      variant="outline"
+                      className="border-slate-600 text-slate-300"
+                      onClick={() => setOverwritePromptOpen(false)}
+                    >
+                      Cancel
+                    </Button>
+                    <Button
+                      className="bg-red-500 hover:bg-red-600 text-white"
+                      onClick={() => handleStartCalibration(true)}
+                    >
+                      Overwrite & calibrate
+                    </Button>
+                  </DialogFooter>
+                </DialogContent>
+              </Dialog>
 
               {robot && (
                 <div className="space-y-2 pt-2">
                   <div className="text-sm font-medium text-slate-300">
                     Robot calibration
                   </div>
-                  <div className="flex items-center gap-2 text-sm">
-                    {robot.leader_config ? (
-                      <CheckCircle className="w-4 h-4 text-green-400" />
-                    ) : (
-                      <Circle className="w-4 h-4 text-slate-500" />
-                    )}
-                    <span
-                      className={
-                        robot.leader_config ? "text-slate-200" : "text-slate-400"
-                      }
-                    >
-                      Leader (Teleoperator)
-                    </span>
-                  </div>
-                  <div className="flex items-center gap-2 text-sm">
-                    {robot.follower_config ? (
-                      <CheckCircle className="w-4 h-4 text-green-400" />
-                    ) : (
-                      <Circle className="w-4 h-4 text-slate-500" />
-                    )}
-                    <span
-                      className={
-                        robot.follower_config
-                          ? "text-slate-200"
-                          : "text-slate-400"
-                      }
-                    >
-                      Follower (Robot)
-                    </span>
-                  </div>
+                  {isBimanual
+                    ? // Bimanual configs are fixed by lerobot's convention
+                      // ("<robot>_left"/"<robot>_right"), so there's no config
+                      // picker — each arm just shows its convention name + whether
+                      // it's been calibrated to it.
+                      ([
+                        { label: "Left Leader (Teleoperator)", cfgField: "leader_config", side: "left" },
+                        { label: "Left Follower (Robot)", cfgField: "follower_config", side: "left" },
+                        { label: "Right Leader (Teleoperator)", cfgField: "right_leader_config", side: "right" },
+                        { label: "Right Follower (Robot)", cfgField: "right_follower_config", side: "right" },
+                      ] as const).map((row) => {
+                        const expected = `${robotName}_${row.side}`;
+                        const current = (robot[row.cfgField] as string) || "";
+                        const compliant = current === expected;
+                        return (
+                          <div key={row.label}>
+                            <div className="flex items-center gap-2 text-sm">
+                              {compliant ? (
+                                <CheckCircle className="w-4 h-4 text-green-400" />
+                              ) : (
+                                <Circle className="w-4 h-4 text-slate-500" />
+                              )}
+                              <span className={compliant ? "text-slate-200" : "text-slate-400"}>
+                                {row.label}
+                              </span>
+                              <span className="ml-auto font-mono text-xs text-slate-500">
+                                {expected}
+                              </span>
+                            </div>
+                            {!compliant && (
+                              <div className="ml-6 text-xs text-amber-400">
+                                {current
+                                  ? `Currently "${current}" — recalibrate this arm to use ${expected}.`
+                                  : "Not calibrated yet — calibrate this arm."}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })
+                    : ([
+                        { label: "Leader (Teleoperator)", device: "teleop", cfgField: "leader_config" },
+                        { label: "Follower (Robot)", device: "robot", cfgField: "follower_config" },
+                      ] as const).map((row) => {
+                        const cfg = (robot[row.cfgField] as string) || "";
+                        return (
+                          <div key={row.label}>
+                            <div className="flex items-center gap-2 text-sm">
+                              {cfg ? (
+                                <CheckCircle className="w-4 h-4 text-green-400" />
+                              ) : (
+                                <Circle className="w-4 h-4 text-slate-500" />
+                              )}
+                              <span className={cfg ? "text-slate-200" : "text-slate-400"}>
+                                {row.label}
+                              </span>
+                            </div>
+                            <CalibrationLibrary
+                              device={row.device}
+                              assignedConfig={cfg}
+                              configField={row.cfgField}
+                              robotName={robotName}
+                              onAssigned={fetchRobot}
+                            />
+                          </div>
+                        );
+                      })}
                 </div>
               )}
             </CardContent>
@@ -961,13 +1341,6 @@ const Calibration = () => {
           </Card>
         )}
       </div>
-
-      <PortDetectionModal
-        open={showPortDetection}
-        onOpenChange={setShowPortDetection}
-        robotType={detectionRobotType}
-        onPortDetected={handlePortDetected}
-      />
     </div>
   );
 };

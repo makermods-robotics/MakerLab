@@ -70,6 +70,33 @@ def test_create_record_config_pins_dshow_on_windows(monkeypatch: pytest.MonkeyPa
     assert config.robot.cameras["wrist"].backend == Cv2Backends.DSHOW
 
 
+def test_create_record_config_builds_biso_for_bimanual(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A bimanual request produces a lerobot BiSO leader+follower pair config."""
+    import lelab.record as record
+    from lerobot.robots.bi_so_follower import BiSOFollowerConfig
+    from lerobot.teleoperators.bi_so_leader import BiSOLeaderConfig
+
+    monkeypatch.setattr(record, "setup_calibration_files", lambda leader, follower: (leader, follower))
+
+    # Configs follow lerobot's "<base>_left"/"<base>_right" convention.
+    request = record.RecordingRequest(
+        leader_port="/dev/ll", follower_port="/dev/lf",
+        leader_config="mybot_left", follower_config="mybot_left",
+        mode="bimanual",
+        right_leader_port="/dev/rl", right_follower_port="/dev/rf",
+        right_leader_config="mybot_right", right_follower_config="mybot_right",
+        dataset_repo_id="user/dataset", single_task="pick up the cube",
+    )
+
+    config = record.create_record_config(request)
+    assert isinstance(config.robot, BiSOFollowerConfig)
+    assert isinstance(config.teleop, BiSOLeaderConfig)
+    # BiSO id is the convention base so lerobot auto-loads "<base>_left/right.json".
+    assert config.robot.id == "mybot"
+    assert config.teleop.id == "mybot"
+    assert config.robot.right_arm_config.port == "/dev/rf"
+
+
 def test_build_camera_configs_uses_default_backend_when_unset() -> None:
     from lelab.record import _build_camera_configs
     from lerobot.cameras.configs import Cv2Backends

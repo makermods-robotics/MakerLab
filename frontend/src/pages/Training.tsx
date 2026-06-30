@@ -10,7 +10,6 @@ import ConfigurationTab from "@/components/training/ConfigurationTab";
 import MonitoringStats from "@/components/training/monitoring/MonitoringStats";
 import TrainingLogs from "@/components/training/monitoring/TrainingLogs";
 import TrainingExtraGate from "@/components/training/TrainingExtraGate";
-import PolicyExtraDialog from "@/components/training/PolicyExtraDialog";
 import HfAuthBanner from "@/components/landing/HfAuthBanner";
 
 import { Button } from "@/components/ui/button";
@@ -132,12 +131,6 @@ const ConfigurationMode: React.FC = () => {
   const [trainingExtraInstallHint, setTrainingExtraInstallHint] = useState<string>("pip install accelerate");
   const [localJobRunning, setLocalJobRunning] = useState<boolean>(false);
   const [isStarting, setIsStarting] = useState(false);
-  const [policyExtra, setPolicyExtra] = useState<{
-    policyType: string;
-    packageName: string;
-    installTarget: string;
-    installHint: string;
-  } | null>(null);
   const [authenticated, setAuthenticated] = useState<boolean>(false);
   const [flavors, setFlavors] = useState<RunnerFlavor[]>([]);
   const [hardwareLoading, setHardwareLoading] = useState(true);
@@ -198,31 +191,6 @@ const ConfigurationMode: React.FC = () => {
       toast({ title: "Error", description: "Dataset repository ID is required", variant: "destructive" });
       return;
     }
-
-    // Pre-flight: smolvla/pi0/diffusion need an optional package. Catch it here
-    // with a one-click installer instead of a buried ImportError after the job
-    // has already started.
-    try {
-      const r = await fetchWithHeaders(
-        `${baseUrl}/system/policy-extra/${trainingConfig.policy_type}`,
-      );
-      if (r.ok) {
-        const extra = await r.json();
-        if (extra.needs_extra && !extra.available) {
-          setPolicyExtra({
-            policyType: trainingConfig.policy_type,
-            packageName: extra.package,
-            installTarget: extra.install_target,
-            installHint: extra.install_hint,
-          });
-          return;
-        }
-      }
-    } catch {
-      // Check failed (offline / older backend) — fall through and let the job
-      // report any problem itself.
-    }
-
     setIsStarting(true);
     try {
       const job = await startTrainingJob(baseUrl, fetchWithHeaders, configToRequest(trainingConfig));
@@ -338,17 +306,6 @@ const ConfigurationMode: React.FC = () => {
           })()}
         </div>
       </div>
-
-      {policyExtra && (
-        <PolicyExtraDialog
-          open={!!policyExtra}
-          onOpenChange={(o) => !o && setPolicyExtra(null)}
-          policyType={policyExtra.policyType}
-          packageName={policyExtra.packageName}
-          installTarget={policyExtra.installTarget}
-          installHint={policyExtra.installHint}
-        />
-      )}
     </div>
   );
 };

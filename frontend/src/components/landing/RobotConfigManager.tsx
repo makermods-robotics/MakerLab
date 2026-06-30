@@ -2,7 +2,7 @@ import React from "react";
 import { useNavigate } from "react-router-dom";
 import { useApi } from "@/contexts/ApiContext";
 import { useToast } from "@/hooks/use-toast";
-import { RobotRecord } from "@/hooks/useRobots";
+import { RobotRecord, RobotMode } from "@/hooks/useRobots";
 import RobotTile from "./RobotTile";
 
 interface RobotConfigManagerProps {
@@ -12,6 +12,8 @@ interface RobotConfigManagerProps {
   isLoading: boolean;
   selectRobot: (name: string) => void;
   createRobot: (name: string) => Promise<boolean>;
+  renameRobot: (oldName: string, newName: string) => Promise<boolean>;
+  setRobotMode: (name: string, mode: RobotMode) => Promise<boolean>;
   deleteRobot: (name: string) => Promise<boolean>;
 }
 
@@ -22,6 +24,8 @@ const RobotConfigManager: React.FC<RobotConfigManagerProps> = ({
   isLoading,
   selectRobot,
   createRobot,
+  renameRobot,
+  setRobotMode,
   deleteRobot,
 }) => {
   const navigate = useNavigate();
@@ -42,6 +46,12 @@ const RobotConfigManager: React.FC<RobotConfigManagerProps> = ({
           follower_port: robot.follower_port,
           leader_config: robot.leader_config,
           follower_config: robot.follower_config,
+          // Bimanual: include the mode + right arm so the backend builds a BiSO pair.
+          mode: robot.mode,
+          right_leader_port: robot.right_leader_port,
+          right_follower_port: robot.right_follower_port,
+          right_leader_config: robot.right_leader_config,
+          right_follower_config: robot.right_follower_config,
         }),
       });
       const data = await res.json();
@@ -80,6 +90,8 @@ const RobotConfigManager: React.FC<RobotConfigManagerProps> = ({
       onCreateNew={createRobot}
       onConfigure={handleConfigure}
       onTeleop={handleTeleop}
+      onRename={renameRobot}
+      onSetMode={setRobotMode}
       onDelete={deleteRobot}
     />
   );

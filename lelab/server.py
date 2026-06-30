@@ -39,7 +39,9 @@ from starlette.types import Scope
 from . import datasets as dataset_browser
 
 # Import our custom calibration functionality
+from .auto_calibrate import AutoCalibrationRequest, auto_calibration_manager
 from .calibrate import CalibrationRequest, calibration_manager
+from .wiggle import wiggle_gripper
 from .jobs import (
     JobAlreadyRunningError,
     JobNotFoundError,
@@ -94,18 +96,20 @@ from .utils.config import (
     get_saved_robot_port,
     is_robot_record_clean,
     is_valid_robot_name,
+    config_slot_conflict,
     list_robot_records,
+    port_slot_conflict,
+    rename_calibration_config,
+    rename_robot_record,
+    save_imported_calibration,
     save_robot_port,
     save_robot_record,
 )
 from .utils.hf_auth import cached_whoami, handle_hf_auth_status, handle_hf_login, shared_hf_api
 from .utils.system import (
     handle_get_cuda_status,
-    handle_get_policy_extra,
     handle_get_training_extra,
     handle_get_wandb_extra,
-    handle_install_policy_extra,
-    handle_install_policy_extra_status,
     handle_install_training_extra,
     handle_install_training_extra_status,
     handle_install_wandb_extra,
@@ -295,9 +299,14 @@ job_registry.set_on_progress(manager.notify_job_progress)
 
 @app.get("/get-configs")
 def get_configs():
-    # Get all available calibration configs
-    leader_configs = [os.path.basename(f) for f in glob.glob(os.path.join(LEADER_CONFIG_PATH, "*.json"))]
-    follower_configs = [os.path.basename(f) for f in glob.glob(os.path.join(FOLLOWER_CONFIG_PATH, "*.json"))]
+    # Get all available calibration configs as STEMS (no .json) — the canonical
+    # user-facing name. The .json is only the on-disk filename.
+    leader_configs = [
+        os.path.splitext(os.path.basename(f))[0] for f in glob.glob(os.path.join(LEADER_CONFIG_PATH, "*.json"))
+    ]
+    follower_configs = [
+        os.path.splitext(os.path.basename(f))[0] for f in glob.glob(os.path.join(FOLLOWER_CONFIG_PATH, "*.json"))
+    ]
 
     return {"leader_configs": leader_configs, "follower_configs": follower_configs}
 
@@ -753,25 +762,6 @@ def install_wandb_extra_status():
     return handle_install_wandb_extra_status()
 
 
-@app.get("/system/policy-extra/{policy_type}")
-def get_policy_extra(policy_type: str):
-    """Whether the optional LeRobot extra a policy needs (e.g. transformers for
-    smolvla/pi0, diffusers for diffusion) is importable. Core policies report available."""
-    return handle_get_policy_extra(policy_type)
-
-
-@app.post("/system/policy-extra/{policy_type}/install")
-def install_policy_extra(policy_type: str):
-    """Spawn `pip install lerobot[<extra>]` for the policy's extra in the background."""
-    return handle_install_policy_extra(policy_type)
-
-
-@app.get("/system/policy-extra/{policy_type}/install-status")
-def install_policy_extra_status(policy_type: str):
-    """Return the policy extra's install state plus any pending log lines (drained on read)."""
-    return handle_install_policy_extra_status(policy_type)
-
-
 @app.get("/system/update-check")
 def update_check():
     """Report whether a newer LeLab commit exists on GitHub (cached, silent on failure)."""
@@ -814,6 +804,27 @@ def calibration_status():
 def complete_calibration_step():
     """Complete the current calibration step"""
     return calibration_manager.complete_step()
+
+
+# --- Auto-calibration (drives the arm under torque; runs the vendored script) ---
+
+
+@app.post("/start-auto-calibration")
+def start_auto_calibration(request: AutoCalibrationRequest):
+    """Start auto-calibration as a subprocess. The arm moves on its own."""
+    return auto_calibration_manager.start(request)
+
+
+@app.post("/stop-auto-calibration")
+def stop_auto_calibration():
+    """Stop a running auto-calibration."""
+    return auto_calibration_manager.stop()
+
+
+@app.get("/auto-calibration-status")
+def auto_calibration_status():
+    """Current auto-calibration state + streamed log lines."""
+    return auto_calibration_manager.get_status()
 
 
 @app.get("/calibration-configs/{device_type}")
@@ -893,6 +904,104 @@ def delete_calibration_config(device_type: str, config_name: str):
         return {"success": False, "message": str(e)}
 
 
+@app.get("/calibration-configs/{device_type}/{config_name}/download")
+def download_calibration_config(device_type: str, config_name: str):
+    """
+    Download one arm's calibration as a raw lerobot calibration JSON file.
+
+    The file IS lerobot's own calibration file (no LeLab wrapper), so it's
+    drop-in: shareable, hand-copyable, and re-importable anywhere. The arm's
+    side/name are supplied by the caller on re-import, not stored in the file.
+    """
+    if device_type == "robot":
+        config_path = FOLLOWER_CONFIG_PATH
+    elif device_type == "teleop":
+        config_path = LEADER_CONFIG_PATH
+    else:
+        return JSONResponse(status_code=400, content={"success": False, "message": "Invalid device type"})
+
+    # config_name is interpolated into a filename, so reject path-traversal
+    # characters before touching the filesystem (same guard as delete).
+    if not is_valid_robot_name(config_name):
+        return JSONResponse(status_code=400, content={"success": False, "message": "Invalid configuration name"})
+
+    # Robot records store config names WITH the .json extension while this
+    # resource is otherwise stem-based; accept either form so callers that pass
+    # `robot.leader_config` ("so101.json") don't resolve to "so101.json.json".
+    if config_name.endswith(".json"):
+        config_name = config_name[: -len(".json")]
+
+    file_path = os.path.join(config_path, f"{config_name}.json")
+    if not os.path.exists(file_path):
+        return JSONResponse(status_code=404, content={"success": False, "message": "Configuration file not found"})
+
+    try:
+        with open(file_path, "rb") as f:
+            data = f.read()
+    except OSError as e:
+        logger.error(f"Error reading calibration config {file_path}: {e}")
+        return JSONResponse(status_code=500, content={"success": False, "message": str(e)})
+
+    return Response(
+        content=data,
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{config_name}.json"'},
+    )
+
+
+@app.post("/calibration-configs/{device_type}/upload")
+def upload_calibration_config(device_type: str, body: dict):
+    """
+    Import a calibration into a side's config dir. Body: {"name": "...",
+    "data": {<raw lerobot calibration>}}. The data is shape-validated; an
+    existing name is never overwritten (409 → caller renames).
+    """
+    name = (body or {}).get("name", "")
+    data = (body or {}).get("data")
+    if not isinstance(name, str):
+        return JSONResponse(status_code=400, content={"success": False, "message": "name must be a string"})
+
+    ok, reason, saved = save_imported_calibration(device_type, name, data)
+    if ok:
+        return {"success": True, "name": saved}
+
+    if reason == "invalid_device":
+        return JSONResponse(status_code=400, content={"success": False, "message": "Invalid device type"})
+    if reason == "invalid_name":
+        return JSONResponse(status_code=400, content={"success": False, "message": "Invalid configuration name"})
+    if reason == "name_taken":
+        return JSONResponse(
+            status_code=409,
+            content={"success": False, "message": f"A config named '{saved}' already exists. Choose a different name."},
+        )
+    if reason.startswith("invalid_data:"):
+        return JSONResponse(status_code=400, content={"success": False, "message": reason.split(":", 1)[1]})
+    return JSONResponse(status_code=500, content={"success": False, "message": "Import failed"})
+
+
+@app.post("/calibration-configs/{device_type}/{config_name}/rename")
+def rename_calibration_config_endpoint(device_type: str, config_name: str, body: dict):
+    """
+    Rename a calibration config file. Body: {"new_name": "..."}. Never
+    overwrites; robot records referencing the old name are repointed.
+    """
+    new_name = (body or {}).get("new_name", "")
+    if not isinstance(new_name, str):
+        return JSONResponse(status_code=400, content={"success": False, "message": "new_name must be a string"})
+
+    ok, reason = rename_calibration_config(device_type, config_name, new_name)
+    if ok:
+        return {"success": True, "name": new_name.strip().removesuffix(".json")}
+
+    status_code, message = {
+        "invalid_device": (400, "Invalid device type"),
+        "invalid_name": (400, "Invalid configuration name"),
+        "not_found": (404, "Configuration file not found"),
+        "name_taken": (409, "A config with that name already exists. Choose a different name."),
+    }.get(reason, (500, "Rename failed"))
+    return JSONResponse(status_code=status_code, content={"success": False, "message": message})
+
+
 # ============================================================================
 # PORT DETECTION ENDPOINTS
 # ============================================================================
@@ -907,6 +1016,16 @@ def get_available_ports():
     except Exception as e:
         logger.error(f"Error getting available ports: {e}")
         return {"status": "error", "message": str(e)}
+
+
+class WiggleRequest(BaseModel):
+    port: str
+
+
+@app.post("/wiggle")
+async def wiggle(request: WiggleRequest):
+    """Wiggle the gripper on a port so the user can see which arm it is."""
+    return await wiggle_gripper(request.port)
 
 
 # Runs in a fresh Python — see _avfoundation_cameras_in_cv2_order for why.
@@ -1188,6 +1307,48 @@ def upsert_robot(name: str, data: dict, create: bool = False):
     """
     if not is_valid_robot_name(name):
         return JSONResponse(status_code=400, content={"status": "error", "message": "Invalid robot name"})
+
+    # Reject assigning the same calibration to both same-side arms of a bimanual
+    # robot — that would point two physical arms at one calibration. Only checked
+    # when the request actually touches a config slot or the mode, so unrelated
+    # edits (cameras, ports) aren't blocked even on a pre-existing conflict.
+    body = data or {}
+    slot_fields = ("mode", "leader_config", "follower_config", "right_leader_config", "right_follower_config")
+    if any(f in body for f in slot_fields):
+        existing = get_robot_record(name) or {}
+        prospective = {"mode": body["mode"] if body.get("mode") in ("single", "bimanual") else existing.get("mode", "single")}
+        for f in ("leader_config", "follower_config", "right_leader_config", "right_follower_config"):
+            prospective[f] = body[f] if isinstance(body.get(f), str) else existing.get(f, "")
+        side = config_slot_conflict(prospective)
+        if side:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "status": "error",
+                    "message": f"That {side} config is already assigned to the other {side} arm. "
+                    "Each physical arm needs its own calibration — pick a different config.",
+                },
+            )
+
+    # Reject assigning one serial port to more than one arm — each physical arm
+    # is its own USB device. Checked when the request touches a port or the mode.
+    port_fields = ("mode", "leader_port", "follower_port", "right_leader_port", "right_follower_port")
+    if any(f in body for f in port_fields):
+        existing = get_robot_record(name) or {}
+        prospective = {"mode": body["mode"] if body.get("mode") in ("single", "bimanual") else existing.get("mode", "single")}
+        for f in ("leader_port", "follower_port", "right_leader_port", "right_follower_port"):
+            prospective[f] = body[f] if isinstance(body.get(f), str) else existing.get(f, "")
+        dup_port = port_slot_conflict(prospective)
+        if dup_port:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "status": "error",
+                    "message": f"Port {dup_port} is already assigned to another arm of this robot. "
+                    "Each arm needs its own serial port.",
+                },
+            )
+
     try:
         if create:
             if get_robot_record(name) is not None:
@@ -1205,6 +1366,30 @@ def upsert_robot(name: str, data: dict, create: bool = False):
     except Exception as e:
         logger.error(f"Error upserting robot {name}: {e}")
         return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
+
+
+@app.post("/robots/{name}/rename")
+def rename_robot(name: str, data: dict):
+    """
+    Rename a robot record. Body: {"new_name": "..."}. Calibration files are not
+    affected (they're keyed by config name, not robot name).
+    """
+    new_name = (data or {}).get("new_name", "")
+    if not isinstance(new_name, str):
+        return JSONResponse(status_code=400, content={"status": "error", "message": "new_name must be a string"})
+    new_name = new_name.strip()
+
+    ok, reason = rename_robot_record(name, new_name)
+    if ok:
+        record = get_robot_record(new_name)
+        return {"status": "success", "robot": _record_with_clean(record) if record else None}
+
+    status_code, message = {
+        "invalid_name": (400, "Invalid robot name"),
+        "not_found": (404, "Robot not found"),
+        "name_taken": (409, "A robot with that name already exists"),
+    }.get(reason, (500, "Rename failed"))
+    return JSONResponse(status_code=status_code, content={"status": "error", "message": message})
 
 
 @app.delete("/robots/{name}")

@@ -72,3 +72,25 @@ def test_calibration_manager_rejects_double_start_via_message() -> None:
     )
     assert result.get("success") is False
     assert "already" in result.get("message", "").lower()
+
+
+def test_start_calibration_refuses_existing_config_without_overwrite(tmp_lerobot_home) -> None:
+    """Completing calibration saves <config_file>.json; if that name already
+    exists, start must refuse (code=name_taken) unless overwrite=True — so no
+    file is silently clobbered, and no hardware is touched."""
+    from pathlib import Path
+
+    from lelab.calibrate import CalibrationManager, CalibrationRequest
+    from lelab.utils import config as cfg
+
+    (Path(cfg.LEADER_CONFIG_PATH) / "taken.json").write_text("{}")
+
+    mgr = CalibrationManager()
+    result = mgr.start_calibration(
+        CalibrationRequest(device_type="teleop", port="/dev/null", config_file="taken")
+    )
+    assert result.get("success") is False
+    assert result.get("code") == "name_taken"
+    # The guard returns before activating or spawning the worker thread.
+    assert mgr.status.calibration_active is False
+    assert mgr.calibration_thread is None
