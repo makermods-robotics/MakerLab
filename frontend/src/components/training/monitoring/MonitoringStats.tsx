@@ -1,9 +1,9 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { TrainingStatus } from '../types';
-import { CheckCircle, Activity, Clock } from 'lucide-react';
-import { useApi } from '@/contexts/ApiContext';
-import { getJobMetricsHistory } from '@/lib/jobsApi';
+import React, { useEffect, useRef, useState } from "react";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { TrainingStatus } from "../types";
+import { CheckCircle, Activity, Clock } from "lucide-react";
+import { useApi } from "@/contexts/ApiContext";
+import { getJobMetricsHistory } from "@/lib/jobsApi";
 import {
   Line,
   LineChart,
@@ -11,7 +11,7 @@ import {
   Tooltip,
   XAxis,
   YAxis,
-} from 'recharts';
+} from "recharts";
 
 interface MonitoringStatsProps {
   jobId: string;
@@ -133,12 +133,15 @@ const MonitoringStats: React.FC<MonitoringStatsProps> = ({
   const progress = getProgressPercentage();
   // Until tqdm fires its first progress line, total_steps is 0 — show
   // "Training starting…" instead of a misleading 0/0 0% reading.
-  const isStarting = trainingStatus.training_active && trainingStatus.total_steps === 0;
+  const isStarting =
+    trainingStatus.training_active && trainingStatus.total_steps === 0;
   const stepLabel = isStarting
-    ? 'Training starting…'
+    ? "Training starting…"
     : `${trainingStatus.current_step.toLocaleString()} / ${trainingStatus.total_steps.toLocaleString()}`;
   const etaLabel =
-    trainingStatus.eta_seconds != null ? formatTime(trainingStatus.eta_seconds) : '—';
+    trainingStatus.eta_seconds != null
+      ? formatTime(trainingStatus.eta_seconds)
+      : "—";
 
   return (
     <div className="space-y-6">
@@ -151,7 +154,9 @@ const MonitoringStats: React.FC<MonitoringStatsProps> = ({
               </div>
               <div>
                 <h3 className="text-sm text-slate-400">Progress</h3>
-                <div className="text-base font-semibold text-white">{stepLabel}</div>
+                <div className="text-base font-semibold text-white">
+                  {stepLabel}
+                </div>
               </div>
             </div>
             <div className="flex items-center gap-2 text-slate-300">
@@ -167,7 +172,7 @@ const MonitoringStats: React.FC<MonitoringStatsProps> = ({
               style={{ width: `${progress}%` }}
             />
             <div className="absolute inset-0 flex items-center justify-center font-semibold text-white text-sm tabular-nums drop-shadow">
-              {isStarting ? 'warming up…' : `${progress.toFixed(1)}%`}
+              {isStarting ? "warming up…" : `${progress.toFixed(1)}%`}
             </div>
           </div>
         </CardContent>
@@ -181,9 +186,9 @@ const MonitoringStats: React.FC<MonitoringStatsProps> = ({
                 <CheckCircle className="w-4 h-4" />
               </div>
               <span>
-                Loss{' '}
+                Loss{" "}
                 <span className="text-slate-400 text-sm font-normal">
-                  ({trainingStatus.current_loss?.toFixed(4) ?? '—'})
+                  ({trainingStatus.current_loss?.toFixed(4) ?? "—"})
                 </span>
               </span>
             </CardTitle>
@@ -202,22 +207,25 @@ const MonitoringStats: React.FC<MonitoringStatsProps> = ({
                   >
                     <XAxis
                       dataKey="step"
-                      tick={{ fill: '#94a3b8', fontSize: 11 }}
+                      type="number"
+                      scale="linear"
+                      domain={["dataMin", "dataMax"]}
+                      tick={{ fill: "#94a3b8", fontSize: 11 }}
                       stroke="#475569"
                     />
                     <YAxis
-                      tick={{ fill: '#94a3b8', fontSize: 11 }}
+                      tick={{ fill: "#94a3b8", fontSize: 11 }}
                       stroke="#475569"
                       width={48}
                     />
                     <Tooltip
                       contentStyle={{
-                        background: '#1e293b',
-                        border: '1px solid #475569',
+                        background: "#1e293b",
+                        border: "1px solid #475569",
                         borderRadius: 8,
                       }}
-                      labelStyle={{ color: '#cbd5e1' }}
-                      itemStyle={{ color: '#34d399' }}
+                      labelStyle={{ color: "#cbd5e1" }}
+                      itemStyle={{ color: "#34d399" }}
                       formatter={(v: number) => v.toFixed(4)}
                     />
                     <Line
@@ -242,9 +250,9 @@ const MonitoringStats: React.FC<MonitoringStatsProps> = ({
                 <Activity className="w-4 h-4" />
               </div>
               <span>
-                Learning Rate{' '}
+                Learning Rate{" "}
                 <span className="text-slate-400 text-sm font-normal">
-                  ({trainingStatus.current_lr?.toExponential(2) ?? '—'})
+                  ({trainingStatus.current_lr?.toExponential(2) ?? "—"})
                 </span>
               </span>
             </CardTitle>
@@ -263,23 +271,26 @@ const MonitoringStats: React.FC<MonitoringStatsProps> = ({
                   >
                     <XAxis
                       dataKey="step"
-                      tick={{ fill: '#94a3b8', fontSize: 11 }}
+                      type="number"
+                      scale="linear"
+                      domain={["dataMin", "dataMax"]}
+                      tick={{ fill: "#94a3b8", fontSize: 11 }}
                       stroke="#475569"
                     />
                     <YAxis
-                      tick={{ fill: '#94a3b8', fontSize: 11 }}
+                      tick={{ fill: "#94a3b8", fontSize: 11 }}
                       stroke="#475569"
                       width={48}
                       tickFormatter={(v: number) => v.toExponential(0)}
                     />
                     <Tooltip
                       contentStyle={{
-                        background: '#1e293b',
-                        border: '1px solid #475569',
+                        background: "#1e293b",
+                        border: "1px solid #475569",
                         borderRadius: 8,
                       }}
-                      labelStyle={{ color: '#cbd5e1' }}
-                      itemStyle={{ color: '#fb923c' }}
+                      labelStyle={{ color: "#cbd5e1" }}
+                      itemStyle={{ color: "#fb923c" }}
                       formatter={(v: number) => v.toExponential(2)}
                     />
                     <Line
