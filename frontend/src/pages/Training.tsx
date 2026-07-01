@@ -112,7 +112,7 @@ const ConfigurationMode: React.FC = () => {
     batch_size: 8,
     seed: 1000,
     num_workers: 4,
-    log_freq: 250,
+    log_freq: 50,
     save_freq: 1000,
     save_checkpoint: true,
     resume: false,

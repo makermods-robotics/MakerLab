@@ -41,6 +41,12 @@ const MonitoringStats: React.FC<MonitoringStatsProps> = ({
   const [lossHistory, setLossHistory] = useState<LossPoint[]>([]);
   const [lrHistory, setLrHistory] = useState<LrPoint[]>([]);
   const lastStepRef = useRef(0);
+  // The last loss value we actually charted. The backend refreshes
+  // current_loss/current_lr only on a real log line (every log_freq steps) and
+  // forward-fills the stale values on the tqdm ticks in between. Keying appends
+  // off a loss-value change lets us plot one point per real log emission
+  // instead of a flat run of duplicated points across the intervening steps.
+  const lastLossValRef = useRef<number | null>(null);
   const { baseUrl, fetchWithHeaders } = useApi();
 
   // Seed the curves from the persisted log on mount (and when the active job
@@ -62,6 +68,9 @@ const MonitoringStats: React.FC<MonitoringStatsProps> = ({
           .slice(-HISTORY_CAP);
         setLossHistory(lossSeed);
         setLrHistory(lrSeed);
+        // Prime the loss ref so the first live tick (which forward-fills the
+        // last logged value) doesn't re-append a point we already seeded.
+        lastLossValRef.current = lossSeed[lossSeed.length - 1]?.loss ?? null;
         // Pin lastStepRef to the last seeded step so the first live tick
         // (whose step is >= the seed's last step) doesn't trigger the
         // step-regressed reset in the live-append effect below.
@@ -83,27 +92,43 @@ const MonitoringStats: React.FC<MonitoringStatsProps> = ({
     if (step < lastStepRef.current) {
       setLossHistory([]);
       setLrHistory([]);
+      lastLossValRef.current = null;
     }
     lastStepRef.current = step;
 
-    if (step > 0 && trainingStatus.current_loss != null) {
+    // A new log line refreshes current_loss (and current_lr alongside it).
+    // Between log lines the backend forward-fills the stale values on every
+    // tqdm tick, so we key off a loss-value change to detect a genuine new
+    // emission and append both series once per real log point — not once per
+    // step. Loss effectively never repeats to 4+ decimals, so this won't drop
+    // real points, and lr gets a point at each log step even on a constant
+    // schedule.
+    if (
+      step > 0 &&
+      trainingStatus.current_loss != null &&
+      trainingStatus.current_loss !== lastLossValRef.current
+    ) {
       const loss = trainingStatus.current_loss;
+      const lr = trainingStatus.current_lr;
+      lastLossValRef.current = loss;
       setLossHistory((prev) => {
         const last = prev[prev.length - 1];
         if (last && last.step === step) return prev;
         return [...prev, { step, loss }].slice(-HISTORY_CAP);
       });
+      if (lr != null) {
+        setLrHistory((prev) => {
+          const last = prev[prev.length - 1];
+          if (last && last.step === step) return prev;
+          return [...prev, { step, lr }].slice(-HISTORY_CAP);
+        });
+      }
     }
-
-    if (step > 0 && trainingStatus.current_lr != null) {
-      const lr = trainingStatus.current_lr;
-      setLrHistory((prev) => {
-        const last = prev[prev.length - 1];
-        if (last && last.step === step) return prev;
-        return [...prev, { step, lr }].slice(-HISTORY_CAP);
-      });
-    }
-  }, [trainingStatus.current_step, trainingStatus.current_loss, trainingStatus.current_lr]);
+  }, [
+    trainingStatus.current_step,
+    trainingStatus.current_loss,
+    trainingStatus.current_lr,
+  ]);
 
   const progress = getProgressPercentage();
   // Until tqdm fires its first progress line, total_steps is 0 — show

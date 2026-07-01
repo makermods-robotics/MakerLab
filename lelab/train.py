@@ -42,7 +42,10 @@ class TrainingRequest(BaseModel):
     num_workers: int = 4
 
     # Logging and checkpointing
-    log_freq: int = 250
+    # log_freq drives how often lerobot prints loss/lr (and thus the chart's
+    # resolution — one point per log line). Lower = smoother curves but noisier
+    # per-window averages and more log volume.
+    log_freq: int = 50
     save_freq: int = 1000
     eval_freq: int = 0
     save_checkpoint: bool = True

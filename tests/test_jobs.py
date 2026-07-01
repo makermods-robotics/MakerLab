@@ -57,6 +57,24 @@ def test_parse_metrics_into_extracts_loss_and_step() -> None:
     assert m.grad_norm == pytest.approx(1.5)
 
 
+def test_parse_metrics_into_keeps_tqdm_step_when_log_line_step_is_abbreviated() -> None:
+    """At >=1000 steps lerobot formats the log-line step with format_big_number
+    ("1K"), which int() can't parse. Feeding a tqdm line (exact step) then the
+    abbreviated loss line into the same metrics object must retain the exact
+    step and still extract the loss — this is what read_metrics_history relies
+    on so it doesn't drop every point past step 1000.
+    """
+    from lelab.jobs import TrainingMetrics, parse_metrics_into
+
+    m = TrainingMetrics()
+    parse_metrics_into("Training:  10%|██░| 1000/10000 [00:30<04:30, 3.2it/s]", m)
+    parse_metrics_into("INFO ... step:1K smpl:8K loss:0.0077 grdn:0.9 lr:0.0001 ...", m)
+
+    assert m.current_step == 1000  # kept from tqdm, not zeroed by "1K"
+    assert m.current_loss == pytest.approx(0.0077)
+    assert m.current_lr == pytest.approx(0.0001)
+
+
 def test_parse_metrics_into_extracts_tqdm_progress() -> None:
     from lelab.jobs import TrainingMetrics, parse_metrics_into
 

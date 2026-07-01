@@ -208,6 +208,10 @@ const AdvancedCard: React.FC<ConfigComponentProps> = ({ config, updateConfig }) 
                   }}
                   className="bg-slate-900 border-slate-600 text-white rounded-lg"
                 />
+                <p className="text-xs text-slate-500 mt-1">
+                  Steps between logged loss/lr points. Lower = higher-resolution
+                  charts (each point is a window average), but more log volume.
+                </p>
               </div>
               <div>
                 <Label htmlFor="save_freq" className="text-slate-300">

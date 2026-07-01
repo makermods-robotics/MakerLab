@@ -967,6 +967,14 @@ class JobRegistry:
         if not path.exists():
             return []
         points: list[MetricsHistoryPoint] = []
+        # Feed every line through ONE accumulator rather than a fresh one per
+        # line. lerobot formats the log-line step with format_big_number, so at
+        # >=1000 steps its token becomes "1K"/"2K" and int() can't parse it; a
+        # fresh-per-line parse would leave current_step at 0 and silently drop
+        # every metric point past step 1000. Carrying state means the exact
+        # integer step from the interleaved tqdm lines is retained for the loss
+        # lines that follow it.
+        acc = TrainingMetrics()
         with path.open() as f:
             for raw in f:
                 raw = raw.strip()
@@ -977,20 +985,17 @@ class JobRegistry:
                 except Exception:
                     continue  # skip malformed line, same as read_persisted_logs
                 msg = log_line.message
-                # Only the log-freq lines carry per-step metric values.
-                # Tqdm lines have a step but no loss/lr — skip them so we
-                # don't emit a flat-line point per tqdm tick.
-                if "step:" not in msg or "loss:" not in msg:
-                    continue
-                fresh = TrainingMetrics()
-                parse_metrics_into(msg, fresh)
-                if fresh.current_step <= 0:
+                parse_metrics_into(msg, acc)
+                # Only the log-freq lines carry loss/lr; tqdm lines just advance
+                # the step. Emit a point only when a loss value is present so we
+                # don't add a flat point per tqdm tick.
+                if "loss:" not in msg or acc.current_step <= 0 or acc.current_loss is None:
                     continue
                 point = MetricsHistoryPoint(
-                    step=fresh.current_step,
-                    loss=fresh.current_loss,
-                    lr=fresh.current_lr,
-                    grad_norm=fresh.grad_norm,
+                    step=acc.current_step,
+                    loss=acc.current_loss,
+                    lr=acc.current_lr,
+                    grad_norm=acc.grad_norm,
                 )
                 # Dedupe by step: overwrite on consecutive same-step lines.
                 if points and points[-1].step == point.step:
