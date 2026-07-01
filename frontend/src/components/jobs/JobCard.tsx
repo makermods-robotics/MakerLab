@@ -13,10 +13,12 @@ import {
   ExternalLink,
   Play,
   FastForward,
+  Download,
 } from "lucide-react";
 import { useApi } from "@/contexts/ApiContext";
 import { JobCheckpoint, listJobCheckpoints } from "@/lib/checkpointsApi";
 import CheckpointDropdown from "@/components/jobs/CheckpointDropdown";
+import PolicyExtraDialog from "@/components/training/PolicyExtraDialog";
 
 interface Props {
   job: JobRecord;
@@ -81,6 +83,15 @@ const JobCard: React.FC<Props> = ({ job, onStop, onDelete, onPlay }) => {
 
   const [checkpoints, setCheckpoints] = useState<JobCheckpoint[]>([]);
   const [selectedStep, setSelectedStep] = useState<number | null>(null);
+  // Set on a failed run whose policy needs a lerobot extra that's still missing
+  // — the likely cause. Offers the same one-click install as the training form.
+  const [missingExtra, setMissingExtra] = useState<{
+    policyType: string;
+    packageName: string;
+    installTarget: string;
+    installHint: string;
+  } | null>(null);
+  const [extraDialogOpen, setExtraDialogOpen] = useState(false);
 
   useEffect(() => {
     if (job.checkpoint_count <= 0) {
@@ -112,6 +123,53 @@ const JobCard: React.FC<Props> = ({ job, onStop, onDelete, onPlay }) => {
       cancelled = true;
     };
   }, [baseUrl, fetchWithHeaders, job.id, job.checkpoint_count]);
+
+  // A failed local training whose policy needs a lerobot extra that's still not
+  // installed almost certainly died on that ImportError — surface the install.
+  useEffect(() => {
+    const policyType = job.config?.policy_type;
+    if (job.state !== "failed" || job.runner !== "local" || !policyType) {
+      setMissingExtra(null);
+      return;
+    }
+    let cancelled = false;
+    fetchWithHeaders(`${baseUrl}/system/policy-extra/${policyType}`)
+      .then((r) => r.json())
+      .then(
+        (d: {
+          policy_type: string;
+          needs_extra: boolean;
+          available: boolean;
+          package: string;
+          install_target: string;
+          install_hint: string;
+        }) => {
+          if (cancelled) return;
+          setMissingExtra(
+            d.needs_extra && !d.available
+              ? {
+                  policyType: d.policy_type,
+                  packageName: d.package,
+                  installTarget: d.install_target,
+                  installHint: d.install_hint,
+                }
+              : null,
+          );
+        },
+      )
+      .catch(() => {
+        if (!cancelled) setMissingExtra(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    baseUrl,
+    fetchWithHeaders,
+    job.state,
+    job.runner,
+    job.config?.policy_type,
+  ]);
 
   const handleAction = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -274,7 +332,31 @@ const JobCard: React.FC<Props> = ({ job, onStop, onDelete, onPlay }) => {
             ) : null}
           </div>
         ) : null}
+        {missingExtra ? (
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={(e) => {
+              e.stopPropagation();
+              setExtraDialogOpen(true);
+            }}
+            className="h-8 gap-1.5 border-amber-500/50 text-amber-300 hover:bg-amber-500/10"
+          >
+            <Download className="w-3.5 h-3.5" /> Install{" "}
+            {missingExtra.installTarget}
+          </Button>
+        ) : null}
       </CardContent>
+      {missingExtra ? (
+        <PolicyExtraDialog
+          open={extraDialogOpen}
+          onOpenChange={setExtraDialogOpen}
+          policyType={missingExtra.policyType}
+          packageName={missingExtra.packageName}
+          installTarget={missingExtra.installTarget}
+          installHint={missingExtra.installHint}
+        />
+      ) : null}
     </Card>
   );
 };
