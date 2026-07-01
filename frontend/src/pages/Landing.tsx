@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import { ChevronsUpDown } from "lucide-react";
+import { ChevronsUpDown, GitMerge } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
 import LandingTopBar from "@/components/landing/LandingTopBar";
@@ -8,6 +8,7 @@ import Footer from "@/components/Footer";
 import RobotConfigManager from "@/components/landing/RobotConfigManager";
 import RecordingModal from "@/components/landing/RecordingModal";
 import DatasetPicker from "@/components/landing/DatasetPicker";
+import MergeDatasetsDialog from "@/components/landing/MergeDatasetsDialog";
 import JobsSection from "@/components/jobs/JobsSection";
 
 import UsageInstructionsModal from "@/components/landing/UsageInstructionsModal";
@@ -36,7 +37,12 @@ const Landing = () => {
     deleteRobot,
   } = useRobots();
 
-  const { datasets, loading: datasetsLoading } = useDatasets();
+  const {
+    datasets,
+    loading: datasetsLoading,
+    refresh: refreshDatasets,
+  } = useDatasets();
+  const [showMergeDialog, setShowMergeDialog] = useState(false);
 
   // Recording modal state
   const [showRecordingModal, setShowRecordingModal] = useState(false);
@@ -275,6 +281,13 @@ const Landing = () => {
                   <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
                 </Button>
               </DatasetPicker>
+              <button
+                type="button"
+                onClick={() => setShowMergeDialog(true)}
+                className="self-start text-xs text-gray-400 hover:text-white transition-colors inline-flex items-center gap-1"
+              >
+                <GitMerge className="h-3.5 w-3.5" /> Merge datasets…
+              </button>
             </div>
             <div className="bg-gray-800 rounded-lg border border-gray-700 p-3 flex flex-col gap-2">
               <h3 className="font-semibold text-lg text-left h-10 flex items-center">
@@ -301,6 +314,13 @@ const Landing = () => {
         open={showUsageModal}
         onOpenChange={setShowUsageModal}
         dismissible={!ON_SPACE}
+      />
+
+      <MergeDatasetsDialog
+        open={showMergeDialog}
+        onOpenChange={setShowMergeDialog}
+        datasets={datasets}
+        onMerged={refreshDatasets}
       />
 
       <RecordingModal

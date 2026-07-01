@@ -37,6 +37,7 @@ from starlette.responses import Response
 from starlette.types import Scope
 
 from . import datasets as dataset_browser
+from .merge import MergeRequest, handle_merge_status, handle_start_merge
 
 # Import our custom calibration functionality
 from .auto_calibrate import AutoCalibrationRequest, auto_calibration_manager
@@ -397,6 +398,18 @@ def datasets_list():
     Each entry carries a `source` field: "local", "hub", or "both".
     """
     return dataset_browser.list_all_datasets()
+
+
+@app.post("/datasets/merge")
+def datasets_merge(request: MergeRequest):
+    """Aggregate 2+ datasets into a new local dataset in the background."""
+    return handle_start_merge(request)
+
+
+@app.get("/datasets/merge/status")
+def datasets_merge_status():
+    """Current merge state + drained log lines (idle | running | done | error)."""
+    return handle_merge_status()
 
 
 @app.get("/ws-test")

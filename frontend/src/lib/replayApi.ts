@@ -19,3 +19,37 @@ export async function listDatasets(
     action: "List datasets",
   });
 }
+
+export type MergeState = "idle" | "running" | "done" | "error";
+
+export interface MergeStatus {
+  state: MergeState;
+  error: string | null;
+  output_repo_id: string | null;
+  logs: { timestamp: number; message: string }[];
+}
+
+export async function startDatasetMerge(
+  baseUrl: string,
+  fetcher: Fetcher,
+  sourceRepoIds: string[],
+  outputRepoId: string,
+): Promise<{ started: boolean; message: string }> {
+  return apiRequest(baseUrl, fetcher, "/datasets/merge", {
+    method: "POST",
+    body: JSON.stringify({
+      source_repo_ids: sourceRepoIds,
+      output_repo_id: outputRepoId,
+    }),
+    action: "Merge datasets",
+  });
+}
+
+export async function getDatasetMergeStatus(
+  baseUrl: string,
+  fetcher: Fetcher,
+): Promise<MergeStatus> {
+  return apiRequest<MergeStatus>(baseUrl, fetcher, "/datasets/merge/status", {
+    action: "Merge status",
+  });
+}
