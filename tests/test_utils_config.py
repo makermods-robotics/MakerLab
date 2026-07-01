@@ -493,3 +493,34 @@ def test_with_lelab_tag_dedupes() -> None:
 
     # Caller-supplied LeLab is not duplicated, and order is preserved.
     assert with_lelab_tag(["robotics", LELAB_TAG, "lerobot"]) == ["robotics", LELAB_TAG, "lerobot"]
+
+
+def test_config_referencing_robots_finds_active_users(tmp_lerobot_home: Path) -> None:
+    from lelab.utils import config as cfg
+
+    cfg.save_robot_record(
+        "arm1",
+        {"mode": "single", "leader_config": "calib_a", "follower_config": "calib_b"},
+        allow_create=True,
+    )
+    assert cfg.config_referencing_robots("teleop", "calib_a") == ["arm1"]
+    assert cfg.config_referencing_robots("robot", "calib_b") == ["arm1"]
+    assert cfg.config_referencing_robots("teleop", "unused") == []
+
+
+def test_config_referencing_robots_ignores_stale_right_config_in_single_mode(
+    tmp_lerobot_home: Path,
+) -> None:
+    """A right_* config left over after switching back to single must not block
+    deletion; it only counts when the robot is actually bimanual."""
+    from lelab.utils import config as cfg
+
+    cfg.save_robot_record(
+        "arm1",
+        {"mode": "single", "leader_config": "left", "right_leader_config": "stale"},
+        allow_create=True,
+    )
+    assert cfg.config_referencing_robots("teleop", "stale") == []
+
+    cfg.save_robot_record("arm1", {"mode": "bimanual"}, allow_create=False)
+    assert cfg.config_referencing_robots("teleop", "stale") == ["arm1"]

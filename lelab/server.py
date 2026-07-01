@@ -97,6 +97,7 @@ from .utils.config import (
     get_saved_robot_port,
     is_robot_record_clean,
     is_valid_robot_name,
+    config_referencing_robots,
     config_slot_conflict,
     list_robot_records,
     port_slot_conflict,
@@ -937,6 +938,19 @@ def delete_calibration_config(device_type: str, config_name: str):
         if not os.path.exists(file_path):
             return {"success": False, "message": "Configuration file not found"}
 
+        # Refuse if a robot still uses this config — deleting it would break that
+        # robot (needs recalibration). Reassign/switch/delete those robots first.
+        users = config_referencing_robots(device_type, config_name)
+        if users:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "success": False,
+                    "message": f"'{config_name}' is in use by {', '.join(users)}. "
+                    "Reassign a different config to those robots first.",
+                },
+            )
+
         # Delete the file
         os.remove(file_path)
         logger.info(f"Deleted calibration config: {file_path}")
@@ -1395,6 +1409,11 @@ def upsert_robot(name: str, data: dict, create: bool = False):
                     "Each arm needs its own serial port.",
                 },
             )
+
+    # Switching to single mode retires the right arm — clear its stale ports so
+    # they don't linger as "taken" in the port picker.
+    if (data or {}).get("mode") == "single":
+        data = {**(data or {}), "right_leader_port": "", "right_follower_port": ""}
 
     try:
         if create:

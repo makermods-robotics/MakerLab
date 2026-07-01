@@ -720,3 +720,28 @@ def rename_calibration_config(device_type: str, old_name: str, new_name: str) ->
 
     logger.info(f"Renamed calibration {device_type}/{old_stem} -> {new_stem}")
     return True, ""
+
+
+def config_referencing_robots(device_type: str, config_name: str) -> list[str]:
+    """Names of robot records that actively reference this calibration config.
+
+    Mirrors port_slot_conflict's mode rule: the right-arm slot only counts when
+    the record is bimanual, so a stale right_* config left over from a robot
+    since switched back to single doesn't block deletion. Deleting a config a
+    robot still uses would break that robot (it fails is_robot_record_clean and
+    can't teleoperate/record until recalibrated), so callers should refuse when
+    this returns any names.
+    """
+    single_field = "leader_config" if device_type == "teleop" else "follower_config"
+    right_field = (
+        "right_leader_config" if device_type == "teleop" else "right_follower_config"
+    )
+    stem = config_name[: -len(".json")] if config_name.endswith(".json") else config_name
+    users: list[str] = []
+    for rec in list_robot_records():
+        fields = [single_field]
+        if rec.get("mode") == "bimanual":
+            fields.append(right_field)
+        if any(rec.get(f) == stem for f in fields):
+            users.append(rec.get("name", "?"))
+    return users
