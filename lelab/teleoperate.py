@@ -35,24 +35,46 @@ from .utils.config import (
 
 logger = logging.getLogger(__name__)
 
-# sts3215 motor resolution; lerobot's _normalize uses (resolution - 1).
+# sts3215 motor resolution; lerobot's DEGREES normalization uses (resolution - 1).
 _STS3215_MAX_RES = 4095
 
-# SO-101 URDF (so101_new_calib.urdf) is authored with the all-zeros pose at the
-# arm's sleep position, not the "middle of range" pose where calibration's
-# set_half_turn_homings is performed. To make the URDF track the real arm:
-#   URDF_value = sign * (motor_normalized_deg - motor_at_urdf_zero_deg)
-# where motor_at_urdf_zero_deg = (urdf_zero_ticks - mid) * 360 / max_res, and
-# `urdf_zero_ticks` is the raw Present_Position when the robot is at sleep.
-# That tick value is a property of the SO-101 mechanics + URDF design, so it's
-# constant across calibrations as long as the user pressed ENTER at the "middle
-# of range" pose during set_half_turn_homings.
-# Joints not listed here use lerobot's default convention (URDF = motor).
-_SO101_URDF_CORRECTIONS = {
-    # motor_name: (sign, urdf_zero_present_position_ticks)
-    "shoulder_lift": (+1, 3252),
-    "elbow_flex": (+1, 1029),
+# General URDF mapping. Rather than chase a per-joint "zero tick" (fragile — the
+# URDF's zero pose isn't reachable/meaningful for every joint), affinely map each
+# motor's *calibrated* travel [range_min, range_max] onto its URDF joint limits
+# [lower, upper]. Both ends are known per arm: the motor range comes from
+# calibration, the limits from so101_new_calib.urdf. So the on-screen model
+# tracks the real arm across its full range, with no clamping and no per-arm tick
+# constants. The only per-joint fact that can't be derived is `sign`: whether
+# motor-increasing maps to URDF-increasing (+1) or -decreasing (-1). Limits are
+# in radians (URDF units); the gripper is RANGE_0_100 (0-100), not degrees.
+_SO101_URDF_JOINTS = {
+    # motor_name: (urdf_joint, lower_rad, upper_rad, sign)
+    "shoulder_pan": ("Rotation", -1.91986, 1.91986, +1),
+    "shoulder_lift": ("Pitch", -1.74533, 1.74533, +1),
+    "elbow_flex": ("Elbow", -1.74533, 1.57080, +1),
+    "wrist_flex": ("Wrist_Pitch", -1.65806, 1.65806, +1),
+    "wrist_roll": ("Wrist_Roll", -2.79253, 2.79253, +1),
+    "gripper": ("Jaw", -0.174533, 1.74533, +1),
 }
+
+
+def _motor_fraction(motor_name: str, value: float, cal) -> float | None:
+    """Position of ``value`` within the motor's calibrated travel, as a 0..1 fraction.
+
+    Returns ``None`` when a body (DEGREES) joint has no calibration to define its
+    range, so the caller can fall back instead of guessing.
+    """
+    if motor_name == "gripper":
+        # RANGE_0_100 norm mode: the observation already is a 0-100 percentage.
+        return value / 100.0
+    if cal is None:
+        return None
+    # DEGREES norm mode: value = (ticks - mid) * 360 / max_res, i.e. symmetric
+    # about 0 across the calibrated range, so 0.5 sits at the midpoint.
+    full_range_deg = (cal.range_max - cal.range_min) * 360.0 / _STS3215_MAX_RES
+    if full_range_deg <= 0:
+        return None
+    return 0.5 + value / full_range_deg
 
 # Global variables for teleoperation state
 teleoperation_active = False
@@ -90,22 +112,13 @@ def get_joint_positions_from_robot(robot, prefix: str = "", calibration=None) ->
     Returns:
         Dictionary mapping URDF joint names to radian values
     """
-    motor_to_urdf_mapping = {
-        "shoulder_pan": "Rotation",
-        "shoulder_lift": "Pitch",
-        "elbow_flex": "Elbow",
-        "wrist_flex": "Wrist_Pitch",
-        "wrist_roll": "Wrist_Roll",
-        "gripper": "Jaw",
-    }
-
     try:
         observation = robot.get_observation()
         calibration = calibration if calibration is not None else (getattr(robot, "calibration", None) or {})
 
         joint_positions: dict[str, float] = {}
         debug_rows = []
-        for motor_name, urdf_joint_name in motor_to_urdf_mapping.items():
+        for motor_name, (urdf_joint_name, lower, upper, sign) in _SO101_URDF_JOINTS.items():
             # Single-arm uses "<motor>.pos"; a bimanual BiSO robot prefixes both
             # arms ("left_<motor>.pos"/"right_<motor>.pos"). Callers pass the
             # prefix for bimanual; when unset, fall back to the left arm so a
@@ -118,19 +131,23 @@ def get_joint_positions_from_robot(robot, prefix: str = "", calibration=None) ->
                 joint_positions[urdf_joint_name] = 0.0
                 continue
 
-            raw_deg = observation[motor_key]
-            angle_degrees = raw_deg
-            correction = _SO101_URDF_CORRECTIONS.get(motor_name)
-            if correction is not None and motor_name in calibration:
-                sign, urdf_zero_ticks = correction
-                cal = calibration[motor_name]
-                mid = (cal.range_min + cal.range_max) / 2
-                motor_at_urdf_zero = (urdf_zero_ticks - mid) * 360 / _STS3215_MAX_RES
-                angle_degrees = sign * (raw_deg - motor_at_urdf_zero)
+            value = observation[motor_key]
+            frac = _motor_fraction(motor_name, value, calibration.get(motor_name))
+            if frac is None:
+                # No calibration for a DEGREES joint — render the raw normalized
+                # value as degrees so we still show *something* (uncalibrated).
+                urdf_rad = value * math.pi / 180.0
+            else:
+                # Affinely map the calibrated range onto the URDF limits; the
+                # clamp guards the rare case of driving slightly past calibration.
+                frac = min(1.0, max(0.0, frac))
+                if sign < 0:
+                    frac = 1.0 - frac
+                urdf_rad = lower + frac * (upper - lower)
 
-            joint_positions[urdf_joint_name] = angle_degrees * math.pi / 180.0
+            joint_positions[urdf_joint_name] = urdf_rad
             debug_rows.append(
-                f"{motor_name:14s} raw={raw_deg:+8.2f}° → {urdf_joint_name:11s} = {angle_degrees:+8.2f}°"
+                f"{motor_name:14s} raw={value:+8.2f} → {urdf_joint_name:11s} = {urdf_rad * 180.0 / math.pi:+8.2f}°"
             )
 
         # Throttled debug print (~once per second at 20 Hz broadcast).
@@ -143,7 +160,7 @@ def get_joint_positions_from_robot(robot, prefix: str = "", calibration=None) ->
 
     except Exception as e:
         logger.error(f"Error getting joint positions: {e}")
-        return dict.fromkeys(motor_to_urdf_mapping.values(), 0.0)
+        return {urdf[0]: 0.0 for urdf in _SO101_URDF_JOINTS.values()}
 
 
 def _safe_disconnect(device) -> None:
