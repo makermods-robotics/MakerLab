@@ -14,17 +14,26 @@ import {
   Play,
   FastForward,
   Download,
+  ChevronRight,
 } from "lucide-react";
 import { useApi } from "@/contexts/ApiContext";
 import { JobCheckpoint, listJobCheckpoints } from "@/lib/checkpointsApi";
 import CheckpointDropdown from "@/components/jobs/CheckpointDropdown";
 import PolicyExtraDialog from "@/components/training/PolicyExtraDialog";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 
 interface Props {
   job: JobRecord;
   onStop: (id: string) => void;
   onDelete: (id: string) => void;
   onPlay: (job: JobRecord, step: number) => void;
+  // Runs this job was resumed from, nearest-parent first. Rendered nested and
+  // hidden from the top-level list so a resumed lineage reads as one entry.
+  ancestors?: JobRecord[];
 }
 
 function relativeTime(epochSec: number): string {
@@ -53,7 +62,13 @@ const statePresentation: Record<
   },
 };
 
-const JobCard: React.FC<Props> = ({ job, onStop, onDelete, onPlay }) => {
+const JobCard: React.FC<Props> = ({
+  job,
+  onStop,
+  onDelete,
+  onPlay,
+  ancestors = [],
+}) => {
   const navigate = useNavigate();
   const { baseUrl, fetchWithHeaders } = useApi();
   const present = statePresentation[job.state];
@@ -225,7 +240,10 @@ const JobCard: React.FC<Props> = ({ job, onStop, onDelete, onPlay }) => {
 
   return (
     <Card
-      onClick={() => {
+      onClick={(e) => {
+        // stopPropagation so clicking a nested ancestor card doesn't also
+        // trigger the enclosing card's navigate.
+        e.stopPropagation();
         if (!isImported) navigate(`/training/${job.id}`);
       }}
       className={`bg-slate-800/50 border-slate-700 rounded-xl transition-colors ${
@@ -345,6 +363,31 @@ const JobCard: React.FC<Props> = ({ job, onStop, onDelete, onPlay }) => {
             <Download className="w-3.5 h-3.5" /> Install{" "}
             {missingExtra.installTarget}
           </Button>
+        ) : null}
+        {ancestors.length > 0 ? (
+          <Collapsible>
+            <CollapsibleTrigger
+              onClick={(e) => e.stopPropagation()}
+              className="group flex items-center gap-1.5 text-xs font-medium text-slate-400 hover:text-white transition-colors"
+            >
+              <ChevronRight className="w-3.5 h-3.5 transition-transform group-data-[state=open]:rotate-90" />
+              Resumed from ({ancestors.length})
+            </CollapsibleTrigger>
+            <CollapsibleContent className="pt-2">
+              <div className="space-y-2 border-l border-slate-700 pl-3">
+                {ancestors.map((anc) => (
+                  <JobCard
+                    key={anc.id}
+                    job={anc}
+                    onStop={onStop}
+                    onDelete={onDelete}
+                    onPlay={onPlay}
+                    ancestors={[]}
+                  />
+                ))}
+              </div>
+            </CollapsibleContent>
+          </Collapsible>
         ) : null}
       </CardContent>
       {missingExtra ? (

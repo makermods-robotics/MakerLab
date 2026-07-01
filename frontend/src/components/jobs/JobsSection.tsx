@@ -10,6 +10,7 @@ import {
   JobProgressSnapshot,
   JobRecord,
   deleteJob,
+  getJob,
   listHubJobs,
   listJobs,
   stopJob,
@@ -44,6 +45,11 @@ const JobsSection: React.FC = () => {
   const { toast } = useToast();
 
   const [jobs, setJobs] = useState<JobRecord[]>([]);
+  // Ancestors referenced via resume_from_job_id but paged out of the list, so a
+  // resumed run can still nest its source even when the source is old.
+  const [ancestorCache, setAncestorCache] = useState<Record<string, JobRecord>>(
+    {},
+  );
   const [hubJobs, setHubJobs] = useState<HubJob[]>([]);
   const [hubModels, setHubModels] = useState<HubModel[]>([]);
   const [hubAuthenticated, setHubAuthenticated] = useState(false);
@@ -125,6 +131,51 @@ const JobsSection: React.FC = () => {
   }, []);
 
   useJobsChangedSignal(refresh, applyProgress);
+
+  // Fetch the transitive closure of resume ancestors that aren't in the loaded
+  // page (or already cached), so nesting works regardless of how old the source
+  // run is. Idempotent: only unseen ids are fetched, so the frequent list
+  // refreshes during a run don't re-fetch. Missing/deleted ancestors are
+  // skipped, ending the chain.
+  useEffect(() => {
+    let cancelled = false;
+    const loaded = new Set(jobs.map((j) => j.id));
+    const queue = jobs
+      .map((j) => j.config?.resume_from_job_id)
+      .filter(
+        (id): id is string => !!id && !loaded.has(id) && !ancestorCache[id],
+      );
+    if (queue.length === 0) return;
+    (async () => {
+      const fetched: Record<string, JobRecord> = {};
+      const seen = new Set(queue);
+      while (queue.length > 0) {
+        const id = queue.shift() as string;
+        try {
+          const rec = await getJob(baseUrl, fetchWithHeaders, id);
+          fetched[id] = rec;
+          const parent = rec.config?.resume_from_job_id;
+          if (
+            parent &&
+            !loaded.has(parent) &&
+            !ancestorCache[parent] &&
+            !seen.has(parent)
+          ) {
+            seen.add(parent);
+            queue.push(parent);
+          }
+        } catch {
+          // Ancestor deleted or unreachable — skip; the chain just stops here.
+        }
+      }
+      if (!cancelled && Object.keys(fetched).length > 0) {
+        setAncestorCache((prev) => ({ ...prev, ...fetched }));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [jobs, ancestorCache, baseUrl, fetchWithHeaders]);
 
   const handleStop = async (id: string) => {
     try {
@@ -225,12 +276,54 @@ const JobsSection: React.FC = () => {
     [filteredHubModels, trackedRepoIds],
   );
 
+  // Resume lineage: job B stores config.resume_from_job_id = A. Hide A (the
+  // superseded run) from the top level and nest it under B, so a resumed chain
+  // reads as one entry. Lineage is linear — each job resumes from one parent.
+  const byId = useMemo(() => {
+    const m = new Map(jobs.map((j) => [j.id, j]));
+    // Cached ancestors fill in parents paged out of the list (never overriding
+    // a loaded record).
+    for (const rec of Object.values(ancestorCache)) {
+      if (!m.has(rec.id)) m.set(rec.id, rec);
+    }
+    return m;
+  }, [jobs, ancestorCache]);
+  const supersededIds = useMemo(() => {
+    const s = new Set<string>();
+    for (const j of jobs) {
+      const parent = j.config?.resume_from_job_id;
+      // Only a real successor (running or with its own checkpoints) supersedes
+      // its parent — a failed continuation shouldn't hide the source run.
+      const legit = j.state === "running" || j.checkpoint_count > 0;
+      if (parent && byId.has(parent) && legit) s.add(parent);
+    }
+    return s;
+  }, [jobs, byId]);
+  const ancestorsOf = useCallback(
+    (job: JobRecord): JobRecord[] => {
+      const chain: JobRecord[] = [];
+      const seen = new Set<string>([job.id]);
+      let cur = byId.get(job.config?.resume_from_job_id ?? "");
+      while (cur && !seen.has(cur.id)) {
+        chain.push(cur);
+        seen.add(cur.id);
+        cur = byId.get(cur.config?.resume_from_job_id ?? "");
+      }
+      return chain;
+    },
+    [byId],
+  );
+
   // Active = running or has runnable checkpoints. Everything else collapses
-  // under UNTRACKED so the eye lands on what's still relevant.
-  const localActive = useMemo(() => localJobs.filter(isJobActive), [localJobs]);
+  // under UNTRACKED so the eye lands on what's still relevant. Superseded runs
+  // are dropped from both — they surface nested under their successor instead.
+  const localActive = useMemo(
+    () => localJobs.filter((j) => isJobActive(j) && !supersededIds.has(j.id)),
+    [localJobs, supersededIds],
+  );
   const localUntracked = useMemo(
-    () => localJobs.filter((j) => !isJobActive(j)),
-    [localJobs],
+    () => localJobs.filter((j) => !isJobActive(j) && !supersededIds.has(j.id)),
+    [localJobs, supersededIds],
   );
   const trackedCloudActive = useMemo(
     () => trackedCloudJobs.filter(isJobActive),
@@ -317,6 +410,7 @@ const JobsSection: React.FC = () => {
                   onStop={handleStop}
                   onDelete={handleDelete}
                   onPlay={handlePlay}
+                  ancestors={ancestorsOf(job)}
                 />
               ))}
             </div>
@@ -428,6 +522,7 @@ const JobsSection: React.FC = () => {
                   onStop={handleStop}
                   onDelete={handleDelete}
                   onPlay={handlePlay}
+                  ancestors={ancestorsOf(job)}
                 />
               ))}
               {trackedCloudUntracked.map((job) => (
