@@ -12,12 +12,10 @@ import {
   XCircle,
   ExternalLink,
   Play,
+  FastForward,
 } from "lucide-react";
 import { useApi } from "@/contexts/ApiContext";
-import {
-  JobCheckpoint,
-  listJobCheckpoints,
-} from "@/lib/checkpointsApi";
+import { JobCheckpoint, listJobCheckpoints } from "@/lib/checkpointsApi";
 import CheckpointDropdown from "@/components/jobs/CheckpointDropdown";
 
 interface Props {
@@ -37,12 +35,20 @@ function relativeTime(epochSec: number): string {
 
 const statePresentation: Record<
   JobRecord["state"],
-  { label: string; color: string; Icon: React.ComponentType<{ className?: string }> }
+  {
+    label: string;
+    color: string;
+    Icon: React.ComponentType<{ className?: string }>;
+  }
 > = {
   running: { label: "Running", color: "text-green-400", Icon: Loader2 },
   done: { label: "Done", color: "text-slate-400", Icon: CheckCircle2 },
   failed: { label: "Failed", color: "text-red-400", Icon: XCircle },
-  interrupted: { label: "Interrupted", color: "text-amber-400", Icon: AlertTriangle },
+  interrupted: {
+    label: "Interrupted",
+    color: "text-amber-400",
+    Icon: AlertTriangle,
+  },
 };
 
 const JobCard: React.FC<Props> = ({ job, onStop, onDelete, onPlay }) => {
@@ -57,18 +63,21 @@ const JobCard: React.FC<Props> = ({ job, onStop, onDelete, onPlay }) => {
   const isStarting = isRunning && job.metrics.total_steps === 0;
   const progressPct =
     job.metrics.total_steps > 0
-      ? Math.min(100, (job.metrics.current_step / job.metrics.total_steps) * 100)
+      ? Math.min(
+          100,
+          (job.metrics.current_step / job.metrics.total_steps) * 100,
+        )
       : 0;
 
   const subtitle = isImported
     ? importedSource
     : isStarting
-    ? "starting…"
-    : isRunning
-    ? `started ${relativeTime(job.started_at)}`
-    : job.ended_at != null
-    ? `ended ${relativeTime(job.ended_at)}`
-    : present.label.toLowerCase();
+      ? "starting…"
+      : isRunning
+        ? `started ${relativeTime(job.started_at)}`
+        : job.ended_at != null
+          ? `ended ${relativeTime(job.ended_at)}`
+          : present.label.toLowerCase();
 
   const [checkpoints, setCheckpoints] = useState<JobCheckpoint[]>([]);
   const [selectedStep, setSelectedStep] = useState<number | null>(null);
@@ -109,9 +118,15 @@ const JobCard: React.FC<Props> = ({ job, onStop, onDelete, onPlay }) => {
     if (isRunning) {
       if (window.confirm("Stop this run?")) onStop(job.id);
     } else if (isImported) {
-      if (window.confirm("Remove this imported model? The source files are left untouched."))
+      if (
+        window.confirm(
+          "Remove this imported model? The source files are left untouched.",
+        )
+      )
         onDelete(job.id);
-    } else if (window.confirm("Delete this run? This wipes the output directory.")) {
+    } else if (
+      window.confirm("Delete this run? This wipes the output directory.")
+    ) {
       onDelete(job.id);
     }
   };
@@ -120,6 +135,31 @@ const JobCard: React.FC<Props> = ({ job, onStop, onDelete, onPlay }) => {
     e.stopPropagation();
     if (selectedStep == null) return;
     onPlay(job, selectedStep);
+  };
+
+  // Resume is local-only (lerobot can't resume from the Hub) and needs a saved
+  // checkpoint with optimizer/step state — i.e. a finished local training run.
+  const canContinue =
+    job.runner === "local" &&
+    !isRunning &&
+    checkpoints.length > 0 &&
+    selectedStep != null;
+
+  const handleContinue = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (selectedStep == null) return;
+    navigate("/training", {
+      state: {
+        resume: {
+          jobId: job.id,
+          step: selectedStep,
+          name: job.name,
+          datasetRepoId: job.config.dataset_repo_id,
+          policyType: job.config.policy_type,
+          sourceSteps: job.config.steps,
+        },
+      },
+    });
   };
 
   const showProgressBar = isRunning;
@@ -136,8 +176,12 @@ const JobCard: React.FC<Props> = ({ job, onStop, onDelete, onPlay }) => {
     >
       <CardContent className="p-4 space-y-3">
         <div className="flex items-start justify-between gap-2">
-          <div className={`flex items-center gap-1.5 text-xs font-semibold ${present.color}`}>
-            <Icon className={`w-3.5 h-3.5 ${isRunning ? "animate-spin" : ""}`} />
+          <div
+            className={`flex items-center gap-1.5 text-xs font-semibold ${present.color}`}
+          >
+            <Icon
+              className={`w-3.5 h-3.5 ${isRunning ? "animate-spin" : ""}`}
+            />
             {stateLabel}
           </div>
           {job.runner === "hf_cloud" && job.hf_job_url ? (
@@ -165,7 +209,11 @@ const JobCard: React.FC<Props> = ({ job, onStop, onDelete, onPlay }) => {
               className="h-7 w-7 text-slate-400 hover:text-white"
               aria-label={isRunning ? "Stop job" : "Delete job"}
             >
-              {isRunning ? <Square className="w-3.5 h-3.5" /> : <X className="w-3.5 h-3.5" />}
+              {isRunning ? (
+                <Square className="w-3.5 h-3.5" />
+              ) : (
+                <X className="w-3.5 h-3.5" />
+              )}
             </Button>
           )}
         </div>
@@ -180,7 +228,9 @@ const JobCard: React.FC<Props> = ({ job, onStop, onDelete, onPlay }) => {
           <div
             className="text-xs text-slate-400 truncate"
             title={subtitle}
-            style={isImported ? { direction: "rtl", textAlign: "left" } : undefined}
+            style={
+              isImported ? { direction: "rtl", textAlign: "left" } : undefined
+            }
           >
             {isImported ? "\u200e" + subtitle : subtitle}
           </div>
@@ -211,6 +261,17 @@ const JobCard: React.FC<Props> = ({ job, onStop, onDelete, onPlay }) => {
             >
               <Play className="w-4 h-4" />
             </Button>
+            {canContinue ? (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={handleContinue}
+                className="h-8 gap-1 border-sky-500/50 text-sky-300 hover:bg-sky-500/10"
+                aria-label="Continue training from this checkpoint"
+              >
+                <FastForward className="w-3.5 h-3.5" /> Continue
+              </Button>
+            ) : null}
           </div>
         ) : null}
       </CardContent>

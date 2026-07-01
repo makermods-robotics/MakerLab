@@ -494,6 +494,52 @@ def _list_local_checkpoints(output_dir: str) -> list[JobCheckpoint]:
     return out
 
 
+# lerobot writes this per-checkpoint config inside pretrained_model/; resuming
+# needs it as --config_path so lerobot can reconstruct the run.
+_TRAIN_CONFIG_NAME = "train_config.json"
+
+
+def _resolve_resume_config_path(source: JobRecord, step: int | None) -> str:
+    """Return the train_config.json path lerobot needs to resume `source` from
+    `step` (or its latest checkpoint if step is None).
+
+    Raises ValueError (→ HTTP 400) with a user-facing message when the source
+    can't be resumed: not a local run, no checkpoints, unknown step, or a
+    weights-only checkpoint missing the training_state/ (optimizer + step)
+    needed to continue.
+    """
+    if source.runner != "local":
+        raise ValueError(
+            "Only local training runs can be resumed — lerobot doesn't support "
+            "resuming from the Hub."
+        )
+    checkpoints = _list_local_checkpoints(source.output_dir)
+    if not checkpoints:
+        raise ValueError(f"Run {source.id!r} has no saved checkpoints to resume from.")
+    if step is None:
+        chosen = checkpoints[-1]  # list is step-sorted; take the latest
+    else:
+        chosen = next((c for c in checkpoints if c.step == step), None)
+        if chosen is None:
+            raise ValueError(f"Run {source.id!r} has no checkpoint at step {step}.")
+    # chosen.ref is <output_dir>/checkpoints/<step>/pretrained_model
+    pretrained_dir = Path(chosen.ref)
+    train_config = pretrained_dir / _TRAIN_CONFIG_NAME
+    training_state = pretrained_dir.parent / "training_state"
+    if not train_config.is_file():
+        raise ValueError(
+            f"Checkpoint at step {chosen.step} is missing {_TRAIN_CONFIG_NAME}, "
+            "so it can't be resumed."
+        )
+    if not training_state.is_dir():
+        raise ValueError(
+            f"Checkpoint at step {chosen.step} has no optimizer/step state "
+            "(training_state/), so it can't be resumed. Weights-only models "
+            "(e.g. imported) can only start a fresh run."
+        )
+    return str(train_config.resolve())
+
+
 _CLOUD_CKPT_TTL_SECONDS = 30.0
 _CKPT_PATH_RE = re.compile(r"^checkpoints/(\d+)/pretrained_model/config\.json$")
 
@@ -793,6 +839,27 @@ class JobRegistry:
                 for r in self._records.values():
                     if r.state == "running" and r.runner == "local":
                         raise JobAlreadyRunningError(r.id)
+
+            # Resume: turn the selected source run + step into the config_path
+            # lerobot needs. Do this under the lock (source lookup) and before
+            # creating the record so a bad selection fails cleanly with no
+            # orphaned job.
+            if config.resume:
+                if config.resume_from_job_id:
+                    source = self._records.get(config.resume_from_job_id)
+                    if source is None:
+                        raise ValueError(
+                            f"Resume source {config.resume_from_job_id!r} not found."
+                        )
+                    config.config_path = _resolve_resume_config_path(
+                        source, config.resume_from_step
+                    )
+                elif not config.config_path:
+                    raise ValueError(
+                        "Resume is on but no source checkpoint was selected. Use "
+                        '"Continue" on a completed local run rather than toggling '
+                        "resume manually."
+                    )
 
             job_id = _generate_job_id(config.policy_type, config.dataset_repo_id)
             job_dir = _job_dir(self._output_root, job_id)

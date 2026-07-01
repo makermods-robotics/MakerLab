@@ -36,6 +36,10 @@ export interface TrainingRequest {
   save_freq: number;
   save_checkpoint: boolean;
   resume: boolean;
+  // Set by the "Continue training" flow: source run + checkpoint step to
+  // resume from. The backend resolves these into the checkpoint's config_path.
+  resume_from_job_id?: string;
+  resume_from_step?: number;
   wandb_enable: boolean;
   wandb_project?: string;
   wandb_entity?: string;

@@ -17,8 +17,81 @@ LocalJobRunner.start() (see plan, "Discovered issue")."""
 from __future__ import annotations
 
 import json as _json
+from pathlib import Path
 
 import pytest
+
+
+def _make_checkpoint(output_dir: Path, step: int, *, with_state: bool = True) -> None:
+    """Lay out a lerobot-style checkpoint under <output_dir>/checkpoints/<step>."""
+    ck = output_dir / "checkpoints" / str(step)
+    pm = ck / "pretrained_model"
+    pm.mkdir(parents=True)
+    (pm / "config.json").write_text("{}")  # required by _list_local_checkpoints
+    (pm / "train_config.json").write_text("{}")
+    if with_state:
+        (ck / "training_state").mkdir()
+
+
+def _record(output_dir: Path, runner: str = "local"):
+    from lelab.jobs import JobRecord
+    from lelab.train import TrainingRequest
+
+    return JobRecord(
+        id="job-1",
+        name="run",
+        state="done",
+        config=TrainingRequest(dataset_repo_id="user/ds"),
+        output_dir=str(output_dir),
+        started_at=0.0,
+        runner=runner,
+    )
+
+
+def test_resolve_resume_config_path_returns_train_config(tmp_path) -> None:
+    from lelab.jobs import _resolve_resume_config_path
+
+    out = tmp_path / "run"
+    _make_checkpoint(out, 5000)
+    path = _resolve_resume_config_path(_record(out), 5000)
+    assert path.endswith("checkpoints/5000/pretrained_model/train_config.json")
+
+
+def test_resolve_resume_config_path_defaults_to_latest(tmp_path) -> None:
+    from lelab.jobs import _resolve_resume_config_path
+
+    out = tmp_path / "run"
+    _make_checkpoint(out, 1000)
+    _make_checkpoint(out, 3000)
+    path = _resolve_resume_config_path(_record(out), None)  # None ⇒ latest
+    assert "checkpoints/3000/" in path
+
+
+def test_resolve_resume_config_path_rejects_missing_training_state(tmp_path) -> None:
+    from lelab.jobs import _resolve_resume_config_path
+
+    out = tmp_path / "run"
+    _make_checkpoint(out, 2000, with_state=False)  # weights-only (e.g. imported)
+    with pytest.raises(ValueError, match="training_state"):
+        _resolve_resume_config_path(_record(out), 2000)
+
+
+def test_resolve_resume_config_path_rejects_non_local(tmp_path) -> None:
+    from lelab.jobs import _resolve_resume_config_path
+
+    out = tmp_path / "run"
+    _make_checkpoint(out, 2000)
+    with pytest.raises(ValueError, match="local"):
+        _resolve_resume_config_path(_record(out, runner="hf_cloud"), 2000)
+
+
+def test_resolve_resume_config_path_rejects_unknown_step(tmp_path) -> None:
+    from lelab.jobs import _resolve_resume_config_path
+
+    out = tmp_path / "run"
+    _make_checkpoint(out, 2000)
+    with pytest.raises(ValueError, match="no checkpoint at step 9999"):
+        _resolve_resume_config_path(_record(out), 9999)
 
 
 def test_extract_wandb_run_url_finds_canonical_url() -> None:

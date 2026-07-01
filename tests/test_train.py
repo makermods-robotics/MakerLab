@@ -37,6 +37,29 @@ def test_minimal_request_yields_well_formed_argv() -> None:
     assert _arg_value(cmd, "--output_dir") == "/tmp/out"
 
 
+def test_resume_request_emits_minimal_argv() -> None:
+    """On resume, lerobot reconstructs the run from config_path, so the builder
+    must NOT re-pass --dataset.* / --policy.type (they'd fight the loaded
+    config) and must pass the resume essentials plus the overridable knobs."""
+    from lelab.train import TrainingRequest, build_training_command
+
+    req = TrainingRequest(
+        dataset_repo_id="lerobot/pusht",
+        resume=True,
+        config_path="/runs/abc/checkpoints/5000/pretrained_model/train_config.json",
+        steps=20000,
+    )
+    cmd = build_training_command(req, output_dir="/tmp/new")
+
+    assert _arg_value(cmd, "--config_path").endswith("train_config.json")
+    assert _arg_value(cmd, "--resume") == "true"
+    assert _arg_value(cmd, "--output_dir") == "/tmp/new"
+    assert _arg_value(cmd, "--steps") == "20000"
+    # Inherited from the checkpoint — must not be re-specified on the CLI.
+    assert "--dataset.repo_id" not in cmd
+    assert "--policy.type" not in cmd
+
+
 def test_optional_dataset_fields_only_present_when_set() -> None:
     from lelab.train import TrainingRequest, build_training_command
 

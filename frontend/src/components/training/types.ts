@@ -20,6 +20,9 @@ export interface TrainingConfig {
 
   // Output configuration
   resume: boolean;
+  // Set by the "Continue training" flow (source run + checkpoint step).
+  resume_from_job_id?: string;
+  resume_from_step?: number;
 
   // Weights & Biases
   wandb_enable: boolean;
@@ -68,6 +71,6 @@ export interface ConfigComponentProps {
   config: TrainingConfig;
   updateConfig: <T extends keyof TrainingConfig>(
     key: T,
-    value: TrainingConfig[T]
+    value: TrainingConfig[T],
   ) => void;
 }

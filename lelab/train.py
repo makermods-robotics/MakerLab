@@ -53,6 +53,11 @@ class TrainingRequest(BaseModel):
     # Output configuration
     output_dir: str = "outputs/train"
     resume: bool = False
+    # Set by the "Continue training" flow: the source run + checkpoint step to
+    # resume from. The JobRegistry resolves these into `config_path` (lerobot
+    # needs the checkpoint's train_config.json to reconstruct the run).
+    resume_from_job_id: str | None = None
+    resume_from_step: int | None = None
     job_name: str | None = None
 
     # Weights & Biases
@@ -105,6 +110,27 @@ def build_training_command(
     that lacks lerobot.
     """
     cmd: list[str] = [python_executable, "-m", "lerobot.scripts.lerobot_train"]
+
+    # Resume: lerobot reconstructs the whole run (policy, dataset, optimizer,
+    # batch size, …) from the checkpoint's train_config.json, so we pass ONLY
+    # the resume essentials plus the few top-level overrides that make sense to
+    # change on continuation. Passing --policy.type / --dataset.* here would
+    # fight the loaded config — lerobot's resume path expects those to come
+    # from config_path, not the CLI. --steps must be raised above the resumed
+    # step for the loop to do any work; --output_dir points new checkpoints at
+    # this job's own dir so tracking stays consistent (state still loads from
+    # the source checkpoint).
+    if request.resume and request.config_path:
+        cmd.extend(["--config_path", request.config_path])
+        cmd.extend(["--resume", "true"])
+        cmd.extend(["--output_dir", output_dir])
+        cmd.extend(["--steps", str(request.steps)])
+        cmd.extend(["--log_freq", str(request.log_freq)])
+        cmd.extend(["--save_freq", str(request.save_freq)])
+        cmd.extend(["--save_checkpoint", "true" if request.save_checkpoint else "false"])
+        if request.job_name:
+            cmd.extend(["--job_name", request.job_name])
+        return cmd
 
     # Dataset
     cmd.extend(["--dataset.repo_id", request.dataset_repo_id])
