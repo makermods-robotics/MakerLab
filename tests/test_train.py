@@ -51,7 +51,13 @@ def test_resume_request_emits_minimal_argv() -> None:
     )
     cmd = build_training_command(req, output_dir="/tmp/new")
 
-    assert _arg_value(cmd, "--config_path").endswith("train_config.json")
+    # config_path MUST be the "--config_path=<path>" form: lerobot's own
+    # pre-parser ignores the space-separated form.
+    cfg_args = [a for a in cmd if a.startswith("--config_path=")]
+    assert cfg_args == [
+        "--config_path=/runs/abc/checkpoints/5000/pretrained_model/train_config.json"
+    ]
+    assert "--config_path" not in cmd  # not the two-token form
     assert _arg_value(cmd, "--resume") == "true"
     assert _arg_value(cmd, "--output_dir") == "/tmp/new"
     assert _arg_value(cmd, "--steps") == "20000"

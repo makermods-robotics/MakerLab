@@ -121,7 +121,10 @@ def build_training_command(
     # this job's own dir so tracking stays consistent (state still loads from
     # the source checkpoint).
     if request.resume and request.config_path:
-        cmd.extend(["--config_path", request.config_path])
+        # lerobot pre-parses config_path with its own parser that ONLY accepts
+        # the "--config_path=<path>" form (space-separated is silently ignored,
+        # yielding "A config_path is expected when resuming a run").
+        cmd.append(f"--config_path={request.config_path}")
         cmd.extend(["--resume", "true"])
         cmd.extend(["--output_dir", output_dir])
         cmd.extend(["--steps", str(request.steps)])
@@ -212,6 +215,7 @@ def build_training_command(
     # Advanced
     cmd.extend(["--use_policy_training_preset", "true" if request.use_policy_training_preset else "false"])
     if request.config_path:
-        cmd.extend(["--config_path", request.config_path])
+        # Equals form required — see the resume branch above.
+        cmd.append(f"--config_path={request.config_path}")
 
     return cmd
