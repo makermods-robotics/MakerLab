@@ -185,6 +185,40 @@ def test_parse_metrics_into_fresh_run_ignores_resume_rebase() -> None:
     assert m.total_steps == 100
 
 
+def test_read_metrics_history_stitches_resume_lineage(tmp_path) -> None:
+    """A resumed run's curve is continuous across the whole lineage: the source
+    run's points (0→100) are prepended to the resumed run's (150→200)."""
+    from lelab.jobs import JobRecord, JobRegistry, LogLine, _job_log_path
+    from lelab.train import TrainingRequest
+
+    reg = JobRegistry(tmp_path)
+    root = reg._output_root
+
+    def write_log(job_id: str, msgs: list[str]) -> None:
+        p = _job_log_path(root, job_id)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with p.open("w") as f:
+            for m in msgs:
+                f.write(LogLine(timestamp=0.0, message=m).model_dump_json() + "\n")
+
+    write_log("A", ["INFO step:50 loss:1.5 grdn:1 lr:0.001", "INFO step:100 loss:1.2 grdn:1 lr:0.001"])
+    write_log("B", ["INFO step:150 loss:1.1 grdn:1 lr:5e-4", "INFO step:200 loss:1.0 grdn:1 lr:2e-4"])
+    reg._records["A"] = JobRecord(
+        id="A", name="a", state="done",
+        config=TrainingRequest(dataset_repo_id="d"),
+        output_dir=str(root / "A" / "run"), started_at=0.0,
+    )
+    reg._records["B"] = JobRecord(
+        id="B", name="b", state="done",
+        config=TrainingRequest(dataset_repo_id="d", resume=True, resume_from_job_id="A", steps=200),
+        output_dir=str(root / "B" / "run"), started_at=0.0,
+    )
+
+    assert [p.step for p in reg.read_metrics_history("B")] == [50, 100, 150, 200]
+    # The source run on its own is unchanged (no lineage to prepend).
+    assert [p.step for p in reg.read_metrics_history("A")] == [50, 100]
+
+
 def test_parse_metrics_into_ignores_unrelated_lines() -> None:
     from lelab.jobs import TrainingMetrics, parse_metrics_into
 

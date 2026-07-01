@@ -228,6 +228,52 @@ def _resume_total_steps(config: TrainingRequest) -> int | None:
     return config.steps if config.resume else None
 
 
+def _read_log_metrics(
+    path: Path, resume_total: int | None
+) -> builtins.list[MetricsHistoryPoint]:
+    """Parse one job's log.jsonl into (step, loss, lr, grad_norm) points.
+
+    Feed every line through ONE accumulator rather than a fresh one per line.
+    lerobot formats the log-line step with format_big_number, so at >=1000 steps
+    its token becomes "1K"/"2K" and int() can't parse it; a fresh-per-line parse
+    would leave current_step at 0 and silently drop every point past step 1000.
+    Carrying state keeps the exact integer step from the interleaved tqdm lines
+    for the loss lines that follow.
+    """
+    if not path.exists():
+        return []
+    points: list[MetricsHistoryPoint] = []
+    acc = TrainingMetrics()
+    with path.open() as f:
+        for raw in f:
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                log_line = LogLine.model_validate_json(raw)
+            except Exception:
+                continue  # skip malformed line, same as read_persisted_logs
+            msg = log_line.message
+            parse_metrics_into(msg, acc, resume_total)
+            # Only the log-freq lines carry loss/lr; tqdm lines just advance the
+            # step. Emit a point only when a loss value is present so we don't
+            # add a flat point per tqdm tick.
+            if "loss:" not in msg or acc.current_step <= 0 or acc.current_loss is None:
+                continue
+            point = MetricsHistoryPoint(
+                step=acc.current_step,
+                loss=acc.current_loss,
+                lr=acc.current_lr,
+                grad_norm=acc.grad_norm,
+            )
+            # Dedupe by step: overwrite on consecutive same-step lines.
+            if points and points[-1].step == point.step:
+                points[-1] = point
+            else:
+                points.append(point)
+    return points
+
+
 class LocalJobRunner:
     """Run a training as a local subprocess.
 
@@ -1050,55 +1096,36 @@ class JobRegistry:
     def read_metrics_history(self, job_id: str) -> builtins.list[MetricsHistoryPoint]:
         """Reconstruct the per-step loss/lr/grad-norm series from log.jsonl.
 
-        Used by the frontend on Monitoring-page mount to seed the curves so
-        they survive page reloads, navigation, and lelab restarts. Re-parses
-        on every call; cache later if a slow file ever shows up.
+        Walks the resume lineage (job -> resume source -> …, oldest first) and
+        concatenates each run's points, so a resumed run's curve is continuous
+        across the whole training rather than starting at the resume step. Stops
+        at a missing ancestor (a deleted source) — the curve just starts later.
+
+        Used by the frontend on Monitoring-page mount to seed the curves so they
+        survive page reloads, navigation, and lelab restarts. Re-parses on every
+        call; cache later if a slow file ever shows up.
         """
         with self._lock:
             if job_id not in self._records:
                 raise JobNotFoundError(job_id)
-            resume_total = _resume_total_steps(self._records[job_id].config)
-        path = _job_log_path(self._output_root, job_id)
-        if not path.exists():
-            return []
-        points: list[MetricsHistoryPoint] = []
-        # Feed every line through ONE accumulator rather than a fresh one per
-        # line. lerobot formats the log-line step with format_big_number, so at
-        # >=1000 steps its token becomes "1K"/"2K" and int() can't parse it; a
-        # fresh-per-line parse would leave current_step at 0 and silently drop
-        # every metric point past step 1000. Carrying state means the exact
-        # integer step from the interleaved tqdm lines is retained for the loss
-        # lines that follow it.
-        acc = TrainingMetrics()
-        with path.open() as f:
-            for raw in f:
-                raw = raw.strip()
-                if not raw:
-                    continue
-                try:
-                    log_line = LogLine.model_validate_json(raw)
-                except Exception:
-                    continue  # skip malformed line, same as read_persisted_logs
-                msg = log_line.message
-                parse_metrics_into(msg, acc, resume_total)
-                # Only the log-freq lines carry loss/lr; tqdm lines just advance
-                # the step. Emit a point only when a loss value is present so we
-                # don't add a flat point per tqdm tick.
-                if "loss:" not in msg or acc.current_step <= 0 or acc.current_loss is None:
-                    continue
-                point = MetricsHistoryPoint(
-                    step=acc.current_step,
-                    loss=acc.current_loss,
-                    lr=acc.current_lr,
-                    grad_norm=acc.grad_norm,
-                )
-                # Dedupe by step: overwrite on consecutive same-step lines.
-                if points and points[-1].step == point.step:
-                    points[-1] = point
-                else:
-                    points.append(point)
-        points.sort(key=lambda p: p.step)
-        return points
+            chain: list[JobRecord] = []
+            seen: set[str] = set()
+            cur: JobRecord | None = self._records[job_id]
+            while cur is not None and cur.id not in seen:
+                chain.append(cur)
+                seen.add(cur.id)
+                parent_id = cur.config.resume_from_job_id
+                cur = self._records.get(parent_id) if parent_id else None
+        chain.reverse()  # oldest (root) first so steps ascend across the chain
+
+        # Concatenate each run's points; dedupe by step (later run wins) in case
+        # a resume boundary overlaps, then sort for a clean ascending curve.
+        by_step: dict[int, MetricsHistoryPoint] = {}
+        for record in chain:
+            log_path = _job_log_path(self._output_root, record.id)
+            for point in _read_log_metrics(log_path, _resume_total_steps(record.config)):
+                by_step[point.step] = point
+        return sorted(by_step.values(), key=lambda p: p.step)
 
     def _checkpoints_for(self, record: JobRecord) -> builtins.list[JobCheckpoint]:
         if record.runner == "imported":
