@@ -14,17 +14,11 @@ import {
   Play,
   FastForward,
   Download,
-  ChevronRight,
 } from "lucide-react";
 import { useApi } from "@/contexts/ApiContext";
 import { JobCheckpoint, listJobCheckpoints } from "@/lib/checkpointsApi";
 import CheckpointDropdown from "@/components/jobs/CheckpointDropdown";
 import PolicyExtraDialog from "@/components/training/PolicyExtraDialog";
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "@/components/ui/collapsible";
 
 interface Props {
   job: JobRecord;
@@ -96,7 +90,13 @@ const JobCard: React.FC<Props> = ({
           ? `ended ${relativeTime(job.ended_at)}`
           : present.label.toLowerCase();
 
-  const [checkpoints, setCheckpoints] = useState<JobCheckpoint[]>([]);
+  // Checkpoints across the resume lineage (this run + the runs it resumed
+  // from), each tagged with its owning job so inference/continue route to the
+  // right run. Sorted newest-step-first so the current run sits above inherited
+  // source checkpoints in the dropdown.
+  const [lineageCheckpoints, setLineageCheckpoints] = useState<
+    { job: JobRecord; ckpt: JobCheckpoint }[]
+  >([]);
   const [selectedStep, setSelectedStep] = useState<number | null>(null);
   // Set on a failed run whose policy needs a lerobot extra that's still missing
   // — the likely cause. Offers the same one-click install as the training form.
@@ -108,36 +108,42 @@ const JobCard: React.FC<Props> = ({
   } | null>(null);
   const [extraDialogOpen, setExtraDialogOpen] = useState(false);
 
+  // Key ancestors by id+count so the frequent list refreshes (which hand us new
+  // array refs) don't refetch unless the lineage actually changed.
+  const ancestorKey = ancestors
+    .map((a) => `${a.id}:${a.checkpoint_count}`)
+    .join("|");
+
   useEffect(() => {
-    if (job.checkpoint_count <= 0) {
-      setCheckpoints([]);
+    const lineage = [job, ...ancestors].filter((j) => j.checkpoint_count > 0);
+    if (lineage.length === 0) {
+      setLineageCheckpoints([]);
       setSelectedStep(null);
       return;
     }
     let cancelled = false;
-    listJobCheckpoints(baseUrl, fetchWithHeaders, job.id)
-      .then((cks) => {
-        if (cancelled) return;
-        setCheckpoints(cks);
-        if (cks.length > 0) {
-          const latest = cks[cks.length - 1].step;
-          setSelectedStep((prev) =>
-            prev != null && cks.some((c) => c.step === prev) ? prev : latest,
-          );
-        } else {
-          setSelectedStep(null);
-        }
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setCheckpoints([]);
-          setSelectedStep(null);
-        }
-      });
+    Promise.all(
+      lineage.map((j) =>
+        listJobCheckpoints(baseUrl, fetchWithHeaders, j.id)
+          .then((cks) => cks.map((ckpt) => ({ job: j, ckpt })))
+          .catch(() => [] as { job: JobRecord; ckpt: JobCheckpoint }[]),
+      ),
+    ).then((results) => {
+      if (cancelled) return;
+      const combined = results.flat().sort((a, b) => b.ckpt.step - a.ckpt.step);
+      setLineageCheckpoints(combined);
+      setSelectedStep((prev) =>
+        prev != null && combined.some((c) => c.ckpt.step === prev)
+          ? prev
+          : (combined[0]?.ckpt.step ?? null),
+      );
+    });
     return () => {
       cancelled = true;
     };
-  }, [baseUrl, fetchWithHeaders, job.id, job.checkpoint_count]);
+    // job/ancestors captured via id+count keys above.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [baseUrl, fetchWithHeaders, job.id, job.checkpoint_count, ancestorKey]);
 
   // A failed local training whose policy needs a lerobot extra that's still not
   // installed almost certainly died on that ImportError — surface the install.
@@ -204,18 +210,26 @@ const JobCard: React.FC<Props> = ({
     }
   };
 
+  // The selected checkpoint may belong to this run or an inherited source run;
+  // route inference/continue to whichever run owns it.
+  const selected =
+    lineageCheckpoints.find((c) => c.ckpt.step === selectedStep) ?? null;
+  const selectedJob = selected?.job ?? job;
+  // Flat list for the dropdown (already newest-first).
+  const checkpoints = lineageCheckpoints.map((c) => c.ckpt);
+
   const handlePlay = (e: React.MouseEvent) => {
     e.stopPropagation();
     if (selectedStep == null) return;
-    onPlay(job, selectedStep);
+    onPlay(selectedJob, selectedStep);
   };
 
   // Resume is local-only (lerobot can't resume from the Hub) and needs a saved
   // checkpoint with optimizer/step state — i.e. a finished local training run.
   const canContinue =
-    job.runner === "local" &&
+    selectedJob.runner === "local" &&
     !isRunning &&
-    checkpoints.length > 0 &&
+    lineageCheckpoints.length > 0 &&
     selectedStep != null;
 
   const handleContinue = (e: React.MouseEvent) => {
@@ -224,26 +238,24 @@ const JobCard: React.FC<Props> = ({
     navigate("/training", {
       state: {
         resume: {
-          jobId: job.id,
+          jobId: selectedJob.id,
           step: selectedStep,
-          name: job.name,
-          datasetRepoId: job.config.dataset_repo_id,
-          policyType: job.config.policy_type,
-          sourceSteps: job.config.steps,
+          name: selectedJob.name,
+          datasetRepoId: selectedJob.config.dataset_repo_id,
+          policyType: selectedJob.config.policy_type,
+          sourceSteps: selectedJob.config.steps,
         },
       },
     });
   };
 
   const showProgressBar = isRunning;
-  const showInferenceRow = checkpoints.length > 0 && selectedStep != null;
+  const showInferenceRow =
+    lineageCheckpoints.length > 0 && selectedStep != null;
 
   return (
     <Card
-      onClick={(e) => {
-        // stopPropagation so clicking a nested ancestor card doesn't also
-        // trigger the enclosing card's navigate.
-        e.stopPropagation();
+      onClick={() => {
         if (!isImported) navigate(`/training/${job.id}`);
       }}
       className={`bg-slate-800/50 border-slate-700 rounded-xl transition-colors ${
@@ -363,31 +375,6 @@ const JobCard: React.FC<Props> = ({
             <Download className="w-3.5 h-3.5" /> Install{" "}
             {missingExtra.installTarget}
           </Button>
-        ) : null}
-        {ancestors.length > 0 ? (
-          <Collapsible>
-            <CollapsibleTrigger
-              onClick={(e) => e.stopPropagation()}
-              className="group flex items-center gap-1.5 text-xs font-medium text-slate-400 hover:text-white transition-colors"
-            >
-              <ChevronRight className="w-3.5 h-3.5 transition-transform group-data-[state=open]:rotate-90" />
-              Resumed from ({ancestors.length})
-            </CollapsibleTrigger>
-            <CollapsibleContent className="pt-2">
-              <div className="space-y-2 border-l border-slate-700 pl-3">
-                {ancestors.map((anc) => (
-                  <JobCard
-                    key={anc.id}
-                    job={anc}
-                    onStop={onStop}
-                    onDelete={onDelete}
-                    onPlay={onPlay}
-                    ancestors={[]}
-                  />
-                ))}
-              </div>
-            </CollapsibleContent>
-          </Collapsible>
         ) : null}
       </CardContent>
       {missingExtra ? (
