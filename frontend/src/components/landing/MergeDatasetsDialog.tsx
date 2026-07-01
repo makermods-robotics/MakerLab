@@ -12,6 +12,7 @@ import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Loader2, CheckCircle2, XCircle, GitMerge } from "lucide-react";
 import { useApi } from "@/contexts/ApiContext";
+import { validateDatasetRepoId } from "@/lib/datasetName";
 import {
   DatasetItem,
   MergeStatus,
@@ -90,9 +91,11 @@ const MergeDatasetsDialog: React.FC<Props> = ({
     });
 
   const trimmedOutput = output.trim();
+  const outputError = trimmedOutput ? validateDatasetRepoId(trimmedOutput) : null;
   const canMerge =
     selected.size >= 2 &&
     trimmedOutput.length > 0 &&
+    outputError === null &&
     !selected.has(trimmedOutput) &&
     status?.state !== "running";
 
@@ -175,8 +178,12 @@ const MergeDatasetsDialog: React.FC<Props> = ({
                 value={output}
                 onChange={(e) => setOutput(e.target.value)}
                 placeholder="user/merged_dataset"
-                className="mt-1 bg-slate-900 border-slate-600 text-white"
+                aria-invalid={outputError !== null}
+                className="mt-1 bg-slate-900 border-slate-600 text-white aria-[invalid=true]:border-red-500/70"
               />
+              {outputError && (
+                <p className="mt-1 text-xs text-red-400">{outputError}</p>
+              )}
             </div>
             {startError ? (
               <p className="text-sm text-red-300">{startError}</p>

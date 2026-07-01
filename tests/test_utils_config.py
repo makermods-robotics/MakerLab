@@ -236,6 +236,66 @@ def test_validate_calibration_data_rejects_malformed(data) -> None:
     assert not ok and reason
 
 
+@pytest.mark.parametrize("name", ["whoo", "my-set_v2", "ok.name-1", "a", "A1"])
+def test_validate_dataset_name_accepts_good(name) -> None:
+    from lelab.utils import config as cfg
+
+    ok, reason = cfg.validate_dataset_name(name)
+    assert ok and reason == ""
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "",  # empty
+        "   ",  # whitespace only
+        " whoo",  # leading space
+        "whoo ",  # trailing space
+        "whoo/",  # trailing slash
+        "a/b",  # embedded slash
+        "..",  # traversal
+        ".",  # traversal
+        ".hidden",  # leading dot
+        "-lead",  # leading dash
+        "trail-",  # trailing dash
+        "bad name",  # space
+        "café",  # non-ascii
+        "x" * 97,  # too long
+    ],
+)
+def test_validate_dataset_name_rejects_bad(name) -> None:
+    from lelab.utils import config as cfg
+
+    ok, reason = cfg.validate_dataset_name(name)
+    assert not ok and reason
+
+
+@pytest.mark.parametrize("repo_id", ["whoo", "Mokuroh54/whoo", "user/my-set_v2"])
+def test_validate_dataset_repo_id_accepts_good(repo_id) -> None:
+    from lelab.utils import config as cfg
+
+    ok, reason = cfg.validate_dataset_repo_id(repo_id)
+    assert ok and reason == ""
+
+
+@pytest.mark.parametrize(
+    "repo_id",
+    [
+        "Mokuroh54/whoo/",  # the reported bug: trailing slash
+        "whoo/",  # trailing slash, no namespace
+        "a/b/c",  # too many slashes
+        "-bad/whoo",  # bad namespace
+        "user/.hidden",  # bad name segment
+        "",  # empty
+    ],
+)
+def test_validate_dataset_repo_id_rejects_bad(repo_id) -> None:
+    from lelab.utils import config as cfg
+
+    ok, reason = cfg.validate_dataset_repo_id(repo_id)
+    assert not ok and reason
+
+
 def test_save_imported_calibration_writes_and_normalizes(tmp_lerobot_home: Path) -> None:
     from lelab.utils import config as cfg
 

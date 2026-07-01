@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import logging
-import re
 import shutil
 import threading
 import time
@@ -38,6 +37,7 @@ from .utils.config import (
     LEADER_CONFIG_PATH,
     bimanual_base,
     setup_calibration_files,
+    validate_dataset_repo_id,
     with_lelab_tag,
 )
 
@@ -255,6 +255,14 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
 
     # Claim the active flag under the lock so two concurrent starts can't both
     # pass the precondition check.
+    logger.info(
+        "Recording start requested: dataset=%r, task=%r, resume=%s, mode=%s",
+        request.dataset_repo_id,
+        request.single_task,
+        request.resume,
+        getattr(request, "mode", "single"),
+    )
+
     with _state_lock:
         if recording_active:
             return {"success": False, "message": "Recording is already active"}
@@ -262,6 +270,17 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
             return {"success": False, "message": "Teleoperation is currently active. Stop it first."}
         if _rollout.inference_active:
             return {"success": False, "message": "Inference is currently active. Stop it first."}
+        # Refuse a malformed dataset name up front (before claiming the flag or
+        # touching hardware). Rejecting beats silent sanitization: "whoo/" used to
+        # smuggle in a namespace and land the dataset at "user/whoo/".
+        name_ok, name_reason = validate_dataset_repo_id(request.dataset_repo_id)
+        if not name_ok:
+            logger.warning(
+                "Rejected recording start: invalid dataset name %r (%s)",
+                request.dataset_repo_id,
+                name_reason,
+            )
+            return {"success": False, "message": name_reason}
         recording_active = True
         recording_thread = None
         recording_events = None
@@ -275,19 +294,10 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
         last_recording_info = None
 
     try:
-        # Sanitize the dataset name so push_to_hub never rejects a finished
-        # recording over an invalid character. HF repo names allow only
-        # [A-Za-z0-9._-]; everything else becomes "_".
-        if request.dataset_repo_id:
-            if "/" in request.dataset_repo_id:
-                namespace, name = request.dataset_repo_id.split("/", 1)
-                name = re.sub(r"[^A-Za-z0-9._-]", "_", name)
-                request.dataset_repo_id = f"{namespace}/{name}"
-            else:
-                request.dataset_repo_id = re.sub(r"[^A-Za-z0-9._-]", "_", request.dataset_repo_id)
-        # Stamp the repo_id with a timestamp (matches lerobot-record CLI behavior),
-        # so each session lands in a unique directory and the frontend gets the
-        # final id back in the response and status payload.
+        # The name is already validated (validate_dataset_repo_id in the lock), so
+        # no sanitization is needed here. Stamp the repo_id with a timestamp
+        # (matches lerobot-record CLI behavior) so each session lands in a unique
+        # directory and the frontend gets the final id back in the response.
         if not request.resume and request.dataset_repo_id:
             request.dataset_repo_id = f"{request.dataset_repo_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 

@@ -20,6 +20,17 @@ import { useSelectedDataset } from "@/hooks/useSelectedDataset";
 import { DatasetItem, deleteDataset } from "@/lib/replayApi";
 import { CameraConfig } from "@/components/recording/CameraConfiguration";
 import { isHostedSpace } from "@/lib/isHostedSpace";
+import { validateDatasetName } from "@/lib/datasetName";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 
 const ON_SPACE = isHostedSpace();
 
@@ -46,6 +57,8 @@ const Landing = () => {
     refresh: refreshDatasets,
   } = useDatasets();
   const [showMergeDialog, setShowMergeDialog] = useState(false);
+  const [pendingDeleteDataset, setPendingDeleteDataset] =
+    useState<DatasetItem | null>(null);
   const { selectedDataset, setSelectedDataset } = useSelectedDataset();
 
   // Recording modal state
@@ -117,17 +130,22 @@ const Landing = () => {
     openRecordingModal();
   };
 
-  const handleDeleteDataset = async (item: DatasetItem) => {
-    if (
-      !window.confirm(
-        `Delete "${item.repo_id}"? This removes it from local disk.`,
-      )
-    )
-      return;
+  // Deleting a dataset is destructive and irreversible, so route the picker's
+  // trash button through a styled confirm dialog instead of deleting inline.
+  const handleDeleteDataset = (item: DatasetItem) => {
+    setPendingDeleteDataset(item);
+  };
+
+  const confirmDeleteDataset = async () => {
+    const item = pendingDeleteDataset;
+    if (!item) return;
+    setPendingDeleteDataset(null);
     try {
       const res = await deleteDataset(baseUrl, fetchWithHeaders, item.repo_id);
       if (res.success) {
         toast({ title: "Dataset deleted", description: item.repo_id });
+        // If the deleted one was selected for training, clear the stale pick.
+        if (selectedDataset === item.repo_id) setSelectedDataset("");
         refreshDatasets();
       } else {
         toast({
@@ -167,6 +185,15 @@ const Landing = () => {
       toast({
         title: "Missing dataset details",
         description: "Please enter a dataset name and task description.",
+        variant: "destructive",
+      });
+      return;
+    }
+    const nameError = validateDatasetName(datasetName);
+    if (nameError) {
+      toast({
+        title: "Invalid dataset name",
+        description: nameError,
         variant: "destructive",
       });
       return;
@@ -344,6 +371,34 @@ const Landing = () => {
         datasets={datasets}
         onMerged={refreshDatasets}
       />
+
+      <AlertDialog
+        open={pendingDeleteDataset !== null}
+        onOpenChange={(o) => !o && setPendingDeleteDataset(null)}
+      >
+        <AlertDialogContent className="bg-gray-900 border-gray-800 text-white">
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              Delete "{pendingDeleteDataset?.repo_id}"?
+            </AlertDialogTitle>
+            <AlertDialogDescription className="text-gray-400">
+              This permanently removes the dataset from local disk — including
+              all recorded episodes and videos. You can't undo this.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel className="border-gray-600 bg-transparent text-gray-200 hover:bg-gray-800 hover:text-white">
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={confirmDeleteDataset}
+              className="bg-red-500 hover:bg-red-600 text-white"
+            >
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <RecordingModal
         open={showRecordingModal}

@@ -14,6 +14,7 @@ import {
   CommandList,
 } from "@/components/ui/command";
 import { DatasetItem } from "@/lib/replayApi";
+import { validateDatasetName } from "@/lib/datasetName";
 
 interface DatasetPickerProps {
   datasets: DatasetItem[];
@@ -26,7 +27,6 @@ interface DatasetPickerProps {
 }
 
 const REPO_ID_RE = /^[\w.-]+\/[\w.-]+$/;
-const NAME_RE = /^[A-Za-z0-9._-]+$/;
 
 const DatasetPicker: React.FC<DatasetPickerProps> = ({
   datasets,
@@ -45,7 +45,10 @@ const DatasetPicker: React.FC<DatasetPickerProps> = ({
     (d) => d.repo_id.toLowerCase() === trimmed.toLowerCase(),
   );
   const isRepoId = REPO_ID_RE.test(trimmed);
-  const isName = NAME_RE.test(trimmed) && !trimmed.includes("/");
+  // Shared with the backend (validate_dataset_name) so the picker never offers to
+  // create a name the recorder will later reject.
+  const nameError = validateDatasetName(trimmed);
+  const isName = nameError === null;
   const canCreate = trimmed.length > 0 && isName && !matchesExisting;
   const canOpenCustom = isRepoId && !matchesExisting;
 
@@ -56,7 +59,7 @@ const DatasetPicker: React.FC<DatasetPickerProps> = ({
       ? "Create new dataset…"
       : canCreate
         ? `Create "${trimmed}"`
-        : 'Use a name without "/"';
+        : (nameError ?? "Invalid name");
 
   const handleFooterCreate = () => {
     if (createDisabled) return;
