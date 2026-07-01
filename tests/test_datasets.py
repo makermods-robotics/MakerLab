@@ -15,15 +15,17 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from unittest.mock import patch
 
 
-def _make_dataset(root: Path, repo_id: str) -> None:
-    """Create the minimal layout `_is_dataset_dir` recognizes."""
+def _make_dataset(root: Path, repo_id: str, episodes: int = 1) -> None:
+    """Create the minimal layout `_is_dataset_dir` recognizes. `episodes`
+    defaults to 1 so the dataset isn't filtered out as empty."""
     d = root / repo_id
     (d / "meta").mkdir(parents=True)
-    (d / "meta" / "info.json").write_text("{}")
+    (d / "meta" / "info.json").write_text(json.dumps({"total_episodes": episodes}))
 
 
 def test_list_local_datasets_empty_when_root_missing(
@@ -75,6 +77,21 @@ def test_list_local_datasets_skips_non_dataset_dirs(
     assert "real_dataset" in repo_ids
     assert "calibration" not in repo_ids
     assert "ports" not in repo_ids
+
+
+def test_list_local_datasets_hides_empty_dataset(
+    tmp_lerobot_home: Path,
+) -> None:
+    """A 0-episode dataset (aborted recording) is hidden so it can't be picked
+    for merging/training, where it only errors out."""
+    from lelab.datasets import list_local_datasets
+
+    _make_dataset(tmp_lerobot_home, "has_eps", episodes=3)
+    _make_dataset(tmp_lerobot_home, "empty_ds", episodes=0)
+
+    repo_ids = [d["repo_id"] for d in list_local_datasets()]
+    assert "has_eps" in repo_ids
+    assert "empty_ds" not in repo_ids
 
 
 def test_list_user_datasets_returns_empty_when_not_logged_in(

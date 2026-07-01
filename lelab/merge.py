@@ -25,16 +25,24 @@ The subprocess entry is ``python -m lelab.merge <output_repo_id> <src> <src>…`
 import argparse
 import contextlib
 import logging
+import os
 import queue
 import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel
 
 from lerobot.datasets.aggregate import aggregate_datasets
+
+
+def _lerobot_cache_root() -> Path:
+    return Path(
+        os.environ.get("HF_LEROBOT_HOME", "~/.cache/huggingface/lerobot")
+    ).expanduser()
 
 logger = logging.getLogger(__name__)
 
@@ -159,9 +167,23 @@ def _run_cli(argv: list[str] | None = None) -> int:
 
     logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
     print(f"Merging {len(args.source_repo_ids)} datasets → {args.output_repo_id}", flush=True)
+
+    # Prefer each source's local copy: pass its root so lerobot loads it from
+    # cache instead of resolving a version against the Hub — which 404s for
+    # datasets that were never pushed. Sources not present locally get root=None
+    # so lerobot fetches them from the Hub as before.
+    cache_root = _lerobot_cache_root()
+    roots: list[Path | None] = [
+        cache_root / repo_id
+        if (cache_root / repo_id / "meta" / "info.json").exists()
+        else None
+        for repo_id in args.source_repo_ids
+    ]
+
     aggregate_datasets(
         repo_ids=args.source_repo_ids,
         aggr_repo_id=args.output_repo_id,
+        roots=roots,
     )
     print(f"Done. Created {args.output_repo_id}", flush=True)
     return 0
