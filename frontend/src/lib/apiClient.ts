@@ -42,7 +42,16 @@ export async function apiRequest<T = unknown>(
     let detail: string | null = null;
     try {
       const errBody = await r.json();
-      detail = errBody?.detail ?? errBody?.message ?? null;
+      const raw = errBody?.detail ?? errBody?.message ?? null;
+      // FastAPI 422s put an array of {loc,msg,type} in `detail`; most errors a
+      // string. Normalize non-strings so they never render as "[object Object]".
+      if (raw == null || typeof raw === "string") {
+        detail = raw;
+      } else if (Array.isArray(raw)) {
+        detail = raw.map((d) => d?.msg ?? JSON.stringify(d)).join("; ");
+      } else {
+        detail = JSON.stringify(raw);
+      }
     } catch {
       // body wasn't JSON
     }

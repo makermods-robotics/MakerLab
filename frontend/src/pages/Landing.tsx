@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import { ChevronsUpDown } from "lucide-react";
+import { ChevronsUpDown, GitMerge } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
 import LandingTopBar from "@/components/landing/LandingTopBar";
@@ -8,21 +8,36 @@ import Footer from "@/components/Footer";
 import RobotConfigManager from "@/components/landing/RobotConfigManager";
 import RecordingModal from "@/components/landing/RecordingModal";
 import DatasetPicker from "@/components/landing/DatasetPicker";
+import MergeDatasetsDialog from "@/components/landing/MergeDatasetsDialog";
 import JobsSection from "@/components/jobs/JobsSection";
 
 import UsageInstructionsModal from "@/components/landing/UsageInstructionsModal";
 import { useHfAuth } from "@/contexts/HfAuthContext";
+import { useApi } from "@/contexts/ApiContext";
 import { useRobots } from "@/hooks/useRobots";
 import { useDatasets } from "@/hooks/useDatasets";
-import { DatasetItem } from "@/lib/replayApi";
+import { useSelectedDataset } from "@/hooks/useSelectedDataset";
+import { DatasetItem, deleteDataset } from "@/lib/replayApi";
 import { CameraConfig } from "@/components/recording/CameraConfiguration";
 import { isHostedSpace } from "@/lib/isHostedSpace";
+import { validateDatasetName } from "@/lib/datasetName";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 
 const ON_SPACE = isHostedSpace();
 
 const Landing = () => {
   const [showUsageModal, setShowUsageModal] = useState(ON_SPACE);
   const { auth } = useHfAuth();
+  const { baseUrl, fetchWithHeaders } = useApi();
 
   const {
     selectedName,
@@ -36,7 +51,15 @@ const Landing = () => {
     deleteRobot,
   } = useRobots();
 
-  const { datasets, loading: datasetsLoading } = useDatasets();
+  const {
+    datasets,
+    loading: datasetsLoading,
+    refresh: refreshDatasets,
+  } = useDatasets();
+  const [showMergeDialog, setShowMergeDialog] = useState(false);
+  const [pendingDeleteDataset, setPendingDeleteDataset] =
+    useState<DatasetItem | null>(null);
+  const { selectedDataset, setSelectedDataset } = useSelectedDataset();
 
   // Recording modal state
   const [showRecordingModal, setShowRecordingModal] = useState(false);
@@ -90,38 +113,54 @@ const Landing = () => {
 
   const handleTrainingClick = () => navigate("/training");
 
-  const openHubViewer = (repoId: string, isPrivate: boolean) => {
-    const spacePath = `/spaces/lerobot/visualize_dataset?path=${encodeURIComponent(`/${repoId}`)}`;
-    const target = isPrivate
-      ? `https://huggingface.co/login?next=${encodeURIComponent(spacePath)}`
-      : `https://huggingface.co${spacePath}`;
-    window.open(target, "_blank", "noopener,noreferrer");
-  };
-
+  // Picking a dataset here selects it for training (the single source of truth);
+  // Training reads it from the persisted selection.
   const handlePickExisting = (item: DatasetItem) => {
-    if (item.source === "local" || item.source === "both") {
-      navigate("/upload", {
-        state: {
-          datasetInfo: {
-            dataset_repo_id: item.repo_id,
-            source: item.source,
-          },
-        },
-      });
-      return;
-    }
-    openHubViewer(item.repo_id, item.private);
+    setSelectedDataset(item.repo_id);
+    toast({ title: "Dataset selected", description: item.repo_id });
   };
 
   const handleOpenCustom = (repoId: string) => {
-    // Custom-typed repo IDs are always treated as Hub paths. We don't know
-    // privacy, so route through the login redirect to be safe.
-    openHubViewer(repoId, true);
+    setSelectedDataset(repoId);
+    toast({ title: "Dataset selected", description: repoId });
   };
 
   const handleCreateDataset = (name: string) => {
     setDatasetName(name);
     openRecordingModal();
+  };
+
+  // Deleting a dataset is destructive and irreversible, so route the picker's
+  // trash button through a styled confirm dialog instead of deleting inline.
+  const handleDeleteDataset = (item: DatasetItem) => {
+    setPendingDeleteDataset(item);
+  };
+
+  const confirmDeleteDataset = async () => {
+    const item = pendingDeleteDataset;
+    if (!item) return;
+    setPendingDeleteDataset(null);
+    try {
+      const res = await deleteDataset(baseUrl, fetchWithHeaders, item.repo_id);
+      if (res.success) {
+        toast({ title: "Dataset deleted", description: item.repo_id });
+        // If the deleted one was selected for training, clear the stale pick.
+        if (selectedDataset === item.repo_id) setSelectedDataset("");
+        refreshDatasets();
+      } else {
+        toast({
+          title: "Delete failed",
+          description: res.message ?? "Could not delete the dataset.",
+          variant: "destructive",
+        });
+      }
+    } catch (e) {
+      toast({
+        title: "Delete failed",
+        description: e instanceof Error ? e.message : String(e),
+        variant: "destructive",
+      });
+    }
   };
 
   const handleStartRecording = async () => {
@@ -146,6 +185,15 @@ const Landing = () => {
       toast({
         title: "Missing dataset details",
         description: "Please enter a dataset name and task description.",
+        variant: "destructive",
+      });
+      return;
+    }
+    const nameError = validateDatasetName(datasetName);
+    if (nameError) {
+      toast({
+        title: "Invalid dataset name",
+        description: nameError,
         variant: "destructive",
       });
       return;
@@ -261,20 +309,30 @@ const Landing = () => {
                 onPickExisting={handlePickExisting}
                 onOpenCustom={handleOpenCustom}
                 onCreateNew={handleCreateDataset}
+                onDelete={handleDeleteDataset}
               >
                 <Button
                   variant="outline"
                   role="combobox"
                   className="w-full justify-between bg-gray-800 border-gray-600 text-white hover:bg-gray-700"
                 >
-                  <span className="truncate text-gray-300">
+                  <span
+                    className={`truncate ${selectedDataset ? "text-white" : "text-gray-300"}`}
+                  >
                     {datasetsLoading
                       ? "Loading datasets…"
-                      : "Select or create a dataset…"}
+                      : (selectedDataset ?? "Select or create a dataset…")}
                   </span>
                   <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
                 </Button>
               </DatasetPicker>
+              <button
+                type="button"
+                onClick={() => setShowMergeDialog(true)}
+                className="self-start text-xs text-gray-400 hover:text-white transition-colors inline-flex items-center gap-1"
+              >
+                <GitMerge className="h-3.5 w-3.5" /> Merge datasets…
+              </button>
             </div>
             <div className="bg-gray-800 rounded-lg border border-gray-700 p-3 flex flex-col gap-2">
               <h3 className="font-semibold text-lg text-left h-10 flex items-center">
@@ -282,10 +340,14 @@ const Landing = () => {
               </h3>
               <Button
                 onClick={handleTrainingClick}
+                disabled={!selectedDataset}
                 className="w-full bg-green-500 hover:bg-green-600 text-white"
               >
                 Training
               </Button>
+              {!selectedDataset && (
+                <p className="text-xs text-gray-500">Select a dataset first.</p>
+              )}
             </div>
           </div>
         </div>
@@ -302,6 +364,41 @@ const Landing = () => {
         onOpenChange={setShowUsageModal}
         dismissible={!ON_SPACE}
       />
+
+      <MergeDatasetsDialog
+        open={showMergeDialog}
+        onOpenChange={setShowMergeDialog}
+        datasets={datasets}
+        onMerged={refreshDatasets}
+      />
+
+      <AlertDialog
+        open={pendingDeleteDataset !== null}
+        onOpenChange={(o) => !o && setPendingDeleteDataset(null)}
+      >
+        <AlertDialogContent className="bg-gray-900 border-gray-800 text-white">
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              Delete "{pendingDeleteDataset?.repo_id}"?
+            </AlertDialogTitle>
+            <AlertDialogDescription className="text-gray-400">
+              This permanently removes the dataset from local disk — including
+              all recorded episodes and videos. You can't undo this.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel className="border-gray-600 bg-transparent text-gray-200 hover:bg-gray-800 hover:text-white">
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={confirmDeleteDataset}
+              className="bg-red-500 hover:bg-red-600 text-white"
+            >
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <RecordingModal
         open={showRecordingModal}

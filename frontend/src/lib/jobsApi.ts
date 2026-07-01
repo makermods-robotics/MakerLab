@@ -28,6 +28,8 @@ export type MetricsHistoryPoint = {
 export interface TrainingRequest {
   dataset_repo_id: string;
   policy_type: string;
+  // Optional user-supplied display name; blank ⇒ backend auto-names the run.
+  job_name?: string;
   steps: number;
   batch_size: number;
   seed?: number;
@@ -36,6 +38,10 @@ export interface TrainingRequest {
   save_freq: number;
   save_checkpoint: boolean;
   resume: boolean;
+  // Set by the "Continue training" flow: source run + checkpoint step to
+  // resume from. The backend resolves these into the checkpoint's config_path.
+  resume_from_job_id?: string;
+  resume_from_step?: number;
   wandb_enable: boolean;
   wandb_project?: string;
   wandb_entity?: string;
@@ -272,6 +278,9 @@ export interface HubModel {
 
 export interface HubJobsResponse {
   authenticated: boolean;
+  // False when the token is valid but lacks the job.read scope (jobs can't be
+  // listed). Absent/true otherwise. Only meaningful when authenticated.
+  jobs_permission?: boolean;
   jobs: HubJob[];
   models: HubModel[];
 }

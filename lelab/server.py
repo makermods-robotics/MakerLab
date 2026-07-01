@@ -36,7 +36,10 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import Response
 from starlette.types import Scope
 
+from lerobot.policies.factory import make_policy_config
+
 from . import datasets as dataset_browser
+from .merge import MergeRequest, handle_merge_status, handle_start_merge
 
 # Import our custom calibration functionality
 from .auto_calibrate import AutoCalibrationRequest, auto_calibration_manager
@@ -96,6 +99,7 @@ from .utils.config import (
     get_saved_robot_port,
     is_robot_record_clean,
     is_valid_robot_name,
+    config_referencing_robots,
     config_slot_conflict,
     list_robot_records,
     port_slot_conflict,
@@ -108,8 +112,11 @@ from .utils.config import (
 from .utils.hf_auth import cached_whoami, handle_hf_auth_status, handle_hf_login, shared_hf_api
 from .utils.system import (
     handle_get_cuda_status,
+    handle_get_policy_extra,
     handle_get_training_extra,
     handle_get_wandb_extra,
+    handle_install_policy_extra,
+    handle_install_policy_extra_status,
     handle_install_training_extra,
     handle_install_training_extra_status,
     handle_install_wandb_extra,
@@ -311,6 +318,74 @@ def get_configs():
     return {"leader_configs": leader_configs, "follower_configs": follower_configs}
 
 
+# Frontend policy_type -> lerobot registry name. Same string except pi0_fast,
+# whose registry key is "pi0fast" in this lerobot pin (and is still likely
+# unavailable -> null). Keep in sync with the EssentialsCard Select options.
+_POLICY_TYPE_TO_LEROBOT = {
+    "act": "act",
+    "diffusion": "diffusion",
+    "pi0": "pi0",
+    "smolvla": "smolvla",
+    "tdmpc": "tdmpc",
+    "vqbet": "vqbet",
+    "pi0_fast": "pi0fast",
+    "sac": "sac",
+    "reward_classifier": "reward_classifier",
+}
+
+# Optimizer preset class name -> frontend optimizer_type value.
+_OPTIMIZER_CLASS_TO_NAME = {
+    "adamw": "adamw",
+    "adam": "adam",
+    "multiadam": "multi_adam",
+    "sgd": "sgd",
+}
+
+
+def _optimizer_name_from_preset(preset) -> str:
+    """Derive the optimizer_type value from the preset config class name.
+
+    e.g. AdamWConfig -> "adamw", MultiAdamConfig -> "multi_adam". Falls back to
+    the lowercased class name (with a trailing "config" stripped) for unknown
+    types so we never crash on an optimizer we haven't mapped.
+    """
+    name = type(preset).__name__.lower()
+    if name.endswith("config"):
+        name = name[: -len("config")]
+    return _OPTIMIZER_CLASS_TO_NAME.get(name, name)
+
+
+@app.get("/policy-optimizer-defaults")
+def get_policy_optimizer_defaults():
+    """Return each policy's optimizer preset (lr / weight_decay / grad_clip_norm
+    + optimizer type) so the training UI can show the real "policy default"
+    instead of a generic placeholder.
+
+    Every frontend policy_type is included; policies whose preset is unavailable
+    in this lerobot pin (e.g. pi0_fast, reward_classifier) map to null.
+    """
+    defaults: dict[str, Any] = {}
+    for frontend_name, lerobot_name in _POLICY_TYPE_TO_LEROBOT.items():
+        try:
+            preset = make_policy_config(lerobot_name).get_optimizer_preset()
+            defaults[frontend_name] = {
+                "optimizer": _optimizer_name_from_preset(preset),
+                "lr": preset.lr,
+                "weight_decay": preset.weight_decay,
+                "grad_clip_norm": preset.grad_clip_norm,
+            }
+        except Exception as e:
+            logger.warning(
+                "No optimizer preset for policy %r (lerobot %r): %s",
+                frontend_name,
+                lerobot_name,
+                e,
+            )
+            defaults[frontend_name] = None
+
+    return {"defaults": defaults}
+
+
 @app.post("/move-arm")
 def teleoperate_arm(request: TeleoperateRequest):
     """Start teleoperation of the robot arm"""
@@ -394,6 +469,18 @@ def datasets_list():
     Each entry carries a `source` field: "local", "hub", or "both".
     """
     return dataset_browser.list_all_datasets()
+
+
+@app.post("/datasets/merge")
+def datasets_merge(request: MergeRequest):
+    """Aggregate 2+ datasets into a new local dataset in the background."""
+    return handle_start_merge(request)
+
+
+@app.get("/datasets/merge/status")
+def datasets_merge_status():
+    """Current merge state + drained log lines (idle | running | done | error)."""
+    return handle_merge_status()
 
 
 @app.get("/ws-test")
@@ -491,6 +578,40 @@ def delete_dataset(request: DatasetInfoRequest):
 async def create_training_job(req: Request):
     raw = await req.json()
     body = StartTrainingBody.from_legacy(raw)
+    cfg = body.config
+    # Soft warning (not a block): lerobot saves/logs on `step % freq == 0`, so a
+    # frequency larger than the total step count means the action never fires —
+    # no checkpoint gets saved / no metrics logged. Almost always a config
+    # mistake, but we still let the run proceed.
+    if cfg.steps:
+        if cfg.save_freq > cfg.steps:
+            logger.warning(
+                "save_freq (%d) exceeds steps (%d) — no checkpoint will be saved.",
+                cfg.save_freq,
+                cfg.steps,
+            )
+        if cfg.log_freq > cfg.steps:
+            logger.warning(
+                "log_freq (%d) exceeds steps (%d) — no metrics will be logged.",
+                cfg.log_freq,
+                cfg.steps,
+            )
+    # Hard block (not a warning): when resuming, the total step count must be
+    # strictly above the checkpoint's step — lerobot requires --steps be raised
+    # above the resumed checkpoint, and steps == checkpoint would train nothing.
+    if cfg.resume_from_step is not None and cfg.steps <= cfg.resume_from_step:
+        logger.warning(
+            "Rejecting resume: steps (%d) <= checkpoint step (%d).",
+            cfg.steps,
+            cfg.resume_from_step,
+        )
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Total steps ({cfg.steps}) must be greater than the checkpoint's "
+                f"step ({cfg.resume_from_step}) to continue training."
+            ),
+        )
     try:
         record = job_registry.start(body.config, body.target)
     except JobAlreadyRunningError as exc:
@@ -543,11 +664,22 @@ def list_hub_jobs():
         if isinstance(o, dict) and o.get("name"):
             authors.append(o["name"])
 
+    jobs_permission = True
     try:
-        jobs = api.list_jobs()
+        # list_jobs() returns a lazy pagination generator — materialize it here
+        # so any HTTP error (e.g. 403 when the token lacks the job.read scope)
+        # is raised and caught inside this try, not later while building the
+        # response, which would escape as an unhandled 500.
+        jobs = list(api.list_jobs())
     except Exception as exc:
         logger.warning("list_jobs failed: %s", exc)
         jobs = []
+        # A 401/403 means the token is valid but lacks the job.read scope —
+        # surface that to the frontend so it can show a hint instead of a
+        # silently-empty list. Other failures are treated as transient.
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        if status in (401, 403):
+            jobs_permission = False
 
     seen_models: set[str] = set()
     models: list[dict] = []
@@ -570,6 +702,7 @@ def list_hub_jobs():
 
     return {
         "authenticated": True,
+        "jobs_permission": jobs_permission,
         "jobs": [
             {
                 "id": ji.id,
@@ -762,6 +895,25 @@ def install_wandb_extra_status():
     return handle_install_wandb_extra_status()
 
 
+@app.get("/system/policy-extra/{policy_type}")
+def get_policy_extra(policy_type: str):
+    """Whether the optional LeRobot extra a policy needs (e.g. transformers for
+    smolvla/pi0, diffusers for diffusion) is importable. Core policies report available."""
+    return handle_get_policy_extra(policy_type)
+
+
+@app.post("/system/policy-extra/{policy_type}/install")
+def install_policy_extra(policy_type: str):
+    """Spawn `pip install lerobot[<extra>]` for the policy's extra in the background."""
+    return handle_install_policy_extra(policy_type)
+
+
+@app.get("/system/policy-extra/{policy_type}/install-status")
+def install_policy_extra_status(policy_type: str):
+    """Return the policy extra's install state plus any pending log lines (drained on read)."""
+    return handle_install_policy_extra_status(policy_type)
+
+
 @app.get("/system/update-check")
 def update_check():
     """Report whether a newer LeLab commit exists on GitHub (cached, silent on failure)."""
@@ -889,6 +1041,19 @@ def delete_calibration_config(device_type: str, config_name: str):
         # Check if file exists
         if not os.path.exists(file_path):
             return {"success": False, "message": "Configuration file not found"}
+
+        # Refuse if a robot still uses this config — deleting it would break that
+        # robot (needs recalibration). Reassign/switch/delete those robots first.
+        users = config_referencing_robots(device_type, config_name)
+        if users:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "success": False,
+                    "message": f"'{config_name}' is in use by {', '.join(users)}. "
+                    "Reassign a different config to those robots first.",
+                },
+            )
 
         # Delete the file
         os.remove(file_path)
@@ -1348,6 +1513,11 @@ def upsert_robot(name: str, data: dict, create: bool = False):
                     "Each arm needs its own serial port.",
                 },
             )
+
+    # Switching to single mode retires the right arm — clear its stale ports so
+    # they don't linger as "taken" in the port picker.
+    if (data or {}).get("mode") == "single":
+        data = {**(data or {}), "right_leader_port": "", "right_follower_port": ""}
 
     try:
         if create:

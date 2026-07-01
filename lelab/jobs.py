@@ -170,22 +170,36 @@ def _parse_duration(s: str) -> float | None:
     return None
 
 
-def parse_metrics_into(line: str, metrics: TrainingMetrics) -> None:
+def parse_metrics_into(
+    line: str, metrics: TrainingMetrics, resume_total: int | None = None
+) -> None:
     """Update `metrics` in-place from one stdout line.
 
     Two complementary sources:
       * tqdm progress for current_step + total_steps + ETA (~1s cadence).
       * 'INFO ... step:N smpl:... loss:X grdn:Y lr:Z ...' for loss/lr/grdn
         (only at log_freq cadence, default every 250 steps).
+
+    `resume_total` is the run's full step target for a *resumed* run (None for a
+    fresh run). On resume lerobot's tqdm bar counts only the remaining window
+    (0 → steps−checkpoint), so the raw bar understates the true global step; we
+    rebase it to `checkpoint + bar = resume_total − remaining_total + bar` so
+    the UI shows e.g. 150/200 instead of 50/100. The `step:N` log line already
+    carries the true global step, so it needs no rebasing.
     """
     try:
         tqdm_match = _TQDM_RE.search(line)
         if tqdm_match:
             try:
-                metrics.current_step = int(tqdm_match.group(1))
+                tqdm_step = int(tqdm_match.group(1))
                 total = int(tqdm_match.group(2))
-                if total > 0:
-                    metrics.total_steps = total
+                if resume_total is not None and total > 0:
+                    metrics.current_step = resume_total - total + tqdm_step
+                    metrics.total_steps = resume_total
+                else:
+                    metrics.current_step = tqdm_step
+                    if total > 0:
+                        metrics.total_steps = total
                 eta = _parse_duration(tqdm_match.group(3))
                 if eta is not None:
                     metrics.eta_seconds = eta
@@ -208,6 +222,58 @@ def parse_metrics_into(line: str, metrics: TrainingMetrics) -> None:
         logger.debug("Error parsing log line %r: %s", line, exc)
 
 
+def _resume_total_steps(config: TrainingRequest) -> int | None:
+    """The full step target to rebase a resumed run's tqdm bar against (see
+    parse_metrics_into). None for a fresh run — its bar is already global."""
+    return config.steps if config.resume else None
+
+
+def _read_log_metrics(
+    path: Path, resume_total: int | None
+) -> builtins.list[MetricsHistoryPoint]:
+    """Parse one job's log.jsonl into (step, loss, lr, grad_norm) points.
+
+    Feed every line through ONE accumulator rather than a fresh one per line.
+    lerobot formats the log-line step with format_big_number, so at >=1000 steps
+    its token becomes "1K"/"2K" and int() can't parse it; a fresh-per-line parse
+    would leave current_step at 0 and silently drop every point past step 1000.
+    Carrying state keeps the exact integer step from the interleaved tqdm lines
+    for the loss lines that follow.
+    """
+    if not path.exists():
+        return []
+    points: list[MetricsHistoryPoint] = []
+    acc = TrainingMetrics()
+    with path.open() as f:
+        for raw in f:
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                log_line = LogLine.model_validate_json(raw)
+            except Exception:
+                continue  # skip malformed line, same as read_persisted_logs
+            msg = log_line.message
+            parse_metrics_into(msg, acc, resume_total)
+            # Only the log-freq lines carry loss/lr; tqdm lines just advance the
+            # step. Emit a point only when a loss value is present so we don't
+            # add a flat point per tqdm tick.
+            if "loss:" not in msg or acc.current_step <= 0 or acc.current_loss is None:
+                continue
+            point = MetricsHistoryPoint(
+                step=acc.current_step,
+                loss=acc.current_loss,
+                lr=acc.current_lr,
+                grad_norm=acc.grad_norm,
+            )
+            # Dedupe by step: overwrite on consecutive same-step lines.
+            if points and points[-1].step == point.step:
+                points[-1] = point
+            else:
+                points.append(point)
+    return points
+
+
 class LocalJobRunner:
     """Run a training as a local subprocess.
 
@@ -228,6 +294,7 @@ class LocalJobRunner:
         self._log_file_path = log_file_path
         self._log_file = None  # type: ignore[assignment]
         self._wandb_run_url: str | None = None
+        self._resume_total: int | None = None
 
     def start(
         self,
@@ -237,6 +304,8 @@ class LocalJobRunner:
     ) -> None:
         if self._process is not None:
             raise RuntimeError("LocalJobRunner already started")
+
+        self._resume_total = _resume_total_steps(config)
 
         # Build the command via the helper that lives in train.py.
         from .train import build_training_command  # avoid import cycle at module load
@@ -325,7 +394,7 @@ class LocalJobRunner:
                 stripped = line.rstrip()
                 if not stripped:
                     continue
-                parse_metrics_into(stripped, self._metrics)
+                parse_metrics_into(stripped, self._metrics, self._resume_total)
                 if self._wandb_run_url is None:
                     url = extract_wandb_run_url(stripped)
                     if url is not None:
@@ -364,10 +433,12 @@ class TailingJobRunner:
         metrics: TrainingMetrics,
         log_file_path: Path,
         pid: int,
+        resume_total: int | None = None,
     ) -> None:
         self._metrics = metrics
         self._log_file_path = log_file_path
         self._pid = pid
+        self._resume_total = resume_total
         self._log_queue: Queue[LogLine] = Queue()
         self._tail_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
@@ -447,7 +518,9 @@ class TailingJobRunner:
                             log_line = LogLine.model_validate_json(raw.strip())
                         except Exception:
                             continue
-                        parse_metrics_into(log_line.message, self._metrics)
+                        parse_metrics_into(
+                            log_line.message, self._metrics, self._resume_total
+                        )
                         if self._wandb_run_url is None:
                             url = extract_wandb_run_url(log_line.message)
                             if url is not None:
@@ -492,6 +565,52 @@ def _list_local_checkpoints(output_dir: str) -> list[JobCheckpoint]:
         )
     out.sort(key=lambda c: c.step)
     return out
+
+
+# lerobot writes this per-checkpoint config inside pretrained_model/; resuming
+# needs it as --config_path so lerobot can reconstruct the run.
+_TRAIN_CONFIG_NAME = "train_config.json"
+
+
+def _resolve_resume_config_path(source: JobRecord, step: int | None) -> str:
+    """Return the train_config.json path lerobot needs to resume `source` from
+    `step` (or its latest checkpoint if step is None).
+
+    Raises ValueError (→ HTTP 400) with a user-facing message when the source
+    can't be resumed: not a local run, no checkpoints, unknown step, or a
+    weights-only checkpoint missing the training_state/ (optimizer + step)
+    needed to continue.
+    """
+    if source.runner != "local":
+        raise ValueError(
+            "Only local training runs can be resumed — lerobot doesn't support "
+            "resuming from the Hub."
+        )
+    checkpoints = _list_local_checkpoints(source.output_dir)
+    if not checkpoints:
+        raise ValueError(f"Run {source.id!r} has no saved checkpoints to resume from.")
+    if step is None:
+        chosen = checkpoints[-1]  # list is step-sorted; take the latest
+    else:
+        chosen = next((c for c in checkpoints if c.step == step), None)
+        if chosen is None:
+            raise ValueError(f"Run {source.id!r} has no checkpoint at step {step}.")
+    # chosen.ref is <output_dir>/checkpoints/<step>/pretrained_model
+    pretrained_dir = Path(chosen.ref)
+    train_config = pretrained_dir / _TRAIN_CONFIG_NAME
+    training_state = pretrained_dir.parent / "training_state"
+    if not train_config.is_file():
+        raise ValueError(
+            f"Checkpoint at step {chosen.step} is missing {_TRAIN_CONFIG_NAME}, "
+            "so it can't be resumed."
+        )
+    if not training_state.is_dir():
+        raise ValueError(
+            f"Checkpoint at step {chosen.step} has no optimizer/step state "
+            "(training_state/), so it can't be resumed. Weights-only models "
+            "(e.g. imported) can only start a fresh run."
+        )
+    return str(train_config.resolve())
 
 
 _CLOUD_CKPT_TTL_SECONDS = 30.0
@@ -794,10 +913,35 @@ class JobRegistry:
                     if r.state == "running" and r.runner == "local":
                         raise JobAlreadyRunningError(r.id)
 
+            # Resume: turn the selected source run + step into the config_path
+            # lerobot needs. Do this under the lock (source lookup) and before
+            # creating the record so a bad selection fails cleanly with no
+            # orphaned job.
+            if config.resume:
+                if config.resume_from_job_id:
+                    source = self._records.get(config.resume_from_job_id)
+                    if source is None:
+                        raise ValueError(
+                            f"Resume source {config.resume_from_job_id!r} not found."
+                        )
+                    config.config_path = _resolve_resume_config_path(
+                        source, config.resume_from_step
+                    )
+                elif not config.config_path:
+                    raise ValueError(
+                        "Resume is on but no source checkpoint was selected. Use "
+                        '"Continue" on a completed local run rather than toggling '
+                        "resume manually."
+                    )
+
             job_id = _generate_job_id(config.policy_type, config.dataset_repo_id)
             job_dir = _job_dir(self._output_root, job_id)
             lerobot_output_dir = str(job_dir / "run")
-            name = f"{config.policy_type.upper()} · {config.dataset_repo_id}"
+            name = (
+                config.job_name.strip()
+                if (config.job_name and config.job_name.strip())
+                else f"{config.policy_type.upper()} · {config.dataset_repo_id}"
+            )
             record = JobRecord(
                 id=job_id,
                 name=name,
@@ -956,49 +1100,36 @@ class JobRegistry:
     def read_metrics_history(self, job_id: str) -> builtins.list[MetricsHistoryPoint]:
         """Reconstruct the per-step loss/lr/grad-norm series from log.jsonl.
 
-        Used by the frontend on Monitoring-page mount to seed the curves so
-        they survive page reloads, navigation, and lelab restarts. Re-parses
-        on every call; cache later if a slow file ever shows up.
+        Walks the resume lineage (job -> resume source -> …, oldest first) and
+        concatenates each run's points, so a resumed run's curve is continuous
+        across the whole training rather than starting at the resume step. Stops
+        at a missing ancestor (a deleted source) — the curve just starts later.
+
+        Used by the frontend on Monitoring-page mount to seed the curves so they
+        survive page reloads, navigation, and lelab restarts. Re-parses on every
+        call; cache later if a slow file ever shows up.
         """
         with self._lock:
             if job_id not in self._records:
                 raise JobNotFoundError(job_id)
-        path = _job_log_path(self._output_root, job_id)
-        if not path.exists():
-            return []
-        points: list[MetricsHistoryPoint] = []
-        with path.open() as f:
-            for raw in f:
-                raw = raw.strip()
-                if not raw:
-                    continue
-                try:
-                    log_line = LogLine.model_validate_json(raw)
-                except Exception:
-                    continue  # skip malformed line, same as read_persisted_logs
-                msg = log_line.message
-                # Only the log-freq lines carry per-step metric values.
-                # Tqdm lines have a step but no loss/lr — skip them so we
-                # don't emit a flat-line point per tqdm tick.
-                if "step:" not in msg or "loss:" not in msg:
-                    continue
-                fresh = TrainingMetrics()
-                parse_metrics_into(msg, fresh)
-                if fresh.current_step <= 0:
-                    continue
-                point = MetricsHistoryPoint(
-                    step=fresh.current_step,
-                    loss=fresh.current_loss,
-                    lr=fresh.current_lr,
-                    grad_norm=fresh.grad_norm,
-                )
-                # Dedupe by step: overwrite on consecutive same-step lines.
-                if points and points[-1].step == point.step:
-                    points[-1] = point
-                else:
-                    points.append(point)
-        points.sort(key=lambda p: p.step)
-        return points
+            chain: list[JobRecord] = []
+            seen: set[str] = set()
+            cur: JobRecord | None = self._records[job_id]
+            while cur is not None and cur.id not in seen:
+                chain.append(cur)
+                seen.add(cur.id)
+                parent_id = cur.config.resume_from_job_id
+                cur = self._records.get(parent_id) if parent_id else None
+        chain.reverse()  # oldest (root) first so steps ascend across the chain
+
+        # Concatenate each run's points; dedupe by step (later run wins) in case
+        # a resume boundary overlaps, then sort for a clean ascending curve.
+        by_step: dict[int, MetricsHistoryPoint] = {}
+        for record in chain:
+            log_path = _job_log_path(self._output_root, record.id)
+            for point in _read_log_metrics(log_path, _resume_total_steps(record.config)):
+                by_step[point.step] = point
+        return sorted(by_step.values(), key=lambda p: p.step)
 
     def _checkpoints_for(self, record: JobRecord) -> builtins.list[JobCheckpoint]:
         if record.runner == "imported":
@@ -1118,6 +1249,7 @@ class JobRegistry:
                             record.metrics,
                             _job_log_path(self._output_root, record.id),
                             pid,
+                            _resume_total_steps(record.config),
                         )
                         runner.start_tailing()
                         self._runners[record.id] = runner

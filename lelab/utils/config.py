@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import platform
+import re
 import shutil
 import time
 from pathlib import Path
@@ -622,6 +623,56 @@ def calibration_dir_for_device(device_type: str) -> str | None:
     return None
 
 
+# A dataset id is either a bare "name" or "namespace/name" (exactly one slash).
+# Each segment is an HF-style path component: 1-96 chars of [A-Za-z0-9._-] that
+# starts and ends with an alphanumeric. We REJECT bad names (rather than silently
+# sanitize) so e.g. "whoo/" fails loudly at the source instead of smuggling in a
+# namespace and landing the dataset in a surprising path like "user/whoo/".
+_DATASET_SEGMENT_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,94}[A-Za-z0-9])?$")
+
+
+def validate_dataset_name(name: object) -> tuple[bool, str]:
+    """Validate ONE dataset repo-id segment (the user-typed name, or a namespace).
+
+    Returns (ok, human_readable_reason).
+    """
+    if not isinstance(name, str) or not name.strip():
+        return False, "Dataset name can't be empty."
+    if name != name.strip():
+        return False, "Dataset name can't have leading or trailing spaces."
+    if "/" in name or "\\" in name:
+        return False, "Dataset name can't contain slashes."
+    if name in (".", ".."):
+        return False, "Dataset name can't be '.' or '..'."
+    if len(name) > 96:
+        return False, "Dataset name is too long (max 96 characters)."
+    if not _DATASET_SEGMENT_RE.match(name):
+        return False, (
+            "Dataset name may only use letters, digits, '.', '_' and '-', and must "
+            "start and end with a letter or digit."
+        )
+    return True, ""
+
+
+def validate_dataset_repo_id(repo_id: object) -> tuple[bool, str]:
+    """Validate a full dataset id: a bare name, or 'namespace/name' (one slash).
+
+    Returns (ok, human_readable_reason). Used by both recording and merge so a bad
+    name is refused at the point of creation, not silently rewritten.
+    """
+    if not isinstance(repo_id, str) or not repo_id.strip():
+        return False, "Dataset name can't be empty."
+    parts = repo_id.split("/")
+    if len(parts) > 2:
+        return False, "Dataset name may contain at most one '/' (namespace/name)."
+    if len(parts) == 2:
+        ns_ok, ns_reason = validate_dataset_name(parts[0])
+        if not ns_ok:
+            return False, ns_reason.replace("Dataset name", "Namespace")
+        return validate_dataset_name(parts[1])
+    return validate_dataset_name(parts[0])
+
+
 def validate_calibration_data(data: object) -> tuple[bool, str]:
     """
     Check that `data` looks like a lerobot motor calibration: a non-empty dict of
@@ -720,3 +771,28 @@ def rename_calibration_config(device_type: str, old_name: str, new_name: str) ->
 
     logger.info(f"Renamed calibration {device_type}/{old_stem} -> {new_stem}")
     return True, ""
+
+
+def config_referencing_robots(device_type: str, config_name: str) -> list[str]:
+    """Names of robot records that actively reference this calibration config.
+
+    Mirrors port_slot_conflict's mode rule: the right-arm slot only counts when
+    the record is bimanual, so a stale right_* config left over from a robot
+    since switched back to single doesn't block deletion. Deleting a config a
+    robot still uses would break that robot (it fails is_robot_record_clean and
+    can't teleoperate/record until recalibrated), so callers should refuse when
+    this returns any names.
+    """
+    single_field = "leader_config" if device_type == "teleop" else "follower_config"
+    right_field = (
+        "right_leader_config" if device_type == "teleop" else "right_follower_config"
+    )
+    stem = config_name[: -len(".json")] if config_name.endswith(".json") else config_name
+    users: list[str] = []
+    for rec in list_robot_records():
+        fields = [single_field]
+        if rec.get("mode") == "bimanual":
+            fields.append(right_field)
+        if any(rec.get(f) == stem for f in fields):
+            users.append(rec.get("name", "?"))
+    return users

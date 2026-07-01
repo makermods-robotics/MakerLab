@@ -4,19 +4,28 @@ import { useToast } from "@/hooks/use-toast";
 import { useApi } from "@/contexts/ApiContext";
 import { useHfAuth } from "@/contexts/HfAuthContext";
 
-import { TrainingConfig, TrainingStatus, LogEntry } from "@/components/training/types";
+import {
+  TrainingConfig,
+  TrainingStatus,
+  LogEntry,
+} from "@/components/training/types";
 import TrainingHeader from "@/components/training/TrainingHeader";
 import ConfigurationTab from "@/components/training/ConfigurationTab";
 import MonitoringStats from "@/components/training/monitoring/MonitoringStats";
 import TrainingLogs from "@/components/training/monitoring/TrainingLogs";
 import TrainingExtraGate from "@/components/training/TrainingExtraGate";
+import PolicyExtraDialog from "@/components/training/PolicyExtraDialog";
 import HfAuthBanner from "@/components/landing/HfAuthBanner";
 
 import { Button } from "@/components/ui/button";
-import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
+import {
+  Tooltip,
+  TooltipTrigger,
+  TooltipContent,
+} from "@/components/ui/tooltip";
 import { Loader2, Play, Square, Trash2, ArrowLeft } from "lucide-react";
 
-import { DatasetItem, listDatasets } from "@/lib/replayApi";
+import { useSelectedDataset } from "@/hooks/useSelectedDataset";
 import {
   JobRecord,
   TrainingRequest,
@@ -38,14 +47,33 @@ import { useRobots } from "@/hooks/useRobots";
 const POLL_INTERVAL_MS = 1000;
 const MAX_LOG_LINES = 5000;
 
-function jobToStatus(job: JobRecord | null, isStarting: boolean): TrainingStatus {
+// Passed via router state by the "Continue" button on a completed local job.
+type ResumeSource = {
+  jobId: string;
+  step: number | null; // null ⇒ resume from the latest checkpoint
+  name: string;
+  datasetRepoId: string;
+  policyType: string;
+  sourceSteps: number; // the source run's configured total, for a sane prefill
+  logFreq?: number; // the source run's log cadence, to preserve on resume
+  saveFreq?: number; // the source run's checkpoint cadence, to preserve on resume
+};
+
+function jobToStatus(
+  job: JobRecord | null,
+  isStarting: boolean,
+): TrainingStatus {
   // Adapter so MonitoringStats can keep its current prop shape.
   if (!job) {
     return {
       training_active: isStarting,
       current_step: 0,
       total_steps: 0,
-      available_controls: { stop_training: false, pause_training: false, resume_training: false },
+      available_controls: {
+        stop_training: false,
+        pause_training: false,
+        resume_training: false,
+      },
     };
   }
   return {
@@ -71,6 +99,7 @@ function configToRequest(c: TrainingConfig): TrainingRequest {
     target: c.target,
     dataset_repo_id: c.dataset_repo_id,
     policy_type: c.policy_type,
+    job_name: c.job_name,
     steps: c.steps,
     batch_size: c.batch_size,
     seed: c.seed,
@@ -79,6 +108,8 @@ function configToRequest(c: TrainingConfig): TrainingRequest {
     save_freq: c.save_freq,
     save_checkpoint: c.save_checkpoint,
     resume: c.resume,
+    resume_from_job_id: c.resume_from_job_id,
+    resume_from_step: c.resume_from_step,
     wandb_enable: c.wandb_enable,
     wandb_project: c.wandb_project,
     wandb_entity: c.wandb_entity,
@@ -101,47 +132,57 @@ const ConfigurationMode: React.FC = () => {
   const { toast } = useToast();
   const navigate = useNavigate();
   const location = useLocation();
+  const navState = location.state as { resume?: ResumeSource } | null;
+  const resumeSource = navState?.resume ?? null;
+  // Dataset is chosen on the home page (single source of truth); a resume
+  // inherits the source run's dataset.
+  const { selectedDataset } = useSelectedDataset();
   const prefilledDatasetRepoId =
-    (location.state as { datasetRepoId?: string } | null)?.datasetRepoId ?? "";
+    resumeSource?.datasetRepoId ?? selectedDataset ?? "";
 
   const [trainingConfig, setTrainingConfig] = useState<TrainingConfig>({
     target: { runner: "local" },
     dataset_repo_id: prefilledDatasetRepoId,
-    policy_type: "act",
-    steps: 10000,
+    policy_type: resumeSource?.policyType ?? "act",
+    job_name: "",
+    // On resume, everything but steps is inherited from the checkpoint's
+    // train_config.json; prefill steps above the source's total so the
+    // continuation actually trains further.
+    steps: resumeSource ? resumeSource.sourceSteps * 2 : 10000,
     batch_size: 8,
     seed: 1000,
     num_workers: 4,
-    log_freq: 250,
-    save_freq: 1000,
+    log_freq: resumeSource?.logFreq ?? 50,
+    save_freq: resumeSource?.saveFreq ?? 1000,
     save_checkpoint: true,
-    resume: false,
+    resume: !!resumeSource,
+    resume_from_job_id: resumeSource?.jobId,
+    resume_from_step: resumeSource?.step ?? undefined,
     wandb_enable: false,
     wandb_mode: "online",
     wandb_disable_artifact: false,
-    policy_device: "cuda",
+    policy_device: "auto",
     policy_use_amp: false,
     optimizer_type: "adam",
     use_policy_training_preset: true,
   });
 
-  const [datasets, setDatasets] = useState<DatasetItem[]>([]);
-  const [datasetsLoading, setDatasetsLoading] = useState(true);
-  const [trainingExtraAvailable, setTrainingExtraAvailable] = useState<boolean | null>(null);
-  const [trainingExtraInstallHint, setTrainingExtraInstallHint] = useState<string>("pip install accelerate");
+  const [trainingExtraAvailable, setTrainingExtraAvailable] = useState<
+    boolean | null
+  >(null);
+  const [trainingExtraInstallHint, setTrainingExtraInstallHint] =
+    useState<string>("pip install accelerate");
   const [localJobRunning, setLocalJobRunning] = useState<boolean>(false);
   const [isStarting, setIsStarting] = useState(false);
+  const [policyExtra, setPolicyExtra] = useState<{
+    policyType: string;
+    packageName: string;
+    installTarget: string;
+    installHint: string;
+  } | null>(null);
   const [authenticated, setAuthenticated] = useState<boolean>(false);
   const [flavors, setFlavors] = useState<RunnerFlavor[]>([]);
   const [hardwareLoading, setHardwareLoading] = useState(true);
-
-  useEffect(() => {
-    setDatasetsLoading(true);
-    listDatasets(baseUrl, fetchWithHeaders)
-      .then(setDatasets)
-      .catch(() => setDatasets([]))
-      .finally(() => setDatasetsLoading(false));
-  }, [baseUrl, fetchWithHeaders]);
 
   useEffect(() => {
     fetchWithHeaders(`${baseUrl}/system/training-extra`)
@@ -182,18 +223,54 @@ const ConfigurationMode: React.FC = () => {
       .finally(() => setHardwareLoading(false));
   }, [baseUrl, fetchWithHeaders, auth.status]);
 
-  const updateConfig = <T extends keyof TrainingConfig>(key: T, value: TrainingConfig[T]) => {
+  const updateConfig = <T extends keyof TrainingConfig>(
+    key: T,
+    value: TrainingConfig[T],
+  ) => {
     setTrainingConfig((prev) => ({ ...prev, [key]: value }));
   };
 
   const handleStart = async () => {
     if (!trainingConfig.dataset_repo_id.trim()) {
-      toast({ title: "Error", description: "Dataset repository ID is required", variant: "destructive" });
+      toast({
+        title: "Error",
+        description: "Dataset repository ID is required",
+        variant: "destructive",
+      });
       return;
     }
+
+    // Pre-flight: smolvla/pi0/diffusion need an optional package. Catch it here
+    // with a one-click installer instead of a buried ImportError after the job
+    // has already started.
+    try {
+      const r = await fetchWithHeaders(
+        `${baseUrl}/system/policy-extra/${trainingConfig.policy_type}`,
+      );
+      if (r.ok) {
+        const extra = await r.json();
+        if (extra.needs_extra && !extra.available) {
+          setPolicyExtra({
+            policyType: trainingConfig.policy_type,
+            packageName: extra.package,
+            installTarget: extra.install_target,
+            installHint: extra.install_hint,
+          });
+          return;
+        }
+      }
+    } catch {
+      // Check failed (offline / older backend) — fall through and let the job
+      // report any problem itself.
+    }
+
     setIsStarting(true);
     try {
-      const job = await startTrainingJob(baseUrl, fetchWithHeaders, configToRequest(trainingConfig));
+      const job = await startTrainingJob(
+        baseUrl,
+        fetchWithHeaders,
+        configToRequest(trainingConfig),
+      );
       toast({ title: "Training Started", description: job.name });
       navigate(`/training/${job.id}`);
     } catch (e) {
@@ -239,38 +316,65 @@ const ConfigurationMode: React.FC = () => {
 
   const targetRequiresAuth = trainingConfig.target.runner === "hf_cloud";
   const targetMissingFlavor =
-    trainingConfig.target.runner === "hf_cloud" && !trainingConfig.target.flavor;
+    trainingConfig.target.runner === "hf_cloud" &&
+    !trainingConfig.target.flavor;
   const localBlocked =
     trainingConfig.target.runner === "local" && localJobRunning;
+  // When resuming, total steps must be strictly above the checkpoint's step:
+  // equal trains nothing and lerobot requires --steps above the resumed step.
+  const resumeStepError =
+    resumeSource != null &&
+    resumeSource.step != null &&
+    trainingConfig.steps <= resumeSource.step
+      ? `Total steps must be greater than the checkpoint's step (${resumeSource.step.toLocaleString()}).`
+      : null;
   const startDisabled =
     isStarting ||
     !trainingConfig.dataset_repo_id.trim() ||
     localBlocked ||
     (targetRequiresAuth && !authenticated) ||
-    targetMissingFlavor;
+    targetMissingFlavor ||
+    resumeStepError != null;
   const startTooltip = localBlocked
     ? "Another local training is already running"
     : targetRequiresAuth && !authenticated
-    ? "Log in to Hugging Face to use cloud compute"
-    : targetMissingFlavor
-    ? "Select a hardware flavor"
-    : undefined;
+      ? "Log in to Hugging Face to use cloud compute"
+      : targetMissingFlavor
+        ? "Select a hardware flavor"
+        : undefined;
 
   return (
     <div className="min-h-screen bg-slate-900 text-white p-4">
       <div className="max-w-7xl mx-auto">
         <TrainingHeader />
         <HfAuthBanner />
+        {resumeSource ? (
+          <div className="max-w-3xl mx-auto mb-4 rounded-lg border border-sky-500/40 bg-sky-500/10 p-4 text-sm text-sky-100">
+            <div className="font-semibold">
+              Continuing “{resumeSource.name}”
+              {resumeSource.step != null
+                ? ` from step ${resumeSource.step.toLocaleString()}`
+                : " from its latest checkpoint"}
+            </div>
+            <p className="mt-1 text-sky-200/80">
+              The dataset, policy, batch size, and optimizer are inherited from
+              the checkpoint — only <span className="font-medium">Steps</span>{" "}
+              applies here. Set it above the resumed step to train further
+              (prefilled to {trainingConfig.steps.toLocaleString()}).
+            </p>
+          </div>
+        ) : null}
         <ConfigurationTab
           config={trainingConfig}
           updateConfig={updateConfig}
-          datasets={datasets}
-          datasetsLoading={datasetsLoading}
           authenticated={authenticated}
           flavors={flavors}
           hardwareLoading={hardwareLoading}
         />
-        <div className="max-w-3xl mx-auto mt-6 flex justify-end">
+        <div className="max-w-3xl mx-auto mt-6 flex flex-col items-end gap-2">
+          {resumeStepError ? (
+            <p className="text-sm text-red-400">{resumeStepError}</p>
+          ) : null}
           {(() => {
             const startButton = (
               <Button
@@ -285,7 +389,8 @@ const ConfigurationMode: React.FC = () => {
                   </>
                 ) : (
                   <>
-                    <Play className="w-5 h-5 mr-2" /> Start Training
+                    <Play className="w-5 h-5 mr-2" />{" "}
+                    {resumeSource ? "Continue Training" : "Start Training"}
                   </>
                 )}
               </Button>
@@ -306,6 +411,17 @@ const ConfigurationMode: React.FC = () => {
           })()}
         </div>
       </div>
+
+      {policyExtra && (
+        <PolicyExtraDialog
+          open={!!policyExtra}
+          onOpenChange={(o) => !o && setPolicyExtra(null)}
+          policyType={policyExtra.policyType}
+          packageName={policyExtra.packageName}
+          installTarget={policyExtra.installTarget}
+          installHint={policyExtra.installHint}
+        />
+      )}
     </div>
   );
 };
@@ -458,7 +574,8 @@ const MonitoringMode: React.FC<{ jobId: string }> = ({ jobId }) => {
 
   const handleDelete = async () => {
     if (!job) return;
-    if (!window.confirm("Delete this run? This wipes the output directory.")) return;
+    if (!window.confirm("Delete this run? This wipes the output directory."))
+      return;
     try {
       await deleteJob(baseUrl, fetchWithHeaders, job.id);
       toast({ title: "Job removed" });
@@ -476,10 +593,16 @@ const MonitoringMode: React.FC<{ jobId: string }> = ({ jobId }) => {
     return (
       <div className="min-h-screen bg-slate-900 text-white p-4">
         <div className="max-w-7xl mx-auto space-y-4">
-          <Button variant="ghost" onClick={() => navigate("/")} className="text-slate-400">
+          <Button
+            variant="ghost"
+            onClick={() => navigate("/")}
+            className="text-slate-400"
+          >
             <ArrowLeft className="w-4 h-4 mr-2" /> Back to Jobs
           </Button>
-          <p className="text-red-300">Couldn't load job {jobId}: {error}</p>
+          <p className="text-red-300">
+            Couldn't load job {jobId}: {error}
+          </p>
         </div>
       </div>
     );
@@ -502,7 +625,11 @@ const MonitoringMode: React.FC<{ jobId: string }> = ({ jobId }) => {
       <div className="max-w-7xl mx-auto space-y-6">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <Button variant="ghost" onClick={() => navigate("/")} className="text-slate-400 hover:text-white">
+            <Button
+              variant="ghost"
+              onClick={() => navigate("/")}
+              className="text-slate-400 hover:text-white"
+            >
               <ArrowLeft className="w-4 h-4 mr-2" /> Jobs
             </Button>
             <div>
@@ -517,16 +644,18 @@ const MonitoringMode: React.FC<{ jobId: string }> = ({ jobId }) => {
                     Local
                   </span>
                 )}
-                {job.runner === "hf_cloud" && job.hf_repo_id && job.state === "done" && (
-                  <a
-                    href={`https://huggingface.co/${job.hf_repo_id}`}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="text-xs text-amber-300 hover:text-amber-200 underline"
-                  >
-                    View on Hub ↗
-                  </a>
-                )}
+                {job.runner === "hf_cloud" &&
+                  job.hf_repo_id &&
+                  job.state === "done" && (
+                    <a
+                      href={`https://huggingface.co/${job.hf_repo_id}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-xs text-amber-300 hover:text-amber-200 underline"
+                    >
+                      View on Hub ↗
+                    </a>
+                  )}
                 {job.wandb_run_url && (
                   <a
                     href={job.wandb_run_url}
@@ -545,11 +674,18 @@ const MonitoringMode: React.FC<{ jobId: string }> = ({ jobId }) => {
             </div>
           </div>
           {isRunning ? (
-            <Button onClick={handleStop} className="bg-red-500 hover:bg-red-600 text-white">
+            <Button
+              onClick={handleStop}
+              className="bg-red-500 hover:bg-red-600 text-white"
+            >
               <Square className="w-4 h-4 mr-2" /> Stop
             </Button>
           ) : (
-            <Button onClick={handleDelete} variant="ghost" className="text-slate-400 hover:text-white">
+            <Button
+              onClick={handleDelete}
+              variant="ghost"
+              className="text-slate-400 hover:text-white"
+            >
               <Trash2 className="w-4 h-4 mr-2" /> Delete
             </Button>
           )}
@@ -562,9 +698,13 @@ const MonitoringMode: React.FC<{ jobId: string }> = ({ jobId }) => {
           formatTime={formatTime}
         />
         <div className="bg-slate-800/40 border border-slate-700 rounded-lg p-4 flex items-center gap-3">
-          <span className="text-sm font-semibold text-slate-300">Run inference</span>
+          <span className="text-sm font-semibold text-slate-300">
+            Run inference
+          </span>
           {checkpoints.length === 0 ? (
-            <span className="text-xs text-slate-500">No checkpoints yet — wait for the first save.</span>
+            <span className="text-xs text-slate-500">
+              No checkpoints yet — wait for the first save.
+            </span>
           ) : (
             <>
               <CheckpointDropdown

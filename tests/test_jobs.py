@@ -17,8 +17,81 @@ LocalJobRunner.start() (see plan, "Discovered issue")."""
 from __future__ import annotations
 
 import json as _json
+from pathlib import Path
 
 import pytest
+
+
+def _make_checkpoint(output_dir: Path, step: int, *, with_state: bool = True) -> None:
+    """Lay out a lerobot-style checkpoint under <output_dir>/checkpoints/<step>."""
+    ck = output_dir / "checkpoints" / str(step)
+    pm = ck / "pretrained_model"
+    pm.mkdir(parents=True)
+    (pm / "config.json").write_text("{}")  # required by _list_local_checkpoints
+    (pm / "train_config.json").write_text("{}")
+    if with_state:
+        (ck / "training_state").mkdir()
+
+
+def _record(output_dir: Path, runner: str = "local"):
+    from lelab.jobs import JobRecord
+    from lelab.train import TrainingRequest
+
+    return JobRecord(
+        id="job-1",
+        name="run",
+        state="done",
+        config=TrainingRequest(dataset_repo_id="user/ds"),
+        output_dir=str(output_dir),
+        started_at=0.0,
+        runner=runner,
+    )
+
+
+def test_resolve_resume_config_path_returns_train_config(tmp_path) -> None:
+    from lelab.jobs import _resolve_resume_config_path
+
+    out = tmp_path / "run"
+    _make_checkpoint(out, 5000)
+    path = _resolve_resume_config_path(_record(out), 5000)
+    assert path.endswith("checkpoints/5000/pretrained_model/train_config.json")
+
+
+def test_resolve_resume_config_path_defaults_to_latest(tmp_path) -> None:
+    from lelab.jobs import _resolve_resume_config_path
+
+    out = tmp_path / "run"
+    _make_checkpoint(out, 1000)
+    _make_checkpoint(out, 3000)
+    path = _resolve_resume_config_path(_record(out), None)  # None ⇒ latest
+    assert "checkpoints/3000/" in path
+
+
+def test_resolve_resume_config_path_rejects_missing_training_state(tmp_path) -> None:
+    from lelab.jobs import _resolve_resume_config_path
+
+    out = tmp_path / "run"
+    _make_checkpoint(out, 2000, with_state=False)  # weights-only (e.g. imported)
+    with pytest.raises(ValueError, match="training_state"):
+        _resolve_resume_config_path(_record(out), 2000)
+
+
+def test_resolve_resume_config_path_rejects_non_local(tmp_path) -> None:
+    from lelab.jobs import _resolve_resume_config_path
+
+    out = tmp_path / "run"
+    _make_checkpoint(out, 2000)
+    with pytest.raises(ValueError, match="local"):
+        _resolve_resume_config_path(_record(out, runner="hf_cloud"), 2000)
+
+
+def test_resolve_resume_config_path_rejects_unknown_step(tmp_path) -> None:
+    from lelab.jobs import _resolve_resume_config_path
+
+    out = tmp_path / "run"
+    _make_checkpoint(out, 2000)
+    with pytest.raises(ValueError, match="no checkpoint at step 9999"):
+        _resolve_resume_config_path(_record(out), 9999)
 
 
 def test_extract_wandb_run_url_finds_canonical_url() -> None:
@@ -57,6 +130,24 @@ def test_parse_metrics_into_extracts_loss_and_step() -> None:
     assert m.grad_norm == pytest.approx(1.5)
 
 
+def test_parse_metrics_into_keeps_tqdm_step_when_log_line_step_is_abbreviated() -> None:
+    """At >=1000 steps lerobot formats the log-line step with format_big_number
+    ("1K"), which int() can't parse. Feeding a tqdm line (exact step) then the
+    abbreviated loss line into the same metrics object must retain the exact
+    step and still extract the loss — this is what read_metrics_history relies
+    on so it doesn't drop every point past step 1000.
+    """
+    from lelab.jobs import TrainingMetrics, parse_metrics_into
+
+    m = TrainingMetrics()
+    parse_metrics_into("Training:  10%|██░| 1000/10000 [00:30<04:30, 3.2it/s]", m)
+    parse_metrics_into("INFO ... step:1K smpl:8K loss:0.0077 grdn:0.9 lr:0.0001 ...", m)
+
+    assert m.current_step == 1000  # kept from tqdm, not zeroed by "1K"
+    assert m.current_loss == pytest.approx(0.0077)
+    assert m.current_lr == pytest.approx(0.0001)
+
+
 def test_parse_metrics_into_extracts_tqdm_progress() -> None:
     from lelab.jobs import TrainingMetrics, parse_metrics_into
 
@@ -68,6 +159,64 @@ def test_parse_metrics_into_extracts_tqdm_progress() -> None:
     assert m.current_step == 100
     assert m.total_steps == 1000
     assert m.eta_seconds == 270  # 4 min 30 s
+
+
+def test_parse_metrics_into_rebases_resumed_tqdm_to_global_step() -> None:
+    """On resume lerobot's bar counts only the remaining window (0 → steps−ckpt),
+    so a raw 55/100 is really global step 155 of 200. With resume_total set, the
+    parser must rebase so the UI shows 155/200, not 55/100."""
+    from lelab.jobs import TrainingMetrics, parse_metrics_into
+
+    m = TrainingMetrics()
+    parse_metrics_into(
+        "Training:  55%|█████| 55/100 [00:30<01:00, 2.0s/step]", m, resume_total=200
+    )
+    assert m.current_step == 155  # 200 - 100 + 55
+    assert m.total_steps == 200
+
+
+def test_parse_metrics_into_fresh_run_ignores_resume_rebase() -> None:
+    """A fresh run passes resume_total=None; its bar is already the global step."""
+    from lelab.jobs import TrainingMetrics, parse_metrics_into
+
+    m = TrainingMetrics()
+    parse_metrics_into("Training:  30%|███| 30/100 [00:30<01:00, 2.0s/step]", m)
+    assert m.current_step == 30
+    assert m.total_steps == 100
+
+
+def test_read_metrics_history_stitches_resume_lineage(tmp_path) -> None:
+    """A resumed run's curve is continuous across the whole lineage: the source
+    run's points (0→100) are prepended to the resumed run's (150→200)."""
+    from lelab.jobs import JobRecord, JobRegistry, LogLine, _job_log_path
+    from lelab.train import TrainingRequest
+
+    reg = JobRegistry(tmp_path)
+    root = reg._output_root
+
+    def write_log(job_id: str, msgs: list[str]) -> None:
+        p = _job_log_path(root, job_id)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with p.open("w") as f:
+            for m in msgs:
+                f.write(LogLine(timestamp=0.0, message=m).model_dump_json() + "\n")
+
+    write_log("A", ["INFO step:50 loss:1.5 grdn:1 lr:0.001", "INFO step:100 loss:1.2 grdn:1 lr:0.001"])
+    write_log("B", ["INFO step:150 loss:1.1 grdn:1 lr:5e-4", "INFO step:200 loss:1.0 grdn:1 lr:2e-4"])
+    reg._records["A"] = JobRecord(
+        id="A", name="a", state="done",
+        config=TrainingRequest(dataset_repo_id="d"),
+        output_dir=str(root / "A" / "run"), started_at=0.0,
+    )
+    reg._records["B"] = JobRecord(
+        id="B", name="b", state="done",
+        config=TrainingRequest(dataset_repo_id="d", resume=True, resume_from_job_id="A", steps=200),
+        output_dir=str(root / "B" / "run"), started_at=0.0,
+    )
+
+    assert [p.step for p in reg.read_metrics_history("B")] == [50, 100, 150, 200]
+    # The source run on its own is unchanged (no lineage to prepend).
+    assert [p.step for p in reg.read_metrics_history("A")] == [50, 100]
 
 
 def test_parse_metrics_into_ignores_unrelated_lines() -> None:

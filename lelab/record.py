@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import logging
-import re
 import shutil
 import threading
 import time
@@ -38,6 +37,7 @@ from .utils.config import (
     LEADER_CONFIG_PATH,
     bimanual_base,
     setup_calibration_files,
+    validate_dataset_repo_id,
     with_lelab_tag,
 )
 
@@ -255,6 +255,14 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
 
     # Claim the active flag under the lock so two concurrent starts can't both
     # pass the precondition check.
+    logger.info(
+        "Recording start requested: dataset=%r, task=%r, resume=%s, mode=%s",
+        request.dataset_repo_id,
+        request.single_task,
+        request.resume,
+        getattr(request, "mode", "single"),
+    )
+
     with _state_lock:
         if recording_active:
             return {"success": False, "message": "Recording is already active"}
@@ -262,6 +270,17 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
             return {"success": False, "message": "Teleoperation is currently active. Stop it first."}
         if _rollout.inference_active:
             return {"success": False, "message": "Inference is currently active. Stop it first."}
+        # Refuse a malformed dataset name up front (before claiming the flag or
+        # touching hardware). Rejecting beats silent sanitization: "whoo/" used to
+        # smuggle in a namespace and land the dataset at "user/whoo/".
+        name_ok, name_reason = validate_dataset_repo_id(request.dataset_repo_id)
+        if not name_ok:
+            logger.warning(
+                "Rejected recording start: invalid dataset name %r (%s)",
+                request.dataset_repo_id,
+                name_reason,
+            )
+            return {"success": False, "message": name_reason}
         recording_active = True
         recording_thread = None
         recording_events = None
@@ -275,19 +294,10 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
         last_recording_info = None
 
     try:
-        # Sanitize the dataset name so push_to_hub never rejects a finished
-        # recording over an invalid character. HF repo names allow only
-        # [A-Za-z0-9._-]; everything else becomes "_".
-        if request.dataset_repo_id:
-            if "/" in request.dataset_repo_id:
-                namespace, name = request.dataset_repo_id.split("/", 1)
-                name = re.sub(r"[^A-Za-z0-9._-]", "_", name)
-                request.dataset_repo_id = f"{namespace}/{name}"
-            else:
-                request.dataset_repo_id = re.sub(r"[^A-Za-z0-9._-]", "_", request.dataset_repo_id)
-        # Stamp the repo_id with a timestamp (matches lerobot-record CLI behavior),
-        # so each session lands in a unique directory and the frontend gets the
-        # final id back in the response and status payload.
+        # The name is already validated (validate_dataset_repo_id in the lock), so
+        # no sanitization is needed here. Stamp the repo_id with a timestamp
+        # (matches lerobot-record CLI behavior) so each session lands in a unique
+        # directory and the frontend gets the final id back in the response.
         if not request.resume and request.dataset_repo_id:
             request.dataset_repo_id = f"{request.dataset_repo_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
@@ -508,11 +518,35 @@ def handle_get_dataset_info(request: DatasetInfoRequest) -> dict[str, Any]:
         from lerobot.datasets import LeRobotDataset
 
         dataset = LeRobotDataset(request.dataset_repo_id)
+        # lerobot's metadata has no `single_task` attr — the real task strings
+        # live in meta.tasks (index = task string, col = task_index). Pair each
+        # with how many episodes use it (the per-episode `tasks` column), so a
+        # merged dataset shows its distinct tasks and their episode counts.
+        tasks_df = getattr(dataset.meta, "tasks", None)
+        ordered = (
+            list(tasks_df.sort_values("task_index").index)
+            if tasks_df is not None and len(tasks_df) > 0
+            else []
+        )
+        counts: dict[str, int] = {}
+        episodes = getattr(dataset.meta, "episodes", None)
+        # meta.episodes is a HF datasets.Dataset (column_names), but tolerate a
+        # pandas DataFrame (columns) too.
+        cols = getattr(episodes, "column_names", None)
+        if cols is None:
+            cols = list(getattr(episodes, "columns", []))
+        if episodes is not None and "tasks" in cols:
+            for arr in episodes["tasks"]:
+                items = arr.tolist() if hasattr(arr, "tolist") else list(arr or [])
+                for task in set(items):
+                    counts[task] = counts.get(task, 0) + 1
+        tasks = [{"task": t, "num_episodes": counts.get(t, 0)} for t in ordered]
         return {
             "success": True,
             "dataset_repo_id": request.dataset_repo_id,
             "num_episodes": dataset.num_episodes,
-            "single_task": getattr(dataset.meta, "single_task", "Unknown task"),
+            "tasks": tasks,
+            "single_task": ordered[0] if len(ordered) == 1 else "Unknown task",
             "fps": dataset.fps,
             "features": list(dataset.features.keys()),
             "total_frames": dataset.num_frames,

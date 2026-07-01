@@ -37,6 +37,35 @@ def test_minimal_request_yields_well_formed_argv() -> None:
     assert _arg_value(cmd, "--output_dir") == "/tmp/out"
 
 
+def test_resume_request_emits_minimal_argv() -> None:
+    """On resume, lerobot reconstructs the run from config_path, so the builder
+    must NOT re-pass --dataset.* / --policy.type (they'd fight the loaded
+    config) and must pass the resume essentials plus the overridable knobs."""
+    from lelab.train import TrainingRequest, build_training_command
+
+    req = TrainingRequest(
+        dataset_repo_id="lerobot/pusht",
+        resume=True,
+        config_path="/runs/abc/checkpoints/5000/pretrained_model/train_config.json",
+        steps=20000,
+    )
+    cmd = build_training_command(req, output_dir="/tmp/new")
+
+    # config_path MUST be the "--config_path=<path>" form: lerobot's own
+    # pre-parser ignores the space-separated form.
+    cfg_args = [a for a in cmd if a.startswith("--config_path=")]
+    assert cfg_args == [
+        "--config_path=/runs/abc/checkpoints/5000/pretrained_model/train_config.json"
+    ]
+    assert "--config_path" not in cmd  # not the two-token form
+    assert _arg_value(cmd, "--resume") == "true"
+    assert _arg_value(cmd, "--output_dir") == "/tmp/new"
+    assert _arg_value(cmd, "--steps") == "20000"
+    # Inherited from the checkpoint — must not be re-specified on the CLI.
+    assert "--dataset.repo_id" not in cmd
+    assert "--policy.type" not in cmd
+
+
 def test_optional_dataset_fields_only_present_when_set() -> None:
     from lelab.train import TrainingRequest, build_training_command
 
@@ -111,6 +140,60 @@ def test_seed_omitted_when_none() -> None:
     req2 = TrainingRequest(dataset_repo_id="x", seed=42)
     cmd2 = build_training_command(req2, "/tmp/out")
     assert _arg_value(cmd2, "--seed") == "42"
+
+
+def test_explicit_device_passes_through() -> None:
+    """A concrete device (persisted by an older config) passes through
+    unchanged for backward compatibility."""
+    from lelab.train import TrainingRequest, build_training_command
+
+    cmd = build_training_command(
+        TrainingRequest(dataset_repo_id="x", policy_device="cuda"), "/tmp/out"
+    )
+    assert _arg_value(cmd, "--policy.device") == "cuda"
+
+    cmd_cpu = build_training_command(
+        TrainingRequest(dataset_repo_id="x", policy_device="cpu"), "/tmp/out"
+    )
+    assert _arg_value(cmd_cpu, "--policy.device") == "cpu"
+
+
+def test_auto_device_resolves_to_concrete_backend(monkeypatch) -> None:
+    """The default "auto" resolves to a real backend so the logged config is
+    truthful. Resolution is made deterministic here via monkeypatch."""
+    import torch
+
+    from lelab.train import TrainingRequest, build_training_command
+
+    # No GPU available -> cpu.
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: False)
+    cmd = build_training_command(
+        TrainingRequest(dataset_repo_id="x", policy_device="auto"), "/tmp/out"
+    )
+    assert _arg_value(cmd, "--policy.device") == "cpu"
+
+    # CUDA available -> cuda.
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    cmd_cuda = build_training_command(
+        TrainingRequest(dataset_repo_id="x", policy_device="auto"), "/tmp/out"
+    )
+    assert _arg_value(cmd_cuda, "--policy.device") == "cuda"
+
+
+def test_default_device_is_auto_and_resolved(monkeypatch) -> None:
+    """The request default is "auto" (not "cuda"); build resolves it to a
+    concrete backend rather than emitting "auto"."""
+    import torch
+
+    from lelab.train import TrainingRequest, build_training_command
+
+    assert TrainingRequest(dataset_repo_id="x").policy_device == "auto"
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
+    cmd = build_training_command(TrainingRequest(dataset_repo_id="x"), "/tmp/out")
+    assert _arg_value(cmd, "--policy.device") == "mps"
 
 
 def test_training_request_validates_required_field() -> None:

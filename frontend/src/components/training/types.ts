@@ -7,6 +7,9 @@ export interface TrainingConfig {
   // Policy configuration
   policy_type: string;
 
+  // Optional user-supplied display name for the run.
+  job_name?: string;
+
   // Core training parameters
   steps: number;
   batch_size: number;
@@ -20,6 +23,9 @@ export interface TrainingConfig {
 
   // Output configuration
   resume: boolean;
+  // Set by the "Continue training" flow (source run + checkpoint step).
+  resume_from_job_id?: string;
+  resume_from_step?: number;
 
   // Weights & Biases
   wandb_enable: boolean;
@@ -68,6 +74,6 @@ export interface ConfigComponentProps {
   config: TrainingConfig;
   updateConfig: <T extends keyof TrainingConfig>(
     key: T,
-    value: TrainingConfig[T]
+    value: TrainingConfig[T],
   ) => void;
 }

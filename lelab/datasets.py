@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 import logging
 import os
 from datetime import UTC, datetime
@@ -35,6 +36,18 @@ def _is_dataset_dir(path: Path) -> bool:
         return (path / "meta" / "info.json").is_file()
     except OSError:
         return False
+
+
+def _dataset_has_episodes(path: Path) -> bool:
+    """True if the dataset recorded at least one episode. An empty dataset
+    (0 episodes — e.g. a recording aborted before saving) has no task/data
+    files and only breaks downstream steps like training and merging, so we
+    hide it from the listing rather than let it be selected."""
+    try:
+        info = json.loads((path / "meta" / "info.json").read_text())
+    except (OSError, ValueError):
+        return False
+    return bool(info.get("total_episodes"))
 
 
 def _dir_mtime_iso(path: Path) -> str | None:
@@ -71,13 +84,16 @@ def list_local_datasets() -> list[dict[str, Any]]:
             continue
 
         if _is_dataset_dir(top):
-            out.append(
-                {
-                    "repo_id": top.name,
-                    "last_modified": _dir_mtime_iso(top),
-                    "private": False,
-                }
-            )
+            # It IS a dataset (empty or not) — record it only if non-empty, but
+            # don't descend into its subdirs either way.
+            if _dataset_has_episodes(top):
+                out.append(
+                    {
+                        "repo_id": top.name,
+                        "last_modified": _dir_mtime_iso(top),
+                        "private": False,
+                    }
+                )
             continue
 
         # Not a dataset itself — descend one level.
@@ -91,7 +107,7 @@ def list_local_datasets() -> list[dict[str, Any]]:
                     continue
             except OSError:
                 continue
-            if _is_dataset_dir(sub):
+            if _is_dataset_dir(sub) and _dataset_has_episodes(sub):
                 out.append(
                     {
                         "repo_id": f"{top.name}/{sub.name}",

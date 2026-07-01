@@ -1,6 +1,5 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Card, CardContent, CardHeader } from '@/components/ui/card';
-import { Input } from '@/components/ui/input';
 import { NumberInput } from '@/components/ui/number-input';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
@@ -14,6 +13,7 @@ import {
 import { Separator } from '@/components/ui/separator';
 import { ChevronDown, ChevronRight } from 'lucide-react';
 import { ConfigComponentProps } from '../types';
+import { useApi } from '@/contexts/ApiContext';
 
 const SectionHeading: React.FC<{ children: React.ReactNode }> = ({ children }) => (
   <h4 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
@@ -21,8 +21,70 @@ const SectionHeading: React.FC<{ children: React.ReactNode }> = ({ children }) =
   </h4>
 );
 
+interface OptimizerDefaults {
+  optimizer: string;
+  lr: number;
+  weight_decay: number;
+  grad_clip_norm: number;
+}
+
+// Render small floats readably: keep tiny/large magnitudes in exponential
+// notation (1e-5, 1e-10) but show human-friendly decimals (0.01, 10) for the
+// mid range, trimming any trailing zeros the browser tacks on.
+const formatNum = (n: number): string => {
+  if (n === 0) return '0';
+  const abs = Math.abs(n);
+  if (abs < 1e-3 || abs >= 1e6) {
+    // toExponential(0) -> "1e-5" style; drop the "+" and leading zeros in exp.
+    return n
+      .toExponential()
+      .replace(/e\+?(-?)0*(\d)/, 'e$1$2');
+  }
+  return String(Number(n.toPrecision(6)));
+};
+
+const OPTIMIZER_LABELS: Record<string, string> = {
+  adam: 'Adam',
+  adamw: 'AdamW',
+  sgd: 'SGD',
+  multi_adam: 'Multi Adam',
+};
+
 const AdvancedCard: React.FC<ConfigComponentProps> = ({ config, updateConfig }) => {
   const [expanded, setExpanded] = useState(false);
+  const { baseUrl, fetchWithHeaders } = useApi();
+  const [policyDefaults, setPolicyDefaults] = useState<
+    Record<string, OptimizerDefaults | null>
+  >({});
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await fetchWithHeaders(`${baseUrl}/policy-optimizer-defaults`);
+        const data: { defaults: Record<string, OptimizerDefaults | null> } =
+          await r.json();
+        if (!cancelled) setPolicyDefaults(data.defaults || {});
+      } catch {
+        // Backend unreachable — fall back to the generic placeholders.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [baseUrl, fetchWithHeaders]);
+
+  const d = policyDefaults[config.policy_type] ?? null;
+  const lrPlaceholder = d ? `${formatNum(d.lr)} (policy default)` : 'Use policy default';
+  const wdPlaceholder = d
+    ? `${formatNum(d.weight_decay)} (policy default)`
+    : 'Use policy default';
+  const gradPlaceholder = d
+    ? `${formatNum(d.grad_clip_norm)} (policy default)`
+    : 'Use policy default';
+  const defaultOptimizerLabel = d
+    ? OPTIMIZER_LABELS[d.optimizer] ?? d.optimizer
+    : null;
 
   return (
     <Card className="bg-slate-800/50 border-slate-700 rounded-xl">
@@ -55,35 +117,16 @@ const AdvancedCard: React.FC<ConfigComponentProps> = ({ config, updateConfig }) 
           {/* Policy */}
           <section className="space-y-4">
             <SectionHeading>Policy</SectionHeading>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div>
-                <Label htmlFor="policy_device" className="text-slate-300">
-                  Device
-                </Label>
-                <Select
-                  value={config.policy_device || 'cuda'}
-                  onValueChange={(value) => updateConfig('policy_device', value)}
-                >
-                  <SelectTrigger id="policy_device" className="bg-slate-900 border-slate-600 text-white rounded-lg">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent className="bg-slate-800 border-slate-600 text-white">
-                    <SelectItem value="cuda">CUDA (GPU)</SelectItem>
-                    <SelectItem value="cpu">CPU</SelectItem>
-                    <SelectItem value="mps">MPS (Apple Silicon)</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="flex items-center space-x-3 pt-6">
-                <Switch
-                  id="policy_use_amp"
-                  checked={config.policy_use_amp}
-                  onCheckedChange={(checked) => updateConfig('policy_use_amp', checked)}
-                />
-                <Label htmlFor="policy_use_amp" className="text-slate-300">
-                  Use Automatic Mixed Precision
-                </Label>
-              </div>
+            <div className="flex items-center space-x-3">
+              <Switch
+                id="policy_use_amp"
+                checked={config.policy_use_amp}
+                onCheckedChange={(checked) => updateConfig('policy_use_amp', checked)}
+                className="data-[state=checked]:bg-green-500"
+              />
+              <Label htmlFor="policy_use_amp" className="text-slate-300">
+                Use Automatic Mixed Precision
+              </Label>
             </div>
           </section>
 
@@ -143,6 +186,11 @@ const AdvancedCard: React.FC<ConfigComponentProps> = ({ config, updateConfig }) 
                   <SelectItem value="multi_adam">Multi Adam</SelectItem>
                 </SelectContent>
               </Select>
+              {defaultOptimizerLabel && (
+                <p className="text-xs text-slate-500 mt-1">
+                  Policy default: {defaultOptimizerLabel}
+                </p>
+              )}
             </div>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               <div>
@@ -155,7 +203,7 @@ const AdvancedCard: React.FC<ConfigComponentProps> = ({ config, updateConfig }) 
                   step="0.0001"
                   value={config.optimizer_lr}
                   onChange={(v) => updateConfig('optimizer_lr', v)}
-                  placeholder="Use policy default"
+                  placeholder={lrPlaceholder}
                   className="bg-slate-900 border-slate-600 text-white rounded-lg"
                 />
               </div>
@@ -169,7 +217,7 @@ const AdvancedCard: React.FC<ConfigComponentProps> = ({ config, updateConfig }) 
                   step="0.0001"
                   value={config.optimizer_weight_decay}
                   onChange={(v) => updateConfig('optimizer_weight_decay', v)}
-                  placeholder="Use policy default"
+                  placeholder={wdPlaceholder}
                   className="bg-slate-900 border-slate-600 text-white rounded-lg"
                 />
               </div>
@@ -183,7 +231,7 @@ const AdvancedCard: React.FC<ConfigComponentProps> = ({ config, updateConfig }) 
                   step="0.0001"
                   value={config.optimizer_grad_clip_norm}
                   onChange={(v) => updateConfig('optimizer_grad_clip_norm', v)}
-                  placeholder="Use policy default"
+                  placeholder={gradPlaceholder}
                   className="bg-slate-900 border-slate-600 text-white rounded-lg"
                 />
               </div>
@@ -208,6 +256,16 @@ const AdvancedCard: React.FC<ConfigComponentProps> = ({ config, updateConfig }) 
                   }}
                   className="bg-slate-900 border-slate-600 text-white rounded-lg"
                 />
+                {config.steps > 0 && config.log_freq > config.steps && (
+                  <p className="text-xs text-amber-400 mt-1">
+                    ⚠ Logging every {config.log_freq} steps exceeds the{' '}
+                    {config.steps}-step run — no metrics will be logged.
+                  </p>
+                )}
+                <p className="text-xs text-slate-500 mt-1">
+                  Steps between logged loss/lr points. Lower = higher-resolution
+                  charts (each point is a window average), but more log volume.
+                </p>
               </div>
               <div>
                 <Label htmlFor="save_freq" className="text-slate-300">
@@ -221,6 +279,12 @@ const AdvancedCard: React.FC<ConfigComponentProps> = ({ config, updateConfig }) 
                   }}
                   className="bg-slate-900 border-slate-600 text-white rounded-lg"
                 />
+                {config.steps > 0 && config.save_freq > config.steps && (
+                  <p className="text-xs text-amber-400 mt-1">
+                    ⚠ Saving every {config.save_freq} steps exceeds the{' '}
+                    {config.steps}-step run — no checkpoint will be saved.
+                  </p>
+                )}
               </div>
             </div>
             <div className="flex items-center space-x-3">
@@ -228,6 +292,7 @@ const AdvancedCard: React.FC<ConfigComponentProps> = ({ config, updateConfig }) 
                 id="save_checkpoint"
                 checked={config.save_checkpoint}
                 onCheckedChange={(checked) => updateConfig('save_checkpoint', checked)}
+                className="data-[state=checked]:bg-green-500"
               />
               <Label htmlFor="save_checkpoint" className="text-slate-300">
                 Save Checkpoints
@@ -238,6 +303,7 @@ const AdvancedCard: React.FC<ConfigComponentProps> = ({ config, updateConfig }) 
                 id="resume"
                 checked={config.resume}
                 onCheckedChange={(checked) => updateConfig('resume', checked)}
+                className="data-[state=checked]:bg-green-500"
               />
               <Label htmlFor="resume" className="text-slate-300">
                 Resume from Checkpoint
@@ -245,74 +311,7 @@ const AdvancedCard: React.FC<ConfigComponentProps> = ({ config, updateConfig }) 
             </div>
           </section>
 
-          {config.wandb_enable && (
-            <>
-              <Separator className="bg-slate-700" />
-              <section className="space-y-4">
-                <SectionHeading>Weights & Biases</SectionHeading>
-                <div>
-                  <Label htmlFor="wandb_entity" className="text-slate-300">
-                    W&B Entity (optional)
-                  </Label>
-                  <Input
-                    id="wandb_entity"
-                    value={config.wandb_entity || ''}
-                    onChange={(e) =>
-                      updateConfig('wandb_entity', e.target.value || undefined)
-                    }
-                    placeholder="your-username"
-                    className="bg-slate-900 border-slate-600 text-white rounded-lg"
-                  />
-                </div>
-                <div>
-                  <Label htmlFor="wandb_notes" className="text-slate-300">
-                    W&B Notes (optional)
-                  </Label>
-                  <Input
-                    id="wandb_notes"
-                    value={config.wandb_notes || ''}
-                    onChange={(e) =>
-                      updateConfig('wandb_notes', e.target.value || undefined)
-                    }
-                    placeholder="Training run notes..."
-                    className="bg-slate-900 border-slate-600 text-white rounded-lg"
-                  />
-                </div>
-                <div>
-                  <Label htmlFor="wandb_mode" className="text-slate-300">
-                    W&B Mode
-                  </Label>
-                  <Select
-                    value={config.wandb_mode || 'online'}
-                    onValueChange={(value) => updateConfig('wandb_mode', value)}
-                  >
-                    <SelectTrigger id="wandb_mode" className="bg-slate-900 border-slate-600 text-white rounded-lg">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent className="bg-slate-800 border-slate-600 text-white">
-                      <SelectItem value="online">Online</SelectItem>
-                      <SelectItem value="offline">Offline</SelectItem>
-                      <SelectItem value="disabled">Disabled</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="flex items-center space-x-3">
-                  <Switch
-                    id="wandb_disable_artifact"
-                    checked={config.wandb_disable_artifact}
-                    onCheckedChange={(checked) =>
-                      updateConfig('wandb_disable_artifact', checked)
-                    }
-                  />
-                  <Label htmlFor="wandb_disable_artifact" className="text-slate-300">
-                    Disable Artifacts
-                  </Label>
-                </div>
-              </section>
-            </>
-          )}
-
-          {!config.wandb_enable && <Separator className="bg-slate-700" />}
+          <Separator className="bg-slate-700" />
 
           {/* Misc */}
           <section className="space-y-4">
@@ -324,6 +323,7 @@ const AdvancedCard: React.FC<ConfigComponentProps> = ({ config, updateConfig }) 
                 onCheckedChange={(checked) =>
                   updateConfig('use_policy_training_preset', checked)
                 }
+                className="data-[state=checked]:bg-green-500"
               />
               <Label htmlFor="use_policy_training_preset" className="text-slate-300">
                 Use Policy Training Preset

@@ -23,6 +23,7 @@ import CameraConfiguration, {
 } from "@/components/recording/CameraConfiguration";
 import { useHfAuth } from "@/contexts/HfAuthContext";
 import { RobotRecord } from "@/hooks/useRobots";
+import { validateDatasetName } from "@/lib/datasetName";
 
 interface RecordingModalProps {
   open: boolean;
@@ -69,7 +70,10 @@ const RecordingModal: React.FC<RecordingModalProps> = ({
 }) => {
   const { auth } = useHfAuth();
 
-  const canStart = !!robot && robot.is_clean;
+  // null when the name is valid; a message otherwise (incl. empty). Mirrors the
+  // backend, so Start can't fire a recording the recorder will reject.
+  const nameError = validateDatasetName(datasetName);
+  const canStart = !!robot && robot.is_clean && nameError === null;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -135,19 +139,19 @@ const RecordingModal: React.FC<RecordingModalProps> = ({
                   <Input
                     id="datasetName"
                     value={datasetName}
-                    onChange={(e) =>
-                      setDatasetName(
-                        e.target.value.replace(/[^A-Za-z0-9._-]/g, "_")
-                      )
-                    }
+                    onChange={(e) => setDatasetName(e.target.value)}
                     placeholder="my_dataset"
-                    className="bg-gray-800 border-gray-700 text-white"
+                    aria-invalid={!!datasetName.trim() && nameError !== null}
+                    className="bg-gray-800 border-gray-700 text-white aria-[invalid=true]:border-red-500/70"
                   />
-                  <p className="text-xs text-gray-500">
-                    Letters, numbers, <code>.</code> <code>_</code>{" "}
-                    <code>-</code> only — other characters become{" "}
-                    <code>_</code>.
-                  </p>
+                  {datasetName.trim() && nameError ? (
+                    <p className="text-xs text-red-400">{nameError}</p>
+                  ) : (
+                    <p className="text-xs text-gray-500">
+                      Letters, numbers, <code>.</code> <code>_</code>{" "}
+                      <code>-</code> only; start and end with a letter or number.
+                    </p>
+                  )}
                   {datasetName &&
                     (auth.status === "authenticated" ? (
                       <p className="text-xs text-gray-500">
