@@ -16,6 +16,7 @@ import { useHfAuth } from "@/contexts/HfAuthContext";
 import { useApi } from "@/contexts/ApiContext";
 import { useRobots } from "@/hooks/useRobots";
 import { useDatasets } from "@/hooks/useDatasets";
+import { useSelectedDataset } from "@/hooks/useSelectedDataset";
 import { DatasetItem, deleteDataset } from "@/lib/replayApi";
 import { CameraConfig } from "@/components/recording/CameraConfiguration";
 import { isHostedSpace } from "@/lib/isHostedSpace";
@@ -45,6 +46,7 @@ const Landing = () => {
     refresh: refreshDatasets,
   } = useDatasets();
   const [showMergeDialog, setShowMergeDialog] = useState(false);
+  const { selectedDataset, setSelectedDataset } = useSelectedDataset();
 
   // Recording modal state
   const [showRecordingModal, setShowRecordingModal] = useState(false);
@@ -98,33 +100,16 @@ const Landing = () => {
 
   const handleTrainingClick = () => navigate("/training");
 
-  const openHubViewer = (repoId: string, isPrivate: boolean) => {
-    const spacePath = `/spaces/lerobot/visualize_dataset?path=${encodeURIComponent(`/${repoId}`)}`;
-    const target = isPrivate
-      ? `https://huggingface.co/login?next=${encodeURIComponent(spacePath)}`
-      : `https://huggingface.co${spacePath}`;
-    window.open(target, "_blank", "noopener,noreferrer");
-  };
-
+  // Picking a dataset here selects it for training (the single source of truth);
+  // Training reads it from the persisted selection.
   const handlePickExisting = (item: DatasetItem) => {
-    if (item.source === "local" || item.source === "both") {
-      navigate("/upload", {
-        state: {
-          datasetInfo: {
-            dataset_repo_id: item.repo_id,
-            source: item.source,
-          },
-        },
-      });
-      return;
-    }
-    openHubViewer(item.repo_id, item.private);
+    setSelectedDataset(item.repo_id);
+    toast({ title: "Dataset selected", description: item.repo_id });
   };
 
   const handleOpenCustom = (repoId: string) => {
-    // Custom-typed repo IDs are always treated as Hub paths. We don't know
-    // privacy, so route through the login redirect to be safe.
-    openHubViewer(repoId, true);
+    setSelectedDataset(repoId);
+    toast({ title: "Dataset selected", description: repoId });
   };
 
   const handleCreateDataset = (name: string) => {
@@ -304,10 +289,12 @@ const Landing = () => {
                   role="combobox"
                   className="w-full justify-between bg-gray-800 border-gray-600 text-white hover:bg-gray-700"
                 >
-                  <span className="truncate text-gray-300">
+                  <span
+                    className={`truncate ${selectedDataset ? "text-white" : "text-gray-300"}`}
+                  >
                     {datasetsLoading
                       ? "Loading datasets…"
-                      : "Select or create a dataset…"}
+                      : (selectedDataset ?? "Select or create a dataset…")}
                   </span>
                   <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
                 </Button>
@@ -326,10 +313,14 @@ const Landing = () => {
               </h3>
               <Button
                 onClick={handleTrainingClick}
+                disabled={!selectedDataset}
                 className="w-full bg-green-500 hover:bg-green-600 text-white"
               >
                 Training
               </Button>
+              {!selectedDataset && (
+                <p className="text-xs text-gray-500">Select a dataset first.</p>
+              )}
             </div>
           </div>
         </div>

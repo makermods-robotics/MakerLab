@@ -25,7 +25,7 @@ import {
 } from "@/components/ui/tooltip";
 import { Loader2, Play, Square, Trash2, ArrowLeft } from "lucide-react";
 
-import { DatasetItem, listDatasets } from "@/lib/replayApi";
+import { useSelectedDataset } from "@/hooks/useSelectedDataset";
 import {
   JobRecord,
   TrainingRequest,
@@ -129,13 +129,13 @@ const ConfigurationMode: React.FC = () => {
   const { toast } = useToast();
   const navigate = useNavigate();
   const location = useLocation();
-  const navState = location.state as {
-    datasetRepoId?: string;
-    resume?: ResumeSource;
-  } | null;
+  const navState = location.state as { resume?: ResumeSource } | null;
   const resumeSource = navState?.resume ?? null;
+  // Dataset is chosen on the home page (single source of truth); a resume
+  // inherits the source run's dataset.
+  const { selectedDataset } = useSelectedDataset();
   const prefilledDatasetRepoId =
-    resumeSource?.datasetRepoId ?? navState?.datasetRepoId ?? "";
+    resumeSource?.datasetRepoId ?? selectedDataset ?? "";
 
   const [trainingConfig, setTrainingConfig] = useState<TrainingConfig>({
     target: { runner: "local" },
@@ -163,8 +163,6 @@ const ConfigurationMode: React.FC = () => {
     use_policy_training_preset: true,
   });
 
-  const [datasets, setDatasets] = useState<DatasetItem[]>([]);
-  const [datasetsLoading, setDatasetsLoading] = useState(true);
   const [trainingExtraAvailable, setTrainingExtraAvailable] = useState<
     boolean | null
   >(null);
@@ -181,14 +179,6 @@ const ConfigurationMode: React.FC = () => {
   const [authenticated, setAuthenticated] = useState<boolean>(false);
   const [flavors, setFlavors] = useState<RunnerFlavor[]>([]);
   const [hardwareLoading, setHardwareLoading] = useState(true);
-
-  useEffect(() => {
-    setDatasetsLoading(true);
-    listDatasets(baseUrl, fetchWithHeaders)
-      .then(setDatasets)
-      .catch(() => setDatasets([]))
-      .finally(() => setDatasetsLoading(false));
-  }, [baseUrl, fetchWithHeaders]);
 
   useEffect(() => {
     fetchWithHeaders(`${baseUrl}/system/training-extra`)
@@ -364,8 +354,6 @@ const ConfigurationMode: React.FC = () => {
         <ConfigurationTab
           config={trainingConfig}
           updateConfig={updateConfig}
-          datasets={datasets}
-          datasetsLoading={datasetsLoading}
           authenticated={authenticated}
           flavors={flavors}
           hardwareLoading={hardwareLoading}
