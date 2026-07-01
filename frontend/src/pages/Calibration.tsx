@@ -3,6 +3,7 @@ import { useNavigate, useLocation } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
+import { Input } from "@/components/ui/input";
 import {
   Select,
   SelectContent,
@@ -118,10 +119,27 @@ const Calibration = () => {
   const assignedConfig = robot ? (robot[configField] as string) : "";
   // Bimanual MUST follow lerobot's "<base>_left"/"<base>_right" convention, so
   // the name is forced to "<robot>_<arm>" regardless of any assigned config.
-  // Single-arm recalibration reuses the in-use config (or the robot name).
-  const calibrationConfigName = isBimanual
+  // Single-arm recalibration defaults to the in-use config (or the robot name).
+  const defaultConfigName = isBimanual
     ? `${robotName}_${arm}`
     : ((assignedConfig?.trim() ? assignedConfig : robotName) ?? "");
+
+  // Editable "save as" name (single-arm only) so one robot can own multiple
+  // named calibrations instead of overwriting. Blank falls back to the default;
+  // bimanual stays locked to the lerobot naming convention. The field re-syncs
+  // to the default whenever the target side changes (device/arm switch, robot
+  // load, or a just-saved calibration reassigning the robot).
+  const [configNameInput, setConfigNameInput] = useState("");
+  useEffect(() => {
+    setConfigNameInput(defaultConfigName);
+  }, [defaultConfigName]);
+  const calibrationConfigName = isBimanual
+    ? defaultConfigName
+    : configNameInput.trim() || defaultConfigName;
+
+  // Bumped when a calibration completes so the per-side CalibrationLibrary
+  // dropdowns re-fetch and surface any newly-named file.
+  const [calibReloadToken, setCalibReloadToken] = useState(0);
 
   // Ports already assigned to the OTHER arms of this robot — each physical arm
   // needs its own serial port, so these are greyed out in the dropdown. The
@@ -379,6 +397,7 @@ const Calibration = () => {
         if (!data.active) {
           if (data.status === "completed") {
             toast({ title: "Auto-calibration complete" });
+            setCalibReloadToken((t) => t + 1);
             fetchRobot();
           } else if (data.status === "failed") {
             toast({
@@ -655,6 +674,9 @@ const Calibration = () => {
   // the next still-incomplete side (or stay on the current side if both done).
   useEffect(() => {
     if (calibrationStatus.status !== "completed") return;
+    // A completed calibration may have written a new named file — nudge the
+    // per-side libraries to re-fetch their config lists so it shows up.
+    setCalibReloadToken((t) => t + 1);
     (async () => {
       const r = await fetchRobot();
       if (!r) return;
@@ -927,6 +949,35 @@ const Calibration = () => {
                 </div>
               </div>
 
+              {!isBimanual && (
+                <div className="space-y-2">
+                  <Label
+                    htmlFor="configName"
+                    className="text-sm font-medium text-slate-300"
+                  >
+                    Calibration name
+                  </Label>
+                  <Input
+                    id="configName"
+                    value={configNameInput}
+                    onChange={(e) => setConfigNameInput(e.target.value)}
+                    placeholder={defaultConfigName}
+                    disabled={
+                      calibrationStatus.calibration_active || autoCal.active
+                    }
+                    className="bg-slate-700 border-slate-600 text-white rounded-md"
+                  />
+                  <p className="text-xs text-slate-500">
+                    Saves as{" "}
+                    <span className="font-mono text-slate-400">
+                      {calibrationConfigName || "…"}
+                    </span>
+                    . Change it to keep the current calibration and save a new
+                    one instead of overwriting.
+                  </p>
+                </div>
+              )}
+
               <Separator className="bg-slate-700" />
 
               <div className="flex flex-col gap-3">
@@ -1163,6 +1214,7 @@ const Calibration = () => {
                               configField={row.cfgField}
                               robotName={robotName}
                               onAssigned={fetchRobot}
+                              reloadToken={calibReloadToken}
                             />
                           </div>
                         );

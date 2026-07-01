@@ -45,6 +45,11 @@ interface CalibrationLibraryProps {
   excludeConfig?: string;
   /** Called after a successful reassignment so the parent can refetch the robot. */
   onAssigned?: () => void | Promise<void>;
+  /**
+   * Bump to force a re-fetch of the saved-config list — e.g. after a
+   * calibration completes and may have written a brand-new named file.
+   */
+  reloadToken?: number;
 }
 
 /**
@@ -59,6 +64,7 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
   configField,
   excludeConfig,
   onAssigned,
+  reloadToken,
 }) => {
   const { baseUrl, fetchWithHeaders } = useApi();
   const { toast } = useToast();
@@ -90,7 +96,7 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
 
   useEffect(() => {
     refresh();
-  }, [refresh]);
+  }, [refresh, reloadToken]);
 
   // Keep a valid selection: prefer the current pick, then the in-use config,
   // then the first available.
