@@ -543,11 +543,22 @@ def list_hub_jobs():
         if isinstance(o, dict) and o.get("name"):
             authors.append(o["name"])
 
+    jobs_permission = True
     try:
-        jobs = api.list_jobs()
+        # list_jobs() returns a lazy pagination generator — materialize it here
+        # so any HTTP error (e.g. 403 when the token lacks the job.read scope)
+        # is raised and caught inside this try, not later while building the
+        # response, which would escape as an unhandled 500.
+        jobs = list(api.list_jobs())
     except Exception as exc:
         logger.warning("list_jobs failed: %s", exc)
         jobs = []
+        # A 401/403 means the token is valid but lacks the job.read scope —
+        # surface that to the frontend so it can show a hint instead of a
+        # silently-empty list. Other failures are treated as transient.
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        if status in (401, 403):
+            jobs_permission = False
 
     seen_models: set[str] = set()
     models: list[dict] = []
@@ -570,6 +581,7 @@ def list_hub_jobs():
 
     return {
         "authenticated": True,
+        "jobs_permission": jobs_permission,
         "jobs": [
             {
                 "id": ji.id,

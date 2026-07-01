@@ -272,6 +272,9 @@ export interface HubModel {
 
 export interface HubJobsResponse {
   authenticated: boolean;
+  // False when the token is valid but lacks the job.read scope (jobs can't be
+  // listed). Absent/true otherwise. Only meaningful when authenticated.
+  jobs_permission?: boolean;
   jobs: HubJob[];
   models: HubModel[];
 }

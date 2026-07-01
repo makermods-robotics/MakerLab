@@ -47,7 +47,9 @@ const JobsSection: React.FC = () => {
   const [hubJobs, setHubJobs] = useState<HubJob[]>([]);
   const [hubModels, setHubModels] = useState<HubModel[]>([]);
   const [hubAuthenticated, setHubAuthenticated] = useState(false);
+  const [hubJobsPermission, setHubJobsPermission] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [hubError, setHubError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
 
   const { selectedRecord } = useRobots();
@@ -57,18 +59,28 @@ const JobsSection: React.FC = () => {
   const [inferenceStep, setInferenceStep] = useState<number | null>(null);
 
   const refresh = useCallback(async () => {
-    try {
-      const [next, hub] = await Promise.all([
-        listJobs(baseUrl, fetchWithHeaders, LIMIT),
-        listHubJobs(baseUrl, fetchWithHeaders),
-      ]);
-      setJobs(next);
-      setHubJobs(hub.jobs);
-      setHubModels(hub.models);
-      setHubAuthenticated(hub.authenticated);
+    // Settle the two fetches independently: a hub failure (network, HF outage,
+    // missing scope) must never blank the local jobs, and vice versa.
+    const [localRes, hubRes] = await Promise.allSettled([
+      listJobs(baseUrl, fetchWithHeaders, LIMIT),
+      listHubJobs(baseUrl, fetchWithHeaders),
+    ]);
+    if (localRes.status === "fulfilled") {
+      setJobs(localRes.value);
       setError(null);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+    } else {
+      const r = localRes.reason;
+      setError(r instanceof Error ? r.message : String(r));
+    }
+    if (hubRes.status === "fulfilled") {
+      setHubJobs(hubRes.value.jobs);
+      setHubModels(hubRes.value.models);
+      setHubAuthenticated(hubRes.value.authenticated);
+      setHubJobsPermission(hubRes.value.jobs_permission ?? true);
+      setHubError(null);
+    } else {
+      const r = hubRes.reason;
+      setHubError(r instanceof Error ? r.message : String(r));
     }
   }, [baseUrl, fetchWithHeaders]);
 
@@ -161,9 +173,7 @@ const JobsSection: React.FC = () => {
   );
   const filteredHubJobs = useMemo(
     () =>
-      hubJobs.filter((h) =>
-        matchesQuery(h.docker_image ?? h.space_id ?? h.id),
-      ),
+      hubJobs.filter((h) => matchesQuery(h.docker_image ?? h.space_id ?? h.id)),
     [hubJobs, matchesQuery],
   );
   const filteredHubModels = useMemo(
@@ -280,7 +290,11 @@ const JobsSection: React.FC = () => {
         </div>
       </div>
 
-      {error ? <p className="text-sm text-red-300">Couldn't load jobs: {error}</p> : null}
+      {error ? (
+        <p className="text-sm text-red-300">
+          Couldn't load local jobs: {error}
+        </p>
+      ) : null}
 
       <Collapsible defaultOpen>
         <CollapsibleTrigger className="group flex items-center gap-1.5 text-sm font-semibold uppercase tracking-wide text-slate-400 hover:text-white transition-colors">
@@ -347,33 +361,53 @@ const JobsSection: React.FC = () => {
           )
         </CollapsibleTrigger>
         <CollapsibleContent className="pt-3">
-          {!hubAuthenticated && trackedCloudJobs.length === 0 ? (
+          {hubError ? (
+            <p className="text-sm text-red-300">
+              Couldn't load cloud jobs: {hubError}
+            </p>
+          ) : !hubAuthenticated && trackedCloudJobs.length === 0 ? (
             <p className="text-sm text-slate-500">
               Sign in with Hugging Face to see your cloud jobs.
             </p>
-          ) : trackedCloudActive.length === 0 &&
-            untrackedHubActive.length === 0 &&
-            untrackedHubModels.length === 0 ? (
-            <p className="text-sm text-slate-500">
-              {query ? "No online jobs match your search." : "No active cloud jobs."}
-            </p>
           ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {trackedCloudActive.map((job) => (
-                <JobCard
-                  key={job.id}
-                  job={job}
-                  onStop={handleStop}
-                  onDelete={handleDelete}
-                  onPlay={handlePlay}
-                />
-              ))}
-              {untrackedHubActive.map((job) => (
-                <HubJobCard key={job.id} job={job} />
-              ))}
-              {untrackedHubModels.map((model) => (
-                <HubModelCard key={model.repo_id} model={model} />
-              ))}
+            <div className="space-y-3">
+              {hubAuthenticated && !hubJobsPermission ? (
+                <p className="text-sm text-amber-300/80">
+                  Your Hugging Face token is missing the{" "}
+                  <code className="text-amber-200">job.read</code> permission,
+                  so cloud jobs can't be listed. Uploaded models still appear
+                  below.
+                </p>
+              ) : null}
+              {trackedCloudActive.length === 0 &&
+              untrackedHubActive.length === 0 &&
+              untrackedHubModels.length === 0 ? (
+                hubAuthenticated && !hubJobsPermission ? null : (
+                  <p className="text-sm text-slate-500">
+                    {query
+                      ? "No online jobs match your search."
+                      : "No active cloud jobs."}
+                  </p>
+                )
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                  {trackedCloudActive.map((job) => (
+                    <JobCard
+                      key={job.id}
+                      job={job}
+                      onStop={handleStop}
+                      onDelete={handleDelete}
+                      onPlay={handlePlay}
+                    />
+                  ))}
+                  {untrackedHubActive.map((job) => (
+                    <HubJobCard key={job.id} job={job} />
+                  ))}
+                  {untrackedHubModels.map((model) => (
+                    <HubModelCard key={model.repo_id} model={model} />
+                  ))}
+                </div>
+              )}
             </div>
           )}
         </CollapsibleContent>
