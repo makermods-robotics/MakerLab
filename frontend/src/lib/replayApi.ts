@@ -35,12 +35,10 @@ export async function startDatasetMerge(
   sourceRepoIds: string[],
   outputRepoId: string,
 ): Promise<{ started: boolean; message: string }> {
+  // apiRequest JSON.stringifies `body` itself — pass a raw object, not a string.
   return apiRequest(baseUrl, fetcher, "/datasets/merge", {
     method: "POST",
-    body: JSON.stringify({
-      source_repo_ids: sourceRepoIds,
-      output_repo_id: outputRepoId,
-    }),
+    body: { source_repo_ids: sourceRepoIds, output_repo_id: outputRepoId },
     action: "Merge datasets",
   });
 }
