@@ -161,6 +161,30 @@ def test_parse_metrics_into_extracts_tqdm_progress() -> None:
     assert m.eta_seconds == 270  # 4 min 30 s
 
 
+def test_parse_metrics_into_rebases_resumed_tqdm_to_global_step() -> None:
+    """On resume lerobot's bar counts only the remaining window (0 → steps−ckpt),
+    so a raw 55/100 is really global step 155 of 200. With resume_total set, the
+    parser must rebase so the UI shows 155/200, not 55/100."""
+    from lelab.jobs import TrainingMetrics, parse_metrics_into
+
+    m = TrainingMetrics()
+    parse_metrics_into(
+        "Training:  55%|█████| 55/100 [00:30<01:00, 2.0s/step]", m, resume_total=200
+    )
+    assert m.current_step == 155  # 200 - 100 + 55
+    assert m.total_steps == 200
+
+
+def test_parse_metrics_into_fresh_run_ignores_resume_rebase() -> None:
+    """A fresh run passes resume_total=None; its bar is already the global step."""
+    from lelab.jobs import TrainingMetrics, parse_metrics_into
+
+    m = TrainingMetrics()
+    parse_metrics_into("Training:  30%|███| 30/100 [00:30<01:00, 2.0s/step]", m)
+    assert m.current_step == 30
+    assert m.total_steps == 100
+
+
 def test_parse_metrics_into_ignores_unrelated_lines() -> None:
     from lelab.jobs import TrainingMetrics, parse_metrics_into
 

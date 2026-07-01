@@ -170,22 +170,36 @@ def _parse_duration(s: str) -> float | None:
     return None
 
 
-def parse_metrics_into(line: str, metrics: TrainingMetrics) -> None:
+def parse_metrics_into(
+    line: str, metrics: TrainingMetrics, resume_total: int | None = None
+) -> None:
     """Update `metrics` in-place from one stdout line.
 
     Two complementary sources:
       * tqdm progress for current_step + total_steps + ETA (~1s cadence).
       * 'INFO ... step:N smpl:... loss:X grdn:Y lr:Z ...' for loss/lr/grdn
         (only at log_freq cadence, default every 250 steps).
+
+    `resume_total` is the run's full step target for a *resumed* run (None for a
+    fresh run). On resume lerobot's tqdm bar counts only the remaining window
+    (0 → steps−checkpoint), so the raw bar understates the true global step; we
+    rebase it to `checkpoint + bar = resume_total − remaining_total + bar` so
+    the UI shows e.g. 150/200 instead of 50/100. The `step:N` log line already
+    carries the true global step, so it needs no rebasing.
     """
     try:
         tqdm_match = _TQDM_RE.search(line)
         if tqdm_match:
             try:
-                metrics.current_step = int(tqdm_match.group(1))
+                tqdm_step = int(tqdm_match.group(1))
                 total = int(tqdm_match.group(2))
-                if total > 0:
-                    metrics.total_steps = total
+                if resume_total is not None and total > 0:
+                    metrics.current_step = resume_total - total + tqdm_step
+                    metrics.total_steps = resume_total
+                else:
+                    metrics.current_step = tqdm_step
+                    if total > 0:
+                        metrics.total_steps = total
                 eta = _parse_duration(tqdm_match.group(3))
                 if eta is not None:
                     metrics.eta_seconds = eta
@@ -208,6 +222,12 @@ def parse_metrics_into(line: str, metrics: TrainingMetrics) -> None:
         logger.debug("Error parsing log line %r: %s", line, exc)
 
 
+def _resume_total_steps(config: TrainingRequest) -> int | None:
+    """The full step target to rebase a resumed run's tqdm bar against (see
+    parse_metrics_into). None for a fresh run — its bar is already global."""
+    return config.steps if config.resume else None
+
+
 class LocalJobRunner:
     """Run a training as a local subprocess.
 
@@ -228,6 +248,7 @@ class LocalJobRunner:
         self._log_file_path = log_file_path
         self._log_file = None  # type: ignore[assignment]
         self._wandb_run_url: str | None = None
+        self._resume_total: int | None = None
 
     def start(
         self,
@@ -237,6 +258,8 @@ class LocalJobRunner:
     ) -> None:
         if self._process is not None:
             raise RuntimeError("LocalJobRunner already started")
+
+        self._resume_total = _resume_total_steps(config)
 
         # Build the command via the helper that lives in train.py.
         from .train import build_training_command  # avoid import cycle at module load
@@ -325,7 +348,7 @@ class LocalJobRunner:
                 stripped = line.rstrip()
                 if not stripped:
                     continue
-                parse_metrics_into(stripped, self._metrics)
+                parse_metrics_into(stripped, self._metrics, self._resume_total)
                 if self._wandb_run_url is None:
                     url = extract_wandb_run_url(stripped)
                     if url is not None:
@@ -364,10 +387,12 @@ class TailingJobRunner:
         metrics: TrainingMetrics,
         log_file_path: Path,
         pid: int,
+        resume_total: int | None = None,
     ) -> None:
         self._metrics = metrics
         self._log_file_path = log_file_path
         self._pid = pid
+        self._resume_total = resume_total
         self._log_queue: Queue[LogLine] = Queue()
         self._tail_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
@@ -447,7 +472,9 @@ class TailingJobRunner:
                             log_line = LogLine.model_validate_json(raw.strip())
                         except Exception:
                             continue
-                        parse_metrics_into(log_line.message, self._metrics)
+                        parse_metrics_into(
+                            log_line.message, self._metrics, self._resume_total
+                        )
                         if self._wandb_run_url is None:
                             url = extract_wandb_run_url(log_line.message)
                             if url is not None:
@@ -1030,6 +1057,7 @@ class JobRegistry:
         with self._lock:
             if job_id not in self._records:
                 raise JobNotFoundError(job_id)
+            resume_total = _resume_total_steps(self._records[job_id].config)
         path = _job_log_path(self._output_root, job_id)
         if not path.exists():
             return []
@@ -1052,7 +1080,7 @@ class JobRegistry:
                 except Exception:
                     continue  # skip malformed line, same as read_persisted_logs
                 msg = log_line.message
-                parse_metrics_into(msg, acc)
+                parse_metrics_into(msg, acc, resume_total)
                 # Only the log-freq lines carry loss/lr; tqdm lines just advance
                 # the step. Emit a point only when a loss value is present so we
                 # don't add a flat point per tqdm tick.
@@ -1190,6 +1218,7 @@ class JobRegistry:
                             record.metrics,
                             _job_log_path(self._output_root, record.id),
                             pid,
+                            _resume_total_steps(record.config),
                         )
                         runner.start_tailing()
                         self._runners[record.id] = runner
