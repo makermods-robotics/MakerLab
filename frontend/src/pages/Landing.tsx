@@ -13,9 +13,10 @@ import JobsSection from "@/components/jobs/JobsSection";
 
 import UsageInstructionsModal from "@/components/landing/UsageInstructionsModal";
 import { useHfAuth } from "@/contexts/HfAuthContext";
+import { useApi } from "@/contexts/ApiContext";
 import { useRobots } from "@/hooks/useRobots";
 import { useDatasets } from "@/hooks/useDatasets";
-import { DatasetItem } from "@/lib/replayApi";
+import { DatasetItem, deleteDataset } from "@/lib/replayApi";
 import { CameraConfig } from "@/components/recording/CameraConfiguration";
 import { isHostedSpace } from "@/lib/isHostedSpace";
 
@@ -24,6 +25,7 @@ const ON_SPACE = isHostedSpace();
 const Landing = () => {
   const [showUsageModal, setShowUsageModal] = useState(ON_SPACE);
   const { auth } = useHfAuth();
+  const { baseUrl, fetchWithHeaders } = useApi();
 
   const {
     selectedName,
@@ -128,6 +130,34 @@ const Landing = () => {
   const handleCreateDataset = (name: string) => {
     setDatasetName(name);
     openRecordingModal();
+  };
+
+  const handleDeleteDataset = async (item: DatasetItem) => {
+    if (
+      !window.confirm(
+        `Delete "${item.repo_id}"? This removes it from local disk.`,
+      )
+    )
+      return;
+    try {
+      const res = await deleteDataset(baseUrl, fetchWithHeaders, item.repo_id);
+      if (res.success) {
+        toast({ title: "Dataset deleted", description: item.repo_id });
+        refreshDatasets();
+      } else {
+        toast({
+          title: "Delete failed",
+          description: res.message ?? "Could not delete the dataset.",
+          variant: "destructive",
+        });
+      }
+    } catch (e) {
+      toast({
+        title: "Delete failed",
+        description: e instanceof Error ? e.message : String(e),
+        variant: "destructive",
+      });
+    }
   };
 
   const handleStartRecording = async () => {
@@ -267,6 +297,7 @@ const Landing = () => {
                 onPickExisting={handlePickExisting}
                 onOpenCustom={handleOpenCustom}
                 onCreateNew={handleCreateDataset}
+                onDelete={handleDeleteDataset}
               >
                 <Button
                   variant="outline"

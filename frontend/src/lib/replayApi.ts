@@ -20,6 +20,18 @@ export async function listDatasets(
   });
 }
 
+export async function deleteDataset(
+  baseUrl: string,
+  fetcher: Fetcher,
+  repoId: string,
+): Promise<{ success: boolean; message?: string }> {
+  return apiRequest(baseUrl, fetcher, "/delete-dataset", {
+    method: "POST",
+    body: { dataset_repo_id: repoId },
+    action: "Delete dataset",
+  });
+}
+
 export type MergeState = "idle" | "running" | "done" | "error";
 
 export interface MergeStatus {

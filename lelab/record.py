@@ -508,11 +508,35 @@ def handle_get_dataset_info(request: DatasetInfoRequest) -> dict[str, Any]:
         from lerobot.datasets import LeRobotDataset
 
         dataset = LeRobotDataset(request.dataset_repo_id)
+        # lerobot's metadata has no `single_task` attr — the real task strings
+        # live in meta.tasks (index = task string, col = task_index). Pair each
+        # with how many episodes use it (the per-episode `tasks` column), so a
+        # merged dataset shows its distinct tasks and their episode counts.
+        tasks_df = getattr(dataset.meta, "tasks", None)
+        ordered = (
+            list(tasks_df.sort_values("task_index").index)
+            if tasks_df is not None and len(tasks_df) > 0
+            else []
+        )
+        counts: dict[str, int] = {}
+        episodes = getattr(dataset.meta, "episodes", None)
+        # meta.episodes is a HF datasets.Dataset (column_names), but tolerate a
+        # pandas DataFrame (columns) too.
+        cols = getattr(episodes, "column_names", None)
+        if cols is None:
+            cols = list(getattr(episodes, "columns", []))
+        if episodes is not None and "tasks" in cols:
+            for arr in episodes["tasks"]:
+                items = arr.tolist() if hasattr(arr, "tolist") else list(arr or [])
+                for task in set(items):
+                    counts[task] = counts.get(task, 0) + 1
+        tasks = [{"task": t, "num_episodes": counts.get(t, 0)} for t in ordered]
         return {
             "success": True,
             "dataset_repo_id": request.dataset_repo_id,
             "num_episodes": dataset.num_episodes,
-            "single_task": getattr(dataset.meta, "single_task", "Unknown task"),
+            "tasks": tasks,
+            "single_task": ordered[0] if len(ordered) == 1 else "Unknown task",
             "fps": dataset.fps,
             "features": list(dataset.features.keys()),
             "total_frames": dataset.num_frames,
