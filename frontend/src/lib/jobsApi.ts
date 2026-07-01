@@ -28,6 +28,8 @@ export type MetricsHistoryPoint = {
 export interface TrainingRequest {
   dataset_repo_id: string;
   policy_type: string;
+  // Optional user-supplied display name; blank ⇒ backend auto-names the run.
+  job_name?: string;
   steps: number;
   batch_size: number;
   seed?: number;

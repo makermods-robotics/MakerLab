@@ -72,6 +72,24 @@ const EssentialsCard: React.FC<ConfigComponentProps> = ({
           </p>
         </div>
 
+        <div>
+          <Label htmlFor="job_name" className="text-slate-300">
+            Run name
+          </Label>
+          <Input
+            id="job_name"
+            value={config.job_name || ""}
+            onChange={(e) => updateConfig("job_name", e.target.value)}
+            placeholder={`${(config.policy_type || "policy").toUpperCase()} · ${
+              config.dataset_repo_id || "dataset"
+            }`}
+            className="bg-slate-900 border-slate-600 text-white rounded-lg"
+          />
+          <p className="text-xs text-slate-500 mt-1">
+            Optional — shown on the job card and searchable.
+          </p>
+        </div>
+
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div>
             <Label htmlFor="policy_type" className="text-slate-300">
@@ -153,20 +171,87 @@ const EssentialsCard: React.FC<ConfigComponentProps> = ({
         />
 
         {config.wandb_enable && (
-          <div>
-            <Label htmlFor="wandb_project" className="text-slate-300">
-              W&B Project Name
-            </Label>
-            <Input
-              id="wandb_project"
-              value={config.wandb_project || ""}
-              onChange={(e) =>
-                updateConfig("wandb_project", e.target.value || undefined)
-              }
-              placeholder="my-robotics-project"
-              className="bg-slate-900 border-slate-600 text-white rounded-lg"
-            />
-          </div>
+          <section className="space-y-4">
+            <h4 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
+              Weights & Biases
+            </h4>
+            <div>
+              <Label htmlFor="wandb_project" className="text-slate-300">
+                W&B Project Name
+              </Label>
+              <Input
+                id="wandb_project"
+                value={config.wandb_project || ""}
+                onChange={(e) =>
+                  updateConfig("wandb_project", e.target.value || undefined)
+                }
+                placeholder="my-robotics-project"
+                className="bg-slate-900 border-slate-600 text-white rounded-lg"
+              />
+            </div>
+            <div>
+              <Label htmlFor="wandb_entity" className="text-slate-300">
+                W&B Entity (optional)
+              </Label>
+              <Input
+                id="wandb_entity"
+                value={config.wandb_entity || ""}
+                onChange={(e) =>
+                  updateConfig("wandb_entity", e.target.value || undefined)
+                }
+                placeholder="your-username"
+                className="bg-slate-900 border-slate-600 text-white rounded-lg"
+              />
+            </div>
+            <div>
+              <Label htmlFor="wandb_notes" className="text-slate-300">
+                W&B Notes (optional)
+              </Label>
+              <Input
+                id="wandb_notes"
+                value={config.wandb_notes || ""}
+                onChange={(e) =>
+                  updateConfig("wandb_notes", e.target.value || undefined)
+                }
+                placeholder="Training run notes..."
+                className="bg-slate-900 border-slate-600 text-white rounded-lg"
+              />
+            </div>
+            <div>
+              <Label htmlFor="wandb_mode" className="text-slate-300">
+                W&B Mode
+              </Label>
+              <Select
+                value={config.wandb_mode || "online"}
+                onValueChange={(value) => updateConfig("wandb_mode", value)}
+              >
+                <SelectTrigger
+                  id="wandb_mode"
+                  className="bg-slate-900 border-slate-600 text-white rounded-lg"
+                >
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent className="bg-slate-800 border-slate-600 text-white">
+                  <SelectItem value="online">Online</SelectItem>
+                  <SelectItem value="offline">Offline</SelectItem>
+                  <SelectItem value="disabled">Disabled</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="flex items-center space-x-3">
+              <Switch
+                id="wandb_disable_artifact"
+                checked={config.wandb_disable_artifact}
+                onCheckedChange={(checked) =>
+                  updateConfig("wandb_disable_artifact", checked)
+                }
+                className="data-[state=checked]:bg-green-500"
+              />
+              <Label htmlFor="wandb_disable_artifact" className="text-slate-300">
+                Disable Artifacts
+              </Label>
+            </div>
+          </section>
         )}
       </CardContent>
     </Card>

@@ -55,6 +55,8 @@ type ResumeSource = {
   datasetRepoId: string;
   policyType: string;
   sourceSteps: number; // the source run's configured total, for a sane prefill
+  logFreq?: number; // the source run's log cadence, to preserve on resume
+  saveFreq?: number; // the source run's checkpoint cadence, to preserve on resume
 };
 
 function jobToStatus(
@@ -97,6 +99,7 @@ function configToRequest(c: TrainingConfig): TrainingRequest {
     target: c.target,
     dataset_repo_id: c.dataset_repo_id,
     policy_type: c.policy_type,
+    job_name: c.job_name,
     steps: c.steps,
     batch_size: c.batch_size,
     seed: c.seed,
@@ -141,6 +144,7 @@ const ConfigurationMode: React.FC = () => {
     target: { runner: "local" },
     dataset_repo_id: prefilledDatasetRepoId,
     policy_type: resumeSource?.policyType ?? "act",
+    job_name: "",
     // On resume, everything but steps is inherited from the checkpoint's
     // train_config.json; prefill steps above the source's total so the
     // continuation actually trains further.
@@ -148,8 +152,8 @@ const ConfigurationMode: React.FC = () => {
     batch_size: 8,
     seed: 1000,
     num_workers: 4,
-    log_freq: 50,
-    save_freq: 1000,
+    log_freq: resumeSource?.logFreq ?? 50,
+    save_freq: resumeSource?.saveFreq ?? 1000,
     save_checkpoint: true,
     resume: !!resumeSource,
     resume_from_job_id: resumeSource?.jobId,
@@ -157,7 +161,7 @@ const ConfigurationMode: React.FC = () => {
     wandb_enable: false,
     wandb_mode: "online",
     wandb_disable_artifact: false,
-    policy_device: "cuda",
+    policy_device: "auto",
     policy_use_amp: false,
     optimizer_type: "adam",
     use_policy_training_preset: true,
@@ -316,12 +320,21 @@ const ConfigurationMode: React.FC = () => {
     !trainingConfig.target.flavor;
   const localBlocked =
     trainingConfig.target.runner === "local" && localJobRunning;
+  // When resuming, total steps must be strictly above the checkpoint's step:
+  // equal trains nothing and lerobot requires --steps above the resumed step.
+  const resumeStepError =
+    resumeSource != null &&
+    resumeSource.step != null &&
+    trainingConfig.steps <= resumeSource.step
+      ? `Total steps must be greater than the checkpoint's step (${resumeSource.step.toLocaleString()}).`
+      : null;
   const startDisabled =
     isStarting ||
     !trainingConfig.dataset_repo_id.trim() ||
     localBlocked ||
     (targetRequiresAuth && !authenticated) ||
-    targetMissingFlavor;
+    targetMissingFlavor ||
+    resumeStepError != null;
   const startTooltip = localBlocked
     ? "Another local training is already running"
     : targetRequiresAuth && !authenticated
@@ -358,7 +371,10 @@ const ConfigurationMode: React.FC = () => {
           flavors={flavors}
           hardwareLoading={hardwareLoading}
         />
-        <div className="max-w-3xl mx-auto mt-6 flex justify-end">
+        <div className="max-w-3xl mx-auto mt-6 flex flex-col items-end gap-2">
+          {resumeStepError ? (
+            <p className="text-sm text-red-400">{resumeStepError}</p>
+          ) : null}
           {(() => {
             const startButton = (
               <Button

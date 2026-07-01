@@ -244,6 +244,8 @@ const JobCard: React.FC<Props> = ({
           datasetRepoId: selectedJob.config.dataset_repo_id,
           policyType: selectedJob.config.policy_type,
           sourceSteps: selectedJob.config.steps,
+          logFreq: selectedJob.config.log_freq,
+          saveFreq: selectedJob.config.save_freq,
         },
       },
     });

@@ -937,7 +937,11 @@ class JobRegistry:
             job_id = _generate_job_id(config.policy_type, config.dataset_repo_id)
             job_dir = _job_dir(self._output_root, job_id)
             lerobot_output_dir = str(job_dir / "run")
-            name = f"{config.policy_type.upper()} · {config.dataset_repo_id}"
+            name = (
+                config.job_name.strip()
+                if (config.job_name and config.job_name.strip())
+                else f"{config.policy_type.upper()} · {config.dataset_repo_id}"
+            )
             record = JobRecord(
                 id=job_id,
                 name=name,

@@ -142,6 +142,60 @@ def test_seed_omitted_when_none() -> None:
     assert _arg_value(cmd2, "--seed") == "42"
 
 
+def test_explicit_device_passes_through() -> None:
+    """A concrete device (persisted by an older config) passes through
+    unchanged for backward compatibility."""
+    from lelab.train import TrainingRequest, build_training_command
+
+    cmd = build_training_command(
+        TrainingRequest(dataset_repo_id="x", policy_device="cuda"), "/tmp/out"
+    )
+    assert _arg_value(cmd, "--policy.device") == "cuda"
+
+    cmd_cpu = build_training_command(
+        TrainingRequest(dataset_repo_id="x", policy_device="cpu"), "/tmp/out"
+    )
+    assert _arg_value(cmd_cpu, "--policy.device") == "cpu"
+
+
+def test_auto_device_resolves_to_concrete_backend(monkeypatch) -> None:
+    """The default "auto" resolves to a real backend so the logged config is
+    truthful. Resolution is made deterministic here via monkeypatch."""
+    import torch
+
+    from lelab.train import TrainingRequest, build_training_command
+
+    # No GPU available -> cpu.
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: False)
+    cmd = build_training_command(
+        TrainingRequest(dataset_repo_id="x", policy_device="auto"), "/tmp/out"
+    )
+    assert _arg_value(cmd, "--policy.device") == "cpu"
+
+    # CUDA available -> cuda.
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    cmd_cuda = build_training_command(
+        TrainingRequest(dataset_repo_id="x", policy_device="auto"), "/tmp/out"
+    )
+    assert _arg_value(cmd_cuda, "--policy.device") == "cuda"
+
+
+def test_default_device_is_auto_and_resolved(monkeypatch) -> None:
+    """The request default is "auto" (not "cuda"); build resolves it to a
+    concrete backend rather than emitting "auto"."""
+    import torch
+
+    from lelab.train import TrainingRequest, build_training_command
+
+    assert TrainingRequest(dataset_repo_id="x").policy_device == "auto"
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
+    cmd = build_training_command(TrainingRequest(dataset_repo_id="x"), "/tmp/out")
+    assert _arg_value(cmd, "--policy.device") == "mps"
+
+
 def test_training_request_validates_required_field() -> None:
     from pydantic import ValidationError
 

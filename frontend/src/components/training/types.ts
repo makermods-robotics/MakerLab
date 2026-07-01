@@ -7,6 +7,9 @@ export interface TrainingConfig {
   // Policy configuration
   policy_type: string;
 
+  // Optional user-supplied display name for the run.
+  job_name?: string;
+
   // Core training parameters
   steps: number;
   batch_size: number;

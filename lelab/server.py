@@ -36,6 +36,8 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import Response
 from starlette.types import Scope
 
+from lerobot.policies.factory import make_policy_config
+
 from . import datasets as dataset_browser
 from .merge import MergeRequest, handle_merge_status, handle_start_merge
 
@@ -316,6 +318,74 @@ def get_configs():
     return {"leader_configs": leader_configs, "follower_configs": follower_configs}
 
 
+# Frontend policy_type -> lerobot registry name. Same string except pi0_fast,
+# whose registry key is "pi0fast" in this lerobot pin (and is still likely
+# unavailable -> null). Keep in sync with the EssentialsCard Select options.
+_POLICY_TYPE_TO_LEROBOT = {
+    "act": "act",
+    "diffusion": "diffusion",
+    "pi0": "pi0",
+    "smolvla": "smolvla",
+    "tdmpc": "tdmpc",
+    "vqbet": "vqbet",
+    "pi0_fast": "pi0fast",
+    "sac": "sac",
+    "reward_classifier": "reward_classifier",
+}
+
+# Optimizer preset class name -> frontend optimizer_type value.
+_OPTIMIZER_CLASS_TO_NAME = {
+    "adamw": "adamw",
+    "adam": "adam",
+    "multiadam": "multi_adam",
+    "sgd": "sgd",
+}
+
+
+def _optimizer_name_from_preset(preset) -> str:
+    """Derive the optimizer_type value from the preset config class name.
+
+    e.g. AdamWConfig -> "adamw", MultiAdamConfig -> "multi_adam". Falls back to
+    the lowercased class name (with a trailing "config" stripped) for unknown
+    types so we never crash on an optimizer we haven't mapped.
+    """
+    name = type(preset).__name__.lower()
+    if name.endswith("config"):
+        name = name[: -len("config")]
+    return _OPTIMIZER_CLASS_TO_NAME.get(name, name)
+
+
+@app.get("/policy-optimizer-defaults")
+def get_policy_optimizer_defaults():
+    """Return each policy's optimizer preset (lr / weight_decay / grad_clip_norm
+    + optimizer type) so the training UI can show the real "policy default"
+    instead of a generic placeholder.
+
+    Every frontend policy_type is included; policies whose preset is unavailable
+    in this lerobot pin (e.g. pi0_fast, reward_classifier) map to null.
+    """
+    defaults: dict[str, Any] = {}
+    for frontend_name, lerobot_name in _POLICY_TYPE_TO_LEROBOT.items():
+        try:
+            preset = make_policy_config(lerobot_name).get_optimizer_preset()
+            defaults[frontend_name] = {
+                "optimizer": _optimizer_name_from_preset(preset),
+                "lr": preset.lr,
+                "weight_decay": preset.weight_decay,
+                "grad_clip_norm": preset.grad_clip_norm,
+            }
+        except Exception as e:
+            logger.warning(
+                "No optimizer preset for policy %r (lerobot %r): %s",
+                frontend_name,
+                lerobot_name,
+                e,
+            )
+            defaults[frontend_name] = None
+
+    return {"defaults": defaults}
+
+
 @app.post("/move-arm")
 def teleoperate_arm(request: TeleoperateRequest):
     """Start teleoperation of the robot arm"""
@@ -508,6 +578,40 @@ def delete_dataset(request: DatasetInfoRequest):
 async def create_training_job(req: Request):
     raw = await req.json()
     body = StartTrainingBody.from_legacy(raw)
+    cfg = body.config
+    # Soft warning (not a block): lerobot saves/logs on `step % freq == 0`, so a
+    # frequency larger than the total step count means the action never fires —
+    # no checkpoint gets saved / no metrics logged. Almost always a config
+    # mistake, but we still let the run proceed.
+    if cfg.steps:
+        if cfg.save_freq > cfg.steps:
+            logger.warning(
+                "save_freq (%d) exceeds steps (%d) — no checkpoint will be saved.",
+                cfg.save_freq,
+                cfg.steps,
+            )
+        if cfg.log_freq > cfg.steps:
+            logger.warning(
+                "log_freq (%d) exceeds steps (%d) — no metrics will be logged.",
+                cfg.log_freq,
+                cfg.steps,
+            )
+    # Hard block (not a warning): when resuming, the total step count must be
+    # strictly above the checkpoint's step — lerobot requires --steps be raised
+    # above the resumed checkpoint, and steps == checkpoint would train nothing.
+    if cfg.resume_from_step is not None and cfg.steps <= cfg.resume_from_step:
+        logger.warning(
+            "Rejecting resume: steps (%d) <= checkpoint step (%d).",
+            cfg.steps,
+            cfg.resume_from_step,
+        )
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Total steps ({cfg.steps}) must be greater than the checkpoint's "
+                f"step ({cfg.resume_from_step}) to continue training."
+            ),
+        )
     try:
         record = job_registry.start(body.config, body.target)
     except JobAlreadyRunningError as exc:

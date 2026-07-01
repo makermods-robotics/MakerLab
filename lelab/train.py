@@ -20,9 +20,31 @@ lives in app/jobs.py.
 
 import re
 
+import torch
 from pydantic import BaseModel
 
 _SLUG_RE = re.compile(r"[^a-zA-Z0-9._-]+")
+
+
+def _resolve_device(device: str | None) -> str:
+    """Resolve the requested training device to a concrete backend.
+
+    lerobot's trainer runs under HuggingFace Accelerate, which auto-detects the
+    hardware and ignores `policy.device` — except that `device == "cpu"` forces
+    CPU. So functionally the UI choice is binary: auto-GPU vs force-CPU. We keep
+    the logged config truthful by resolving "auto"/None to the platform's real
+    device here.
+
+    Explicit "cuda"/"mps"/"cpu" pass through unchanged (backward-compat with
+    configs that persisted a concrete device before this collapse to auto/cpu).
+    """
+    if device in ("cuda", "mps", "cpu"):
+        return device
+    if torch.cuda.is_available():
+        return "cuda"
+    if torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
 
 
 class TrainingRequest(BaseModel):
@@ -77,7 +99,7 @@ class TrainingRequest(BaseModel):
     eval_use_async_envs: bool = False
 
     # Policy-specific
-    policy_device: str | None = "cuda"
+    policy_device: str | None = "auto"
     policy_use_amp: bool = False
     # Hub upload (set by HfCloudJobRunner; not exposed in the form)
     policy_push_to_hub: bool = False
@@ -155,8 +177,8 @@ def build_training_command(
         cmd.extend(["--seed", str(request.seed)])
 
     # Policy device / AMP / hub
-    if request.policy_device:
-        cmd.extend(["--policy.device", request.policy_device])
+    resolved = _resolve_device(request.policy_device)
+    cmd.extend(["--policy.device", resolved])
     cmd.extend(["--policy.use_amp", "true" if request.policy_use_amp else "false"])
     # LeRobot defaults push_to_hub=True and demands --policy.repo_id when so.
     # Local jobs keep it off; HF Cloud jobs flip it on via the runner.
