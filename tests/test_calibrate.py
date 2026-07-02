@@ -16,7 +16,25 @@ post-recording centering guard."""
 
 from __future__ import annotations
 
-from lelab.calibrate import find_off_center_joints
+from lelab.calibrate import final_motor_ranges, find_off_center_joints
+
+
+def test_final_motor_ranges_forces_wrist_roll_full_turn() -> None:
+    # Wrist_roll's swept sliver is discarded for the full turn (matching
+    # upstream lerobot); other joints keep their recorded ranges.
+    mins = {"shoulder_pan": 900, "wrist_roll": 2000}
+    maxes = {"shoulder_pan": 3200, "wrist_roll": 2010}
+    assert final_motor_ranges(mins, maxes) == {
+        "shoulder_pan": (900, 3200),
+        "wrist_roll": (0, 4095),
+    }
+
+
+def test_final_motor_ranges_forces_full_turn_even_if_unmoved() -> None:
+    # Not moving wrist_roll at all is the documented procedure.
+    mins = {"wrist_roll": 2047}
+    maxes = {"wrist_roll": 2047}
+    assert final_motor_ranges(mins, maxes) == {"wrist_roll": (0, 4095)}
 
 
 def test_calibration_status_defaults_to_idle() -> None:

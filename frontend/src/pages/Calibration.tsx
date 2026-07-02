@@ -1381,8 +1381,11 @@ const Calibration = () => {
                       <Alert className="bg-purple-900/50 border-purple-700 text-purple-200">
                         <Activity className="h-4 w-4" />
                         <AlertDescription>
-                          <strong>Important:</strong> Move EACH joint through
-                          its full range. A check appears next to each joint
+                          <strong>Important:</strong> Move each joint through
+                          its full range —{" "}
+                          <strong>except the wrist roll</strong>: leave it near
+                          the middle. It rotates continuously and its range is
+                          set automatically. A check appears next to each joint
                           once its range is wide enough.
                         </AlertDescription>
                       </Alert>
