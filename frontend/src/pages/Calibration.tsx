@@ -1137,7 +1137,14 @@ const Calibration = () => {
                       setPort("");
                       persistPort("");
                     }}
-                    disabled={!port}
+                    // Also gated during calibration: clearing wouldn't stop the
+                    // running session (the subprocess holds the serial port),
+                    // it would just desync the UI from the arm being measured.
+                    disabled={
+                      !port ||
+                      calibrationStatus.calibration_active ||
+                      autoCal.active
+                    }
                     title="Clear port — release it without assigning another"
                     aria-label="Clear port"
                     className="border-slate-600 hover:border-red-500 text-slate-400 hover:text-red-400 bg-slate-700 hover:bg-slate-600 shrink-0"
@@ -1189,7 +1196,13 @@ const Calibration = () => {
                     type="button"
                     variant="outline"
                     onClick={handleWiggle}
-                    disabled={!port || wiggling}
+                    disabled={
+                      !port ||
+                      wiggling ||
+                      detecting ||
+                      calibrationStatus.calibration_active ||
+                      autoCal.active
+                    }
                     title="Move the gripper on this port to see which arm it is"
                     className="w-32 shrink-0 border-slate-600 hover:border-yellow-500 text-slate-400 hover:text-yellow-400 bg-slate-700 hover:bg-slate-600"
                   >

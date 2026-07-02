@@ -1,7 +1,6 @@
 import React from "react";
 import { Button } from "@/components/ui/button";
-import { Alert, AlertDescription } from "@/components/ui/alert";
-import { ArrowLeft, AlertTriangle } from "lucide-react";
+import { ArrowLeft } from "lucide-react";
 import { cn } from "@/lib/utils";
 import UrdfViewer from "../UrdfViewer";
 import Logo from "@/components/Logo";
@@ -39,17 +38,10 @@ const VisualizerPanel: React.FC<VisualizerPanelProps> = ({
           <div className="w-px h-6 bg-gray-700" />
           <h2 className="text-xl font-medium text-gray-200">Teleoperation</h2>
         </div>
-        {/* Stopping (back arrow, closing the tab) ends the session; the arm
-            drives back to its session-start pose, then torque is released.
-            Error stops (e.g. an unplugged cable) still release immediately. */}
-        <Alert className="mb-4 bg-amber-900/40 border-amber-700 text-amber-100">
-          <AlertTriangle className="h-4 w-4" />
-          <AlertDescription>
-            After stopping, the follower arm returns to its starting position,
-            then goes limp. Stop again to release it immediately; if the
-            session ends with an error, it may go limp right away.
-          </AlertDescription>
-        </Alert>
+        {/* No standing torque warning here: stops are graceful (the arm
+            drives back to its session-start pose before torque releases) and
+            the stop toast explains the behavior at the moment it happens.
+            Only error stops release in place. */}
         {bimanual ? (
           <div className="flex-1 flex flex-col sm:flex-row gap-2 min-h-[50vh] lg:min-h-0">
             <div className="flex-1 flex flex-col">
