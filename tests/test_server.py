@@ -46,9 +46,6 @@ REQUIRED_PATHS = {
     "/available-ports",
     "/available-cameras",
     "/hf-auth-status",
-    "/hf-auth/accounts",
-    "/hf-auth/switch",
-    "/hf-auth/logout",
     "/ws/joint-data",
 }
 
@@ -598,67 +595,3 @@ def test_rename_job_route_maps_value_error_to_400(client, monkeypatch) -> None:
     resp = client.post("/jobs/act_ds_x/rename", json={"new_name": "   "})
     assert resp.status_code == 400
     assert "empty" in resp.json()["detail"]
-
-
-# --- HF auth account-management endpoints -------------------------------------
-
-
-def test_hf_auth_accounts_endpoint_returns_handler_payload(client, monkeypatch) -> None:
-    payload = {"accounts": ["alice-token", "bob-token"], "active": "bob-token", "env_token": False}
-    monkeypatch.setattr(server_mod, "handle_hf_accounts", lambda: payload)
-    resp = client.get("/hf-auth/accounts")
-    assert resp.status_code == 200
-    assert resp.json() == payload
-
-
-def test_hf_auth_switch_endpoint_returns_new_status(client, monkeypatch) -> None:
-    monkeypatch.setattr(
-        server_mod, "handle_hf_switch", lambda name: {"authenticated": True, "username": name}
-    )
-    resp = client.post("/hf-auth/switch", json={"name": "bob-token"})
-    assert resp.status_code == 200
-    assert resp.json()["username"] == "bob-token"
-
-
-def test_hf_auth_switch_unknown_account_maps_to_404(client, monkeypatch) -> None:
-    def boom(name):
-        raise ValueError("not found")
-
-    monkeypatch.setattr(server_mod, "handle_hf_switch", boom)
-    resp = client.post("/hf-auth/switch", json={"name": "ghost"})
-    assert resp.status_code == 404
-
-
-def test_hf_auth_switch_env_token_maps_to_409(client, monkeypatch) -> None:
-    def boom(name):
-        raise PermissionError("pinned by env var")
-
-    monkeypatch.setattr(server_mod, "handle_hf_switch", boom)
-    resp = client.post("/hf-auth/switch", json={"name": "bob-token"})
-    assert resp.status_code == 409
-    assert "env" in resp.json()["detail"].lower()
-
-
-def test_hf_auth_logout_endpoint_returns_status(client, monkeypatch) -> None:
-    monkeypatch.setattr(server_mod, "handle_hf_logout", lambda: {"authenticated": False})
-    resp = client.post("/hf-auth/logout")
-    assert resp.status_code == 200
-    assert resp.json()["authenticated"] is False
-
-
-def test_hf_auth_logout_env_token_maps_to_409(client, monkeypatch) -> None:
-    def boom():
-        raise PermissionError("pinned by env var")
-
-    monkeypatch.setattr(server_mod, "handle_hf_logout", boom)
-    resp = client.post("/hf-auth/logout")
-    assert resp.status_code == 409
-
-
-def test_hf_auth_login_env_token_maps_to_409(client, monkeypatch) -> None:
-    def boom(token):
-        raise PermissionError("pinned by env var")
-
-    monkeypatch.setattr(server_mod, "handle_hf_login", boom)
-    resp = client.post("/hf-auth/login", json={"token": "hf_x"})
-    assert resp.status_code == 409

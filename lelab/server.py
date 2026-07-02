@@ -114,15 +114,7 @@ from .utils.config import (
     save_robot_port,
     save_robot_record,
 )
-from .utils.hf_auth import (
-    cached_whoami,
-    handle_hf_accounts,
-    handle_hf_auth_status,
-    handle_hf_login,
-    handle_hf_logout,
-    handle_hf_switch,
-    shared_hf_api,
-)
+from .utils.hf_auth import cached_whoami, handle_hf_auth_status, handle_hf_login, shared_hf_api
 from .utils.system import (
     handle_get_cuda_status,
     handle_get_policy_extra,
@@ -531,60 +523,11 @@ class HfLoginBody(BaseModel):
 
 @app.post("/hf-auth/login")
 def hf_auth_login(body: HfLoginBody):
-    """Persist a pasted HF token (validated against whoami) for this user.
-
-    Stored named-by-displayName in the machine-global token store (shared with
-    the `hf` CLI) and made active. Already-submitted HF Jobs keep the token
-    they launched with; this only affects new calls.
-    """
+    """Persist a pasted HF token (validated against whoami) for this user."""
     try:
         return handle_hf_login(body.token)
-    except PermissionError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
-
-
-@app.get("/hf-auth/accounts")
-def hf_auth_accounts():
-    """List stored HF accounts, the active one, and whether HF_TOKEN pins it.
-
-    Account names are HF token displayNames shared with the `hf` CLI.
-    """
-    return handle_hf_accounts()
-
-
-class HfSwitchBody(BaseModel):
-    name: str
-
-
-@app.post("/hf-auth/switch")
-def hf_auth_switch(body: HfSwitchBody):
-    """Activate a stored HF account by name and return the new auth status.
-
-    Refuses (409) when HF_TOKEN pins the identity. Already-submitted HF Jobs
-    keep the token they launched with; this only affects new calls.
-    """
-    try:
-        return handle_hf_switch(body.name)
-    except PermissionError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-
-@app.post("/hf-auth/logout")
-def hf_auth_logout():
-    """Remove the active HF account from the machine-global store, falling back
-    to the next stored account if one exists, else signed-out.
-
-    Refuses (409) when HF_TOKEN pins the identity. Already-submitted HF Jobs
-    keep the token they launched with; this only affects new calls.
-    """
-    try:
-        return handle_hf_logout()
-    except PermissionError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.get("/datasets")

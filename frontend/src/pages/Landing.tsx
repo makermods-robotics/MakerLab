@@ -78,13 +78,6 @@ const Landing = () => {
 
   const releaseStreamsRef = useRef<(() => void) | null>(null);
 
-  // Hub-owned datasets are per-account, so re-list them whenever the signed-in
-  // HF identity changes (e.g. switching accounts from the header dropdown).
-  const activeHfUser = auth.status === "authenticated" ? auth.username : null;
-  useEffect(() => {
-    refreshDatasets();
-  }, [activeHfUser, refreshDatasets]);
-
   const navigate = useNavigate();
   const { toast } = useToast();
 
