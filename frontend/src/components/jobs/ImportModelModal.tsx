@@ -12,7 +12,8 @@ import {
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { AlertTriangle, Download, Loader2 } from "lucide-react";
 import { useApi } from "@/contexts/ApiContext";
-import { importModel } from "@/lib/jobsApi";
+import { useToast } from "@/hooks/use-toast";
+import { importModel, jobDisplayName } from "@/lib/jobsApi";
 
 interface Props {
   open: boolean;
@@ -22,6 +23,7 @@ interface Props {
 
 const ImportModelModal: React.FC<Props> = ({ open, onOpenChange, onImported }) => {
   const { baseUrl, fetchWithHeaders } = useApi();
+  const { toast } = useToast();
   const [source, setSource] = useState("");
   const [name, setName] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -33,7 +35,20 @@ const ImportModelModal: React.FC<Props> = ({ open, onOpenChange, onImported }) =
     setSubmitting(true);
     setError(null);
     try {
-      await importModel(baseUrl, fetchWithHeaders, src, name.trim() || undefined);
+      const record = await importModel(
+        baseUrl,
+        fetchWithHeaders,
+        src,
+        name.trim() || undefined,
+      );
+      if (record.already_imported) {
+        // Duplicate source: the backend returned the existing entry (id and
+        // display alias preserved) instead of registering a second one.
+        toast({
+          title: "Already imported",
+          description: `"${jobDisplayName(record)}" is already in your models.`,
+        });
+      }
       setSource("");
       setName("");
       onOpenChange(false);

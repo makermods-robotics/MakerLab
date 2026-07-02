@@ -20,6 +20,8 @@ from pathlib import Path
 
 import pytest
 
+from lelab.utils import config as cfg
+
 
 @pytest.fixture(autouse=True)
 def _patch_robots_path(tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -145,6 +147,439 @@ def test_robot_record_merges_fields(tmp_lerobot_home: Path) -> None:
     assert loaded["follower_port"] == "/dev/b"
 
 
+def test_robot_record_merge_clears_field_with_empty_string(tmp_lerobot_home: Path) -> None:
+    """An empty string is a valid merge value: it CLEARS the field (e.g. releasing
+    a port without assigning another), it does not preserve the old value."""
+    from lelab.utils import config as cfg
+
+    cfg.save_robot_record(
+        "clear_test", {"leader_port": "/dev/a", "follower_port": "/dev/b"}, allow_create=True
+    )
+    cfg.save_robot_record("clear_test", {"leader_port": ""}, allow_create=False)
+
+    loaded = cfg.get_robot_record("clear_test")
+    assert loaded is not None
+    assert loaded["leader_port"] == ""
+    assert loaded["follower_port"] == "/dev/b"
+
+
+def test_clamp_motor_power_bounds_and_fallback(tmp_lerobot_home: Path) -> None:
+    from lelab.utils import config as cfg
+
+    assert cfg.clamp_motor_power(55) == 55
+    assert cfg.clamp_motor_power(5) == cfg.MOTOR_POWER_MIN
+    assert cfg.clamp_motor_power(150) == cfg.MOTOR_POWER_MAX
+    assert cfg.clamp_motor_power(42.9) == 42
+    # Non-numeric (including bool — a subclass of int) → full power, never raise.
+    assert cfg.clamp_motor_power(None) == cfg.DEFAULT_MOTOR_POWER
+    assert cfg.clamp_motor_power("50") == cfg.DEFAULT_MOTOR_POWER
+    assert cfg.clamp_motor_power(True) == cfg.DEFAULT_MOTOR_POWER
+
+
+def test_robot_record_motor_power_defaults_to_full(tmp_lerobot_home: Path) -> None:
+    """Records saved before the field existed (or fresh ones) read back as 100."""
+    from lelab.utils import config as cfg
+
+    # A pre-motor_power record on disk: write raw JSON without the field.
+    path = Path(cfg.ROBOTS_PATH) / "old_bot.json"
+    path.write_text(json.dumps({"name": "old_bot", "mode": "single", "leader_port": "/dev/a"}))
+
+    loaded = cfg.get_robot_record("old_bot")
+    assert loaded is not None
+    assert loaded["motor_power"] == cfg.DEFAULT_MOTOR_POWER
+
+
+def test_robot_record_motor_power_merge_clamps_and_ignores_invalid(
+    tmp_lerobot_home: Path,
+) -> None:
+    from lelab.utils import config as cfg
+
+    cfg.save_robot_record("power_bot", {"motor_power": 60}, allow_create=True)
+    assert cfg.get_robot_record("power_bot")["motor_power"] == 60
+
+    # Out-of-range values are clamped, not rejected.
+    cfg.save_robot_record("power_bot", {"motor_power": 5}, allow_create=False)
+    assert cfg.get_robot_record("power_bot")["motor_power"] == cfg.MOTOR_POWER_MIN
+    cfg.save_robot_record("power_bot", {"motor_power": 500}, allow_create=False)
+    assert cfg.get_robot_record("power_bot")["motor_power"] == cfg.MOTOR_POWER_MAX
+
+    # A wrongly-typed value is ignored (keeps the existing setting), matching
+    # the known-typed-fields-only merge of the string/list fields.
+    cfg.save_robot_record("power_bot", {"motor_power": "25"}, allow_create=False)
+    assert cfg.get_robot_record("power_bot")["motor_power"] == cfg.MOTOR_POWER_MAX
+
+
+def test_robot_record_motor_power_clamped_on_read(tmp_lerobot_home: Path) -> None:
+    """A corrupted on-disk value never reaches consumers un-clamped."""
+    from lelab.utils import config as cfg
+
+    path = Path(cfg.ROBOTS_PATH) / "corrupt_bot.json"
+    path.write_text(json.dumps({"name": "corrupt_bot", "mode": "single", "motor_power": 9000}))
+    assert cfg.get_robot_record("corrupt_bot")["motor_power"] == cfg.MOTOR_POWER_MAX
+
+    path.write_text(json.dumps({"name": "corrupt_bot", "mode": "single", "motor_power": "junk"}))
+    assert cfg.get_robot_record("corrupt_bot")["motor_power"] == cfg.DEFAULT_MOTOR_POWER
+
+
+def test_rename_robot_record_moves_file_and_preserves_fields(
+    tmp_lerobot_home: Path,
+) -> None:
+    from lelab.utils import config as cfg
+
+    cfg.save_robot_record("old_name", {"leader_port": "/dev/a"}, allow_create=True)
+
+    ok, reason = cfg.rename_robot_record("old_name", "new_name")
+    assert ok and reason == ""
+
+    # Old gone, new present with fields and updated name.
+    assert cfg.get_robot_record("old_name") is None
+    moved = cfg.get_robot_record("new_name")
+    assert moved is not None
+    assert moved["name"] == "new_name"
+    assert moved["leader_port"] == "/dev/a"
+
+
+def test_rename_robot_record_noop_when_names_equal(tmp_lerobot_home: Path) -> None:
+    from lelab.utils import config as cfg
+
+    cfg.save_robot_record("same", {"leader_port": "/dev/a"}, allow_create=True)
+    ok, reason = cfg.rename_robot_record("same", "same")
+    assert ok and reason == ""
+    assert cfg.get_robot_record("same") is not None
+
+
+def test_rename_robot_record_rejects_missing_source(tmp_lerobot_home: Path) -> None:
+    from lelab.utils import config as cfg
+
+    ok, reason = cfg.rename_robot_record("ghost", "whatever")
+    assert not ok and reason == "not_found"
+
+
+def test_rename_robot_record_rejects_existing_target(tmp_lerobot_home: Path) -> None:
+    from lelab.utils import config as cfg
+
+    cfg.save_robot_record("a", {"leader_port": "/dev/a"}, allow_create=True)
+    cfg.save_robot_record("b", {"leader_port": "/dev/b"}, allow_create=True)
+
+    ok, reason = cfg.rename_robot_record("a", "b")
+    assert not ok and reason == "name_taken"
+    # Both records untouched.
+    assert cfg.get_robot_record("a")["leader_port"] == "/dev/a"
+    assert cfg.get_robot_record("b")["leader_port"] == "/dev/b"
+
+
+def test_rename_robot_record_rejects_invalid_target(tmp_lerobot_home: Path) -> None:
+    from lelab.utils import config as cfg
+
+    cfg.save_robot_record("valid", {"leader_port": "/dev/a"}, allow_create=True)
+    ok, reason = cfg.rename_robot_record("valid", "../escape")
+    assert not ok and reason == "invalid_name"
+    # Source record must survive a rejected rename.
+    assert cfg.get_robot_record("valid") is not None
+
+
+_GOOD_CALIBRATION = {
+    "shoulder_pan": {
+        "id": 1,
+        "drive_mode": 0,
+        "homing_offset": 1927,
+        "range_min": 741,
+        "range_max": 3472,
+    },
+}
+
+
+def test_validate_calibration_data_accepts_well_formed() -> None:
+    from lelab.utils import config as cfg
+
+    ok, reason = cfg.validate_calibration_data(_GOOD_CALIBRATION)
+    assert ok and reason == ""
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {},  # empty
+        {"m": {"id": 1}},  # missing fields
+        {"m": "not-an-object"},  # motor not a dict
+        {"m": {"id": True, "drive_mode": 0, "homing_offset": 0, "range_min": 0, "range_max": 1}},  # bool not int
+    ],
+)
+def test_validate_calibration_data_rejects_malformed(data) -> None:
+    from lelab.utils import config as cfg
+
+    ok, reason = cfg.validate_calibration_data(data)
+    assert not ok and reason
+
+
+@pytest.mark.parametrize("name", ["whoo", "my-set_v2", "ok.name-1", "a", "A1"])
+def test_validate_dataset_name_accepts_good(name) -> None:
+    from lelab.utils import config as cfg
+
+    ok, reason = cfg.validate_dataset_name(name)
+    assert ok and reason == ""
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "",  # empty
+        "   ",  # whitespace only
+        " whoo",  # leading space
+        "whoo ",  # trailing space
+        "whoo/",  # trailing slash
+        "a/b",  # embedded slash
+        "..",  # traversal
+        ".",  # traversal
+        ".hidden",  # leading dot
+        "-lead",  # leading dash
+        "trail-",  # trailing dash
+        "bad name",  # space
+        "café",  # non-ascii
+        "x" * 97,  # too long
+    ],
+)
+def test_validate_dataset_name_rejects_bad(name) -> None:
+    from lelab.utils import config as cfg
+
+    ok, reason = cfg.validate_dataset_name(name)
+    assert not ok and reason
+
+
+@pytest.mark.parametrize("repo_id", ["whoo", "Mokuroh54/whoo", "user/my-set_v2"])
+def test_validate_dataset_repo_id_accepts_good(repo_id) -> None:
+    from lelab.utils import config as cfg
+
+    ok, reason = cfg.validate_dataset_repo_id(repo_id)
+    assert ok and reason == ""
+
+
+@pytest.mark.parametrize(
+    "repo_id",
+    [
+        "Mokuroh54/whoo/",  # the reported bug: trailing slash
+        "whoo/",  # trailing slash, no namespace
+        "a/b/c",  # too many slashes
+        "-bad/whoo",  # bad namespace
+        "user/.hidden",  # bad name segment
+        "",  # empty
+    ],
+)
+def test_validate_dataset_repo_id_rejects_bad(repo_id) -> None:
+    from lelab.utils import config as cfg
+
+    ok, reason = cfg.validate_dataset_repo_id(repo_id)
+    assert not ok and reason
+
+
+def test_save_imported_calibration_writes_and_normalizes(tmp_lerobot_home: Path) -> None:
+    from lelab.utils import config as cfg
+
+    # Name carries the .json extension (as robot records do) → normalized to stem.
+    ok, reason, name = cfg.save_imported_calibration("teleop", "armA.json", _GOOD_CALIBRATION)
+    assert ok and reason == "" and name == "armA"
+    written = Path(cfg.LEADER_CONFIG_PATH) / "armA.json"
+    assert written.is_file()
+    assert json.loads(written.read_text()) == _GOOD_CALIBRATION
+
+
+def test_save_imported_calibration_never_overwrites(tmp_lerobot_home: Path) -> None:
+    from lelab.utils import config as cfg
+
+    cfg.save_imported_calibration("robot", "armB", _GOOD_CALIBRATION)
+    ok, reason, _ = cfg.save_imported_calibration("robot", "armB", _GOOD_CALIBRATION)
+    assert not ok and reason == "name_taken"
+
+
+def test_save_imported_calibration_rejects_bad_device(tmp_lerobot_home: Path) -> None:
+    from lelab.utils import config as cfg
+
+    ok, reason, _ = cfg.save_imported_calibration("nope", "x", _GOOD_CALIBRATION)
+    assert not ok and reason == "invalid_device"
+
+
+def test_get_robot_record_normalizes_config_extension(tmp_lerobot_home: Path) -> None:
+    """Legacy records stored config names WITH .json; reads normalize to stems."""
+    from lelab.utils import config as cfg
+
+    # Write a record on disk that carries the old ".json" form.
+    cfg.save_robot_record(
+        "legacy",
+        {"leader_config": "so101.json", "follower_config": "so101.json"},
+        allow_create=True,
+    )
+    rec = cfg.get_robot_record("legacy")
+    assert rec["leader_config"] == "so101"
+    assert rec["follower_config"] == "so101"
+
+
+def test_rename_calibration_config_moves_and_repoints_records(tmp_lerobot_home: Path) -> None:
+    from lelab.utils import config as cfg
+
+    (Path(cfg.LEADER_CONFIG_PATH) / "armA.json").write_text("{}")
+    cfg.save_robot_record("bot", {"leader_config": "armA"}, allow_create=True)
+
+    ok, reason = cfg.rename_calibration_config("teleop", "armA", "armB")
+    assert ok and reason == ""
+    assert not (Path(cfg.LEADER_CONFIG_PATH) / "armA.json").exists()
+    assert (Path(cfg.LEADER_CONFIG_PATH) / "armB.json").exists()
+    # The robot that referenced armA is repointed to armB.
+    assert cfg.get_robot_record("bot")["leader_config"] == "armB"
+
+
+def test_rename_calibration_config_repoints_right_arm_slot(tmp_lerobot_home: Path) -> None:
+    """Renaming a config repoints the bimanual right slot, not just the left."""
+    from lelab.utils import config as cfg
+
+    (Path(cfg.LEADER_CONFIG_PATH) / "armA.json").write_text("{}")
+    cfg.save_robot_record(
+        "bi",
+        {"mode": "bimanual", "leader_config": "armX", "right_leader_config": "armA"},
+        allow_create=True,
+    )
+
+    ok, reason = cfg.rename_calibration_config("teleop", "armA", "armB")
+    assert ok and reason == ""
+
+    rec = cfg.get_robot_record("bi")
+    assert rec["right_leader_config"] == "armB"
+    assert rec["leader_config"] == "armX"  # the other slot is untouched
+
+
+def test_rename_calibration_config_never_overwrites(tmp_lerobot_home: Path) -> None:
+    from lelab.utils import config as cfg
+
+    (Path(cfg.FOLLOWER_CONFIG_PATH) / "a.json").write_text("{}")
+    (Path(cfg.FOLLOWER_CONFIG_PATH) / "b.json").write_text('{"keep": 1}')
+
+    ok, reason = cfg.rename_calibration_config("robot", "a", "b")
+    assert not ok and reason == "name_taken"
+    # Target untouched.
+    assert (Path(cfg.FOLLOWER_CONFIG_PATH) / "b.json").read_text() == '{"keep": 1}'
+
+
+def test_rename_calibration_config_missing_source(tmp_lerobot_home: Path) -> None:
+    from lelab.utils import config as cfg
+
+    ok, reason = cfg.rename_calibration_config("teleop", "ghost", "x")
+    assert not ok and reason == "not_found"
+
+
+def test_record_defaults_to_single_mode(tmp_lerobot_home: Path) -> None:
+    """A legacy record with no `mode` key reads back as single, with empty right_*."""
+    from lelab.utils import config as cfg
+
+    cfg.save_robot_record("legacy", {"leader_config": "L"}, allow_create=True)
+    rec = cfg.get_robot_record("legacy")
+    assert rec["mode"] == "single"
+    assert rec["right_leader_config"] == ""
+
+
+def test_save_record_persists_bimanual_mode(tmp_lerobot_home: Path) -> None:
+    from lelab.utils import config as cfg
+
+    cfg.save_robot_record(
+        "bi",
+        {"mode": "bimanual", "right_leader_config": "RL"},
+        allow_create=True,
+    )
+    rec = cfg.get_robot_record("bi")
+    assert rec["mode"] == "bimanual"
+    assert rec["right_leader_config"] == "RL"
+
+
+def test_save_record_rejects_unknown_mode(tmp_lerobot_home: Path) -> None:
+    from lelab.utils import config as cfg
+
+    cfg.save_robot_record("weird", {"mode": "nonsense"}, allow_create=True)
+    assert cfg.get_robot_record("weird")["mode"] == "single"
+
+
+def test_bimanual_record_clean_requires_all_four_calibrations(tmp_lerobot_home: Path) -> None:
+    from lelab.utils import config as cfg
+
+    record = {
+        "name": "bi",
+        "mode": "bimanual",
+        "leader_port": "/dev/ll", "follower_port": "/dev/lf",
+        "leader_config": "LL", "follower_config": "LF",
+        "right_leader_port": "/dev/rl", "right_follower_port": "/dev/rf",
+        "right_leader_config": "RL", "right_follower_config": "RF",
+    }
+    # Only the left pair's files exist -> not clean.
+    (Path(cfg.LEADER_CONFIG_PATH) / "LL.json").write_text("{}")
+    (Path(cfg.FOLLOWER_CONFIG_PATH) / "LF.json").write_text("{}")
+    assert cfg.is_robot_record_clean(record) is False
+
+    # Add the right pair's files -> clean.
+    (Path(cfg.LEADER_CONFIG_PATH) / "RL.json").write_text("{}")
+    (Path(cfg.FOLLOWER_CONFIG_PATH) / "RF.json").write_text("{}")
+    assert cfg.is_robot_record_clean(record) is True
+
+
+def test_config_slot_conflict_detects_same_side_duplicate() -> None:
+    from lelab.utils import config as cfg
+
+    base = {
+        "mode": "bimanual",
+        "leader_config": "L1", "follower_config": "F1",
+        "right_leader_config": "L2", "right_follower_config": "F2",
+    }
+    assert cfg.config_slot_conflict(base) is None
+    assert cfg.config_slot_conflict({**base, "right_leader_config": "L1"}) == "leader"
+    assert cfg.config_slot_conflict({**base, "right_follower_config": "F1"}) == "follower"
+
+
+def test_port_slot_conflict_detects_shared_port() -> None:
+    from lelab.utils import config as cfg
+
+    # Single: leader and follower must differ.
+    assert cfg.port_slot_conflict({"mode": "single", "leader_port": "/dev/a", "follower_port": "/dev/b"}) is None
+    assert cfg.port_slot_conflict({"mode": "single", "leader_port": "/dev/a", "follower_port": "/dev/a"}) == "/dev/a"
+
+    # Bimanual: all four must differ, across sides.
+    base = {
+        "mode": "bimanual",
+        "leader_port": "/dev/a", "follower_port": "/dev/b",
+        "right_leader_port": "/dev/c", "right_follower_port": "/dev/d",
+    }
+    assert cfg.port_slot_conflict(base) is None
+    assert cfg.port_slot_conflict({**base, "right_follower_port": "/dev/a"}) == "/dev/a"
+    # Empty ports are ignored.
+    assert cfg.port_slot_conflict({"mode": "bimanual", "leader_port": "", "follower_port": ""}) is None
+
+
+def test_config_slot_conflict_ignores_single_mode_and_cross_side() -> None:
+    from lelab.utils import config as cfg
+
+    # Single mode never conflicts (one slot per side).
+    assert cfg.config_slot_conflict({"mode": "single", "leader_config": "X", "right_leader_config": "X"}) is None
+    # Same name across sides is fine — different directories.
+    assert cfg.config_slot_conflict({"mode": "bimanual", "leader_config": "X", "follower_config": "X"}) is None
+    # Empty slots don't count as a conflict.
+    assert cfg.config_slot_conflict({"mode": "bimanual", "leader_config": "", "right_leader_config": ""}) is None
+
+
+def test_is_robot_record_clean_with_stem_configs(tmp_lerobot_home: Path) -> None:
+    """A record storing stems is clean when "<stem>.json" exists on disk."""
+    from lelab.utils import config as cfg
+
+    record = {
+        "name": "r",
+        "leader_port": "/dev/a",
+        "follower_port": "/dev/b",
+        "leader_config": "so101",
+        "follower_config": "so101",
+    }
+    assert cfg.is_robot_record_clean(record) is False  # no files yet
+
+    (Path(cfg.LEADER_CONFIG_PATH) / "so101.json").write_text("{}")
+    (Path(cfg.FOLLOWER_CONFIG_PATH) / "so101.json").write_text("{}")
+    assert cfg.is_robot_record_clean(record) is True
+    # Still clean if a value carries the extension (defensive).
+    assert cfg.is_robot_record_clean(dict(record, leader_config="so101.json")) is True
+
+
 def test_setup_calibration_files_copies_configs(
     tmp_lerobot_home: Path,
 ) -> None:
@@ -194,3 +629,65 @@ def test_with_lelab_tag_dedupes() -> None:
 
     # Caller-supplied LeLab is not duplicated, and order is preserved.
     assert with_lelab_tag(["robotics", LELAB_TAG, "lerobot"]) == ["robotics", LELAB_TAG, "lerobot"]
+
+
+def test_clear_config_references_unassigns_matching_records(tmp_lerobot_home: Path) -> None:
+    """Deleting a config unassigns every robot that pointed at it — on the
+    right side (device_type) only — and reports which fields were cleared."""
+    cfg.save_robot_record(
+        "arm1",
+        {"mode": "single", "leader_config": "calib_a", "follower_config": "calib_b"},
+        allow_create=True,
+    )
+    # A second robot sharing the same leader config is unassigned too.
+    cfg.save_robot_record("arm2", {"mode": "single", "leader_config": "calib_a"}, allow_create=True)
+
+    assert cfg.clear_config_references("teleop", "calib_a") == [
+        {"robot": "arm1", "fields": ["leader_config"]},
+        {"robot": "arm2", "fields": ["leader_config"]},
+    ]
+    assert cfg.get_robot_record("arm1")["leader_config"] == ""
+    assert cfg.get_robot_record("arm2")["leader_config"] == ""
+    # The follower slot (other side) is untouched, and the record is now dirty.
+    assert cfg.get_robot_record("arm1")["follower_config"] == "calib_b"
+    assert cfg.is_robot_record_clean(cfg.get_robot_record("arm1")) is False
+
+    # A config nobody references clears nothing.
+    assert cfg.clear_config_references("teleop", "unused") == []
+
+
+def test_clear_config_references_clears_stale_right_slot_too(tmp_lerobot_home: Path) -> None:
+    """A right_* reference is cleared even when the robot is back in single
+    mode — the file is gone, so the stale name must not resurface on a mode
+    switch. Both slots are reported when both matched."""
+    cfg.save_robot_record(
+        "arm1",
+        {"mode": "single", "leader_config": "gone", "right_leader_config": "gone"},
+        allow_create=True,
+    )
+    assert cfg.clear_config_references("teleop", "gone") == [
+        {"robot": "arm1", "fields": ["leader_config", "right_leader_config"]}
+    ]
+    record = cfg.get_robot_record("arm1")
+    assert record["leader_config"] == ""
+    assert record["right_leader_config"] == ""
+
+
+def test_clear_config_references_accepts_json_extension(tmp_lerobot_home: Path) -> None:
+    """Callers may pass 'name.json'; matching is on the stem."""
+    cfg.save_robot_record("arm1", {"mode": "single", "follower_config": "calib_b"}, allow_create=True)
+    assert cfg.clear_config_references("robot", "calib_b.json") == [
+        {"robot": "arm1", "fields": ["follower_config"]}
+    ]
+    assert cfg.get_robot_record("arm1")["follower_config"] == ""
+
+
+def test_setup_calibration_files_rejects_unassigned_arm(tmp_lerobot_home: Path) -> None:
+    """An empty config name (arm unassigned / needs calibration) fails with a
+    legible message instead of an IsADirectoryError from shutil.copy2."""
+    with pytest.raises(FileNotFoundError, match="leader arm has no calibration assigned"):
+        cfg.setup_calibration_files("", "whatever.json")
+    with pytest.raises(FileNotFoundError, match="follower arm has no calibration assigned"):
+        cfg.setup_calibration_files("whatever.json", "  ")
+    with pytest.raises(FileNotFoundError, match="follower arm has no calibration assigned"):
+        cfg.setup_follower_calibration_file("")

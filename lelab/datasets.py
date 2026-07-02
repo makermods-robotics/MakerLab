@@ -12,17 +12,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 import logging
 import os
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import pyarrow.parquet as pq
 from huggingface_hub.errors import HfHubHTTPError
 
 from .utils.hf_auth import cached_whoami, shared_hf_api
 
 logger = logging.getLogger(__name__)
+
+CAMERA_FEATURE_PREFIX = "observation.images."
 
 
 def _lerobot_cache_root() -> Path:
@@ -35,6 +39,18 @@ def _is_dataset_dir(path: Path) -> bool:
         return (path / "meta" / "info.json").is_file()
     except OSError:
         return False
+
+
+def _dataset_has_episodes(path: Path) -> bool:
+    """True if the dataset recorded at least one episode. An empty dataset
+    (0 episodes — e.g. a recording aborted before saving) has no task/data
+    files and only breaks downstream steps like training and merging, so we
+    hide it from the listing rather than let it be selected."""
+    try:
+        info = json.loads((path / "meta" / "info.json").read_text())
+    except (OSError, ValueError):
+        return False
+    return bool(info.get("total_episodes"))
 
 
 def _dir_mtime_iso(path: Path) -> str | None:
@@ -71,13 +87,16 @@ def list_local_datasets() -> list[dict[str, Any]]:
             continue
 
         if _is_dataset_dir(top):
-            out.append(
-                {
-                    "repo_id": top.name,
-                    "last_modified": _dir_mtime_iso(top),
-                    "private": False,
-                }
-            )
+            # It IS a dataset (empty or not) — record it only if non-empty, but
+            # don't descend into its subdirs either way.
+            if _dataset_has_episodes(top):
+                out.append(
+                    {
+                        "repo_id": top.name,
+                        "last_modified": _dir_mtime_iso(top),
+                        "private": False,
+                    }
+                )
             continue
 
         # Not a dataset itself — descend one level.
@@ -91,7 +110,7 @@ def list_local_datasets() -> list[dict[str, Any]]:
                     continue
             except OSError:
                 continue
-            if _is_dataset_dir(sub):
+            if _is_dataset_dir(sub) and _dataset_has_episodes(sub):
                 out.append(
                     {
                         "repo_id": f"{top.name}/{sub.name}",
@@ -102,6 +121,144 @@ def list_local_datasets() -> list[dict[str, Any]]:
 
     out.sort(key=lambda d: d["last_modified"] or "", reverse=True)
     return out
+
+
+def _read_task_strings(meta_dir: Path) -> list[str]:
+    """Task strings for a dataset, ordered by task_index.
+
+    v3.0 datasets keep them in ``meta/tasks.parquet`` (columns ``task_index``
+    and ``task``; pandas stores ``task`` as the frame index, but pyarrow
+    surfaces both as plain columns). Older v2.x datasets use
+    ``meta/tasks.jsonl`` with one ``{"task_index": …, "task": …}`` object per
+    line. Unreadable/absent task metadata degrades to an empty list — the info
+    card can render without it.
+    """
+    parquet_path = meta_dir / "tasks.parquet"
+    if parquet_path.is_file():
+        try:
+            table = pq.read_table(parquet_path).to_pydict()
+            rows = sorted(zip(table.get("task_index", []), table.get("task", []), strict=True))
+            return [str(task) for _, task in rows]
+        except Exception as e:
+            logger.warning(f"Could not read {parquet_path}: {e}")
+            return []
+
+    jsonl_path = meta_dir / "tasks.jsonl"
+    if jsonl_path.is_file():
+        try:
+            rows = []
+            for line in jsonl_path.read_text().splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                obj = json.loads(line)
+                rows.append((obj.get("task_index", 0), str(obj.get("task", ""))))
+            rows.sort()
+            return [task for _, task in rows if task]
+        except (OSError, ValueError) as e:
+            logger.warning(f"Could not read {jsonl_path}: {e}")
+
+    return []
+
+
+def _count_task_episodes(meta_dir: Path) -> dict[str, int]:
+    """Episodes per task string, from the per-episode ``tasks`` column.
+
+    Same mapping the recording picker uses (see ``handle_get_dataset_info`` in
+    record.py): each episode lists the task strings it uses, and an episode
+    counts once per distinct task. Read directly from the metadata files —
+    v3.0 keeps episode rows in ``meta/episodes/chunk-*/file-*.parquet`` (only
+    the ``tasks`` column is loaded, not the wide per-episode stats), v2.x in
+    ``meta/episodes.jsonl`` — so the endpoint stays a cheap file read instead
+    of a full ``LeRobotDataset`` load. Unreadable/absent episode metadata
+    degrades to an empty dict (counts render as 0).
+    """
+    counts: dict[str, int] = {}
+
+    episodes_dir = meta_dir / "episodes"
+    if episodes_dir.is_dir():
+        for parquet_path in sorted(episodes_dir.glob("**/*.parquet")):
+            try:
+                table = pq.read_table(parquet_path, columns=["tasks"])
+            except Exception as e:
+                logger.warning(f"Could not read {parquet_path}: {e}")
+                continue
+            for episode_tasks in table.column("tasks").to_pylist():
+                for task in set(episode_tasks or []):
+                    counts[str(task)] = counts.get(str(task), 0) + 1
+        return counts
+
+    jsonl_path = meta_dir / "episodes.jsonl"
+    if jsonl_path.is_file():
+        try:
+            for line in jsonl_path.read_text().splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                obj = json.loads(line)
+                for task in set(obj.get("tasks") or []):
+                    counts[str(task)] = counts.get(str(task), 0) + 1
+        except (OSError, ValueError) as e:
+            logger.warning(f"Could not read {jsonl_path}: {e}")
+
+    return counts
+
+
+def _dir_size_bytes(path: Path) -> int:
+    """Total size of all files under `path`. Unreadable files are skipped."""
+    total = 0
+    for dirpath, _dirnames, filenames in os.walk(path):
+        for name in filenames:
+            try:
+                total += os.stat(os.path.join(dirpath, name)).st_size
+            except OSError:
+                continue
+    return total
+
+
+def get_local_dataset_info(repo_id: str) -> dict[str, Any] | None:
+    """Detail view of one locally-cached dataset, for the selection info card.
+
+    Reads ``meta/info.json`` + task metadata and walks the directory for its
+    size on disk — per-dataset on demand, so the cheap ``/datasets`` listing
+    stays cheap. Returns None if `repo_id` escapes the cache root or isn't a
+    local dataset (e.g. it only exists on the Hub).
+    """
+    root = _lerobot_cache_root().resolve()
+    try:
+        path = (root / repo_id).resolve()
+    except OSError:
+        return None
+    # Reject path traversal: the dataset dir must stay strictly inside the cache.
+    if path == root or root not in path.parents:
+        return None
+    if not _is_dataset_dir(path):
+        return None
+
+    try:
+        info = json.loads((path / "meta" / "info.json").read_text())
+    except (OSError, ValueError):
+        return None
+
+    features = info.get("features") or {}
+    cameras = [key[len(CAMERA_FEATURE_PREFIX) :] for key in features if key.startswith(CAMERA_FEATURE_PREFIX)]
+
+    # Same {task, num_episodes} shape as record.py's handle_get_dataset_info.
+    task_counts = _count_task_episodes(path / "meta")
+    tasks = [
+        {"task": task, "num_episodes": task_counts.get(task, 0)} for task in _read_task_strings(path / "meta")
+    ]
+
+    return {
+        "repo_id": repo_id,
+        "total_episodes": int(info.get("total_episodes") or 0),
+        "total_frames": int(info.get("total_frames") or 0),
+        "fps": info.get("fps"),
+        "robot_type": info.get("robot_type"),
+        "cameras": cameras,
+        "tasks": tasks,
+        "size_bytes": _dir_size_bytes(path),
+    }
 
 
 def list_user_datasets() -> list[dict[str, Any]]:

@@ -34,6 +34,7 @@ import {
 interface DatasetInfo {
   dataset_repo_id: string;
   single_task: string;
+  tasks?: { task: string; num_episodes: number }[];
   num_episodes: number;
   saved_episodes?: number;
   session_elapsed_seconds?: number;
@@ -282,7 +283,7 @@ const Upload = () => {
             <Button
               onClick={() => navigate("/")}
               variant="outline"
-              className="border-gray-500 hover:border-gray-200 text-gray-300 hover:text-white"
+              className="border-gray-500 hover:border-gray-200 text-gray-700 hover:text-gray-900 dark:text-gray-300 dark:hover:text-white"
             >
               <ArrowLeft className="w-4 h-4 mr-2" />
               Back to Home
@@ -293,7 +294,7 @@ const Upload = () => {
               size="icon"
               disabled={isDeleting}
               aria-label="Delete dataset from disk"
-              className="border-red-500/40 text-red-400 hover:border-red-400 hover:text-red-300 hover:bg-red-500/10"
+              className="border-red-500/40 text-red-600 hover:text-red-700 dark:text-red-400 hover:border-red-400 dark:hover:text-red-300 hover:bg-red-500/10"
             >
               <Trash2 className="w-4 h-4" />
             </Button>
@@ -328,7 +329,7 @@ const Upload = () => {
               <Button
                 onClick={() => {
                   const spacePath = `/spaces/lerobot/visualize_dataset?path=${encodeURIComponent(
-                    `/${datasetInfo.dataset_repo_id}`
+                    `/${datasetInfo.dataset_repo_id}`,
                   )}`;
                   const target = uploadConfig.private
                     ? `https://huggingface.co/login?next=${encodeURIComponent(spacePath)}`
@@ -371,8 +372,28 @@ const Upload = () => {
                     </p>
                   </div>
                   <div>
-                    <span className="text-gray-400">Task:</span>
-                    <p className="text-white">{datasetInfo.single_task}</p>
+                    <span className="text-gray-400">
+                      {(datasetInfo.tasks?.length ?? 0) > 1
+                        ? "Tasks:"
+                        : "Task:"}
+                    </span>
+                    {!datasetInfo.tasks || datasetInfo.tasks.length === 0 ? (
+                      <p className="text-white">Unknown task</p>
+                    ) : (
+                      <ul className="mt-1 space-y-1">
+                        {datasetInfo.tasks.map((t) => (
+                          <li
+                            key={t.task}
+                            className="flex items-baseline justify-between gap-3"
+                          >
+                            <span className="text-white">{t.task}</span>
+                            <span className="shrink-0 text-sm text-gray-400 tabular-nums">
+                              {t.num_episodes} ep
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
                   </div>
                 </div>
                 <div className="space-y-3">
@@ -493,7 +514,7 @@ const Upload = () => {
                     onClick={handleSkipUpload}
                     disabled={isUploading}
                     variant="outline"
-                    className="border-gray-600 text-gray-300 hover:bg-gray-800 hover:text-white py-4 px-8 text-lg"
+                    className="border-gray-600 text-gray-700 dark:text-gray-300 hover:bg-gray-800 hover:text-white py-4 px-8 text-lg"
                   >
                     Skip Upload
                   </Button>
@@ -541,7 +562,11 @@ const Upload = () => {
           <AlertDialogHeader>
             <AlertDialogTitle>Delete dataset from disk?</AlertDialogTitle>
             <AlertDialogDescription className="text-gray-400">
-              This permanently removes <span className="font-mono text-white">{datasetInfo.dataset_repo_id}</span> from your local cache. This action cannot be undone.
+              This permanently removes{" "}
+              <span className="font-mono text-white">
+                {datasetInfo.dataset_repo_id}
+              </span>{" "}
+              from your local cache. This action cannot be undone.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

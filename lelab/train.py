@@ -20,9 +20,31 @@ lives in app/jobs.py.
 
 import re
 
+import torch
 from pydantic import BaseModel
 
 _SLUG_RE = re.compile(r"[^a-zA-Z0-9._-]+")
+
+
+def _resolve_device(device: str | None) -> str:
+    """Resolve the requested training device to a concrete backend.
+
+    lerobot's trainer runs under HuggingFace Accelerate, which auto-detects the
+    hardware and ignores `policy.device` — except that `device == "cpu"` forces
+    CPU. So functionally the UI choice is binary: auto-GPU vs force-CPU. We keep
+    the logged config truthful by resolving "auto"/None to the platform's real
+    device here.
+
+    Explicit "cuda"/"mps"/"cpu" pass through unchanged (backward-compat with
+    configs that persisted a concrete device before this collapse to auto/cpu).
+    """
+    if device in ("cuda", "mps", "cpu"):
+        return device
+    if torch.cuda.is_available():
+        return "cuda"
+    if torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
 
 
 class TrainingRequest(BaseModel):
@@ -42,7 +64,10 @@ class TrainingRequest(BaseModel):
     num_workers: int = 4
 
     # Logging and checkpointing
-    log_freq: int = 250
+    # log_freq drives how often lerobot prints loss/lr (and thus the chart's
+    # resolution — one point per log line). Lower = smoother curves but noisier
+    # per-window averages and more log volume.
+    log_freq: int = 50
     save_freq: int = 1000
     eval_freq: int = 0
     save_checkpoint: bool = True
@@ -50,6 +75,20 @@ class TrainingRequest(BaseModel):
     # Output configuration
     output_dir: str = "outputs/train"
     resume: bool = False
+    # Set by the "Continue training" flow: the source run + checkpoint step to
+    # resume from. The JobRegistry resolves these into `config_path` (lerobot
+    # needs the checkpoint's train_config.json to reconstruct the run).
+    resume_from_job_id: str | None = None
+    resume_from_step: int | None = None
+    # Set by the "Fine-tune" flow: start a FRESH run (fresh optimizer, step 0)
+    # whose weights are initialized from an imported/existing checkpoint. Unlike
+    # resume, this needs no optimizer/step state — weights-only is exactly the
+    # point. The UI picks a source + step; JobRegistry resolves them into
+    # `policy_pretrained_path` (the checkpoint's pretrained_model dir or Hub ref
+    # that lerobot's --policy.pretrained_path accepts).
+    finetune_from_job_id: str | None = None
+    finetune_from_step: int | None = None
+    policy_pretrained_path: str | None = None
     job_name: str | None = None
 
     # Weights & Biases
@@ -69,7 +108,7 @@ class TrainingRequest(BaseModel):
     eval_use_async_envs: bool = False
 
     # Policy-specific
-    policy_device: str | None = "cuda"
+    policy_device: str | None = "auto"
     policy_use_amp: bool = False
     # Hub upload (set by HfCloudJobRunner; not exposed in the form)
     policy_push_to_hub: bool = False
@@ -103,6 +142,30 @@ def build_training_command(
     """
     cmd: list[str] = [python_executable, "-m", "lerobot.scripts.lerobot_train"]
 
+    # Resume: lerobot reconstructs the whole run (policy, dataset, optimizer,
+    # batch size, …) from the checkpoint's train_config.json, so we pass ONLY
+    # the resume essentials plus the few top-level overrides that make sense to
+    # change on continuation. Passing --policy.type / --dataset.* here would
+    # fight the loaded config — lerobot's resume path expects those to come
+    # from config_path, not the CLI. --steps must be raised above the resumed
+    # step for the loop to do any work; --output_dir points new checkpoints at
+    # this job's own dir so tracking stays consistent (state still loads from
+    # the source checkpoint).
+    if request.resume and request.config_path:
+        # lerobot pre-parses config_path with its own parser that ONLY accepts
+        # the "--config_path=<path>" form (space-separated is silently ignored,
+        # yielding "A config_path is expected when resuming a run").
+        cmd.append(f"--config_path={request.config_path}")
+        cmd.extend(["--resume", "true"])
+        cmd.extend(["--output_dir", output_dir])
+        cmd.extend(["--steps", str(request.steps)])
+        cmd.extend(["--log_freq", str(request.log_freq)])
+        cmd.extend(["--save_freq", str(request.save_freq)])
+        cmd.extend(["--save_checkpoint", "true" if request.save_checkpoint else "false"])
+        if request.job_name:
+            cmd.extend(["--job_name", request.job_name])
+        return cmd
+
     # Dataset
     cmd.extend(["--dataset.repo_id", request.dataset_repo_id])
     if request.dataset_revision:
@@ -114,6 +177,13 @@ def build_training_command(
 
     # Policy
     cmd.extend(["--policy.type", request.policy_type])
+    # Fine-tune: initialize weights (+ processors) from an existing checkpoint.
+    # This is a normal FRESH run (--resume false below) — lerobot loads only the
+    # weights via pretrained_path, starting a new optimizer at step 0. Equals
+    # form (like config_path) to be safe against value parsing. Never emitted on
+    # the resume branch above.
+    if request.policy_pretrained_path:
+        cmd.append(f"--policy.pretrained_path={request.policy_pretrained_path}")
 
     # Core training params
     cmd.extend(["--steps", str(request.steps)])
@@ -123,8 +193,8 @@ def build_training_command(
         cmd.extend(["--seed", str(request.seed)])
 
     # Policy device / AMP / hub
-    if request.policy_device:
-        cmd.extend(["--policy.device", request.policy_device])
+    resolved = _resolve_device(request.policy_device)
+    cmd.extend(["--policy.device", resolved])
     cmd.extend(["--policy.use_amp", "true" if request.policy_use_amp else "false"])
     # LeRobot defaults push_to_hub=True and demands --policy.repo_id when so.
     # Local jobs keep it off; HF Cloud jobs flip it on via the runner.
@@ -183,6 +253,7 @@ def build_training_command(
     # Advanced
     cmd.extend(["--use_policy_training_preset", "true" if request.use_policy_training_preset else "false"])
     if request.config_path:
-        cmd.extend(["--config_path", request.config_path])
+        # Equals form required — see the resume branch above.
+        cmd.append(f"--config_path={request.config_path}")
 
     return cmd

@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Plus, ExternalLink } from "lucide-react";
+import { Plus, ExternalLink, Trash2 } from "lucide-react";
 import {
   Popover,
   PopoverContent,
@@ -14,6 +14,7 @@ import {
   CommandList,
 } from "@/components/ui/command";
 import { DatasetItem } from "@/lib/replayApi";
+import { validateDatasetName } from "@/lib/datasetName";
 
 interface DatasetPickerProps {
   datasets: DatasetItem[];
@@ -21,11 +22,11 @@ interface DatasetPickerProps {
   onPickExisting: (item: DatasetItem) => void;
   onCreateNew: (name: string) => void;
   onOpenCustom: (repoId: string) => void;
+  onDelete?: (item: DatasetItem) => void;
   children: React.ReactNode;
 }
 
-const REPO_ID_RE = /^[\w.\-]+\/[\w.\-]+$/;
-const NAME_RE = /^[A-Za-z0-9._-]+$/;
+const REPO_ID_RE = /^[\w.-]+\/[\w.-]+$/;
 
 const DatasetPicker: React.FC<DatasetPickerProps> = ({
   datasets,
@@ -33,6 +34,7 @@ const DatasetPicker: React.FC<DatasetPickerProps> = ({
   onPickExisting,
   onCreateNew,
   onOpenCustom,
+  onDelete,
   children,
 }) => {
   const [open, setOpen] = useState(false);
@@ -43,7 +45,10 @@ const DatasetPicker: React.FC<DatasetPickerProps> = ({
     (d) => d.repo_id.toLowerCase() === trimmed.toLowerCase(),
   );
   const isRepoId = REPO_ID_RE.test(trimmed);
-  const isName = NAME_RE.test(trimmed) && !trimmed.includes("/");
+  // Shared with the backend (validate_dataset_name) so the picker never offers to
+  // create a name the recorder will later reject.
+  const nameError = validateDatasetName(trimmed);
+  const isName = nameError === null;
   const canCreate = trimmed.length > 0 && isName && !matchesExisting;
   const canOpenCustom = isRepoId && !matchesExisting;
 
@@ -54,7 +59,7 @@ const DatasetPicker: React.FC<DatasetPickerProps> = ({
       ? "Create new dataset…"
       : canCreate
         ? `Create "${trimmed}"`
-        : 'Use a name without "/"';
+        : (nameError ?? "Invalid name");
 
   const handleFooterCreate = () => {
     if (createDisabled) return;
@@ -62,7 +67,9 @@ const DatasetPicker: React.FC<DatasetPickerProps> = ({
     reset();
   };
 
-  const localDatasets = datasets.filter((d) => d.source === "local" || d.source === "both");
+  const localDatasets = datasets.filter(
+    (d) => d.source === "local" || d.source === "both",
+  );
   const hubDatasets = datasets.filter((d) => d.source === "hub");
 
   const reset = () => {
@@ -98,8 +105,25 @@ const DatasetPicker: React.FC<DatasetPickerProps> = ({
       {d.source === "both" && (
         <span className="text-xs text-gray-400 mr-2">on Hub</span>
       )}
-      {d.private && (
-        <span className="text-xs text-amber-400">private</span>
+      {d.private && <span className="text-xs text-amber-400">private</span>}
+      {onDelete && (d.source === "local" || d.source === "both") && (
+        <button
+          type="button"
+          aria-label={`Delete ${d.repo_id}`}
+          className="ml-2 shrink-0 text-gray-500 hover:text-red-400"
+          // stop cmdk from treating the click as a selection of the row
+          onMouseDown={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+          }}
+          onClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            onDelete(d);
+          }}
+        >
+          <Trash2 className="h-3.5 w-3.5" />
+        </button>
       )}
     </CommandItem>
   );
@@ -115,7 +139,9 @@ const DatasetPicker: React.FC<DatasetPickerProps> = ({
           <CommandInput
             placeholder="Search, type a new name, or org/name…"
             value={query}
-            onValueChange={(v) => setQuery(v.replace(/[^A-Za-z0-9._\-/]/g, "_"))}
+            onValueChange={(v) =>
+              setQuery(v.replace(/[^A-Za-z0-9._\-/]/g, "_"))
+            }
             onKeyDown={(e) => {
               if (e.key !== "Enter") return;
               if (canCreate) {

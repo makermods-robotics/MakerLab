@@ -10,6 +10,7 @@ import {
   JobProgressSnapshot,
   JobRecord,
   deleteJob,
+  getJob,
   listHubJobs,
   listJobs,
   stopJob,
@@ -44,10 +45,17 @@ const JobsSection: React.FC = () => {
   const { toast } = useToast();
 
   const [jobs, setJobs] = useState<JobRecord[]>([]);
+  // Ancestors referenced via resume_from_job_id but paged out of the list, so a
+  // resumed run can still nest its source even when the source is old.
+  const [ancestorCache, setAncestorCache] = useState<Record<string, JobRecord>>(
+    {},
+  );
   const [hubJobs, setHubJobs] = useState<HubJob[]>([]);
   const [hubModels, setHubModels] = useState<HubModel[]>([]);
   const [hubAuthenticated, setHubAuthenticated] = useState(false);
+  const [hubJobsPermission, setHubJobsPermission] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [hubError, setHubError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
 
   const { selectedRecord } = useRobots();
@@ -57,18 +65,28 @@ const JobsSection: React.FC = () => {
   const [inferenceStep, setInferenceStep] = useState<number | null>(null);
 
   const refresh = useCallback(async () => {
-    try {
-      const [next, hub] = await Promise.all([
-        listJobs(baseUrl, fetchWithHeaders, LIMIT),
-        listHubJobs(baseUrl, fetchWithHeaders),
-      ]);
-      setJobs(next);
-      setHubJobs(hub.jobs);
-      setHubModels(hub.models);
-      setHubAuthenticated(hub.authenticated);
+    // Settle the two fetches independently: a hub failure (network, HF outage,
+    // missing scope) must never blank the local jobs, and vice versa.
+    const [localRes, hubRes] = await Promise.allSettled([
+      listJobs(baseUrl, fetchWithHeaders, LIMIT),
+      listHubJobs(baseUrl, fetchWithHeaders),
+    ]);
+    if (localRes.status === "fulfilled") {
+      setJobs(localRes.value);
       setError(null);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+    } else {
+      const r = localRes.reason;
+      setError(r instanceof Error ? r.message : String(r));
+    }
+    if (hubRes.status === "fulfilled") {
+      setHubJobs(hubRes.value.jobs);
+      setHubModels(hubRes.value.models);
+      setHubAuthenticated(hubRes.value.authenticated);
+      setHubJobsPermission(hubRes.value.jobs_permission ?? true);
+      setHubError(null);
+    } else {
+      const r = hubRes.reason;
+      setHubError(r instanceof Error ? r.message : String(r));
     }
   }, [baseUrl, fetchWithHeaders]);
 
@@ -114,6 +132,51 @@ const JobsSection: React.FC = () => {
 
   useJobsChangedSignal(refresh, applyProgress);
 
+  // Fetch the transitive closure of resume ancestors that aren't in the loaded
+  // page (or already cached), so nesting works regardless of how old the source
+  // run is. Idempotent: only unseen ids are fetched, so the frequent list
+  // refreshes during a run don't re-fetch. Missing/deleted ancestors are
+  // skipped, ending the chain.
+  useEffect(() => {
+    let cancelled = false;
+    const loaded = new Set(jobs.map((j) => j.id));
+    const queue = jobs
+      .map((j) => j.config?.resume_from_job_id)
+      .filter(
+        (id): id is string => !!id && !loaded.has(id) && !ancestorCache[id],
+      );
+    if (queue.length === 0) return;
+    (async () => {
+      const fetched: Record<string, JobRecord> = {};
+      const seen = new Set(queue);
+      while (queue.length > 0) {
+        const id = queue.shift() as string;
+        try {
+          const rec = await getJob(baseUrl, fetchWithHeaders, id);
+          fetched[id] = rec;
+          const parent = rec.config?.resume_from_job_id;
+          if (
+            parent &&
+            !loaded.has(parent) &&
+            !ancestorCache[parent] &&
+            !seen.has(parent)
+          ) {
+            seen.add(parent);
+            queue.push(parent);
+          }
+        } catch {
+          // Ancestor deleted or unreachable — skip; the chain just stops here.
+        }
+      }
+      if (!cancelled && Object.keys(fetched).length > 0) {
+        setAncestorCache((prev) => ({ ...prev, ...fetched }));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [jobs, ancestorCache, baseUrl, fetchWithHeaders]);
+
   const handleStop = async (id: string) => {
     try {
       await stopJob(baseUrl, fetchWithHeaders, id);
@@ -156,14 +219,14 @@ const JobsSection: React.FC = () => {
   );
 
   const filteredJobs = useMemo(
-    () => jobs.filter((j) => matchesQuery(j.name)),
+    // Match on the display alias as well as the original name, so a renamed
+    // model is findable by either.
+    () => jobs.filter((j) => matchesQuery(j.name) || matchesQuery(j.display_name)),
     [jobs, matchesQuery],
   );
   const filteredHubJobs = useMemo(
     () =>
-      hubJobs.filter((h) =>
-        matchesQuery(h.docker_image ?? h.space_id ?? h.id),
-      ),
+      hubJobs.filter((h) => matchesQuery(h.docker_image ?? h.space_id ?? h.id)),
     [hubJobs, matchesQuery],
   );
   const filteredHubModels = useMemo(
@@ -215,12 +278,54 @@ const JobsSection: React.FC = () => {
     [filteredHubModels, trackedRepoIds],
   );
 
+  // Resume lineage: job B stores config.resume_from_job_id = A. Hide A (the
+  // superseded run) from the top level and nest it under B, so a resumed chain
+  // reads as one entry. Lineage is linear — each job resumes from one parent.
+  const byId = useMemo(() => {
+    const m = new Map(jobs.map((j) => [j.id, j]));
+    // Cached ancestors fill in parents paged out of the list (never overriding
+    // a loaded record).
+    for (const rec of Object.values(ancestorCache)) {
+      if (!m.has(rec.id)) m.set(rec.id, rec);
+    }
+    return m;
+  }, [jobs, ancestorCache]);
+  const supersededIds = useMemo(() => {
+    const s = new Set<string>();
+    for (const j of jobs) {
+      const parent = j.config?.resume_from_job_id;
+      // Only a real successor (running or with its own checkpoints) supersedes
+      // its parent — a failed continuation shouldn't hide the source run.
+      const legit = j.state === "running" || j.checkpoint_count > 0;
+      if (parent && byId.has(parent) && legit) s.add(parent);
+    }
+    return s;
+  }, [jobs, byId]);
+  const ancestorsOf = useCallback(
+    (job: JobRecord): JobRecord[] => {
+      const chain: JobRecord[] = [];
+      const seen = new Set<string>([job.id]);
+      let cur = byId.get(job.config?.resume_from_job_id ?? "");
+      while (cur && !seen.has(cur.id)) {
+        chain.push(cur);
+        seen.add(cur.id);
+        cur = byId.get(cur.config?.resume_from_job_id ?? "");
+      }
+      return chain;
+    },
+    [byId],
+  );
+
   // Active = running or has runnable checkpoints. Everything else collapses
-  // under UNTRACKED so the eye lands on what's still relevant.
-  const localActive = useMemo(() => localJobs.filter(isJobActive), [localJobs]);
+  // under UNTRACKED so the eye lands on what's still relevant. Superseded runs
+  // are dropped from both — they surface nested under their successor instead.
+  const localActive = useMemo(
+    () => localJobs.filter((j) => isJobActive(j) && !supersededIds.has(j.id)),
+    [localJobs, supersededIds],
+  );
   const localUntracked = useMemo(
-    () => localJobs.filter((j) => !isJobActive(j)),
-    [localJobs],
+    () => localJobs.filter((j) => !isJobActive(j) && !supersededIds.has(j.id)),
+    [localJobs, supersededIds],
   );
   const trackedCloudActive = useMemo(
     () => trackedCloudJobs.filter(isJobActive),
@@ -245,20 +350,182 @@ const JobsSection: React.FC = () => {
     untrackedHubInactive.length;
 
   return (
-    <section className="space-y-6">
-      <div className="flex items-center justify-between gap-3">
-        <h2 className="text-lg font-semibold text-white">Jobs</h2>
-        <div className="flex items-center gap-2">
-          <div className="relative">
-            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400 pointer-events-none" />
-            <Input
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search jobs"
-              className="h-8 w-48 sm:w-60 pl-8 bg-slate-800/50 border-slate-700 text-sm text-white placeholder:text-slate-500"
-              aria-label="Search jobs"
-            />
+    <section className="grid grid-cols-1 lg:grid-cols-2 gap-x-8 gap-y-10 items-start">
+      {/* Jobs column: local runs, cloud runs, and inactive/untracked leftovers.
+          The search box lives here (it primarily filters job text) but keeps
+          filtering the imported-models column too, so behavior is unchanged. */}
+      <div className="space-y-6">
+        <div className="flex items-center justify-between gap-3">
+          <h2 className="text-lg font-semibold text-white">Jobs</h2>
+          <div className="flex items-center gap-2">
+            <div className="relative">
+              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400 pointer-events-none" />
+              <Input
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search jobs"
+                className="h-8 w-48 sm:w-60 pl-8 bg-slate-800/50 border-slate-700 text-sm text-white placeholder:text-slate-500"
+                aria-label="Search jobs"
+              />
+            </div>
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={refresh}
+              className="h-7 w-7 text-slate-400 hover:text-white"
+              aria-label="Refresh jobs"
+            >
+              <RefreshCw className="w-4 h-4" />
+            </Button>
           </div>
+        </div>
+
+        {error ? (
+          <p className="text-sm text-red-300">
+            Couldn't load local jobs: {error}
+          </p>
+        ) : null}
+
+        <Collapsible defaultOpen>
+          <CollapsibleTrigger className="group flex items-center gap-1.5 text-sm font-semibold uppercase tracking-wide text-slate-400 hover:text-white transition-colors">
+            <ChevronRight className="w-3.5 h-3.5 transition-transform group-data-[state=open]:rotate-90" />
+            Local jobs ({localActive.length})
+          </CollapsibleTrigger>
+          <CollapsibleContent className="pt-3">
+            {localActive.length === 0 ? (
+              <p className="text-sm text-slate-500">
+                {query
+                  ? "No local jobs match your search."
+                  : "No active local jobs. Start one from the Training page."}
+              </p>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-1 gap-4">
+                {localActive.map((job) => (
+                  <JobCard
+                    key={job.id}
+                    job={job}
+                    onStop={handleStop}
+                    onDelete={handleDelete}
+                    onPlay={handlePlay}
+                    onRenamed={refresh}
+                    ancestors={ancestorsOf(job)}
+                  />
+                ))}
+              </div>
+            )}
+          </CollapsibleContent>
+        </Collapsible>
+
+        <div className="border-t border-slate-700" />
+
+        <Collapsible defaultOpen>
+          <CollapsibleTrigger className="group flex items-center gap-1.5 text-sm font-semibold uppercase tracking-wide text-slate-400 hover:text-white transition-colors">
+            <ChevronRight className="w-3.5 h-3.5 transition-transform group-data-[state=open]:rotate-90" />
+            Online jobs (
+            {trackedCloudActive.length +
+              untrackedHubActive.length +
+              untrackedHubModels.length}
+            )
+          </CollapsibleTrigger>
+          <CollapsibleContent className="pt-3">
+            {hubError ? (
+              <p className="text-sm text-red-300">
+                Couldn't load cloud jobs: {hubError}
+              </p>
+            ) : !hubAuthenticated && trackedCloudJobs.length === 0 ? (
+              <p className="text-sm text-slate-500">
+                Sign in with Hugging Face to see your cloud jobs.
+              </p>
+            ) : (
+              <div className="space-y-3">
+                {hubAuthenticated && !hubJobsPermission ? (
+                  <p className="text-sm text-amber-300/80">
+                    Your Hugging Face token is missing the{" "}
+                    <code className="text-amber-200">job.read</code> permission,
+                    so cloud jobs can't be listed. Uploaded models still appear
+                    below.
+                  </p>
+                ) : null}
+                {trackedCloudActive.length === 0 &&
+                untrackedHubActive.length === 0 &&
+                untrackedHubModels.length === 0 ? (
+                  hubAuthenticated && !hubJobsPermission ? null : (
+                    <p className="text-sm text-slate-500">
+                      {query
+                        ? "No online jobs match your search."
+                        : "No active cloud jobs."}
+                    </p>
+                  )
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-1 gap-4">
+                    {trackedCloudActive.map((job) => (
+                      <JobCard
+                        key={job.id}
+                        job={job}
+                        onStop={handleStop}
+                        onDelete={handleDelete}
+                        onPlay={handlePlay}
+                        onRenamed={refresh}
+                      />
+                    ))}
+                    {untrackedHubActive.map((job) => (
+                      <HubJobCard key={job.id} job={job} />
+                    ))}
+                    {untrackedHubModels.map((model) => (
+                      <HubModelCard key={model.repo_id} model={model} />
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </CollapsibleContent>
+        </Collapsible>
+
+        {untrackedCount > 0 ? (
+          <Collapsible>
+            <CollapsibleTrigger className="group flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-slate-400 hover:text-white transition-colors">
+              <ChevronRight className="w-3.5 h-3.5 transition-transform group-data-[state=open]:rotate-90" />
+              Untracked ({untrackedCount})
+            </CollapsibleTrigger>
+            <CollapsibleContent className="pt-3">
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-1 gap-4">
+                {localUntracked.map((job) => (
+                  <JobCard
+                    key={job.id}
+                    job={job}
+                    onStop={handleStop}
+                    onDelete={handleDelete}
+                    onPlay={handlePlay}
+                    onRenamed={refresh}
+                    ancestors={ancestorsOf(job)}
+                  />
+                ))}
+                {trackedCloudUntracked.map((job) => (
+                  <JobCard
+                    key={job.id}
+                    job={job}
+                    onStop={handleStop}
+                    onDelete={handleDelete}
+                    onPlay={handlePlay}
+                    onRenamed={refresh}
+                  />
+                ))}
+                {untrackedHubInactive.map((job) => (
+                  <HubJobCard key={job.id} job={job} />
+                ))}
+              </div>
+            </CollapsibleContent>
+          </Collapsible>
+        ) : null}
+      </div>
+
+      {/* Imported models column. Owns the Import button; rendered even when
+          empty so the entry point is always visible. */}
+      <div className="space-y-6">
+        <div className="flex items-center justify-between gap-3">
+          <h2 className="text-lg font-semibold text-white">
+            Imported models{importedJobs.length > 0 ? ` (${importedJobs.length})` : ""}
+          </h2>
           <Button
             variant="outline"
             size="sm"
@@ -268,150 +535,28 @@ const JobsSection: React.FC = () => {
             <Download className="w-3.5 h-3.5 mr-1.5" />
             Import model
           </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={refresh}
-            className="h-7 w-7 text-slate-400 hover:text-white"
-            aria-label="Refresh jobs"
-          >
-            <RefreshCw className="w-4 h-4" />
-          </Button>
         </div>
+        {importedJobs.length === 0 ? (
+          <p className="text-sm text-slate-500">
+            {query
+              ? "No imported models match your search."
+              : "No imported models. Use Import model to add one from the Hub or a local folder."}
+          </p>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-1 gap-4">
+            {importedJobs.map((job) => (
+              <JobCard
+                key={job.id}
+                job={job}
+                onStop={handleStop}
+                onDelete={handleDelete}
+                onPlay={handlePlay}
+                onRenamed={refresh}
+              />
+            ))}
+          </div>
+        )}
       </div>
-
-      {error ? <p className="text-sm text-red-300">Couldn't load jobs: {error}</p> : null}
-
-      <Collapsible defaultOpen>
-        <CollapsibleTrigger className="group flex items-center gap-1.5 text-sm font-semibold uppercase tracking-wide text-slate-400 hover:text-white transition-colors">
-          <ChevronRight className="w-3.5 h-3.5 transition-transform group-data-[state=open]:rotate-90" />
-          Local jobs ({localActive.length})
-        </CollapsibleTrigger>
-        <CollapsibleContent className="pt-3">
-          {localActive.length === 0 ? (
-            <p className="text-sm text-slate-500">
-              {query
-                ? "No local jobs match your search."
-                : "No active local jobs. Start one from the Training page."}
-            </p>
-          ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {localActive.map((job) => (
-                <JobCard
-                  key={job.id}
-                  job={job}
-                  onStop={handleStop}
-                  onDelete={handleDelete}
-                  onPlay={handlePlay}
-                />
-              ))}
-            </div>
-          )}
-        </CollapsibleContent>
-      </Collapsible>
-
-      {importedJobs.length > 0 ? (
-        <>
-          <div className="border-t border-slate-700" />
-          <Collapsible defaultOpen>
-            <CollapsibleTrigger className="group flex items-center gap-1.5 text-sm font-semibold uppercase tracking-wide text-slate-400 hover:text-white transition-colors">
-              <ChevronRight className="w-3.5 h-3.5 transition-transform group-data-[state=open]:rotate-90" />
-              Imported models ({importedJobs.length})
-            </CollapsibleTrigger>
-            <CollapsibleContent className="pt-3">
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                {importedJobs.map((job) => (
-                  <JobCard
-                    key={job.id}
-                    job={job}
-                    onStop={handleStop}
-                    onDelete={handleDelete}
-                    onPlay={handlePlay}
-                  />
-                ))}
-              </div>
-            </CollapsibleContent>
-          </Collapsible>
-        </>
-      ) : null}
-
-      <div className="border-t border-slate-700" />
-
-      <Collapsible defaultOpen>
-        <CollapsibleTrigger className="group flex items-center gap-1.5 text-sm font-semibold uppercase tracking-wide text-slate-400 hover:text-white transition-colors">
-          <ChevronRight className="w-3.5 h-3.5 transition-transform group-data-[state=open]:rotate-90" />
-          Online jobs (
-          {trackedCloudActive.length +
-            untrackedHubActive.length +
-            untrackedHubModels.length}
-          )
-        </CollapsibleTrigger>
-        <CollapsibleContent className="pt-3">
-          {!hubAuthenticated && trackedCloudJobs.length === 0 ? (
-            <p className="text-sm text-slate-500">
-              Sign in with Hugging Face to see your cloud jobs.
-            </p>
-          ) : trackedCloudActive.length === 0 &&
-            untrackedHubActive.length === 0 &&
-            untrackedHubModels.length === 0 ? (
-            <p className="text-sm text-slate-500">
-              {query ? "No online jobs match your search." : "No active cloud jobs."}
-            </p>
-          ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {trackedCloudActive.map((job) => (
-                <JobCard
-                  key={job.id}
-                  job={job}
-                  onStop={handleStop}
-                  onDelete={handleDelete}
-                  onPlay={handlePlay}
-                />
-              ))}
-              {untrackedHubActive.map((job) => (
-                <HubJobCard key={job.id} job={job} />
-              ))}
-              {untrackedHubModels.map((model) => (
-                <HubModelCard key={model.repo_id} model={model} />
-              ))}
-            </div>
-          )}
-        </CollapsibleContent>
-      </Collapsible>
-
-      {untrackedCount > 0 ? (
-        <Collapsible>
-          <CollapsibleTrigger className="group flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-slate-400 hover:text-white transition-colors">
-            <ChevronRight className="w-3.5 h-3.5 transition-transform group-data-[state=open]:rotate-90" />
-            Untracked ({untrackedCount})
-          </CollapsibleTrigger>
-          <CollapsibleContent className="pt-3">
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {localUntracked.map((job) => (
-                <JobCard
-                  key={job.id}
-                  job={job}
-                  onStop={handleStop}
-                  onDelete={handleDelete}
-                  onPlay={handlePlay}
-                />
-              ))}
-              {trackedCloudUntracked.map((job) => (
-                <JobCard
-                  key={job.id}
-                  job={job}
-                  onStop={handleStop}
-                  onDelete={handleDelete}
-                  onPlay={handlePlay}
-                />
-              ))}
-              {untrackedHubInactive.map((job) => (
-                <HubJobCard key={job.id} job={job} />
-              ))}
-            </div>
-          </CollapsibleContent>
-        </Collapsible>
-      ) : null}
 
       {inferenceJob ? (
         <InferenceModal

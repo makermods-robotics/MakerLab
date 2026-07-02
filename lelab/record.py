@@ -13,24 +13,36 @@
 # limitations under the License.
 
 import logging
-import re
 import shutil
 import threading
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel
 
 from lerobot.configs.dataset import DatasetRecordConfig
 from lerobot.datasets import LeRobotDataset
+from lerobot.robots.bi_so_follower import BiSOFollowerConfig
 from lerobot.robots.so_follower import SO101FollowerConfig
 
 # Import the main record functionality to reuse it
 from lerobot.scripts.lerobot_record import RecordConfig
+from lerobot.teleoperators.bi_so_leader import BiSOLeaderConfig
 from lerobot.teleoperators.so_leader import SO101LeaderConfig
 
-from .utils.config import setup_calibration_files, with_lelab_tag
+from .arm_identity import ArmIdentityError, verify_devices
+from .motor_power import apply_motor_power
+from .teleoperate import force_disable_torque, hold_torque_release_grace
+from .utils.config import (
+    FOLLOWER_CONFIG_PATH,
+    LEADER_CONFIG_PATH,
+    bimanual_base,
+    setup_calibration_files,
+    validate_dataset_repo_id,
+    with_lelab_tag,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -48,9 +60,44 @@ phase_start_time = None  # Track when current phase started
 last_recording_info: dict[str, Any] | None = (
     None  # Snapshot of the most recently completed dataset (for /dataset-info)
 )
+# Warn-but-allow arm-identity findings from the current session's guard (see
+# lelab/arm_identity.py). The guard runs inside the recording worker (after the
+# start response has already been sent), so the messages are surfaced through
+# the /recording-status payload instead of the start response.
+identity_warnings: list[str] = []
 # Guards the start path so two concurrent POST /start-recording calls cannot
 # both pass the active-flag check.
 _state_lock = threading.Lock()
+
+# True while the session's cleanup is holding torque for the release grace (see
+# teleoperate.TORQUE_RELEASE_GRACE_S): the recording loop is over but the arms
+# are still energized (holding position) and the serial ports are still held.
+# Surfaced in the status payload so the UI isn't lying about the arm's state.
+releasing = False
+# Cuts the grace hold short: set by a second stop request ("release now") or by
+# a new start request that needs the serial ports. Cleared on start.
+_release_now = threading.Event()
+
+
+def finish_pending_release(timeout: float = 10.0) -> bool:
+    """Cut a pending torque-release grace short and wait for its cleanup.
+
+    Called by start paths (recording and teleoperation) so a start arriving
+    during the grace window releases the arms and frees the serial ports
+    immediately instead of failing port-busy for the rest of the grace.
+    Returns True when no recording worker is running afterwards; False when a
+    live session is still recording or the worker did not exit in time.
+    """
+    worker = recording_thread
+    if worker is None or not worker.is_alive():
+        return True
+    if not releasing:
+        # A live recording session, not a pending release — the caller's
+        # mutex check will report "already active".
+        return False
+    _release_now.set()
+    worker.join(timeout=timeout)
+    return not worker.is_alive()
 
 
 class RecordingRequest(BaseModel):
@@ -58,6 +105,12 @@ class RecordingRequest(BaseModel):
     follower_port: str
     leader_config: str
     follower_config: str
+    # Bimanual: the primary pair above is the LEFT arm; these add the right arm.
+    mode: str = "single"
+    right_leader_port: str = ""
+    right_follower_port: str = ""
+    right_leader_config: str = ""
+    right_follower_config: str = ""
     dataset_repo_id: str
     single_task: str
     num_episodes: int = 5
@@ -72,6 +125,12 @@ class RecordingRequest(BaseModel):
     streaming_encoding: bool = True
     cameras: dict = {}
     test_mode: bool = False  # Skip robot connection for testing
+    # Escape hatch for the arm-identity guard (see lelab/arm_identity.py):
+    # when true, record even if the connected arms don't match their calibrations.
+    skip_identity_check: bool = False
+    # Follower torque as a percentage of full power (see lelab/motor_power.py).
+    # Applied to follower motors only; clamped server-side to 10-100.
+    motor_power: int = 100
 
 
 class UploadRequest(BaseModel):
@@ -145,27 +204,51 @@ def _build_camera_configs(cameras: dict, default_backend) -> dict:
 
 def create_record_config(request: RecordingRequest) -> RecordConfig:
     """Create a RecordConfig from the recording request"""
-    # Setup calibration files
-    leader_config_name, follower_config_name = setup_calibration_files(
-        request.leader_config, request.follower_config
-    )
-
     # Convert the frontend camera dict into OpenCVCameraConfig objects. Backend
     # defaults to the platform pin unless the request overrides it per camera.
     camera_configs = _build_camera_configs(request.cameras, _platform_backend())
 
-    # Create robot config
-    robot_config = SO101FollowerConfig(
-        port=request.follower_port,
-        id=follower_config_name,
-        cameras=camera_configs,
-    )
+    if request.mode == "bimanual":
+        # Build a lerobot BiSO leader+follower pair. lerobot loads each sub-arm's
+        # calibration as "<base>_left/right.json" from the side's dir, so set the
+        # BiSO id to that base + the side's calibration_dir and let it auto-load
+        # (otherwise the sub-arms have no calibration and connect() would try to
+        # interactively recalibrate — which hangs the record thread). Cameras go
+        # on the left follower arm (exposed prefixed "left_*").
+        setup_calibration_files(request.leader_config, request.follower_config)
+        setup_calibration_files(request.right_leader_config, request.right_follower_config)
+        follower_base = bimanual_base(request.follower_config, request.right_follower_config, "follower")
+        leader_base = bimanual_base(request.leader_config, request.right_leader_config, "leader")
+        robot_config = BiSOFollowerConfig(
+            id=follower_base,
+            calibration_dir=Path(FOLLOWER_CONFIG_PATH),
+            left_arm_config=SO101FollowerConfig(port=request.follower_port, cameras=camera_configs),
+            right_arm_config=SO101FollowerConfig(port=request.right_follower_port),
+        )
+        teleop_config = BiSOLeaderConfig(
+            id=leader_base,
+            calibration_dir=Path(LEADER_CONFIG_PATH),
+            left_arm_config=SO101LeaderConfig(port=request.leader_port),
+            right_arm_config=SO101LeaderConfig(port=request.right_leader_port),
+        )
+    else:
+        # Setup calibration files
+        leader_config_name, follower_config_name = setup_calibration_files(
+            request.leader_config, request.follower_config
+        )
 
-    # Create teleop config
-    teleop_config = SO101LeaderConfig(
-        port=request.leader_port,
-        id=leader_config_name,
-    )
+        # Create robot config
+        robot_config = SO101FollowerConfig(
+            port=request.follower_port,
+            id=follower_config_name,
+            cameras=camera_configs,
+        )
+
+        # Create teleop config
+        teleop_config = SO101LeaderConfig(
+            port=request.leader_port,
+            id=leader_config_name,
+        )
 
     # Create dataset config
     dataset_config = DatasetRecordConfig(
@@ -201,6 +284,7 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
     """Handle start recording request by using the existing record() function"""
     global \
         recording_active, \
+        releasing, \
         recording_thread, \
         recording_events, \
         recording_config, \
@@ -210,20 +294,59 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
         saved_episodes, \
         current_phase, \
         phase_start_time, \
-        last_recording_info
+        last_recording_info, \
+        identity_warnings
 
     from . import rollout as _rollout, teleoperate as _teleoperate
 
     # Claim the active flag under the lock so two concurrent starts can't both
     # pass the precondition check.
+    logger.info(
+        "Recording start requested: dataset=%r, task=%r, resume=%s, mode=%s",
+        request.dataset_repo_id,
+        request.single_task,
+        request.resume,
+        getattr(request, "mode", "single"),
+    )
+
+    # A previous session (recording or teleop) may still be holding torque for
+    # its release grace — cut it short so this start doesn't fail on a busy
+    # serial port. Best effort: failures are surfaced by the checks below.
+    finish_pending_release()
+    _teleoperate.finish_pending_release()
+
     with _state_lock:
         if recording_active:
-            return {"success": False, "message": "Recording is already active"}
+            return {
+                "success": False,
+                "message": (
+                    "The previous session is still releasing the arms. Try again in a few seconds."
+                    if releasing
+                    else "Recording is already active"
+                ),
+            }
         if _teleoperate.teleoperation_active:
             return {"success": False, "message": "Teleoperation is currently active. Stop it first."}
         if _rollout.inference_active:
             return {"success": False, "message": "Inference is currently active. Stop it first."}
+        # Refuse a malformed dataset name up front (before claiming the flag or
+        # touching hardware). Rejecting beats silent sanitization: "whoo/" used to
+        # smuggle in a namespace and land the dataset at "user/whoo/".
+        name_ok, name_reason = validate_dataset_repo_id(request.dataset_repo_id)
+        if not name_ok:
+            logger.warning(
+                "Rejected recording start: invalid dataset name %r (%s)",
+                request.dataset_repo_id,
+                name_reason,
+            )
+            return {"success": False, "message": name_reason}
+        # Per-session state reset, under the same lock that claims the active
+        # flag: a stale _release_now from a previous session's double-stop
+        # would otherwise cut EVERY later release grace short until the server
+        # restarts (regression-tested in tests/test_record.py).
         recording_active = True
+        releasing = False
+        _release_now.clear()
         recording_thread = None
         recording_events = None
         recording_config = None
@@ -234,21 +357,13 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
         current_phase = "preparing"
         phase_start_time = None
         last_recording_info = None
+        identity_warnings = []
 
     try:
-        # Sanitize the dataset name so push_to_hub never rejects a finished
-        # recording over an invalid character. HF repo names allow only
-        # [A-Za-z0-9._-]; everything else becomes "_".
-        if request.dataset_repo_id:
-            if "/" in request.dataset_repo_id:
-                namespace, name = request.dataset_repo_id.split("/", 1)
-                name = re.sub(r"[^A-Za-z0-9._-]", "_", name)
-                request.dataset_repo_id = f"{namespace}/{name}"
-            else:
-                request.dataset_repo_id = re.sub(r"[^A-Za-z0-9._-]", "_", request.dataset_repo_id)
-        # Stamp the repo_id with a timestamp (matches lerobot-record CLI behavior),
-        # so each session lands in a unique directory and the frontend gets the
-        # final id back in the response and status payload.
+        # The name is already validated (validate_dataset_repo_id in the lock), so
+        # no sanitization is needed here. Stamp the repo_id with a timestamp
+        # (matches lerobot-record CLI behavior) so each session lands in a unique
+        # directory and the frontend gets the final id back in the response.
         if not request.resume and request.dataset_repo_id:
             request.dataset_repo_id = f"{request.dataset_repo_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
@@ -295,7 +410,12 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                     )
                     time.sleep(2.0)
 
-                dataset = record_with_web_events(record_config, recording_events)
+                dataset = record_with_web_events(
+                    record_config,
+                    recording_events,
+                    skip_identity_check=request.skip_identity_check,
+                    motor_power=request.motor_power,
+                )
                 logger.info(f"Recording completed successfully. Dataset has {dataset.num_episodes} episodes")
                 last_recording_info = {
                     "success": True,
@@ -342,8 +462,21 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
 
 
 def handle_stop_recording() -> dict[str, Any]:
-    """Handle stop recording request - replaces ESC key"""
+    """Handle stop recording request - replaces ESC key.
+
+    A second stop while the session-end cleanup is holding torque for the
+    release grace cuts the hold short ("release now").
+    """
     global current_phase, phase_start_time
+
+    if releasing:
+        _release_now.set()
+        logger.info("Second stop during the release grace — releasing the arms now")
+        return {
+            "success": True,
+            "message": "Releasing the arms now",
+            "session_ending": True,
+        }
 
     if not recording_active or recording_events is None:
         return {"success": False, "message": "No recording session is active"}
@@ -355,7 +488,10 @@ def handle_stop_recording() -> dict[str, Any]:
     logger.info("Stop recording triggered from web interface")
     return {
         "success": True,
-        "message": "Recording stop requested successfully",
+        "message": (
+            "Recording stop requested. When the session ends, the arm holds its pose for ~5 s "
+            "so you can guide it to a rest position — press Stop again to release it immediately."
+        ),
         "session_ending": True,
     }
 
@@ -412,6 +548,10 @@ def handle_recording_status() -> dict[str, Any]:
         "recording_active": recording_active,
         "current_phase": current_phase,  # "preparing", "recording", "resetting", "completed"
         "session_ended": session_ended,  # New field to indicate session completion
+        # True during the post-session grace window: the recording loop is over
+        # but the arms are still energized (holding position) so the user can
+        # guide them to a rest position before torque is released.
+        "releasing": releasing,
         "available_controls": {
             "stop_recording": recording_active,  # ESC key replacement
             "exit_early": recording_active,  # Right arrow key replacement
@@ -431,6 +571,11 @@ def handle_recording_status() -> dict[str, Any]:
     # can read the actual on-disk repo_id (post stamp) for upload navigation.
     if recording_config:
         status["dataset_repo_id"] = recording_config.dataset_repo_id
+
+    # Warn-but-allow arm-identity findings (the guard runs in the worker, after
+    # the start response) — the frontend shows these as a non-blocking toast.
+    if identity_warnings:
+        status["warning"] = " ".join(identity_warnings)
 
     # Add episode information if recording is active
     if recording_active and recording_config:
@@ -469,11 +614,35 @@ def handle_get_dataset_info(request: DatasetInfoRequest) -> dict[str, Any]:
         from lerobot.datasets import LeRobotDataset
 
         dataset = LeRobotDataset(request.dataset_repo_id)
+        # lerobot's metadata has no `single_task` attr — the real task strings
+        # live in meta.tasks (index = task string, col = task_index). Pair each
+        # with how many episodes use it (the per-episode `tasks` column), so a
+        # merged dataset shows its distinct tasks and their episode counts.
+        tasks_df = getattr(dataset.meta, "tasks", None)
+        ordered = (
+            list(tasks_df.sort_values("task_index").index)
+            if tasks_df is not None and len(tasks_df) > 0
+            else []
+        )
+        counts: dict[str, int] = {}
+        episodes = getattr(dataset.meta, "episodes", None)
+        # meta.episodes is a HF datasets.Dataset (column_names), but tolerate a
+        # pandas DataFrame (columns) too.
+        cols = getattr(episodes, "column_names", None)
+        if cols is None:
+            cols = list(getattr(episodes, "columns", []))
+        if episodes is not None and "tasks" in cols:
+            for arr in episodes["tasks"]:
+                items = arr.tolist() if hasattr(arr, "tolist") else list(arr or [])
+                for task in set(items):
+                    counts[task] = counts.get(task, 0) + 1
+        tasks = [{"task": t, "num_episodes": counts.get(t, 0)} for t in ordered]
         return {
             "success": True,
             "dataset_repo_id": request.dataset_repo_id,
             "num_episodes": dataset.num_episodes,
-            "single_task": getattr(dataset.meta, "single_task", "Unknown task"),
+            "tasks": tasks,
+            "single_task": ordered[0] if len(ordered) == 1 else "Unknown task",
             "fps": dataset.fps,
             "features": list(dataset.features.keys()),
             "total_frames": dataset.num_frames,
@@ -565,7 +734,9 @@ def handle_upload_dataset(request: UploadRequest) -> dict[str, Any]:
         return {"success": False, "message": f"Failed to upload dataset: {str(e)}"}
 
 
-def record_with_web_events(cfg: RecordConfig, web_events: dict) -> LeRobotDataset:
+def record_with_web_events(
+    cfg: RecordConfig, web_events: dict, skip_identity_check: bool = False, motor_power: int = 100
+) -> LeRobotDataset:
     """
     Implement recording with phase tracking - exactly mirrors original record() function behavior
     """
@@ -583,7 +754,8 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict) -> LeRobotDatase
     from lerobot.utils.feature_utils import hw_to_dataset_features
     from lerobot.utils.utils import log_say
 
-    global current_phase, phase_start_time, current_episode, saved_episodes
+    global current_phase, phase_start_time, current_episode, saved_episodes, releasing
+    global identity_warnings
 
     robot = make_robot_from_config(cfg.robot)
     teleop = make_teleoperator_from_config(cfg.teleop) if cfg.teleop is not None else None
@@ -631,7 +803,10 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict) -> LeRobotDatase
     # 🔧 ROBOT CONNECTION: Connect with enhanced error handling for camera conflicts
     try:
         logger.info("🔧 ROBOT CONNECTION: Attempting to connect robot...")
-        robot.connect()
+        # Calibration is already on disk (loaded via the configs above), so never
+        # let connect() drop into interactive recalibration — that would hang the
+        # headless record thread (the "stuck on preparing session" symptom).
+        robot.connect(calibrate=False)
         logger.info("✅ ROBOT CONNECTION: Robot connected successfully")
     except Exception as e:
         logger.error(f"❌ ROBOT CONNECTION: Failed to connect robot: {e}")
@@ -646,39 +821,80 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict) -> LeRobotDatase
     if teleop is not None:
         try:
             logger.info("🔧 TELEOP CONNECTION: Attempting to connect teleoperator...")
-            teleop.connect()
+            # calibrate=False for the same reason as the robot connect above —
+            # and critically for the identity guard below: with the default
+            # calibrate=True, an EEPROM/file mismatch (exactly the swapped-port
+            # case) drops into SOLeader.calibrate(), which writes the wrong
+            # JSON into the servos' EEPROM (or hangs on input() in this
+            # headless thread). The calibration write happens explicitly in
+            # _write_calibration below, after the guard has read the EEPROM.
+            teleop.connect(calibrate=False)
             logger.info("✅ TELEOP CONNECTION: Teleoperator connected successfully")
         except Exception as e:
             logger.error(f"❌ TELEOP CONNECTION: Failed to connect teleoperator: {e}")
             raise
 
+    # Arm-identity guard: read-only check that each connected arm matches its
+    # assigned calibration, BEFORE _write_calibration below can stamp a wrong
+    # file into a swapped arm's EEPROM and before any action is sent. On a hard
+    # mismatch, release the arms (torque was never enabled) and let the worker's
+    # error path surface the message via the recording status.
+    try:
+        identity_warnings = verify_devices(
+            ((robot, "follower"), (teleop, "leader")), skip=skip_identity_check
+        )
+    except ArmIdentityError:
+        robot.disconnect()
+        if teleop is not None:
+            teleop.disconnect()
+        raise
+
     # Ensure calibration is properly loaded and applied to the devices
     logger.info("Applying calibration to devices")
 
-    # Write calibration to motors' memory (similar to teleoperation code)
-    if hasattr(robot, "bus") and robot.calibration is not None:
-        try:
-            logger.info("Writing robot calibration to motors...")
-            robot.bus.write_calibration(robot.calibration)
-            logger.info("Robot calibration applied successfully")
-        except Exception as e:
-            logger.error(f"Error writing robot calibration: {e}")
-    else:
-        logger.warning("Robot bus or calibration not available - calibration may not be applied")
+    # Write calibration to motors' memory (similar to teleoperation code). A
+    # single-arm device has its own .bus/.calibration; a bimanual BiSO device
+    # exposes left_arm/right_arm sub-arms instead, so write each of those.
+    def _write_calibration(device, label: str) -> None:
+        if device is None:
+            return
+        sub_arms = [
+            a
+            for a in (getattr(device, "left_arm", None), getattr(device, "right_arm", None))
+            if a is not None
+        ]
+        targets = sub_arms if sub_arms else [device]
+        wrote = False
+        for target in targets:
+            if hasattr(target, "bus") and getattr(target, "calibration", None) is not None:
+                try:
+                    target.bus.write_calibration(target.calibration)
+                    wrote = True
+                except Exception as e:
+                    logger.error(f"Error writing {label} calibration: {e}")
+        if wrote:
+            logger.info(f"{label.capitalize()} calibration applied successfully")
+        else:
+            logger.warning(f"{label.capitalize()} bus or calibration not available - calibration may not be applied")
 
-    if teleop is not None and hasattr(teleop, "bus") and teleop.calibration is not None:
-        try:
-            logger.info("Writing teleop calibration to motors...")
-            teleop.bus.write_calibration(teleop.calibration)
-            logger.info("Teleop calibration applied successfully")
-        except Exception as e:
-            logger.error(f"Error writing teleop calibration: {e}")
-    else:
-        logger.warning("Teleop bus or calibration not available - calibration may not be applied")
+    _write_calibration(robot, "robot")
+    _write_calibration(teleop, "teleop")
+
+    # Session motor power (RAM Torque_Limit) — the follower only, never the
+    # human-held leader. robot.connect() above already ran configure(), so
+    # nothing overwrites this before the recording loop; a failed write
+    # degrades to full power (logged inside) and must not abort the session.
+    apply_motor_power(robot, motor_power, "follower arm")
 
     # Start with episode 1 - but track it properly
     current_episode = 1
     saved_episodes = 0  # Track how many episodes we've actually saved
+
+    # Set once the session ends on a user/planned path (stop button, all
+    # episodes recorded) — those get the torque-release grace below. An
+    # exception (camera death, unplugged bus, ...) leaves it False so the
+    # release is attempted immediately: the bus may already be unreachable.
+    ended_normally = False
 
     try:
         while saved_episodes < cfg.dataset.num_episodes:
@@ -858,11 +1074,28 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict) -> LeRobotDatase
         phase_start_time = None
         print("🏁 STATUS CHANGE: Recording session completed - all episodes finished")
         log_say("Stop recording", cfg.play_sounds, blocking=True)
+        ended_normally = True
 
     finally:
-        robot.disconnect()
-        if teleop:
-            teleop.disconnect()
+        try:
+            if ended_normally:
+                # User-initiated stop / planned session end: keep torque
+                # enabled for the grace window so the arms can be guided to a
+                # rest position before they go limp. Cut short by a second
+                # stop press or a new start (see _release_now). This only
+                # delays the release below — it never skips it.
+                releasing = True
+                hold_torque_release_grace(_release_now, label="recording arms")
+            # Belt and braces: disable torque explicitly before disconnect, so a
+            # failure inside disconnect() can't leave an arm energized (rigid).
+            # force_disable_torque logs any failure at ERROR level with the port.
+            force_disable_torque(robot, "robot")
+            force_disable_torque(teleop, "teleop")
+            robot.disconnect()
+            if teleop:
+                teleop.disconnect()
+        finally:
+            releasing = False
 
     if cfg.dataset.push_to_hub:
         dataset.push_to_hub(tags=cfg.dataset.tags, private=cfg.dataset.private)

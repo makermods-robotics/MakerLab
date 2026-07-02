@@ -1,0 +1,631 @@
+# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Tests for lelab.auto_calibrate — subprocess manager (process mocked)."""
+
+from __future__ import annotations
+
+import subprocess
+import threading
+
+import pytest
+
+import lelab.auto_calibrate as auto_calibrate
+from lelab.vendor.feetech_autocal import auto_calibrate_script as acs
+
+
+class StoppableFakeProc:
+    """Process double for the stop path.
+
+    stdout yields one line then blocks until the process "dies"; wait()
+    honors timeouts like subprocess.Popen.wait. With ignore_sigterm=True the
+    process only dies on kill() — the hardware failure mode (main thread
+    wedged in a C-level serial call, SIGTERM's KeyboardInterrupt never
+    materializes).
+    """
+
+    def __init__(self, ignore_sigterm: bool = False) -> None:
+        self._dead = threading.Event()
+        self.ignore_sigterm = ignore_sigterm
+        self.terminated = False
+        self.killed = False
+        self.returncode: int | None = None
+
+        def _gen():
+            yield "Stage 0: init\n"
+            self._dead.wait()
+
+        self.stdout = _gen()
+
+    def wait(self, timeout: float | None = None) -> int:
+        if not self._dead.wait(timeout):
+            raise subprocess.TimeoutExpired(cmd="auto-calibrate", timeout=timeout or 0)
+        self.returncode = -9 if self.killed else 130
+        return self.returncode
+
+    def terminate(self) -> None:
+        self.terminated = True
+        if not self.ignore_sigterm:
+            self._dead.set()
+
+    def kill(self) -> None:
+        self.killed = True
+        self._dead.set()
+
+
+def _start_with_fake_proc(
+    monkeypatch: pytest.MonkeyPatch, proc: StoppableFakeProc, released_ports: list[str]
+):
+    """Start a manager on a fake process, with the fallback release recorded."""
+    import lelab.auto_calibrate as ac
+
+    popen_kwargs: dict = {}
+
+    def _popen(*args, **kwargs):
+        popen_kwargs.update(kwargs)
+        return proc
+
+    monkeypatch.setattr(ac.subprocess, "Popen", _popen)
+    monkeypatch.setattr(ac, "_release_arm_torque", lambda port: (released_ports.append(port), [])[1])
+    # Keep the escalation fast in tests.
+    monkeypatch.setattr(ac, "_STOP_GRACE_S", 0.2)
+    monkeypatch.setattr(ac, "_STOP_KILL_WAIT_S", 0.2)
+
+    mgr = ac.AutoCalibrationManager()
+    result = mgr.start(ac.AutoCalibrationRequest(device_type="robot", port="/dev/arm", config_file="my_arm"))
+    assert result["success"] is True
+    return mgr, popen_kwargs
+
+
+def _join_stop(mgr) -> None:
+    if mgr._stop_thread is not None:
+        mgr._stop_thread.join(timeout=5)
+    if mgr._thread is not None:
+        mgr._thread.join(timeout=5)
+
+
+def test_auto_calibration_rejects_bad_device() -> None:
+    import lelab.auto_calibrate as ac
+
+    mgr = ac.AutoCalibrationManager()
+    result = mgr.start(ac.AutoCalibrationRequest(device_type="bogus", port="/dev/x", config_file="c"))
+    assert result["success"] is False
+
+
+def test_auto_calibration_rejects_empty_port() -> None:
+    import lelab.auto_calibrate as ac
+
+    mgr = ac.AutoCalibrationManager()
+    result = mgr.start(ac.AutoCalibrationRequest(device_type="robot", port="", config_file="c"))
+    assert result["success"] is False
+
+
+def test_auto_calibration_status_idle() -> None:
+    import lelab.auto_calibrate as ac
+
+    status = ac.AutoCalibrationManager().get_status()
+    assert status["status"] == "idle"
+    assert status["active"] is False
+    assert status["logs"] == []
+
+
+def test_auto_calibration_launches_captures_logs_and_completes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A successful subprocess run captures its stdout and ends 'completed'."""
+    import lelab.auto_calibrate as ac
+
+    class FakeProc:
+        def __init__(self) -> None:
+            self.stdout = iter(["Stage 0: init\n", "calibration done\n"])
+
+        def wait(self) -> int:
+            return 0
+
+        def terminate(self) -> None:
+            pass
+
+    monkeypatch.setattr(ac.subprocess, "Popen", lambda *a, **k: FakeProc())
+
+    mgr = ac.AutoCalibrationManager()
+    # No robot_name -> no record write-back, so no filesystem needed.
+    result = mgr.start(ac.AutoCalibrationRequest(device_type="robot", port="/dev/x", config_file="my_arm"))
+    assert result["success"] is True
+
+    if mgr._thread is not None:
+        mgr._thread.join(timeout=2)
+
+    status = mgr.get_status()
+    assert status["status"] == "completed"
+    assert status["active"] is False
+    assert any("Stage 0" in line for line in status["logs"])
+
+
+def test_stop_graceful_reaches_stopped_and_releases_torque(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The normal stop: SIGTERM, the script exits on its own within the grace
+    period, no kill — and the fallback release still runs (belt and braces)."""
+    proc = StoppableFakeProc()
+    released: list[str] = []
+    mgr, popen_kwargs = _start_with_fake_proc(monkeypatch, proc, released)
+
+    result = mgr.stop()
+    assert result["success"] is True
+    _join_stop(mgr)
+
+    status = mgr.get_status()
+    assert status["status"] == "stopped"
+    assert status["active"] is False
+    assert status["error"] is None
+    assert proc.terminated is True
+    assert proc.killed is False
+    assert released == ["/dev/arm"]
+    # The child must not inherit the server's stdin: a TTY there makes the
+    # script interactive and its "press Enter" prompts block forever.
+    assert popen_kwargs.get("stdin") == subprocess.DEVNULL
+
+
+def test_stop_kills_process_that_ignores_sigterm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The hardware failure mode: the script never exits on SIGTERM (wedged in
+    a C-level serial call). The manager must escalate to SIGKILL, release
+    torque directly over the port, and still end on a terminal status —
+    previously it stayed 'active' forever with the arm energized."""
+    proc = StoppableFakeProc(ignore_sigterm=True)
+    released: list[str] = []
+    mgr, _ = _start_with_fake_proc(monkeypatch, proc, released)
+
+    result = mgr.stop()
+    assert result["success"] is True
+    # A second stop while the escalation runs must not double-spawn workers.
+    assert mgr.stop()["success"] is False
+    _join_stop(mgr)
+
+    status = mgr.get_status()
+    assert status["status"] == "stopped"
+    assert status["active"] is False
+    assert proc.terminated is True
+    assert proc.killed is True
+    assert released == ["/dev/arm"]
+
+
+def test_stop_surfaces_failed_torque_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the fallback release fails, the status must end terminal (not
+    frozen) with an unmistakable torque warning for the UI."""
+    import lelab.auto_calibrate as ac
+
+    proc = StoppableFakeProc(ignore_sigterm=True)
+    released: list[str] = []
+    mgr, _ = _start_with_fake_proc(monkeypatch, proc, released)
+    monkeypatch.setattr(
+        ac,
+        "_release_arm_torque",
+        lambda port: [f"TORQUE MAY STILL BE ENABLED on {port} — unplug power to release."],
+    )
+
+    assert mgr.stop()["success"] is True
+    _join_stop(mgr)
+
+    status = mgr.get_status()
+    assert status["status"] == "failed"
+    assert status["active"] is False
+    assert "TORQUE MAY STILL BE ENABLED" in status["error"]
+    assert "/dev/arm" in status["error"]
+
+
+def test_release_arm_torque_disables_all_motors(monkeypatch: pytest.MonkeyPatch) -> None:
+    import lelab.auto_calibrate as ac
+
+    class _FakeReleaseBus:
+        instances: list[_FakeReleaseBus] = []
+
+        def __init__(self, port: str, motors: dict) -> None:
+            self.port = port
+            self.motors = motors
+            self.disabled: list[str] = []
+            self.disconnected = False
+            _FakeReleaseBus.instances.append(self)
+
+        def connect(self, handshake: bool = True) -> None:
+            assert handshake is False
+
+        def disable_torque(self, motor: str, num_retry: int = 0) -> None:
+            self.disabled.append(motor)
+
+        def disconnect(self, disable_torque: bool = True) -> None:
+            self.disconnected = True
+
+    monkeypatch.setattr(ac, "FeetechMotorsBus", _FakeReleaseBus)
+    problems = ac._release_arm_torque("/dev/arm")
+
+    assert problems == []
+    bus = _FakeReleaseBus.instances[-1]
+    # All six SO-101 motors released, then the port freed again.
+    assert len(bus.disabled) == 6
+    assert bus.disconnected is True
+
+
+# ---------------------------------------------------------------------------
+# Vendored script: graceful stop (freeze -> return to start -> release)
+# ---------------------------------------------------------------------------
+
+
+class _FakeScriptBus:
+    """Bus double for the vendored script's interrupt/graceful-stop path.
+
+    Reads come from `registers` ({reg: {motor: value}}, default 0); every
+    mutation is appended to `calls` so tests can assert ordering.
+    """
+
+    def __init__(self, registers: dict[str, dict[str, int]] | None = None) -> None:
+        self.motors = dict.fromkeys(acs.MOTOR_NAMES)
+        self.registers = registers or {}
+        self.calls: list[tuple] = []
+        self.sync_write_error: BaseException | None = None
+        self.limits = (0, acs.FULL_TURN - 1)
+        self.torque_recovery_fail: set[str] = set()
+        self.read_fail: set[str] = set()
+
+    def read(self, reg: str, motor: str, normalize: bool = True) -> int:
+        if motor in self.read_fail:
+            raise ConnectionError("no response")
+        return self.registers.get(reg, {}).get(motor, 0)
+
+    def write(self, reg: str, motor: str, value: int, normalize: bool = True) -> None:
+        self.calls.append(("write", reg, motor, value))
+
+    def sync_write(self, reg: str, values: dict, normalize: bool = True) -> None:
+        if self.sync_write_error is not None:
+            raise self.sync_write_error
+        self.calls.append(("sync_write", reg, dict(values)))
+
+    def sync_write_pos_ex(self, values: dict) -> None:
+        self.calls.append(("pos_ex", dict(values)))
+
+    def read_position_limits(self, motor: str) -> tuple[int, int]:
+        return self.limits
+
+    def _write_torque_with_recovery(
+        self, motor: str, value: int, retries: int = 3, interval_s: float = 0.5
+    ) -> None:
+        if motor in self.torque_recovery_fail:
+            raise RuntimeError("overload persists")
+        self.calls.append(("torque_recovery", motor, value))
+
+    def safe_disable_all(self) -> None:
+        self.calls.append(("safe_disable_all",))
+
+    def disconnect(self, disable_torque: bool = True) -> None:
+        self.calls.append(("disconnect",))
+
+
+class _FakeClock:
+    """Simulated time for the vendored script: sleep() advances monotonic()."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.sleeps: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+@pytest.fixture
+def fake_clock(monkeypatch: pytest.MonkeyPatch) -> _FakeClock:
+    """Drive the script's time.sleep/time.monotonic off a simulated clock."""
+    clock = _FakeClock()
+    monkeypatch.setattr(acs.time, "sleep", clock.sleep)
+    monkeypatch.setattr(acs.time, "monotonic", clock.monotonic)
+    return clock
+
+
+@pytest.fixture
+def no_sleep(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Record time.sleep durations (as seen by the vendored script) without sleeping."""
+    sleeps: list[float] = []
+    monkeypatch.setattr(acs.time, "sleep", lambda s: sleeps.append(s))
+    return sleeps
+
+
+def test_interrupt_freezes_and_returns_before_releasing(
+    monkeypatch: pytest.MonkeyPatch, no_sleep: list[float]
+) -> None:
+    """On KeyboardInterrupt the script must freeze all motion FIRST (halt
+    velocity mode, hold current pose at working torque), then drive back to the
+    startup pose, and only then disable torque — no more instant free-fall."""
+    bus = _FakeScriptBus(
+        registers={
+            "Present_Position": dict.fromkeys(acs.MOTOR_NAMES, 1000),
+            "Homing_Offset": dict.fromkeys(acs.MOTOR_NAMES, 0),
+            "Moving": dict.fromkeys(acs.MOTOR_NAMES, 0),  # return arrives instantly
+        }
+    )
+    monkeypatch.setattr(acs, "_connect_and_clear", lambda port: bus)
+
+    def body(b) -> None:
+        raise KeyboardInterrupt
+
+    code = acs._run_with_bus("/dev/arm", False, body)
+
+    assert code == 130
+    names = [c[0] for c in bus.calls]
+    # Freeze: Goal_Velocity=0 broadcast, then per-motor holds, then the two
+    # pos_ex writes (freeze goals + return goals), then the release.
+    assert names[0] == "sync_write"
+    assert bus.calls[0][1] == "Goal_Velocity"
+    assert names.count("pos_ex") == 2
+    last_pos_ex = len(names) - 1 - names[::-1].index("pos_ex")
+    assert names.index("safe_disable_all") > last_pos_ex
+    assert names[-1] == "disconnect"
+    # Freeze holds at NORMAL working torque, not a sag value.
+    torque_writes = [c for c in bus.calls if c[0] == "write" and c[1] == "Torque_Limit"]
+    assert {c[3] for c in torque_writes} == {acs.DEFAULT_TORQUE_LIMIT}
+    # Every motor is re-energized through the overload-clearing recovery path.
+    recoveries = [c for c in bus.calls if c[0] == "torque_recovery"]
+    assert len(recoveries) == 6
+    assert {c[2] for c in recoveries} == {1}
+    # Return arrived -> no fallback hold.
+    assert acs.STOP_HOLD_S not in no_sleep
+
+
+def test_return_to_rest_pose_reexpresses_targets_against_current_offset(no_sleep: list[float]) -> None:
+    """The startup pose is captured offset-independently; the return must
+    re-express it against the CURRENT Homing_Offset (calibration rewrites it)."""
+    bus = _FakeScriptBus(
+        registers={
+            "Present_Position": {"shoulder_lift": 500},
+            "Homing_Offset": {"shoulder_lift": 100},
+        }
+    )
+    pose = acs._capture_rest_pose(bus)
+    assert pose["shoulder_lift"] == 600  # (500 + 100) % 4096
+
+    # Calibration later rewrote the offset; same physical pose, new raw target.
+    # Success is position-based (within POSITION_TOLERANCE), so simulate the
+    # motor sitting at the re-expressed target when the return polls it.
+    bus.registers["Homing_Offset"]["shoulder_lift"] = -50
+    bus.registers["Present_Position"]["shoulder_lift"] = 650
+    arrived = acs._return_to_rest_pose(bus, pose, acs.RETURN_TO_REST_BUDGET_S)
+
+    assert arrived is True
+    pos_ex = [c for c in bus.calls if c[0] == "pos_ex"]
+    assert len(pos_ex) == 1
+    target, speed, _acc = pos_ex[0][1]["shoulder_lift"]
+    assert target == 650  # (600 - (-50)) % 4096
+    assert speed == acs.RETURN_POS_SPEED
+
+
+def test_graceful_stop_stalled_return_falls_back_to_hold(fake_clock: _FakeClock) -> None:
+    """A return making no progress (Moving stays 1, position never changes)
+    must be declared a stall after RETURN_STALL_WINDOW_S — well before the
+    absolute ceiling — and fall back to the freeze-hold before the release."""
+    bus = _FakeScriptBus(registers={"Moving": dict.fromkeys(acs.MOTOR_NAMES, 1)})
+
+    acs._graceful_stop(bus, {"shoulder_lift": 600})
+
+    assert acs.STOP_HOLD_S in fake_clock.sleeps
+    # The stall detector fired; the 10s ceiling never had to matter.
+    assert fake_clock.now < acs.RETURN_TO_REST_BUDGET_S
+
+
+def test_return_slower_than_old_flat_budget_still_completes(fake_clock: _FakeClock) -> None:
+    """A healthy-but-slow return must run to completion — termination is
+    progress-based, so steady motion is never cut short by a timer (the old
+    flat 5s cutoff would have aborted this one mid-motion)."""
+    bus = _FakeScriptBus(registers={"Moving": {"shoulder_lift": 1}})
+    start, target, rate = 500, 2000, 200.0  # ticks, ticks, ticks/s -> ~7.5s of travel
+    base_read = _FakeScriptBus.read
+
+    def read(reg: str, motor: str, normalize: bool = True) -> int:
+        if reg == "Present_Position" and motor == "shoulder_lift":
+            return min(target, int(start + rate * fake_clock.now))
+        return base_read(bus, reg, motor, normalize)
+
+    bus.read = read  # type: ignore[method-assign]
+
+    arrived = acs._return_to_rest_pose(bus, {"shoulder_lift": target}, acs.RETURN_TO_REST_BUDGET_S)
+
+    assert arrived is True
+    assert fake_clock.now > 5.0  # kept going past the old flat budget
+    assert fake_clock.now < acs.RETURN_TO_REST_BUDGET_S  # ceiling still untouched
+
+
+def test_freeze_clears_overload_and_skips_dead_motor(
+    no_sleep: list[float], capsys: pytest.CaptureFixture
+) -> None:
+    """The freeze must disable torque first (a Stop usually lands with one
+    motor stalled mid-probe with its overload latch set — a bare
+    Torque_Enable=1 NAKs on it), then re-enable via the recovery path. A motor
+    that stays dead is skipped LOUDLY rather than aborting the freeze —
+    hardware showed a silently-limp motor stalls the whole return."""
+    bus = _FakeScriptBus()
+    bus.torque_recovery_fail = {"elbow_flex"}
+
+    acs._freeze_arm(bus)
+
+    # Overload latch cleared (Torque_Enable=0) on every motor before enabling.
+    latch_clears = [c for c in bus.calls if c[0] == "write" and c[1] == "Torque_Enable" and c[3] == 0]
+    assert len(latch_clears) == 6
+    # The dead motor is excluded from the hold goals; the other five freeze.
+    pos_ex = [c for c in bus.calls if c[0] == "pos_ex"]
+    assert len(pos_ex) == 1
+    assert "elbow_flex" not in pos_ex[0][1]
+    assert len(pos_ex[0][1]) == 5
+    assert "could not be re-energized" in capsys.readouterr().out
+
+
+def test_graceful_stop_diagnoses_a_stalled_return(
+    fake_clock: _FakeClock, capsys: pytest.CaptureFixture
+) -> None:
+    """The fallback must say WHY it was taken — hardware logs previously could
+    not distinguish 'no pose' from 'stall' from 'ceiling'."""
+    bus = _FakeScriptBus(registers={"Moving": dict.fromkeys(acs.MOTOR_NAMES, 1)})
+
+    acs._graceful_stop(bus, {"shoulder_lift": 600})
+
+    out = capsys.readouterr().out
+    assert "Fallback: return stalled after" in out
+    assert "ticks" in out
+
+
+def test_graceful_stop_diagnoses_a_missing_pose(
+    no_sleep: list[float], capsys: pytest.CaptureFixture
+) -> None:
+    bus = _FakeScriptBus()
+
+    acs._graceful_stop(bus, {})
+
+    assert "no start pose was captured" in capsys.readouterr().out
+
+
+def test_return_reports_settled_short_instead_of_success(
+    fake_clock: _FakeClock, capsys: pytest.CaptureFixture
+) -> None:
+    """All-Moving==0 with a motor far from target must NOT count as returned
+    (the bench symptom: 'not sure the starting position was right') — it is
+    its own 'settled short' outcome, with the per-motor deltas."""
+    bus = _FakeScriptBus(
+        registers={
+            "Present_Position": {"shoulder_lift": 100},  # sits 500 ticks short
+            "Moving": dict.fromkeys(acs.MOTOR_NAMES, 0),
+        }
+    )
+
+    arrived = acs._return_to_rest_pose(bus, {"shoulder_lift": 600}, acs.RETURN_TO_REST_BUDGET_S)
+
+    assert arrived is False
+    out = capsys.readouterr().out
+    assert "settled short of target" in out
+    assert "shoulder_lift=500" in out
+
+
+def test_return_success_reports_per_motor_deltas(
+    no_sleep: list[float], capsys: pytest.CaptureFixture
+) -> None:
+    """A successful return logs |final - target| per motor so a subtly-off
+    landing is diagnosable from the log panel."""
+    bus = _FakeScriptBus(registers={"Present_Position": {"shoulder_lift": 595}})
+
+    arrived = acs._return_to_rest_pose(bus, {"shoulder_lift": 595}, acs.RETURN_TO_REST_BUDGET_S)
+
+    assert arrived is True
+    out = capsys.readouterr().out
+    assert "Return complete: max delta" in out
+    assert "shoulder_lift=" in out
+
+
+def test_capture_rest_pose_reports_missing_motors(capsys: pytest.CaptureFixture) -> None:
+    """A motor absent from the capture (comm error) is never returned on a
+    stop — which looks exactly like 'the starting position wasn't right' — so
+    the capture must say what it got and what it is missing."""
+    bus = _FakeScriptBus()
+    bus.read_fail = {"wrist_roll"}
+
+    pose = acs._capture_rest_pose(bus)
+
+    assert "wrist_roll" not in pose
+    assert len(pose) == 5
+    out = capsys.readouterr().out
+    assert "Start pose captured for:" in out
+    assert "MISSING: wrist_roll" in out
+
+
+def test_nearest_wrap_target_takes_the_short_arc() -> None:
+    """The rest target is only defined mod FULL_TURN; the return must pick the
+    wrap representative nearest the current position (clamped into the
+    firmware limits) so a seam-adjacent pose is a short arc, not a long trek
+    through the hard stops."""
+    # Target near the top of the range, joint sitting just past the 0 seam:
+    # the -96 representative (== 4000 physically) is nearest; clamped to 0.
+    assert acs._nearest_wrap_target(4000, 100, 0, 4095) == 0
+    # Mirror image: target near 0, joint near 4095 -> clamp at the top.
+    assert acs._nearest_wrap_target(96, 4050, 0, 4095) == 4095
+    # No seam involved: the plain representative wins.
+    assert acs._nearest_wrap_target(650, 500, 0, 4095) == 650
+    # Calibrated limit window is respected.
+    assert acs._nearest_wrap_target(650, 500, 700, 3000) == 700
+
+
+def test_graceful_stop_without_captured_pose_holds_then_falls_through(no_sleep: list[float]) -> None:
+    """No startup pose (capture failed) -> freeze, hold, no return attempt."""
+    bus = _FakeScriptBus()
+
+    acs._graceful_stop(bus, {})
+
+    # Only the freeze pos_ex — no return goals were written.
+    assert [c[0] for c in bus.calls if c[0] == "pos_ex"] == ["pos_ex"]
+    assert acs.STOP_HOLD_S in no_sleep
+
+
+def test_graceful_stop_second_interrupt_skips_everything(no_sleep: list[float]) -> None:
+    """A second Stop (KeyboardInterrupt mid-sequence) means NOW: _graceful_stop
+    must swallow it and return immediately so the release runs instantly."""
+    bus = _FakeScriptBus()
+    bus.sync_write_error = KeyboardInterrupt()
+
+    acs._graceful_stop(bus, {"shoulder_lift": 600})  # must not raise
+
+    assert no_sleep == []  # no return settle, no fallback hold
+
+
+def test_graceful_stop_bus_error_falls_through_immediately(no_sleep: list[float]) -> None:
+    """A dead bus mid-freeze must not raise and must not delay the release."""
+    bus = _FakeScriptBus()
+
+    # _freeze_arm tolerates a COMM_ERR broadcast failure; a harder failure in
+    # pos_ex is caught by _graceful_stop's blanket guard.
+    def _boom(values: dict) -> None:
+        raise OSError("port vanished")
+
+    bus.sync_write_pos_ex = _boom  # type: ignore[method-assign]
+    acs._graceful_stop(bus, {})  # must not raise
+
+    assert acs.STOP_HOLD_S not in no_sleep
+
+
+def test_stop_sequence_budget_stays_inside_sigterm_grace() -> None:
+    """freeze (<0.5s) + return ceiling (10s backstop, never expected to matter
+    — termination is progress-based) + fallback hold (3s) + 6-motor release
+    and disconnect (~2s) must fit the manager's SIGTERM grace, or a healthy
+    graceful stop gets SIGKILLed mid-landing."""
+    freeze_and_release_margin_s = 3.0
+    assert (
+        acs.RETURN_TO_REST_BUDGET_S + acs.STOP_HOLD_S + freeze_and_release_margin_s
+        <= auto_calibrate._STOP_GRACE_S
+    )
+
+
+def test_release_arm_torque_reports_connect_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    import lelab.auto_calibrate as ac
+
+    class _DeadBus:
+        def __init__(self, port: str, motors: dict) -> None:
+            self.port = port
+
+        def connect(self, handshake: bool = True) -> None:
+            raise ConnectionError("port busy")
+
+    monkeypatch.setattr(ac, "FeetechMotorsBus", _DeadBus)
+    problems = ac._release_arm_torque("/dev/arm")
+
+    assert len(problems) == 1
+    assert "TORQUE MAY STILL BE ENABLED" in problems[0]
+    assert "/dev/arm" in problems[0]

@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import platform
+import re
 import shutil
 import time
 from pathlib import Path
@@ -85,8 +86,25 @@ def _config_file_for(robot_type: RobotSide) -> str:
     raise ValueError(f"robot_type must be 'leader' or 'follower', got {robot_type!r}")
 
 
+def _require_assigned_config(config: str, side: str) -> None:
+    """Fail with a legible message when an arm has no calibration assigned.
+
+    An empty name would otherwise resolve to the calibration *directory* and
+    crash shutil.copy2 with an opaque IsADirectoryError. This happens when a
+    robot record's config field was cleared (e.g. its calibration config was
+    deleted) and a start request is issued anyway.
+    """
+    if not (config or "").strip():
+        raise FileNotFoundError(
+            f"The {side} arm has no calibration assigned. Calibrate it "
+            "(or assign a saved calibration config) before starting."
+        )
+
+
 def setup_calibration_files(leader_config: str, follower_config: str):
     """Setup calibration files in the correct locations for teleoperation and recording"""
+    _require_assigned_config(leader_config, "leader")
+    _require_assigned_config(follower_config, "follower")
     # Extract config names from file paths (remove .json extension)
     leader_config_name = os.path.splitext(leader_config)[0]
     follower_config_name = os.path.splitext(follower_config)[0]
@@ -134,6 +152,7 @@ def setup_calibration_files(leader_config: str, follower_config: str):
 
 def setup_follower_calibration_file(follower_config: str):
     """Setup follower calibration file in the correct location for replay functionality"""
+    _require_assigned_config(follower_config, "follower")
     # Extract config name from file path (remove .json extension)
     follower_config_name = os.path.splitext(follower_config)[0]
 
@@ -173,9 +192,15 @@ def find_available_ports():
     if platform.system() == "Windows":
         # List COM ports using pyserial
         ports = [port.device for port in list_ports.comports()]
-    else:  # Linux/macOS
-        # List /dev/tty* ports for Unix-based systems
-        ports = [str(path) for path in Path("/dev").glob("tty*")]
+    else:
+        # Linux/macOS: globbing all of /dev/tty* returns dozens of pseudo-ttys
+        # and Bluetooth/debug devices. Restrict to USB-serial adapters — the only
+        # thing an SO-101 arm shows up as — and keep the tty.* naming the rest of
+        # the code (and saved robot records) use.
+        #   macOS:  /dev/tty.usbmodem*  /dev/tty.usbserial*
+        #   Linux:  /dev/ttyUSB*        /dev/ttyACM*
+        patterns = ("tty.usbmodem*", "tty.usbserial*", "ttyUSB*", "ttyACM*")
+        ports = [str(path) for pattern in patterns for path in Path("/dev").glob(pattern)]
     return sorted(ports)
 
 
@@ -327,8 +352,44 @@ def get_default_robot_config(robot_type: str, available_configs: list):
 
 # Characters disallowed in a robot name (filesystem safety)
 _INVALID_NAME_CHARS = ("/", "\\", "..")
-_ROBOT_STRING_FIELDS = ("leader_port", "follower_port", "leader_config", "follower_config")
+
+# The primary leader/follower pair. In bimanual mode this is the LEFT arm pair;
+# in single mode it's the only pair. Reusing these keeps existing records valid.
+_SINGLE_CONFIG_FIELDS = ("leader_port", "follower_port", "leader_config", "follower_config")
+# The RIGHT arm pair — populated only when mode == "bimanual".
+_BIMANUAL_CONFIG_FIELDS = (
+    "right_leader_port",
+    "right_follower_port",
+    "right_leader_config",
+    "right_follower_config",
+)
+_ROBOT_STRING_FIELDS = _SINGLE_CONFIG_FIELDS + _BIMANUAL_CONFIG_FIELDS
 _ROBOT_LIST_FIELDS = ("cameras",)
+
+# Follower motor power, as a percentage of full torque (see lelab/motor_power.py
+# for how it's written to the servos). Bounded below because under ~10% the arm
+# can't reliably hold its own weight; 100 = stock behavior.
+MOTOR_POWER_MIN = 10
+MOTOR_POWER_MAX = 100
+DEFAULT_MOTOR_POWER = 100
+
+
+def clamp_motor_power(value: object) -> int:
+    """Coerce a motor_power value to a safe integer percent in [10, 100].
+
+    Anything non-numeric (including bool, a subclass of int) falls back to full
+    power — the register's own power-on default — rather than raising, so a
+    corrupted record can never block a session start.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return DEFAULT_MOTOR_POWER
+    return max(MOTOR_POWER_MIN, min(MOTOR_POWER_MAX, int(value)))
+
+
+# Config-name fields whose stored value may carry a ".json" extension to strip.
+_CONFIG_NAME_FIELDS = ("leader_config", "follower_config", "right_leader_config", "right_follower_config")
+_VALID_MODES = ("single", "bimanual")
+_DEFAULT_MODE = "single"
 
 
 def _robot_record_path(name: str) -> str:
@@ -345,7 +406,7 @@ def is_valid_robot_name(name: str) -> bool:
 
 
 def _empty_record(name: str) -> dict:
-    record: dict = {"name": name}
+    record: dict = {"name": name, "mode": _DEFAULT_MODE, "motor_power": DEFAULT_MOTOR_POWER}
     for field in _ROBOT_STRING_FIELDS:
         record[field] = ""
     for field in _ROBOT_LIST_FIELDS:
@@ -368,6 +429,20 @@ def get_robot_record(name: str) -> dict | None:
     record = _empty_record(name)
     record.update({k: v for k, v in data.items() if k in record})
     record["name"] = name
+    # Canonical config names are STEMS (no .json). Older records stored the
+    # filename with the extension — normalize on read so every consumer sees the
+    # same form. The on-disk file keeps its .json.
+    for field in _CONFIG_NAME_FIELDS:
+        value = record.get(field, "")
+        if isinstance(value, str) and value.endswith(".json"):
+            record[field] = value[: -len(".json")]
+    # Guard against an unknown mode on disk.
+    if record.get("mode") not in _VALID_MODES:
+        record["mode"] = _DEFAULT_MODE
+    # Older records have no motor_power (→ full power via _empty_record); an
+    # out-of-range or corrupted value on disk is clamped so every consumer
+    # sees a safe 10-100 integer.
+    record["motor_power"] = clamp_motor_power(record.get("motor_power"))
     return record
 
 
@@ -413,6 +488,14 @@ def save_robot_record(name: str, data: dict, allow_create: bool = True) -> bool:
     for field in _ROBOT_LIST_FIELDS:
         if field in data and isinstance(data[field], list):
             record[field] = data[field]
+    # Same known-typed-fields-only merge as above: a numeric motor_power is
+    # clamped to the safe range, anything else is ignored (keeps existing).
+    value = data.get("motor_power")
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        record["motor_power"] = clamp_motor_power(value)
+    if data.get("mode") in _VALID_MODES:
+        record["mode"] = data["mode"]
+    record.setdefault("mode", _DEFAULT_MODE)
     record["name"] = name
 
     path = _robot_record_path(name)
@@ -433,18 +516,336 @@ def delete_robot_record(name: str) -> bool:
     return True
 
 
+def rename_robot_record(old_name: str, new_name: str) -> tuple[bool, str]:
+    """
+    Rename a robot record file. Returns (ok, reason).
+
+    `reason` is a machine-readable code on failure: "invalid_name" (either name
+    fails validation), "not_found" (no record under old_name), or "name_taken"
+    (a record already exists under new_name). On success reason is "".
+
+    Renaming the *robot* record never touches calibration files: those live under
+    config-name paths (leader_config / follower_config), independent of the robot
+    record's name. A no-op rename (old == new) succeeds.
+    """
+    if not is_valid_robot_name(old_name) or not is_valid_robot_name(new_name):
+        return False, "invalid_name"
+
+    record = get_robot_record(old_name)
+    if record is None:
+        return False, "not_found"
+
+    if old_name == new_name:
+        return True, ""
+
+    if os.path.exists(_robot_record_path(new_name)):
+        return False, "name_taken"
+
+    record["name"] = new_name
+    _atomic_write_text(_robot_record_path(new_name), json.dumps(record, indent=2))
+    os.remove(_robot_record_path(old_name))
+    logger.info(f"Renamed robot record {old_name} -> {new_name}")
+    return True, ""
+
+
 def is_robot_record_clean(record: dict) -> bool:
     """
-    A record is 'clean' when all four operational fields are populated AND both
-    referenced calibration files exist on disk. Cameras are optional and don't
-    affect cleanliness.
+    A record is 'clean' when every operational field for its mode is populated AND
+    every referenced calibration file exists on disk. Cameras are optional.
+
+    - single   : the leader/follower pair (4 fields, 2 calibration files).
+    - bimanual : that pair (= left arm) plus the right pair (8 fields, 4 files).
     """
     if not record:
         return False
-    for field in _ROBOT_STRING_FIELDS:
+
+    # Config fields are stems; the file on disk is "<stem>.json". Tolerate a
+    # stored value that still carries the extension (defensive).
+    def _file_for(base: str, name: str) -> str:
+        stem = name[: -len(".json")] if name.endswith(".json") else name
+        return os.path.join(base, f"{stem}.json")
+
+    bimanual = record.get("mode") == "bimanual"
+    required_fields = _SINGLE_CONFIG_FIELDS + (_BIMANUAL_CONFIG_FIELDS if bimanual else ())
+    for field in required_fields:
         value = record.get(field, "")
         if not isinstance(value, str) or not value.strip():
             return False
-    leader_path = os.path.join(LEADER_CONFIG_PATH, record["leader_config"])
-    follower_path = os.path.join(FOLLOWER_CONFIG_PATH, record["follower_config"])
-    return os.path.exists(leader_path) and os.path.exists(follower_path)
+
+    config_files = [
+        _file_for(LEADER_CONFIG_PATH, record["leader_config"]),
+        _file_for(FOLLOWER_CONFIG_PATH, record["follower_config"]),
+    ]
+    if bimanual:
+        config_files += [
+            _file_for(LEADER_CONFIG_PATH, record["right_leader_config"]),
+            _file_for(FOLLOWER_CONFIG_PATH, record["right_follower_config"]),
+        ]
+    return all(os.path.exists(p) for p in config_files)
+
+
+def config_slot_conflict(record: dict) -> str | None:
+    """
+    Detect when a bimanual record points two same-side arms at the SAME config.
+
+    The two leader slots share the so_leader dir and the two follower slots share
+    so_follower, so an identical config name on both = one physical arm's
+    calibration on two arms (at least one is wrong). Returns "leader"/"follower"
+    for the offending side, or None. Single mode (one slot per side) never
+    conflicts. A leader and follower sharing a name is fine — different dirs.
+    """
+    if record.get("mode") != "bimanual":
+        return None
+    leader = record.get("leader_config", "")
+    if leader and leader == record.get("right_leader_config", ""):
+        return "leader"
+    follower = record.get("follower_config", "")
+    if follower and follower == record.get("right_follower_config", ""):
+        return "follower"
+    return None
+
+
+# Port fields per mode. Unlike configs (which may legitimately share a name
+# across leader/follower dirs), a serial PORT is one physical USB device, so
+# every arm's port must be distinct — across BOTH sides.
+_SINGLE_PORT_FIELDS = ("leader_port", "follower_port")
+_BIMANUAL_PORT_FIELDS = ("right_leader_port", "right_follower_port")
+
+
+def bimanual_base(left_config: str, right_config: str, side: str) -> str:
+    """
+    Derive the lerobot BiSO base id from a pair of config names.
+
+    lerobot names a bimanual robot's two arm calibration files "<base>_left.json"
+    and "<base>_right.json" from a single base id. LeLab stores the two names
+    separately, so they must follow that convention. Returns the base, or raises
+    a clear RuntimeError naming the offending side.
+    """
+    left = left_config[: -len(".json")] if left_config.endswith(".json") else left_config
+    right = right_config[: -len(".json")] if right_config.endswith(".json") else right_config
+    if left.endswith("_left") and right == f"{left[: -len('_left')]}_right":
+        return left[: -len("_left")]
+    raise RuntimeError(
+        f"Bimanual {side} calibrations must be named '<base>_left' and '<base>_right' "
+        f"to match lerobot's convention, but got '{left}' and '{right}'. Recalibrate "
+        f"those arms (the default names already follow this)."
+    )
+
+
+def port_slot_conflict(record: dict) -> str | None:
+    """
+    Return a serial port assigned to more than one arm of this robot, or None.
+
+    Two physical arms can't share a port, so all of a robot's ports must differ —
+    leader vs follower in single mode, and all four in bimanual mode. Empty ports
+    are ignored (not yet set).
+    """
+    fields = _SINGLE_PORT_FIELDS + (
+        _BIMANUAL_PORT_FIELDS if record.get("mode") == "bimanual" else ()
+    )
+    seen: set[str] = set()
+    for field in fields:
+        port = record.get(field, "")
+        if not isinstance(port, str) or not port.strip():
+            continue
+        if port in seen:
+            return port
+        seen.add(port)
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Calibration config import
+# ---------------------------------------------------------------------------
+
+# A lerobot motor calibration entry has exactly these integer fields.
+_CALIBRATION_MOTOR_FIELDS = ("id", "drive_mode", "homing_offset", "range_min", "range_max")
+
+
+def calibration_dir_for_device(device_type: str) -> str | None:
+    """Map an API device_type ("teleop"/"robot") to its calibration dir, or None."""
+    if device_type == "robot":
+        return FOLLOWER_CONFIG_PATH
+    if device_type == "teleop":
+        return LEADER_CONFIG_PATH
+    return None
+
+
+# A dataset id is either a bare "name" or "namespace/name" (exactly one slash).
+# Each segment is an HF-style path component: 1-96 chars of [A-Za-z0-9._-] that
+# starts and ends with an alphanumeric. We REJECT bad names (rather than silently
+# sanitize) so e.g. "whoo/" fails loudly at the source instead of smuggling in a
+# namespace and landing the dataset in a surprising path like "user/whoo/".
+_DATASET_SEGMENT_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,94}[A-Za-z0-9])?$")
+
+
+def validate_dataset_name(name: object) -> tuple[bool, str]:
+    """Validate ONE dataset repo-id segment (the user-typed name, or a namespace).
+
+    Returns (ok, human_readable_reason).
+    """
+    if not isinstance(name, str) or not name.strip():
+        return False, "Dataset name can't be empty."
+    if name != name.strip():
+        return False, "Dataset name can't have leading or trailing spaces."
+    if "/" in name or "\\" in name:
+        return False, "Dataset name can't contain slashes."
+    if name in (".", ".."):
+        return False, "Dataset name can't be '.' or '..'."
+    if len(name) > 96:
+        return False, "Dataset name is too long (max 96 characters)."
+    if not _DATASET_SEGMENT_RE.match(name):
+        return False, (
+            "Dataset name may only use letters, digits, '.', '_' and '-', and must "
+            "start and end with a letter or digit."
+        )
+    return True, ""
+
+
+def validate_dataset_repo_id(repo_id: object) -> tuple[bool, str]:
+    """Validate a full dataset id: a bare name, or 'namespace/name' (one slash).
+
+    Returns (ok, human_readable_reason). Used by both recording and merge so a bad
+    name is refused at the point of creation, not silently rewritten.
+    """
+    if not isinstance(repo_id, str) or not repo_id.strip():
+        return False, "Dataset name can't be empty."
+    parts = repo_id.split("/")
+    if len(parts) > 2:
+        return False, "Dataset name may contain at most one '/' (namespace/name)."
+    if len(parts) == 2:
+        ns_ok, ns_reason = validate_dataset_name(parts[0])
+        if not ns_ok:
+            return False, ns_reason.replace("Dataset name", "Namespace")
+        return validate_dataset_name(parts[1])
+    return validate_dataset_name(parts[0])
+
+
+def validate_calibration_data(data: object) -> tuple[bool, str]:
+    """
+    Check that `data` looks like a lerobot motor calibration: a non-empty dict of
+    motor_name -> {id, drive_mode, homing_offset, range_min, range_max} with
+    integer values. Returns (ok, human_readable_reason). Validating here means a
+    bad import fails loudly at upload instead of later inside teleop/calibration.
+    """
+    if not isinstance(data, dict) or not data:
+        return False, "Calibration must be a non-empty object of motors."
+    for motor, fields in data.items():
+        if not isinstance(fields, dict):
+            return False, f"Motor '{motor}' must be an object."
+        for key in _CALIBRATION_MOTOR_FIELDS:
+            if key not in fields:
+                return False, f"Motor '{motor}' is missing '{key}'."
+            value = fields[key]
+            # bool is a subclass of int; a JSON true/false here is not valid.
+            if not isinstance(value, int) or isinstance(value, bool):
+                return False, f"Motor '{motor}' field '{key}' must be an integer."
+    return True, ""
+
+
+def save_imported_calibration(device_type: str, name: str, data: object) -> tuple[bool, str, str]:
+    """
+    Validate and persist an uploaded calibration as <name>.json under the side's
+    config dir. Never overwrites an existing file. Returns (ok, reason, name)
+    where `name` is the normalized config name (extension stripped). Reason codes:
+    "invalid_device", "invalid_name", "invalid_data:<msg>", "name_taken", "".
+    """
+    config_path = calibration_dir_for_device(device_type)
+    if config_path is None:
+        return False, "invalid_device", ""
+
+    name = name.strip()
+    # Accept either a stem or a "<name>.json" filename (records carry the ext).
+    if name.endswith(".json"):
+        name = name[: -len(".json")]
+    if not is_valid_robot_name(name):
+        return False, "invalid_name", name
+
+    ok, msg = validate_calibration_data(data)
+    if not ok:
+        return False, f"invalid_data:{msg}", name
+
+    os.makedirs(config_path, exist_ok=True)
+    file_path = os.path.join(config_path, f"{name}.json")
+    if os.path.exists(file_path):
+        return False, "name_taken", name
+
+    _atomic_write_text(file_path, json.dumps(data, indent=2))
+    logger.info(f"Imported calibration {device_type}/{name}")
+    return True, "", name
+
+
+def rename_calibration_config(device_type: str, old_name: str, new_name: str) -> tuple[bool, str]:
+    """
+    Rename a calibration config file within a side's dir. Never overwrites an
+    existing target. Robot records that referenced the old name (on this side)
+    are repointed to the new name so they stay valid. Returns (ok, reason):
+    "invalid_device", "invalid_name", "not_found", "name_taken", "".
+    """
+    config_path = calibration_dir_for_device(device_type)
+    if config_path is None:
+        return False, "invalid_device"
+
+    old_stem = old_name[: -len(".json")] if old_name.endswith(".json") else old_name
+    new_stem = new_name.strip()
+    if new_stem.endswith(".json"):
+        new_stem = new_stem[: -len(".json")]
+    if not is_valid_robot_name(old_stem) or not is_valid_robot_name(new_stem):
+        return False, "invalid_name"
+
+    old_path = os.path.join(config_path, f"{old_stem}.json")
+    if not os.path.exists(old_path):
+        return False, "not_found"
+    if old_stem == new_stem:
+        return True, ""  # no-op
+
+    new_path = os.path.join(config_path, f"{new_stem}.json")
+    if os.path.exists(new_path):
+        return False, "name_taken"
+
+    os.rename(old_path, new_path)
+
+    # Repoint any robot records that used the old config on this side — both the
+    # primary/left slot and the bimanual right slot live in the same dir.
+    fields = (
+        ("leader_config", "right_leader_config")
+        if device_type == "teleop"
+        else ("follower_config", "right_follower_config")
+    )
+    for rec in list_robot_records():
+        patch = {f: new_stem for f in fields if rec.get(f) == old_stem}
+        if patch:
+            save_robot_record(rec["name"], patch, allow_create=False)
+
+    logger.info(f"Renamed calibration {device_type}/{old_stem} -> {new_stem}")
+    return True, ""
+
+
+def clear_config_references(device_type: str, config_name: str) -> list[dict]:
+    """Blank every robot-record field (on this side) that references this
+    calibration config, across ALL robot records — both the primary/left slot
+    and the bimanual right slot, regardless of mode. A stale right_* reference
+    in a single-mode record is cleared too: it points at a file that no longer
+    exists, so leaving it would resurface a dangling name on a mode switch.
+
+    Called when a calibration config is deleted: instead of refusing the
+    delete, the referencing arms are unassigned and return to the "needs
+    calibration" state (is_robot_record_clean → False, and teleop/record refuse
+    to start with a clear message until the arm is recalibrated or reassigned).
+
+    Returns [{"robot": <name>, "fields": [<cleared fields>]}] for each record
+    modified, so callers can tell the user which arms now need calibration.
+    """
+    fields = (
+        ("leader_config", "right_leader_config")
+        if device_type == "teleop"
+        else ("follower_config", "right_follower_config")
+    )
+    stem = config_name.removesuffix(".json")
+    cleared: list[dict] = []
+    for rec in list_robot_records():
+        hit = [f for f in fields if rec.get(f) == stem]
+        if hit:
+            save_robot_record(rec["name"], dict.fromkeys(hit, ""), allow_create=False)
+            cleared.append({"robot": rec["name"], "fields": hit})
+    return cleared
