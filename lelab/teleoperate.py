@@ -26,6 +26,9 @@ from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
 from lerobot.teleoperators.bi_so_leader import BiSOLeader, BiSOLeaderConfig
 from lerobot.teleoperators.so_leader import SO101Leader, SO101LeaderConfig
 
+from .arm_identity import verify_devices
+from .motor_power import apply_motor_power, torque_limit_from_percent
+from .rest_pose import capture_rest_pose, return_to_rest_pose
 from .utils.config import (
     FOLLOWER_CONFIG_PATH,
     LEADER_CONFIG_PATH,
@@ -88,6 +91,157 @@ last_cleanup_error: str | None = None
 # Guards the start path; the worker owns disconnect so stop() does not race.
 _state_lock = threading.Lock()
 
+# Grace period between a *user-initiated* stop and the torque release, used by
+# RECORDING only (lelab/record.py imports hold_torque_release_grace; recording
+# has no return-to-start — its last pose may be deliberate — so the timed hold
+# gives the operator a window to get a hand on the arm). Teleoperation stops
+# no longer hold: the servos already hold their last goal on their own in
+# position mode, so the stop drives the follower straight back to its
+# session-start pose (see lelab/rest_pose.py) — same behavior as the
+# auto-calibration stop — then releases. Error paths (an exception in the
+# control loop — e.g. an unplugged bus) skip everything and attempt the
+# release immediately: you can't hold what you can't reach.
+TORQUE_RELEASE_GRACE_S = 5.0
+# True while the worker is driving the follower back to its rest pose (and on
+# through the release). The session is no longer "active" (the control loop
+# has exited) but the serial ports are still held and the arms are still
+# energized — surfaced in the status payload so the UI isn't lying about the
+# arm's state.
+releasing = False
+# Cuts the post-stop return short: set by a second stop request ("release
+# now") or by a new start request that needs the serial ports. Cleared on start.
+_release_now = threading.Event()
+
+# --- Follower power telemetry ---
+# Present_Current (register 69, 2 bytes, read-only; absent from the pinned
+# sign-magnitude encoding table, so reads come back as plain magnitudes) is
+# the servo's MEASURED winding current, 6.5 mA per LSB per Feetech's STS3215
+# memory table — the honest signal for validating the motor-power cap.
+# Present_Load (register 60) is a signed PWM duty in 0.1% units, i.e.
+# commanded effort, not measured draw — deliberately not used. Sampled at
+# ~1 Hz inside the teleop loop: one sync_read per second per FOLLOWER bus,
+# piggybacked on the broadcast tick so it adds no extra loop overhead. If a
+# firmware revision leaves the register at 0, the summary shows all-zero
+# peaks — that is the register being unpopulated, not zero current.
+_PRESENT_CURRENT_REGISTER = "Present_Current"
+_CURRENT_MA_PER_UNIT = 6.5
+_CURRENT_SAMPLE_INTERVAL_S = 1.0
+
+
+class PowerTelemetry:
+    """Per-motor peak/mean Present_Current (mA) across a teleop session.
+
+    Gives an objective A/B for the motor-power cap: run once at 100% and once
+    at 30% against the same manual resistance and compare the logged peaks —
+    no subjective feel test needed. Sampling and summarizing never raise.
+    """
+
+    def __init__(self) -> None:
+        self.peak_ma: dict[str, float] = {}
+        self.latest_ma: dict[str, float] = {}
+        self._sum_ma: dict[str, float] = {}
+        self._n: dict[str, int] = {}
+
+    def sample(self, bus, prefix: str = "") -> None:
+        """One Present_Current sync_read on a follower bus; never raises."""
+        try:
+            raw = bus.sync_read(_PRESENT_CURRENT_REGISTER, normalize=False)
+        except Exception as e:
+            logger.debug(f"Power telemetry sample failed: {e}")
+            return
+        for motor, value in raw.items():
+            ma = abs(float(value)) * _CURRENT_MA_PER_UNIT
+            key = f"{prefix}{motor}"
+            self.latest_ma[key] = round(ma, 1)
+            self.peak_ma[key] = max(self.peak_ma.get(key, 0.0), ma)
+            self._sum_ma[key] = self._sum_ma.get(key, 0.0) + ma
+            self._n[key] = self._n.get(key, 0) + 1
+
+    def summary(self, motor_power_percent: int) -> str | None:
+        """One INFO-ready line of per-motor peaks/means, or None if no samples."""
+        if not self._n:
+            return None
+        parts = [
+            f"{motor} peak {self.peak_ma[motor]:.0f}mA / mean {self._sum_ma[motor] / self._n[motor]:.0f}mA"
+            for motor in self.peak_ma
+        ]
+        return (
+            f"power telemetry: {'; '.join(parts)} "
+            f"(motor power {motor_power_percent}%, Torque_Limit {torque_limit_from_percent(motor_power_percent)})"
+        )
+
+
+def hold_torque_release_grace(
+    release_now: threading.Event,
+    grace_s: float = TORQUE_RELEASE_GRACE_S,
+    label: str = "arms",
+) -> bool:
+    """Keep the arm(s) energized for up to ``grace_s`` seconds before release.
+
+    "Holding" is just *not disabling torque yet* — the servos hold their last
+    goal on their own in position mode. Waits on ``release_now`` so a second
+    stop press (or a new start that needs the ports) can cut the hold short.
+    Returns True when cut short, False when the full grace elapsed.
+
+    This only *delays* the release; the caller must still run its
+    force_disable_torque + disconnect cleanup afterwards, unconditionally.
+    """
+    logger.info(
+        "Holding torque on the %s for up to %.0f s — guide the arm to a rest position "
+        "(stop again to release now)",
+        label,
+        grace_s,
+    )
+    cut_short = release_now.wait(timeout=grace_s)
+    logger.info("Grace hold on the %s finished: %s", label, "release-now" if cut_short else "elapsed")
+    return cut_short
+
+
+def finish_pending_release(timeout: float = 10.0) -> bool:
+    """Cut a pending torque-release grace short and wait for its cleanup.
+
+    Called by start paths (teleoperation and recording) so a start arriving
+    during the grace window releases the arms and frees the serial ports
+    immediately instead of failing port-busy for the rest of the grace.
+    Returns True when no teleoperation worker is running afterwards (the ports
+    are free as far as teleoperation is concerned); False when a live session
+    is running or the worker did not exit in time.
+    """
+    global teleoperation_thread
+
+    worker = teleoperation_thread
+    if worker is None or not worker.is_alive():
+        return True
+    if teleoperation_active:
+        # A live session, not a pending release — the caller's mutex check
+        # will report "already active".
+        return False
+    _release_now.set()
+    worker.join(timeout=timeout)
+    if worker.is_alive():
+        return False
+    teleoperation_thread = None
+    return True
+
+
+def _return_followers_to_rest(rest_poses: list[tuple], abort_event: threading.Event) -> None:
+    """Drive each follower bus back to its captured session-start pose.
+
+    Runs immediately before the torque release on a NORMAL stop only (no timed
+    hold: the servos hold their last goal on their own until the return goals
+    land). Best-effort: each bus's outcome is logged (returned | settled |
+    stalled | ceiling | cut-short | no-pose | comm-error) and every failure
+    falls through to the unconditional torque release. NEVER called with a
+    leader bus — the leader is human-held with torque off; driving it would
+    fight the user's hand.
+    """
+    for bus, pose in rest_poses:
+        port = getattr(bus, "port", None) or "unknown port"
+        label = f"follower arm on {port}"
+        logger.info(f"Rest-pose return starting for the {label}")
+        _arrived, reason = return_to_rest_pose(bus, pose, abort_event=abort_event, label=label)
+        logger.info(f"Rest-pose return finished for the {label}: {reason}")
+
 
 class TeleoperateRequest(BaseModel):
     leader_port: str
@@ -100,6 +254,12 @@ class TeleoperateRequest(BaseModel):
     right_follower_port: str = ""
     right_leader_config: str = ""
     right_follower_config: str = ""
+    # Escape hatch for the arm-identity guard (see lelab/arm_identity.py):
+    # when true, start even if the connected arms don't match their calibrations.
+    skip_identity_check: bool = False
+    # Follower torque as a percentage of full power (see lelab/motor_power.py).
+    # Applied to follower motors only; clamped server-side to 10-100.
+    motor_power: int = 100
 
 
 def get_joint_positions_from_robot(robot, prefix: str = "", calibration=None) -> dict[str, float]:
@@ -251,7 +411,8 @@ def _connect_bimanual(request: TeleoperateRequest):
     primary leader/follower pair, right = the right_* pair). lerobot loads each
     sub-arm's calibration as "<base>_left/right.json" from the side's dir, so we
     set the BiSO id to that base and let lerobot load it. Returns
-    (robot, teleop_device) connected, or raises after disconnecting any device.
+    (robot, teleop_device, identity_warnings) connected, or raises after
+    disconnecting any device.
     """
     # Validate the four files exist and follow lerobot's "<base>_left/right" naming.
     setup_calibration_files(request.leader_config, request.follower_config)
@@ -292,6 +453,12 @@ def _connect_bimanual(request: TeleoperateRequest):
                     "Make sure it's plugged in and powered on, then try again."
                 ) from e
 
+        # Arm-identity guard: all four arms, read-only, BEFORE write_calibration
+        # below can stamp a wrong file into a swapped arm's EEPROM.
+        identity_warnings = verify_devices(
+            ((robot, "follower"), (teleop_device, "leader")), skip=request.skip_identity_check
+        )
+
         # Each sub-arm auto-loaded its calibration in __init__ (id=<base>_side);
         # register it on the bus, then cameras + configure both sides.
         for arm in (robot.left_arm, robot.right_arm, teleop_device.left_arm, teleop_device.right_arm):
@@ -300,8 +467,12 @@ def _connect_bimanual(request: TeleoperateRequest):
             cam.connect()
         robot.configure()
         teleop_device.configure()
+        # Session motor power (RAM Torque_Limit) — followers only, never the
+        # human-held leader. After configure() so nothing overwrites it; a
+        # failed write degrades to full power and is surfaced as a warning.
+        identity_warnings += apply_motor_power(robot, request.motor_power, "follower arms")
         logger.info("Successfully connected to both bimanual arms")
-        return robot, teleop_device
+        return robot, teleop_device, identity_warnings
     except Exception:
         _safe_disconnect(robot, "follower arms")
         _safe_disconnect(teleop_device, "leader arms")
@@ -317,18 +488,39 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
     success. Only the teleoperation loop runs in the background thread.
     """
     global teleoperation_active, teleoperation_thread, current_robot, current_teleop, last_cleanup_error
+    global releasing
 
     from . import record as _record, rollout as _rollout
+
+    # A previous session (teleop or recording) may still be holding torque for
+    # its release grace — cut it short so this start doesn't fail on a busy
+    # serial port. Best effort: failures are surfaced by the checks below.
+    finish_pending_release()
+    _record.finish_pending_release()
 
     with _state_lock:
         if teleoperation_active:
             return {"success": False, "message": "Teleoperation is already active"}
+        if teleoperation_thread is not None and teleoperation_thread.is_alive():
+            # A stopped session's worker is still releasing the arms (grace was
+            # cut short above but the cleanup hasn't finished yet).
+            return {
+                "success": False,
+                "message": "The arms from the previous session are still being released. "
+                "Try again in a few seconds.",
+            }
         if _record.recording_active:
             return {"success": False, "message": "Recording is currently active. Stop it first."}
         if _rollout.inference_active:
             return {"success": False, "message": "Inference is currently active. Stop it first."}
+        # Per-session state reset, under the same lock that claims the active
+        # flag: a stale _release_now from a previous session's double-stop
+        # would otherwise cut EVERY later grace/return short until the server
+        # restarts (regression-tested in tests/test_teleoperate.py).
         teleoperation_active = True
         last_cleanup_error = None
+        releasing = False
+        _release_now.clear()
 
     robot = None
     teleop_device = None
@@ -338,7 +530,7 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
         )
 
         if request.mode == "bimanual":
-            robot, teleop_device = _connect_bimanual(request)
+            robot, teleop_device, identity_warnings = _connect_bimanual(request)
         else:
             # Setup calibration files
             leader_config_name, follower_config_name = setup_calibration_files(
@@ -383,6 +575,16 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
                     "Make sure it's plugged in and powered on, then try again."
                 ) from e
 
+            # Arm-identity guard: read-only check that each connected arm matches
+            # its assigned calibration — swapped leader/follower ports still
+            # connect fine but would drive the arms with the wrong calibration.
+            # Must run BEFORE write_calibration below stamps the (possibly wrong)
+            # file into the servos' EEPROM. Raises on mismatch; the except path
+            # below disconnects both devices and surfaces the message.
+            identity_warnings = verify_devices(
+                ((robot, "follower"), (teleop_device, "leader")), skip=request.skip_identity_check
+            )
+
             # Write calibration to motors' memory
             logger.info("Writing calibration to motors...")
             robot.bus.write_calibration(robot.calibration)
@@ -394,10 +596,25 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
                 cam.connect()
             robot.configure()
             teleop_device.configure()
+            # Session motor power (RAM Torque_Limit) — follower only, never the
+            # human-held leader. After configure() so nothing overwrites it; a
+            # failed write degrades to full power and is surfaced as a warning.
+            identity_warnings += apply_motor_power(robot, request.motor_power, "follower arm")
             logger.info("Successfully connected to both devices")
 
         current_robot = robot
         current_teleop = teleop_device
+
+        # Capture the follower's rest pose now — after connect/identity guard,
+        # before the loop moves anything — so a normal stop can drive it back
+        # to where the user left it. Followers only, NEVER the human-held
+        # leader. The gripper is excluded: at stop time it may be holding an
+        # object, and returning it to its (likely open) starting width would
+        # drop the object mid-return.
+        follower_rest_poses = [
+            (bus, {m: v for m, v in capture_rest_pose(bus).items() if m != "gripper"})
+            for bus in _device_buses(robot)
+        ]
 
         # Stream the arms in the background; the worker owns disconnect so stop()
         # does not race the serial bus from the request thread.
@@ -405,12 +622,21 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
         # joints so the frontend can drive two 3D viewers.
         is_bimanual = hasattr(robot, "left_arm") and hasattr(robot, "right_arm")
 
+        # Power telemetry: ~1 Hz Present_Current samples per follower bus (see
+        # PowerTelemetry). Followers only — the leader's torque is off.
+        telemetry = PowerTelemetry()
+        telemetry_targets = list(
+            zip(_device_buses(robot), ["left_", "right_"] if is_bimanual else [""], strict=False)
+        )
+
         def teleoperation_worker():
-            global teleoperation_active, current_robot, current_teleop, last_cleanup_error
+            global teleoperation_active, current_robot, current_teleop, last_cleanup_error, releasing
 
             logger.info("Starting teleoperation loop...")
+            stopped_normally = False
             try:
                 last_broadcast_time = 0
+                last_current_sample_time = 0.0
                 broadcast_interval = 0.05  # 20 FPS
 
                 while teleoperation_active:
@@ -420,6 +646,13 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
                     current_time = time.time()
                     if current_time - last_broadcast_time >= broadcast_interval:
                         try:
+                            # Piggyback the ~1 Hz current sample on the
+                            # broadcast tick — no extra loop overhead, one
+                            # sync_read per second per follower bus.
+                            if current_time - last_current_sample_time >= _CURRENT_SAMPLE_INTERVAL_S:
+                                for bus, prefix in telemetry_targets:
+                                    telemetry.sample(bus, prefix)
+                                last_current_sample_time = current_time
                             if is_bimanual:
                                 joint_positions = get_joint_positions_from_robot(
                                     robot, prefix="left_", calibration=robot.left_arm.calibration
@@ -435,6 +668,10 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
                                 joint_data["joints_right"] = get_joint_positions_from_robot(
                                     robot, prefix="right_", calibration=robot.right_arm.calibration
                                 )
+                            if telemetry.latest_ma:
+                                # Instantaneous follower current (mA), ~1 Hz
+                                # fresh; the frontend is free to ignore it.
+                                joint_data["follower_currents_ma"] = dict(telemetry.latest_ma)
                             if websocket_manager and websocket_manager.active_connections:
                                 websocket_manager.broadcast_joint_data_sync(joint_data)
                             last_broadcast_time = current_time
@@ -442,9 +679,24 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
                             logger.error(f"Error broadcasting joint data: {e}")
 
                     time.sleep(0.001)
+                # The loop exited because a stop request cleared the active
+                # flag — a *user-initiated* stop, so the graceful landing applies.
+                stopped_normally = True
             except Exception as e:
                 logger.error(f"Error during teleoperation loop: {e}")
             finally:
+                telemetry_summary = telemetry.summary(request.motor_power)
+                if telemetry_summary:
+                    logger.info(telemetry_summary)
+                if stopped_normally and not _release_now.is_set():
+                    # User-initiated stop: no timed hold — the servos hold
+                    # their last goal on their own — so drive the follower(s)
+                    # straight back to their session-start pose, then release
+                    # (same behavior as the auto-calibration stop). A second
+                    # stop (release-now) skips/aborts the return; error exits
+                    # skip this — the bus may be gone, release ASAP.
+                    releasing = True
+                    _return_followers_to_rest(follower_rest_poses, _release_now)
                 # Belt and braces: disable torque explicitly before disconnect.
                 # disconnect() disables torque too, but if it fails partway the
                 # error is swallowed here and the arm stays energized (rigid) —
@@ -458,6 +710,7 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
                 last_cleanup_error = " ".join(problems) if problems else None
                 logger.info("Teleoperation stopped")
                 teleoperation_active = False
+                releasing = False
                 current_robot = None
                 current_teleop = None
 
@@ -466,12 +719,17 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
         )
         teleoperation_thread.start()
 
-        return {
+        response = {
             "success": True,
             "message": "Teleoperation started successfully",
             "leader_port": request.leader_port,
             "follower_port": request.follower_port,
         }
+        # Warn-but-allow identity findings (EEPROM offsets differ from the file,
+        # e.g. a saved config assigned without recalibrating).
+        if identity_warnings:
+            response["warning"] = " ".join(identity_warnings)
+        return response
 
     except Exception as e:
         # Connection (or setup) failed before the loop started: release any
@@ -490,57 +748,98 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
 def handle_stop_teleoperation() -> dict[str, Any]:
     """Handle stop teleoperation request.
 
-    Signals the worker via `teleoperation_active = False` and waits for it to
-    exit. The worker owns the disconnect call, so this avoids racing the
-    serial bus from the request thread.
+    First stop: signals the worker via `teleoperation_active = False`. The
+    control loop exits and the worker drives the follower(s) straight back to
+    their session-start pose (no timed hold — the servos hold their last goal
+    on their own in position mode), then releases torque — reported
+    immediately via `releasing: true` rather than blocking through the return.
+    Second stop during the return: aborts it (release now) and waits for the
+    cleanup so any release problem is surfaced. The worker owns the disconnect
+    call either way, so this never races the serial bus from the request
+    thread.
     """
     global teleoperation_active, teleoperation_thread
 
-    if not teleoperation_active:
-        return {"success": False, "message": "No teleoperation session is active"}
-
-    logger.info("Stop teleoperation triggered from web interface")
-    teleoperation_active = False
-
     worker = teleoperation_thread
+    if teleoperation_active:
+        logger.info("Stop teleoperation triggered from web interface")
+        teleoperation_active = False
+
+        if worker is None or not worker.is_alive():
+            # No worker is holding the arms (it already exited, or a start
+            # never spawned one) — nothing to hold torque with, so report the
+            # cleanup outcome directly, as before the grace period existed.
+            teleoperation_thread = None
+            if last_cleanup_error:
+                return {
+                    "success": True,
+                    "message": "Teleoperation stopped, but releasing the arms reported a problem",
+                    "warning": last_cleanup_error,
+                }
+            return {"success": True, "message": "Teleoperation stopped successfully"}
+
+        return {
+            "success": True,
+            # The port is still held and the arm is still energized while the
+            # return runs; the status endpoint reports the same flag.
+            "releasing": True,
+            "message": (
+                "Teleoperation stopped — the arm returns to its starting position, "
+                "then goes limp. Press Stop again to release it now."
+            ),
+        }
+
     if worker is not None and worker.is_alive():
+        # Second stop while the return (or the release cleanup) is still
+        # running: release immediately and wait so problems can be surfaced.
+        logger.info("Second stop during the rest-pose return — releasing the arms now")
+        _release_now.set()
         worker.join(timeout=5.0)
         if worker.is_alive():
             logger.warning("Teleoperation worker did not exit within 5s")
             teleoperation_thread = None
             return {
                 "success": True,
-                "message": "Teleoperation stop requested, but the worker has not shut down yet",
+                "message": "Release requested, but the worker has not shut down yet",
                 "warning": (
                     "The teleoperation worker did not shut down within 5s, so the arms may not have "
                     "been released. If an arm stays rigid, unplug its power to release it."
                 ),
             }
-    teleoperation_thread = None
+        teleoperation_thread = None
+        # The worker has exited, so its cleanup already ran; if disabling
+        # torque or disconnecting failed, tell the caller — the arm may still
+        # be energized.
+        if last_cleanup_error:
+            return {
+                "success": True,
+                "message": "Arms released, but the release reported a problem",
+                "warning": last_cleanup_error,
+            }
+        return {"success": True, "message": "Arms released"}
 
-    # The worker has exited, so its cleanup already ran; if disabling torque or
-    # disconnecting failed, tell the caller — the arm may still be energized.
-    if last_cleanup_error:
-        return {
-            "success": True,
-            "message": "Teleoperation stopped, but releasing the arms reported a problem",
-            "warning": last_cleanup_error,
-        }
-
-    return {"success": True, "message": "Teleoperation stopped successfully"}
+    return {"success": False, "message": "No teleoperation session is active"}
 
 
 def handle_teleoperation_status() -> dict[str, Any]:
     """Handle teleoperation status request"""
+    message = (
+        "Returning the arm to its rest position…"
+        if releasing
+        else "Teleoperation status retrieved successfully"
+    )
     return {
         "teleoperation_active": teleoperation_active,
         "available_controls": {
             "stop_teleoperation": teleoperation_active,
         },
+        # True during the post-stop rest-pose return: the session is over but
+        # the arm is still energized and the port is still held.
+        "releasing": releasing,
         # Non-None when the last session's cleanup could not release an arm
         # (torque may still be enabled); cleared when a new session starts.
         "last_cleanup_error": last_cleanup_error,
-        "message": "Teleoperation status retrieved successfully",
+        "message": message,
     }
 
 

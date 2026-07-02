@@ -39,14 +39,15 @@ const VisualizerPanel: React.FC<VisualizerPanelProps> = ({
           <div className="w-px h-6 bg-gray-700" />
           <h2 className="text-xl font-medium text-gray-200">Teleoperation</h2>
         </div>
-        {/* Stopping (back arrow, closing the tab, an error) disconnects the
-            follower, which releases motor torque — warn before it happens. */}
+        {/* Stopping (back arrow, closing the tab) ends the session; the arm
+            drives back to its session-start pose, then torque is released.
+            Error stops (e.g. an unplugged cable) still release immediately. */}
         <Alert className="mb-4 bg-amber-900/40 border-amber-700 text-amber-100">
           <AlertTriangle className="h-4 w-4" />
           <AlertDescription>
-            Stopping releases motor torque — the follower arm will go limp and
-            fall under gravity. Move it to a low, supported pose before
-            stopping or leaving this page.
+            After stopping, the follower arm returns to its starting position,
+            then goes limp. Stop again to release it immediately; if the
+            session ends with an error, it may go limp right away.
           </AlertDescription>
         </Alert>
         {bimanual ? (

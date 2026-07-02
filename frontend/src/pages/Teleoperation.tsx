@@ -34,6 +34,34 @@ const TeleoperationPage = () => {
           description: data.warning,
           variant: "destructive",
         });
+      } else if (data?.releasing) {
+        // The backend drives the follower straight back to its session-start
+        // pose (no timed hold), then releases torque.
+        toast({
+          title: "Teleoperation stopped",
+          description:
+            data.message ?? "The arm returns to its starting position, then goes limp.",
+        });
+        // The release happens after this response returns, so check once
+        // after the return (progress-based, 10 s ceiling) whether it actually
+        // succeeded (the toast store is global, so this fires even after
+        // navigating away).
+        setTimeout(async () => {
+          try {
+            const status = await fetchWithHeaders(`${baseUrl}/teleoperation-status`).then((r) =>
+              r.json()
+            );
+            if (status?.last_cleanup_error) {
+              toast({
+                title: "Check the arm",
+                description: status.last_cleanup_error,
+                variant: "destructive",
+              });
+            }
+          } catch {
+            /* best-effort */
+          }
+        }, 13000);
       } else if (data?.success) {
         toast({
           title: "Teleoperation stopped",

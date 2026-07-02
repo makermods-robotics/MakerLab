@@ -33,16 +33,35 @@ from dataclasses import dataclass
 
 from pydantic import BaseModel
 
+from lerobot.motors.feetech import FeetechMotorsBus
+
+from .torque import force_disable_bus_torque
 from .utils.config import (
     CALIBRATION_BASE_PATH_ROBOTS,
     LEADER_CONFIG_PATH,
     save_robot_record,
 )
+from .vendor.feetech_autocal.calibration_defaults import SO_FOLLOWER_MOTORS
 
 logger = logging.getLogger(__name__)
 
 _MAX_LOG_LINES = 1000
 _SCRIPT_MODULE = "lelab.vendor.feetech_autocal.auto_calibrate_script"
+
+# Stop escalation timings. The script's own SIGTERM cleanup (KeyboardInterrupt
+# -> _graceful_stop -> safe_disable_all) first freezes the arm (~1s), then
+# drives it back to its starting pose — progress-based, giving up on stall,
+# with RETURN_TO_REST_BUDGET_S = 10s as an absolute ceiling — or holds the
+# freeze (STOP_HOLD_S = 3s) before the 6-motor release + disconnect (~1-2s,
+# more on a bus that's mid overload). Worst case ~15-16s, so 18s of grace
+# before concluding the script is wedged (e.g. blocked in a C-level serial
+# call, where the raised KeyboardInterrupt never materializes) and killing
+# it. Keep this above the vendored script's summed stop budget
+# (lelab/vendor/feetech_autocal/auto_calibrate_script.py) so a SIGKILL can
+# never land on a healthy graceful stop mid-motion.
+_STOP_GRACE_S = 18.0
+_STOP_KILL_WAIT_S = 5.0
+_READER_JOIN_S = 5.0
 
 
 class AutoCalibrationRequest(BaseModel):
@@ -56,7 +75,7 @@ class AutoCalibrationRequest(BaseModel):
 @dataclass
 class AutoCalibrationStatus:
     active: bool = False
-    status: str = "idle"  # idle | running | completed | failed | stopped
+    status: str = "idle"  # idle | running | stopping | completed | failed | stopped
     message: str = ""
     error: str | None = None
 
@@ -65,12 +84,48 @@ def _stem(name: str) -> str:
     return name[: -len(".json")] if name.endswith(".json") else name
 
 
+def _release_arm_torque(port: str) -> list[str]:
+    """Fallback torque release, run from THIS process after the calibration
+    subprocess is dead (so the serial port is free again).
+
+    The script's own SIGTERM handler releases torque on a clean stop, but a
+    killed or wedged script leaves the arm energized (rigid) — so reconnect a
+    fresh bus to the port and disable torque motor by motor, with retries.
+    Returns problem descriptions; empty means every motor was released.
+
+    Deliberately INSTANT — no freeze/return-to-start like the script's own
+    graceful stop: this is the emergency path after the child died or was
+    killed, the bus state is unknown, and the priority is de-energizing the
+    arm, not landing it nicely.
+    """
+    try:
+        bus = FeetechMotorsBus(port=port, motors=SO_FOLLOWER_MOTORS.copy())
+        # No handshake: a mid-calibration motor can be in overload and slow to
+        # answer pings, but still accept the Torque_Enable=0 writes below.
+        bus.connect(handshake=False)
+    except Exception as e:
+        message = (
+            f"TORQUE MAY STILL BE ENABLED on {port} — could not reconnect to release the arm ({e}). "
+            "The arm can stay rigid; unplug its power to release it."
+        )
+        logger.error(message)
+        return [message]
+    try:
+        return force_disable_bus_torque(bus, "auto-calibration arm")
+    finally:
+        try:
+            bus.disconnect(disable_torque=False)
+        except Exception as e:
+            logger.warning(f"Auto-calibration fallback release: disconnect failed: {e}")
+
+
 class AutoCalibrationManager:
     """Runs the auto-calibration subprocess and tracks its state + logs."""
 
     def __init__(self) -> None:
         self._proc: subprocess.Popen | None = None
         self._thread: threading.Thread | None = None
+        self._stop_thread: threading.Thread | None = None
         self._lock = threading.Lock()
         self._logs: deque[str] = deque(maxlen=_MAX_LOG_LINES)
         self._request: AutoCalibrationRequest | None = None
@@ -103,9 +158,15 @@ class AutoCalibrationManager:
 
             self._logs.clear()
             self._request = request
+            self._stop_thread = None
             try:
                 self._proc = subprocess.Popen(
                     command,
+                    # DEVNULL, not inherited: with the server launched from a
+                    # terminal the child would see a TTY on stdin and run
+                    # interactively — its "press Enter" prompts would then
+                    # block forever on a terminal nobody is answering.
+                    stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,
@@ -116,7 +177,9 @@ class AutoCalibrationManager:
                 self.status = AutoCalibrationStatus(active=False, status="failed", error=str(e))
                 return {"success": False, "message": str(e)}
 
-            self.status = AutoCalibrationStatus(active=True, status="running", message="Auto-calibration running…")
+            self.status = AutoCalibrationStatus(
+                active=True, status="running", message="Auto-calibration running…"
+            )
             self._thread = threading.Thread(target=self._run, name="auto-calibration", daemon=True)
             self._thread.start()
             return {"success": True, "message": "Auto-calibration started"}
@@ -141,9 +204,12 @@ class AutoCalibrationManager:
                 except Exception as e:
                     logger.error(f"Auto-calibration post-processing failed: {e}")
                     self.status = AutoCalibrationStatus(active=False, status="failed", error=str(e))
-            elif self.status.status == "stopped":
-                # Already marked stopped by stop(); keep it.
-                self.status = AutoCalibrationStatus(active=False, status="stopped", message="Auto-calibration stopped")
+            elif self.status.status in ("stopping", "stopped"):
+                # Stop path: _stop_worker owns the terminal status — it still
+                # has to run the fallback torque release after the process is
+                # gone, and only then flips the status to stopped/failed.
+                # Leave "stopping" (active=True) so the UI keeps polling.
+                pass
             else:
                 self.status = AutoCalibrationStatus(
                     active=False, status="failed", error=f"Auto-calibration exited with code {code}"
@@ -188,15 +254,98 @@ class AutoCalibrationManager:
                 logger.warning(f"Auto-calibration write-back failed for {request.robot_name}: {e}")
 
     def stop(self) -> dict:
+        """Request a stop. Escalation runs in a worker thread so this returns
+        immediately; the status is guaranteed to reach a terminal state
+        (stopped/failed) even if the subprocess has to be killed."""
         with self._lock:
             if not self.status.active or self._proc is None:
                 return {"success": False, "message": "No auto-calibration is running"}
-            self.status.status = "stopped"
+            if self.status.status == "stopping":
+                return {"success": False, "message": "Auto-calibration is already stopping"}
+            self.status.status = "stopping"
+            # The script's graceful stop freezes the arm, drives it back to its
+            # starting pose, and only then releases torque — up to ~10s. Say so,
+            # or the wait reads as an unresponsive Stop button.
+            self.status.message = "Stopping — returning the arm to its starting position…"
+            proc = self._proc
+            port = self._request.port if self._request is not None else ""
+            self._stop_thread = threading.Thread(
+                target=self._stop_worker, args=(proc, port), name="auto-calibration-stop", daemon=True
+            )
+            self._stop_thread.start()
+        return {"success": True, "message": "Stopping auto-calibration"}
+
+    def _stop_worker(self, proc: subprocess.Popen, port: str) -> None:
+        """Escalating stop: SIGTERM → grace period for the script's own torque
+        release → SIGKILL → direct fallback torque release from this process.
+
+        SIGTERM makes the script raise KeyboardInterrupt and release torque
+        itself, but if its main thread is wedged in a C-level serial call the
+        exception never materializes and the process won't die — observed on
+        hardware. SIGKILL can't be caught, so after it the arm is assumed
+        energized and we release torque directly over the (now free) port.
+        Always ends on a terminal status so the UI can never freeze mid-stop.
+        """
+        killed = False
+        problems: list[str] = []
+        try:
             try:
-                self._proc.terminate()
+                proc.terminate()
             except Exception as e:
                 logger.warning(f"Error terminating auto-calibration: {e}")
-        return {"success": True, "message": "Stopping auto-calibration"}
+            try:
+                proc.wait(timeout=_STOP_GRACE_S)
+            except subprocess.TimeoutExpired:
+                killed = True
+                logger.warning(
+                    f"Auto-calibration did not exit within {_STOP_GRACE_S}s of SIGTERM; killing it"
+                )
+                self._logs.append(f"Stop: process did not exit within {_STOP_GRACE_S:.0f}s; killing it.")
+                try:
+                    proc.kill()
+                except Exception as e:
+                    logger.warning(f"Error killing auto-calibration: {e}")
+                try:
+                    proc.wait(timeout=_STOP_KILL_WAIT_S)
+                except subprocess.TimeoutExpired:
+                    # Unkillable = stuck in an uninterruptible kernel call; the
+                    # port is still held, so the release below will fail loudly.
+                    logger.error("Auto-calibration process survived SIGKILL")
+
+            # Let the reader thread drain the last logs and observe the exit.
+            reader = self._thread
+            if reader is not None:
+                reader.join(timeout=_READER_JOIN_S)
+
+            # Belt and braces: release torque from here even when the script
+            # exited cleanly — a killed or wedged script leaves torque enabled,
+            # and re-disabling already-released motors is harmless.
+            problems = _release_arm_torque(port)
+            if killed and not problems:
+                self._logs.append("Process killed; torque released directly over the port.")
+        except Exception as e:
+            logger.error(f"Auto-calibration stop worker failed: {e}")
+            problems.append(
+                f"TORQUE MAY STILL BE ENABLED on {port} — the stop sequence failed ({e}). "
+                "The arm can stay rigid; unplug its power to release it."
+            )
+        finally:
+            with self._lock:
+                if self.status.status == "completed":
+                    # The run finished during the grace period; keep the result.
+                    pass
+                elif problems:
+                    self.status = AutoCalibrationStatus(
+                        active=False,
+                        status="failed",
+                        message="Auto-calibration stopped",
+                        error=" ".join(problems),
+                    )
+                else:
+                    self.status = AutoCalibrationStatus(
+                        active=False, status="stopped", message="Auto-calibration stopped"
+                    )
+                self._proc = None
 
     def get_status(self) -> dict:
         with self._lock:

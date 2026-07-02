@@ -32,7 +32,9 @@ from lerobot.scripts.lerobot_record import RecordConfig
 from lerobot.teleoperators.bi_so_leader import BiSOLeaderConfig
 from lerobot.teleoperators.so_leader import SO101LeaderConfig
 
-from .teleoperate import force_disable_torque
+from .arm_identity import ArmIdentityError, verify_devices
+from .motor_power import apply_motor_power
+from .teleoperate import force_disable_torque, hold_torque_release_grace
 from .utils.config import (
     FOLLOWER_CONFIG_PATH,
     LEADER_CONFIG_PATH,
@@ -58,9 +60,44 @@ phase_start_time = None  # Track when current phase started
 last_recording_info: dict[str, Any] | None = (
     None  # Snapshot of the most recently completed dataset (for /dataset-info)
 )
+# Warn-but-allow arm-identity findings from the current session's guard (see
+# lelab/arm_identity.py). The guard runs inside the recording worker (after the
+# start response has already been sent), so the messages are surfaced through
+# the /recording-status payload instead of the start response.
+identity_warnings: list[str] = []
 # Guards the start path so two concurrent POST /start-recording calls cannot
 # both pass the active-flag check.
 _state_lock = threading.Lock()
+
+# True while the session's cleanup is holding torque for the release grace (see
+# teleoperate.TORQUE_RELEASE_GRACE_S): the recording loop is over but the arms
+# are still energized (holding position) and the serial ports are still held.
+# Surfaced in the status payload so the UI isn't lying about the arm's state.
+releasing = False
+# Cuts the grace hold short: set by a second stop request ("release now") or by
+# a new start request that needs the serial ports. Cleared on start.
+_release_now = threading.Event()
+
+
+def finish_pending_release(timeout: float = 10.0) -> bool:
+    """Cut a pending torque-release grace short and wait for its cleanup.
+
+    Called by start paths (recording and teleoperation) so a start arriving
+    during the grace window releases the arms and frees the serial ports
+    immediately instead of failing port-busy for the rest of the grace.
+    Returns True when no recording worker is running afterwards; False when a
+    live session is still recording or the worker did not exit in time.
+    """
+    worker = recording_thread
+    if worker is None or not worker.is_alive():
+        return True
+    if not releasing:
+        # A live recording session, not a pending release — the caller's
+        # mutex check will report "already active".
+        return False
+    _release_now.set()
+    worker.join(timeout=timeout)
+    return not worker.is_alive()
 
 
 class RecordingRequest(BaseModel):
@@ -88,6 +125,12 @@ class RecordingRequest(BaseModel):
     streaming_encoding: bool = True
     cameras: dict = {}
     test_mode: bool = False  # Skip robot connection for testing
+    # Escape hatch for the arm-identity guard (see lelab/arm_identity.py):
+    # when true, record even if the connected arms don't match their calibrations.
+    skip_identity_check: bool = False
+    # Follower torque as a percentage of full power (see lelab/motor_power.py).
+    # Applied to follower motors only; clamped server-side to 10-100.
+    motor_power: int = 100
 
 
 class UploadRequest(BaseModel):
@@ -241,6 +284,7 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
     """Handle start recording request by using the existing record() function"""
     global \
         recording_active, \
+        releasing, \
         recording_thread, \
         recording_events, \
         recording_config, \
@@ -250,7 +294,8 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
         saved_episodes, \
         current_phase, \
         phase_start_time, \
-        last_recording_info
+        last_recording_info, \
+        identity_warnings
 
     from . import rollout as _rollout, teleoperate as _teleoperate
 
@@ -264,9 +309,22 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
         getattr(request, "mode", "single"),
     )
 
+    # A previous session (recording or teleop) may still be holding torque for
+    # its release grace — cut it short so this start doesn't fail on a busy
+    # serial port. Best effort: failures are surfaced by the checks below.
+    finish_pending_release()
+    _teleoperate.finish_pending_release()
+
     with _state_lock:
         if recording_active:
-            return {"success": False, "message": "Recording is already active"}
+            return {
+                "success": False,
+                "message": (
+                    "The previous session is still releasing the arms. Try again in a few seconds."
+                    if releasing
+                    else "Recording is already active"
+                ),
+            }
         if _teleoperate.teleoperation_active:
             return {"success": False, "message": "Teleoperation is currently active. Stop it first."}
         if _rollout.inference_active:
@@ -282,7 +340,13 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                 name_reason,
             )
             return {"success": False, "message": name_reason}
+        # Per-session state reset, under the same lock that claims the active
+        # flag: a stale _release_now from a previous session's double-stop
+        # would otherwise cut EVERY later release grace short until the server
+        # restarts (regression-tested in tests/test_record.py).
         recording_active = True
+        releasing = False
+        _release_now.clear()
         recording_thread = None
         recording_events = None
         recording_config = None
@@ -293,6 +357,7 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
         current_phase = "preparing"
         phase_start_time = None
         last_recording_info = None
+        identity_warnings = []
 
     try:
         # The name is already validated (validate_dataset_repo_id in the lock), so
@@ -345,7 +410,12 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                     )
                     time.sleep(2.0)
 
-                dataset = record_with_web_events(record_config, recording_events)
+                dataset = record_with_web_events(
+                    record_config,
+                    recording_events,
+                    skip_identity_check=request.skip_identity_check,
+                    motor_power=request.motor_power,
+                )
                 logger.info(f"Recording completed successfully. Dataset has {dataset.num_episodes} episodes")
                 last_recording_info = {
                     "success": True,
@@ -392,8 +462,21 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
 
 
 def handle_stop_recording() -> dict[str, Any]:
-    """Handle stop recording request - replaces ESC key"""
+    """Handle stop recording request - replaces ESC key.
+
+    A second stop while the session-end cleanup is holding torque for the
+    release grace cuts the hold short ("release now").
+    """
     global current_phase, phase_start_time
+
+    if releasing:
+        _release_now.set()
+        logger.info("Second stop during the release grace — releasing the arms now")
+        return {
+            "success": True,
+            "message": "Releasing the arms now",
+            "session_ending": True,
+        }
 
     if not recording_active or recording_events is None:
         return {"success": False, "message": "No recording session is active"}
@@ -405,7 +488,10 @@ def handle_stop_recording() -> dict[str, Any]:
     logger.info("Stop recording triggered from web interface")
     return {
         "success": True,
-        "message": "Recording stop requested successfully",
+        "message": (
+            "Recording stop requested. When the session ends, the arm holds its pose for ~5 s "
+            "so you can guide it to a rest position — press Stop again to release it immediately."
+        ),
         "session_ending": True,
     }
 
@@ -462,6 +548,10 @@ def handle_recording_status() -> dict[str, Any]:
         "recording_active": recording_active,
         "current_phase": current_phase,  # "preparing", "recording", "resetting", "completed"
         "session_ended": session_ended,  # New field to indicate session completion
+        # True during the post-session grace window: the recording loop is over
+        # but the arms are still energized (holding position) so the user can
+        # guide them to a rest position before torque is released.
+        "releasing": releasing,
         "available_controls": {
             "stop_recording": recording_active,  # ESC key replacement
             "exit_early": recording_active,  # Right arrow key replacement
@@ -481,6 +571,11 @@ def handle_recording_status() -> dict[str, Any]:
     # can read the actual on-disk repo_id (post stamp) for upload navigation.
     if recording_config:
         status["dataset_repo_id"] = recording_config.dataset_repo_id
+
+    # Warn-but-allow arm-identity findings (the guard runs in the worker, after
+    # the start response) — the frontend shows these as a non-blocking toast.
+    if identity_warnings:
+        status["warning"] = " ".join(identity_warnings)
 
     # Add episode information if recording is active
     if recording_active and recording_config:
@@ -639,7 +734,9 @@ def handle_upload_dataset(request: UploadRequest) -> dict[str, Any]:
         return {"success": False, "message": f"Failed to upload dataset: {str(e)}"}
 
 
-def record_with_web_events(cfg: RecordConfig, web_events: dict) -> LeRobotDataset:
+def record_with_web_events(
+    cfg: RecordConfig, web_events: dict, skip_identity_check: bool = False, motor_power: int = 100
+) -> LeRobotDataset:
     """
     Implement recording with phase tracking - exactly mirrors original record() function behavior
     """
@@ -657,7 +754,8 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict) -> LeRobotDatase
     from lerobot.utils.feature_utils import hw_to_dataset_features
     from lerobot.utils.utils import log_say
 
-    global current_phase, phase_start_time, current_episode, saved_episodes
+    global current_phase, phase_start_time, current_episode, saved_episodes, releasing
+    global identity_warnings
 
     robot = make_robot_from_config(cfg.robot)
     teleop = make_teleoperator_from_config(cfg.teleop) if cfg.teleop is not None else None
@@ -723,11 +821,33 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict) -> LeRobotDatase
     if teleop is not None:
         try:
             logger.info("🔧 TELEOP CONNECTION: Attempting to connect teleoperator...")
-            teleop.connect()
+            # calibrate=False for the same reason as the robot connect above —
+            # and critically for the identity guard below: with the default
+            # calibrate=True, an EEPROM/file mismatch (exactly the swapped-port
+            # case) drops into SOLeader.calibrate(), which writes the wrong
+            # JSON into the servos' EEPROM (or hangs on input() in this
+            # headless thread). The calibration write happens explicitly in
+            # _write_calibration below, after the guard has read the EEPROM.
+            teleop.connect(calibrate=False)
             logger.info("✅ TELEOP CONNECTION: Teleoperator connected successfully")
         except Exception as e:
             logger.error(f"❌ TELEOP CONNECTION: Failed to connect teleoperator: {e}")
             raise
+
+    # Arm-identity guard: read-only check that each connected arm matches its
+    # assigned calibration, BEFORE _write_calibration below can stamp a wrong
+    # file into a swapped arm's EEPROM and before any action is sent. On a hard
+    # mismatch, release the arms (torque was never enabled) and let the worker's
+    # error path surface the message via the recording status.
+    try:
+        identity_warnings = verify_devices(
+            ((robot, "follower"), (teleop, "leader")), skip=skip_identity_check
+        )
+    except ArmIdentityError:
+        robot.disconnect()
+        if teleop is not None:
+            teleop.disconnect()
+        raise
 
     # Ensure calibration is properly loaded and applied to the devices
     logger.info("Applying calibration to devices")
@@ -760,9 +880,21 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict) -> LeRobotDatase
     _write_calibration(robot, "robot")
     _write_calibration(teleop, "teleop")
 
+    # Session motor power (RAM Torque_Limit) — the follower only, never the
+    # human-held leader. robot.connect() above already ran configure(), so
+    # nothing overwrites this before the recording loop; a failed write
+    # degrades to full power (logged inside) and must not abort the session.
+    apply_motor_power(robot, motor_power, "follower arm")
+
     # Start with episode 1 - but track it properly
     current_episode = 1
     saved_episodes = 0  # Track how many episodes we've actually saved
+
+    # Set once the session ends on a user/planned path (stop button, all
+    # episodes recorded) — those get the torque-release grace below. An
+    # exception (camera death, unplugged bus, ...) leaves it False so the
+    # release is attempted immediately: the bus may already be unreachable.
+    ended_normally = False
 
     try:
         while saved_episodes < cfg.dataset.num_episodes:
@@ -942,16 +1074,28 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict) -> LeRobotDatase
         phase_start_time = None
         print("🏁 STATUS CHANGE: Recording session completed - all episodes finished")
         log_say("Stop recording", cfg.play_sounds, blocking=True)
+        ended_normally = True
 
     finally:
-        # Belt and braces: disable torque explicitly before disconnect, so a
-        # failure inside disconnect() can't leave an arm energized (rigid).
-        # force_disable_torque logs any failure at ERROR level with the port.
-        force_disable_torque(robot, "robot")
-        force_disable_torque(teleop, "teleop")
-        robot.disconnect()
-        if teleop:
-            teleop.disconnect()
+        try:
+            if ended_normally:
+                # User-initiated stop / planned session end: keep torque
+                # enabled for the grace window so the arms can be guided to a
+                # rest position before they go limp. Cut short by a second
+                # stop press or a new start (see _release_now). This only
+                # delays the release below — it never skips it.
+                releasing = True
+                hold_torque_release_grace(_release_now, label="recording arms")
+            # Belt and braces: disable torque explicitly before disconnect, so a
+            # failure inside disconnect() can't leave an arm energized (rigid).
+            # force_disable_torque logs any failure at ERROR level with the port.
+            force_disable_torque(robot, "robot")
+            force_disable_torque(teleop, "teleop")
+            robot.disconnect()
+            if teleop:
+                teleop.disconnect()
+        finally:
+            releasing = False
 
     if cfg.dataset.push_to_hub:
         dataset.push_to_hub(tags=cfg.dataset.tags, private=cfg.dataset.private)

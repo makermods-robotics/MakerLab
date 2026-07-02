@@ -34,6 +34,7 @@ Usage examples:
 """
 
 import argparse
+import contextlib
 import signal
 import sys
 import time
@@ -62,11 +63,264 @@ from .calibration_defaults import (
     DEFAULT_VELOCITY_LIMIT,
     HOMING_OFFSET_MAX_MAG,
     MOTOR_NAMES,
+    POSITION_TOLERANCE,
     SO_FOLLOWER_MOTORS,
     STS_HALF_TURN_RAW,
     UNFOLD_ORDER,
     motor_label,
 )
+
+# ====================== Graceful stop (freeze -> return to start -> release) ======================
+
+# NOTE: lelab/rest_pose.py carries the lelab-side twin of this return logic
+# (teleoperation stop). This script runs as a standalone subprocess and cannot
+# import lelab cleanly, so the two are kept mirrored by hand — change one,
+# check the other.
+#
+# On a mid-calibration stop the arm is usually extended in mid-air with torque on
+# (possibly still moving in velocity mode); cutting Torque_Enable instantly makes
+# it free-fall. The STS3215 has no torque-control mode for true gravity
+# compensation, so the stop sequence instead: (1) FREEZES all motion immediately
+# — the user sees the Stop register right away — (2) drives the arm back to the
+# pose it was in when the script started, at a gentle speed, for as long as it
+# keeps making progress, and (3) only then releases torque. If the return can't
+# run (pose not captured, bus error) or stalls, the arm holds its frozen pose
+# briefly and is then released wherever it is.
+#
+# Budget: freeze (~1s) + return (<= the RETURN_TO_REST_BUDGET_S ceiling) +
+# fallback hold (STOP_HOLD_S) + 6-motor release/disconnect (~1-2s) must stay
+# inside the manager's SIGTERM grace, lelab.auto_calibrate._STOP_GRACE_S —
+# sized to 18s for exactly this worst case.
+#
+# ABSOLUTE ceiling on the return, not a working limit: termination is
+# progress-based (see the stall constants below), so a healthy-but-slow return
+# is never cut short and this ceiling must never matter in practice — it
+# exists so the manager's SIGKILL can't land mid-motion.
+RETURN_TO_REST_BUDGET_S = 10.0
+RETURN_POS_SPEED = 400  # gentle return speed (fold/unfold move at DEFAULT_POS_SPEED=1000)
+RETURN_SETTLE_S = 0.3  # let motion start before polling (mirrors _fold_arm)
+RETURN_POLL_S = 0.05
+# Stall detection: the return is allowed to be slow, never to be stuck. Give up
+# only when the aggregate distance-to-target fails to shrink by more than
+# RETURN_STALL_MIN_PROGRESS ticks for a full RETURN_STALL_WINDOW_S window.
+RETURN_STALL_WINDOW_S = 1.5
+RETURN_STALL_MIN_PROGRESS = 10  # ticks, summed over all motors
+STOP_HOLD_S = 3.0  # fallback: stay frozen this long before releasing
+
+
+def _capture_rest_pose(bus: FeetechMotorsBus) -> dict[str, int]:
+    """Offset-independent pose of every motor, to return to on an interrupt.
+
+    Captured as (Present_Position + Homing_Offset) % FULL_TURN — the same
+    invariant as _record_reference_position — because calibration rewrites
+    Homing_Offset, so a raw Present_Position captured now would point at a
+    different physical pose later. Best-effort: unreadable motors are simply
+    absent from the result.
+    """
+    pose: dict[str, int] = {}
+    for motor in bus.motors:
+        try:
+            pr = bus.read("Present_Position", motor, normalize=False)
+            ho = bus.read("Homing_Offset", motor, normalize=False)
+            pose[motor] = (pr + ho) % FULL_TURN
+        except COMM_ERR:
+            continue
+    # Say what was captured: a motor silently absent here (comm error) is
+    # never returned on a stop, which on the bench looks exactly like "the
+    # starting position wasn't right".
+    missing = [m for m in bus.motors if m not in pose]
+    line = f"Start pose captured for: {', '.join(pose) if pose else 'NO MOTORS'}"
+    if missing:
+        line += f" (MISSING: {', '.join(missing)} — these will NOT be returned on a stop)"
+    print(line)
+    return pose
+
+
+def _freeze_arm(bus: FeetechMotorsBus) -> None:
+    """Halt all motion NOW: hold the current pose at normal working torque.
+
+    Zero velocity-mode motion first (a motor interrupted mid limit-probe keeps
+    pushing otherwise), then per motor: servo mode (the same mode-switch
+    pattern _fold_arm and write_pos_ex_and_wait use mid-run), working
+    Torque_Limit, torque cleared-and-re-enabled, goal = current position.
+    ~1s for 6 motors; a per-motor comm error skips that motor rather than
+    aborting the freeze.
+
+    The disable-settle-enable torque cycle matters: the Stop usually lands
+    while one motor sits stalled against a hard stop with its OVERLOAD latch
+    set, and a bare Torque_Enable=1 NAKs on such a servo — leaving it limp,
+    which then stalls the whole return-to-start (the arm cannot move a dead
+    joint back; observed on hardware as "only ever the fallback"). Disabling
+    first clears the latch, exactly like the mixin's _clear_and_enable_torque;
+    _write_torque_with_recovery retries the enable with a longer settle if it
+    still NAKs. The ~50ms per-motor limp window is imperceptible (the other
+    five motors keep holding).
+    """
+    with contextlib.suppress(COMM_ERR):
+        bus.sync_write("Goal_Velocity", dict.fromkeys(bus.motors, 0))
+    values: dict[str, tuple[int, int, int]] = {}
+    for motor in bus.motors:
+        try:
+            bus.write("Operating_Mode", motor, 0)
+            bus.write("Torque_Limit", motor, DEFAULT_TORQUE_LIMIT, normalize=False)
+            with contextlib.suppress(COMM_ERR):
+                bus.write("Torque_Enable", motor, 0)  # clear a mid-probe overload latch
+            time.sleep(0.05)
+            pos = bus.read("Present_Position", motor, normalize=False)
+            bus._write_torque_with_recovery(motor, 1, retries=2, interval_s=0.2)
+            values[motor] = (pos, DEFAULT_POS_SPEED, DEFAULT_ACCELERATION)
+        except COMM_ERR:
+            print(f"  Freeze: {motor_label(motor)} could not be re-energized; it will not hold or return.")
+            continue
+    if values:
+        bus.sync_write_pos_ex(values)
+
+
+def _nearest_wrap_target(base: int, present: int, min_limit: int, max_limit: int) -> int:
+    """Pick the wrap-equivalent of `base` nearest `present`, inside the limits.
+
+    Geometry: the encoder is a FULL_TURN-tick circle, so the re-expressed rest
+    target `(encoder - ho_now) % FULL_TURN` is only defined modulo FULL_TURN —
+    base, base - FULL_TURN and base + FULL_TURN all name the same physical
+    pose. But Goal_Position drives a straight line through register space, so
+    the wrong representative can send the joint the long way around, through
+    the calibration hard stops. Choose the representative nearest the joint's
+    current position, then clamp into the firmware's current
+    Min/Max_Position_Limit window: a clamped seam-adjacent target still lands
+    a short arc from the pose instead of trekking toward the far one.
+    """
+    candidates = (base - FULL_TURN, base, base + FULL_TURN)
+    target = min(candidates, key=lambda candidate: abs(candidate - present))
+    return max(min_limit, min(max_limit, target))
+
+
+def _return_to_rest_pose(bus: FeetechMotorsBus, rest_pose: dict[str, int], ceiling_s: float) -> bool:
+    """Drive the arm back to the captured start pose; True once it arrives.
+
+    Targets are re-expressed against each motor's CURRENT Homing_Offset (see
+    _capture_rest_pose) using the near, in-limits wrap representative (see
+    _nearest_wrap_target). Motion is simultaneous and gentle.
+
+    Termination is progress-based, not timed: the return runs for as long as
+    the aggregate distance-to-target keeps shrinking (by more than
+    RETURN_STALL_MIN_PROGRESS ticks per RETURN_STALL_WINDOW_S window), and
+    succeeds ONLY when every motor sits within POSITION_TOLERANCE of its
+    target. All-Moving==0 is deliberately NOT success: a latched or weak motor
+    can sit motionless far from target, and reporting that as "returned" is
+    exactly the bench symptom of "the starting position wasn't right" — it is
+    reported as a distinct "settled short" outcome instead. A healthy-but-slow
+    return is never cut short; `ceiling_s` is only the absolute backstop
+    (RETURN_TO_REST_BUDGET_S) that keeps the manager's SIGKILL from landing
+    mid-motion.
+    """
+    values: dict[str, tuple[int, int, int]] = {}
+    for motor, encoder in rest_pose.items():
+        try:
+            ho = bus.read("Homing_Offset", motor, normalize=False)
+            present = bus.read("Present_Position", motor, normalize=False)
+            try:
+                # Mid-calibration these are (0, 4095) from stage 0 until a
+                # motor's calibrated limits land — which are written right
+                # after its new Homing_Offset, so they are in the same
+                # offset-applied space as our re-expressed target. Clamping is
+                # therefore consistent at every interrupt point.
+                min_limit, max_limit = bus.read_position_limits(motor)
+            except COMM_ERR:
+                min_limit, max_limit = 0, FULL_TURN - 1
+            base = (encoder - ho) % FULL_TURN
+            target = _nearest_wrap_target(base, present, min_limit, max_limit)
+            values[motor] = (target, RETURN_POS_SPEED, DEFAULT_ACCELERATION)
+        except COMM_ERR:
+            continue
+    if not values:
+        print("Fallback: could not compute any return target (comm errors on every motor).")
+        return False
+    targets = {motor: v[0] for motor, v in values.items()}
+    bus.sync_write_pos_ex(values)
+    time.sleep(RETURN_SETTLE_S)
+    t0 = time.monotonic()
+    best_dist: int | None = None
+    last_progress_t = t0
+    remaining = -1
+    distances: dict[str, int] = {}
+    while time.monotonic() - t0 < ceiling_s:
+        remaining = 0
+        distances = {}
+        readable = False
+        arrived = True
+        for motor, target in targets.items():
+            try:
+                pos = bus.read("Present_Position", motor, normalize=False)
+            except COMM_ERR:
+                arrived = False
+                continue
+            readable = True
+            distance = abs(pos - target)
+            distances[motor] = distance
+            remaining += distance
+            if distance > POSITION_TOLERANCE:
+                arrived = False
+        now = time.monotonic()
+        if readable and arrived:
+            detail = ", ".join(f"{m}={d}" for m, d in distances.items())
+            print(f"Return complete: max delta {max(distances.values())} ticks ({detail}).")
+            return True
+        if readable and (best_dist is None or remaining < best_dist - RETURN_STALL_MIN_PROGRESS):
+            best_dist = remaining
+            last_progress_t = now
+        if now - last_progress_t > RETURN_STALL_WINDOW_S:
+            # No meaningful progress for a full window. Say which motors are
+            # still out — and whether they are still fighting (stalled) or
+            # sitting motionless short of target (settled: latched/weak) — so
+            # the next hardware log is conclusive.
+            detail = ", ".join(f"{m}={d}" for m, d in distances.items() if d > POSITION_TOLERANCE)
+            outcome = "stalled"
+            with contextlib.suppress(COMM_ERR):
+                if all(bus.read("Moving", m, normalize=False) == 0 for m in targets):
+                    outcome = "settled short of target"
+            print(
+                f"Fallback: return {outcome} after {now - t0:.1f}s — "
+                f"remaining distance {remaining} ticks ({detail or 'unreadable motors'})."
+            )
+            return False
+        time.sleep(RETURN_POLL_S)
+    # Absolute ceiling — never expected in practice (see docstring).
+    print(f"Fallback: return hit the {ceiling_s:.0f}s ceiling with {remaining} ticks remaining.")
+    return False
+
+
+def _graceful_stop(bus: FeetechMotorsBus, rest_pose: dict[str, int]) -> None:
+    """Interrupt sequence: freeze in place, then return to the start pose (or hold).
+
+    The caller runs safe_disable_all afterwards on EVERY path — this function
+    only decides where the arm is when torque drops. All six motors take part,
+    gripper included: during calibration nothing is ever gripped, so there is
+    nothing a moving gripper could drop.
+
+    Strictly best-effort: any failure falls through immediately so this can
+    never prevent — or delay beyond the manager's SIGTERM grace — the real
+    release. A SECOND KeyboardInterrupt (another Stop / SIGTERM) anywhere in
+    here means "stop NOW": skip the rest and release instantly.
+    """
+    try:
+        print("\nStop requested: freezing the arm in place...")
+        _freeze_arm(bus)
+        returned = False
+        if rest_pose:
+            print("Returning the arm to its starting position...")
+            returned = _return_to_rest_pose(bus, rest_pose, RETURN_TO_REST_BUDGET_S)
+        else:
+            print("Fallback: no start pose was captured at startup.")
+        if returned:
+            print("Arm returned to its starting position.")
+        else:
+            print(f"Holding position for {STOP_HOLD_S:.0f}s before releasing...")
+            time.sleep(STOP_HOLD_S)
+    except (Exception, KeyboardInterrupt):
+        # Includes a broken stdout pipe from the prints: skip straight to the
+        # caller's safe_disable_all rather than dying with torque on.
+        pass
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -396,11 +650,20 @@ def _run_with_bus(
     except Exception as e:
         print(f"Connect failed: {e}", file=sys.stderr)
         return 1
+    rest_pose: dict[str, int] = {}
     try:
+        # Captured before any motion, so a Stop mid-run can drive the arm back
+        # to exactly where the user left it (inside the try: a SIGTERM during
+        # the capture itself must still release torque below).
+        rest_pose = _capture_rest_pose(bus)
         body(bus)
     except KeyboardInterrupt:
-        print("\nUser interrupt; releasing all servos...")
+        # Freeze/return first (best-effort, see _graceful_stop), then release
+        # torque BEFORE printing: if stdout's pipe is gone the print raises
+        # and would otherwise skip the release.
+        _graceful_stop(bus, rest_pose)
         bus.safe_disable_all()
+        print("\nUser interrupt; releasing all servos...")
         return 130
     except Exception as e:
         print(f"Exception: {e}", file=sys.stderr)
@@ -412,7 +675,13 @@ def _run_with_bus(
                 pass
         return 1
     finally:
-        bus.disconnect()
+        # Don't let a failed disconnect (e.g. a motor still in overload NAKs
+        # the disable-torque write it performs) replace the return code with
+        # a traceback — torque was already released on every path above.
+        try:
+            bus.disconnect()
+        except Exception as e:
+            print(f"Disconnect failed: {e}", file=sys.stderr)
     return 0
 
 
@@ -631,6 +900,9 @@ def run_full_calibration(
             with open(calibration_fpath, "w") as f, draccus.config_type("json"):
                 draccus.dump(cal, f, indent=4)
             print(f"Wrote calibration to: {calibration_fpath}")
+        # No _soft_release needed here (unlike the interrupt path): _fold_arm
+        # above already parked the arm in its folded rest pose, so cutting
+        # torque from here is a no-drop release.
         print("Releasing all servos...")
         bus.safe_disable_all()
 
