@@ -17,7 +17,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
+
+import pyarrow as pa
+import pyarrow.parquet as pq
+from fastapi.testclient import TestClient
 
 
 def _make_dataset(root: Path, repo_id: str, episodes: int = 1) -> None:
@@ -122,3 +127,147 @@ def test_list_all_datasets_merges_hub_and_local(
     by_id = {d["repo_id"]: d for d in result}
     assert by_id["alice/pusht"]["source"] == "both"
     assert by_id["alice/aloha"]["source"] == "hub"
+
+
+def _write_info(root: Path, repo_id: str, info: dict[str, Any]) -> Path:
+    """Write a dataset dir with the given meta/info.json; returns the dir."""
+    d = root / repo_id
+    (d / "meta").mkdir(parents=True)
+    (d / "meta" / "info.json").write_text(json.dumps(info))
+    return d
+
+
+def test_get_local_dataset_info_returns_full_details(
+    tmp_lerobot_home: Path,
+) -> None:
+    from lelab.datasets import get_local_dataset_info
+
+    d = _write_info(
+        tmp_lerobot_home,
+        "alice/pick",
+        {
+            "total_episodes": 20,
+            "total_frames": 16723,
+            "fps": 30,
+            "robot_type": "so_follower",
+            "features": {
+                "action": {"dtype": "float32"},
+                "observation.state": {"dtype": "float32"},
+                "observation.images.wrist": {"dtype": "video"},
+                "observation.images.front": {"dtype": "video"},
+            },
+        },
+    )
+    # v3.0 task metadata: tasks.parquet with task_index + task columns,
+    # deliberately written out of index order to check the sort.
+    pq.write_table(
+        pa.table({"task_index": [1, 0], "task": ["second task", "first task"]}),
+        d / "meta" / "tasks.parquet",
+    )
+    (d / "data").mkdir()
+    (d / "data" / "file-000.parquet").write_bytes(b"x" * 1234)
+
+    result = get_local_dataset_info("alice/pick")
+    assert result is not None
+    assert result["total_episodes"] == 20
+    assert result["total_frames"] == 16723
+    assert result["fps"] == 30
+    assert result["robot_type"] == "so_follower"
+    assert result["cameras"] == ["wrist", "front"]
+    assert result["tasks"] == ["first task", "second task"]
+    # Directory walk covers data + meta files, so at least the data blob.
+    assert result["size_bytes"] >= 1234
+
+
+def test_get_local_dataset_info_reads_v2_tasks_jsonl(
+    tmp_lerobot_home: Path,
+) -> None:
+    from lelab.datasets import get_local_dataset_info
+
+    d = _write_info(
+        tmp_lerobot_home,
+        "old_format",
+        {"total_episodes": 2, "total_frames": 100, "fps": 30, "features": {}},
+    )
+    lines = [
+        json.dumps({"task_index": 1, "task": "beta"}),
+        json.dumps({"task_index": 0, "task": "alpha"}),
+    ]
+    (d / "meta" / "tasks.jsonl").write_text("\n".join(lines))
+
+    result = get_local_dataset_info("old_format")
+    assert result is not None
+    assert result["tasks"] == ["alpha", "beta"]
+
+
+def test_get_local_dataset_info_zero_episodes_and_no_cameras(
+    tmp_lerobot_home: Path,
+) -> None:
+    """A 0-episode dataset is hidden from the listing but must still resolve
+    here, so the frontend can render its warning badges."""
+    from lelab.datasets import get_local_dataset_info
+
+    _write_info(
+        tmp_lerobot_home,
+        "alice/aborted",
+        {
+            "total_episodes": 0,
+            "total_frames": 0,
+            "fps": 30,
+            "robot_type": "so_follower",
+            "features": {"action": {"dtype": "float32"}},
+        },
+    )
+
+    result = get_local_dataset_info("alice/aborted")
+    assert result is not None
+    assert result["total_episodes"] == 0
+    assert result["cameras"] == []
+    assert result["tasks"] == []
+
+
+def test_get_local_dataset_info_missing_dataset_returns_none(
+    tmp_lerobot_home: Path,
+) -> None:
+    from lelab.datasets import get_local_dataset_info
+
+    assert get_local_dataset_info("nobody/nothing") is None
+
+
+def test_get_local_dataset_info_rejects_path_traversal(
+    tmp_lerobot_home: Path,
+) -> None:
+    from lelab.datasets import get_local_dataset_info
+
+    # A dataset-shaped dir OUTSIDE the cache root must not be reachable.
+    outside = tmp_lerobot_home.parent / "outside"
+    (outside / "meta").mkdir(parents=True)
+    (outside / "meta" / "info.json").write_text(json.dumps({"total_episodes": 1}))
+
+    assert get_local_dataset_info("../outside") is None
+    assert get_local_dataset_info("..") is None
+    assert get_local_dataset_info(".") is None
+
+
+def test_datasets_info_endpoint(client: TestClient, tmp_lerobot_home: Path) -> None:
+    _write_info(
+        tmp_lerobot_home,
+        "alice/pick",
+        {
+            "total_episodes": 3,
+            "total_frames": 900,
+            "fps": 30,
+            "robot_type": "so_follower",
+            "features": {"observation.images.front": {"dtype": "video"}},
+        },
+    )
+
+    ok = client.get("/datasets/info", params={"repo_id": "alice/pick"})
+    assert ok.status_code == 200
+    body = ok.json()
+    assert body["total_episodes"] == 3
+    assert body["cameras"] == ["front"]
+    assert body["size_bytes"] > 0
+
+    missing = client.get("/datasets/info", params={"repo_id": "alice/ghost"})
+    assert missing.status_code == 404

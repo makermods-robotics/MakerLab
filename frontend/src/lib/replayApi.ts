@@ -20,6 +20,32 @@ export async function listDatasets(
   });
 }
 
+export interface DatasetInfo {
+  repo_id: string;
+  total_episodes: number;
+  total_frames: number;
+  fps: number | null;
+  robot_type: string | null;
+  cameras: string[];
+  tasks: string[];
+  size_bytes: number;
+}
+
+/** Detail view of a locally-cached dataset (404 if it's Hub-only). */
+export async function getDatasetInfo(
+  baseUrl: string,
+  fetcher: Fetcher,
+  repoId: string,
+  signal?: AbortSignal,
+): Promise<DatasetInfo> {
+  return apiRequest<DatasetInfo>(
+    baseUrl,
+    fetcher,
+    `/datasets/info?repo_id=${encodeURIComponent(repoId)}`,
+    { signal, action: "Dataset info" },
+  );
+}
+
 export async function deleteDataset(
   baseUrl: string,
   fetcher: Fetcher,

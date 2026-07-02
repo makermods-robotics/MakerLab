@@ -8,6 +8,7 @@ import Footer from "@/components/Footer";
 import RobotConfigManager from "@/components/landing/RobotConfigManager";
 import RecordingModal from "@/components/landing/RecordingModal";
 import DatasetPicker from "@/components/landing/DatasetPicker";
+import DatasetInfoCard from "@/components/landing/DatasetInfoCard";
 import MergeDatasetsDialog from "@/components/landing/MergeDatasetsDialog";
 import JobsSection from "@/components/jobs/JobsSection";
 
@@ -258,6 +259,8 @@ const Landing = () => {
       right_follower_port: robot.right_follower_port,
       right_leader_config: robot.right_leader_config,
       right_follower_config: robot.right_follower_config,
+      // Follower torque limit for the session (10-100% of full power).
+      motor_power: robot.motor_power ?? 100,
       dataset_repo_id: datasetRepoId,
       single_task: singleTask,
       num_episodes: numEpisodes,
@@ -326,6 +329,7 @@ const Landing = () => {
                   <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
                 </Button>
               </DatasetPicker>
+              {selectedDataset && <DatasetInfoCard repoId={selectedDataset} />}
               <button
                 type="button"
                 onClick={() => setShowMergeDialog(true)}

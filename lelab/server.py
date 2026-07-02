@@ -472,6 +472,18 @@ def datasets_list():
     return dataset_browser.list_all_datasets()
 
 
+@app.get("/datasets/info")
+def datasets_info(repo_id: str):
+    """Detail card for one locally-cached dataset (episodes, cameras, tasks,
+    size on disk). repo_id is a query param because repo ids contain '/'."""
+    info = dataset_browser.get_local_dataset_info(repo_id)
+    if info is None:
+        raise HTTPException(
+            status_code=404, detail=f"Dataset '{repo_id}' not found in the local cache"
+        )
+    return info
+
+
 @app.post("/datasets/merge")
 def datasets_merge(request: MergeRequest):
     """Aggregate 2+ datasets into a new local dataset in the background."""
