@@ -46,11 +46,13 @@ const Landing = () => {
   const { baseUrl, fetchWithHeaders } = useApi();
 
   const {
+    records,
     selectedName,
     selectedRecord,
     availableNames,
     isLoading: isLoadingRobots,
     selectRobot,
+    clearSelection,
     createRobot,
     renameRobot,
     deleteRobot,
@@ -318,11 +320,13 @@ const Landing = () => {
       >
         <div className="mx-auto max-w-7xl px-4 py-4 grid gap-4 grid-cols-1 lg:grid-cols-[1.2fr_2fr]">
           <RobotConfigManager
+            records={records}
             selectedName={selectedName}
             selectedRecord={selectedRecord}
             availableNames={availableNames}
             isLoading={isLoadingRobots}
             selectRobot={selectRobot}
+            clearSelection={clearSelection}
             createRobot={createRobot}
             renameRobot={renameRobot}
             deleteRobot={deleteRobot}

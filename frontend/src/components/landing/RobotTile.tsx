@@ -16,12 +16,15 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { RobotRecord, RobotMode } from "@/hooks/useRobots";
+import { cn } from "@/lib/utils";
 import RobotSelector from "./RobotSelector";
 
 interface RobotTileProps {
   robot: RobotRecord | null;
   selectedName: string | null;
   availableNames: string[];
+  modeFilter: RobotMode;
+  onFilterChange: (mode: RobotMode) => void;
   isLoading: boolean;
   onSelect: (name: string) => void;
   onCreateNew: (name: string, mode: RobotMode) => Promise<boolean>;
@@ -31,10 +34,17 @@ interface RobotTileProps {
   onDelete: (name: string) => void;
 }
 
+const MODE_FILTERS: { value: RobotMode; label: string }[] = [
+  { value: "single", label: "Single arm" },
+  { value: "bimanual", label: "Bimanual" },
+];
+
 const RobotTile: React.FC<RobotTileProps> = ({
   robot,
   selectedName,
   availableNames,
+  modeFilter,
+  onFilterChange,
   isLoading,
   onSelect,
   onCreateNew,
@@ -83,11 +93,43 @@ const RobotTile: React.FC<RobotTileProps> = ({
       <h3 className="font-semibold text-lg text-center h-10 flex items-center justify-center">
         Robot arm configuration
       </h3>
+      {/* Layout filter. Not a mutator — a record's mode is immutable. Picking
+          a side only changes which robots the dropdown lists; the active side
+          mirrors the selected robot's layout (selection is the source of
+          truth), so it doubles as the layout indicator. */}
+      <div
+        role="radiogroup"
+        aria-label="Filter by arm layout"
+        className="grid grid-cols-2 gap-1 rounded-md border border-gray-700 bg-gray-900 p-1"
+      >
+        {MODE_FILTERS.map((opt) => {
+          const active = modeFilter === opt.value;
+          return (
+            <button
+              key={opt.value}
+              type="button"
+              role="radio"
+              aria-checked={active}
+              onClick={() => onFilterChange(opt.value)}
+              className={cn(
+                "rounded px-3 py-1.5 text-xs font-medium transition-colors",
+                active
+                  ? "bg-gray-700 text-white"
+                  : "text-gray-400 hover:text-gray-200"
+              )}
+            >
+              {opt.label}
+            </button>
+          );
+        })}
+      </div>
+
       <div className="flex items-center gap-2">
         <div className="flex-1 min-w-0">
           <RobotSelector
             selectedName={selectedName}
             availableNames={availableNames}
+            defaultMode={modeFilter}
             onSelect={onSelect}
             onCreateNew={onCreateNew}
             isLoading={isLoading}
@@ -149,17 +191,6 @@ const RobotTile: React.FC<RobotTileProps> = ({
           </div>
         )}
       </div>
-
-      {robot && (
-        <div className="flex items-center gap-2">
-          <span className="text-xs text-gray-400 shrink-0">Arms</span>
-          {/* Mode is fixed at creation — display only. A bimanual rig is a
-              separate machine; migrating means creating a new robot. */}
-          <span className="rounded-md border border-gray-700 bg-gray-900 px-3 py-1 text-xs text-gray-200">
-            {robot.mode === "bimanual" ? "Bimanual" : "Single arm"}
-          </span>
-        </div>
-      )}
 
       {robot && (
         <Tooltip>

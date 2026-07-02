@@ -30,10 +30,18 @@ import { cn } from "@/lib/utils";
 interface RobotSelectorProps {
   selectedName: string | null;
   availableNames: string[];
+  // Layout the create dialog preseeds to (mirrors the active filter). The user
+  // can still change it in the dialog.
+  defaultMode: RobotMode;
   onSelect: (name: string) => void;
   onCreateNew: (name: string, mode: RobotMode) => Promise<boolean>;
   isLoading: boolean;
 }
+
+const MODE_LABEL: Record<RobotMode, string> = {
+  single: "single arm",
+  bimanual: "bimanual",
+};
 
 const MODE_OPTIONS: { value: RobotMode; label: string; description: string }[] = [
   {
@@ -51,6 +59,7 @@ const MODE_OPTIONS: { value: RobotMode; label: string; description: string }[] =
 const RobotSelector: React.FC<RobotSelectorProps> = ({
   selectedName,
   availableNames,
+  defaultMode,
   onSelect,
   onCreateNew,
   isLoading,
@@ -59,7 +68,7 @@ const RobotSelector: React.FC<RobotSelectorProps> = ({
   const [query, setQuery] = useState("");
   const [createOpen, setCreateOpen] = useState(false);
   const [newName, setNewName] = useState("");
-  const [newMode, setNewMode] = useState<RobotMode>("single");
+  const [newMode, setNewMode] = useState<RobotMode>(defaultMode);
   const [creating, setCreating] = useState(false);
 
   const handlePickExisting = (name: string) => {
@@ -76,7 +85,8 @@ const RobotSelector: React.FC<RobotSelectorProps> = ({
     // carry it into the dialog.
     const seed = query.trim();
     setNewName(seed !== "" && !nameExists(seed) ? seed : "");
-    setNewMode("single");
+    // Preseed the layout to the active filter; the user can still change it.
+    setNewMode(defaultMode);
     setOpen(false);
     setCreateOpen(true);
   };
@@ -95,7 +105,7 @@ const RobotSelector: React.FC<RobotSelectorProps> = ({
       if (ok) {
         setCreateOpen(false);
         setNewName("");
-        setNewMode("single");
+        setNewMode(defaultMode);
         setQuery("");
       }
     } finally {
@@ -139,7 +149,7 @@ const RobotSelector: React.FC<RobotSelectorProps> = ({
             <CommandList>
               {availableNames.length === 0 && (
                 <CommandEmpty className="py-4 text-sm text-gray-400 text-center">
-                  No robots yet.
+                  No {MODE_LABEL[defaultMode]} robots yet — create one.
                 </CommandEmpty>
               )}
               {availableNames.length > 0 && (
@@ -181,7 +191,7 @@ const RobotSelector: React.FC<RobotSelectorProps> = ({
           setCreateOpen(o);
           if (!o) {
             setNewName("");
-            setNewMode("single");
+            setNewMode(defaultMode);
           }
         }}
       >
