@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -322,3 +322,100 @@ def test_datasets_info_endpoint(client: TestClient, tmp_lerobot_home: Path) -> N
 
     missing = client.get("/datasets/info", params={"repo_id": "alice/ghost"})
     assert missing.status_code == 404
+
+
+# --- Hub sync status --------------------------------------------------------
+
+
+def _clear_hub_status_cache() -> None:
+    from lelab import datasets as ds
+
+    with ds._HUB_STATUS_LOCK:
+        ds._HUB_STATUS_CACHE.clear()
+
+
+def test_get_hub_status_reports_on_hub_when_repo_exists() -> None:
+    from lelab import datasets as ds
+
+    _clear_hub_status_cache()
+    fake_api = MagicMock()
+    fake_api.repo_exists.return_value = True
+    with patch("lelab.datasets.shared_hf_api", return_value=fake_api):
+        result = ds.get_hub_status("alice/pick")
+
+    assert result["status"] == "on_hub"
+    assert result["url"] == "https://huggingface.co/datasets/alice/pick"
+    fake_api.repo_exists.assert_called_once_with("alice/pick", repo_type="dataset")
+
+
+def test_get_hub_status_reports_local_only_when_repo_missing() -> None:
+    from lelab import datasets as ds
+
+    _clear_hub_status_cache()
+    fake_api = MagicMock()
+    fake_api.repo_exists.return_value = False
+    with patch("lelab.datasets.shared_hf_api", return_value=fake_api):
+        result = ds.get_hub_status("alice/pick")
+
+    assert result["status"] == "local_only"
+    assert result["url"] is None
+
+
+def test_get_hub_status_degrades_to_unknown_offline() -> None:
+    """A transport error (offline / rate-limited) degrades to "unknown" and is
+    NOT cached, so the next check re-tries once connectivity returns."""
+    from lelab import datasets as ds
+
+    _clear_hub_status_cache()
+    fake_api = MagicMock()
+    fake_api.repo_exists.side_effect = OSError("no network")
+    with patch("lelab.datasets.shared_hf_api", return_value=fake_api):
+        result = ds.get_hub_status("alice/pick")
+        assert result["status"] == "unknown"
+        assert result["url"] is None
+        # Not cached: a second call re-invokes repo_exists.
+        ds.get_hub_status("alice/pick")
+    assert fake_api.repo_exists.call_count == 2
+
+
+def test_get_hub_status_caches_definitive_answer() -> None:
+    """A definitive answer is memoized: repo_exists runs once across calls."""
+    from lelab import datasets as ds
+
+    _clear_hub_status_cache()
+    fake_api = MagicMock()
+    fake_api.repo_exists.return_value = True
+    with patch("lelab.datasets.shared_hf_api", return_value=fake_api):
+        ds.get_hub_status("alice/pick")
+        ds.get_hub_status("alice/pick")
+    assert fake_api.repo_exists.call_count == 1
+
+
+def test_invalidate_hub_status_forces_recheck() -> None:
+    """After invalidation (called on successful upload), the next check
+    re-queries the Hub — so a "local_only" answer can flip to "on_hub"."""
+    from lelab import datasets as ds
+
+    _clear_hub_status_cache()
+    fake_api = MagicMock()
+    fake_api.repo_exists.return_value = False
+    with patch("lelab.datasets.shared_hf_api", return_value=fake_api):
+        assert ds.get_hub_status("alice/pick")["status"] == "local_only"
+        # Simulate a successful upload: repo now exists, cache invalidated.
+        ds.invalidate_hub_status("alice/pick")
+        fake_api.repo_exists.return_value = True
+        assert ds.get_hub_status("alice/pick")["status"] == "on_hub"
+    assert fake_api.repo_exists.call_count == 2
+
+
+def test_hub_status_endpoint(client: TestClient) -> None:
+    _clear_hub_status_cache()
+    fake_api = MagicMock()
+    fake_api.repo_exists.return_value = True
+    with patch("lelab.datasets.shared_hf_api", return_value=fake_api):
+        resp = client.get("/datasets/hub-status", params={"repo_id": "alice/pick"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["repo_id"] == "alice/pick"
+    assert body["status"] == "on_hub"
+    assert body["url"] == "https://huggingface.co/datasets/alice/pick"

@@ -15,6 +15,7 @@
 import json
 import logging
 import os
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,56 @@ from .utils.hf_auth import cached_whoami, shared_hf_api
 logger = logging.getLogger(__name__)
 
 CAMERA_FEATURE_PREFIX = "observation.images."
+
+# In-process cache of Hub existence checks, keyed by repo_id. /whoami-v2 and
+# repo-existence lookups hit the network, so the info card fetches this lazily
+# and we memoize the "on Hub" answer for the process lifetime. A successful
+# upload invalidates the entry (see invalidate_hub_status), so the card can
+# flip Local only -> On Hub without waiting for a cache expiry. "unknown" (the
+# offline/unauthenticated/error degrade) is never cached, so connectivity
+# returning is picked up on the next check.
+_HUB_STATUS_CACHE: dict[str, str] = {}
+_HUB_STATUS_LOCK = threading.Lock()
+
+
+def invalidate_hub_status(repo_id: str) -> None:
+    """Drop the cached Hub-existence answer for `repo_id`. Called after a
+    successful upload so the next /datasets/hub-status re-checks (and sees
+    the freshly pushed repo)."""
+    with _HUB_STATUS_LOCK:
+        _HUB_STATUS_CACHE.pop(repo_id, None)
+
+
+def get_hub_status(repo_id: str) -> dict[str, Any]:
+    """Whether a dataset repo with this id exists on the Hub.
+
+    Returns ``{"repo_id": ..., "status": "on_hub" | "local_only" | "unknown",
+    "url": <hub url> | None}``. Never raises: offline, unauthenticated, or any
+    transport error degrades to ``"unknown"`` (no error spam — the card just
+    hides the badge). Definitive answers (exists / doesn't) are memoized per
+    repo_id for the process lifetime; ``"unknown"`` is not cached so transient
+    failures self-heal on the next check.
+    """
+    url = f"https://huggingface.co/datasets/{repo_id}"
+
+    with _HUB_STATUS_LOCK:
+        cached = _HUB_STATUS_CACHE.get(repo_id)
+    if cached is not None:
+        return {"repo_id": repo_id, "status": cached, "url": url if cached == "on_hub" else None}
+
+    api = shared_hf_api()
+    try:
+        exists = api.repo_exists(repo_id, repo_type="dataset")
+    except Exception as exc:
+        # Offline / rate-limited / any other transport error: degrade to
+        # "unknown" without caching so it re-checks once connectivity returns.
+        logger.info("hub-status repo_exists(%s) failed: %s", repo_id, exc)
+        return {"repo_id": repo_id, "status": "unknown", "url": None}
+
+    status = "on_hub" if exists else "local_only"
+    with _HUB_STATUS_LOCK:
+        _HUB_STATUS_CACHE[repo_id] = status
+    return {"repo_id": repo_id, "status": status, "url": url if exists else None}
 
 
 def _lerobot_cache_root() -> Path:

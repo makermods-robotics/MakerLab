@@ -549,6 +549,17 @@ def datasets_info(repo_id: str):
     return info
 
 
+@app.get("/datasets/hub-status")
+def datasets_hub_status(repo_id: str):
+    """Whether a dataset repo with this id exists on the Hub.
+
+    Fetched lazily by the info card (separate from /datasets/info) so it never
+    blocks the card render. Degrades to status "unknown" offline/unauthenticated
+    — see get_hub_status. repo_id is a query param because repo ids contain '/'.
+    """
+    return dataset_browser.get_hub_status(repo_id)
+
+
 @app.post("/datasets/merge")
 def datasets_merge(request: MergeRequest):
     """Aggregate 2+ datasets into a new local dataset in the background."""

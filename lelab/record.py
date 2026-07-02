@@ -33,6 +33,7 @@ from lerobot.teleoperators.bi_so_leader import BiSOLeaderConfig
 from lerobot.teleoperators.so_leader import SO101LeaderConfig
 
 from .arm_identity import ArmIdentityError, verify_devices
+from .datasets import invalidate_hub_status
 from .motor_power import apply_motor_power
 from .teleoperate import force_disable_torque, hold_torque_release_grace
 from .utils.config import (
@@ -706,6 +707,10 @@ def handle_upload_dataset(request: UploadRequest) -> dict[str, Any]:
         dataset.push_to_hub(tags=tags, private=request.private)
 
         logger.info(f"Dataset {request.dataset_repo_id} uploaded successfully to HuggingFace Hub")
+
+        # The dataset now exists on the Hub; drop any cached "local_only" answer
+        # so the info card's next hub-status check flips to "On Hub".
+        invalidate_hub_status(request.dataset_repo_id)
 
         return {
             "success": True,
