@@ -69,11 +69,11 @@ export const POLICY_TYPE_OPTIONS: {
   { value: "vqbet", label: "VQ-BeT", display: "VQ-BeT" },
   { value: "pi0_fast", label: "PI0 Fast", display: "PI0 Fast" },
   { value: "sac", label: "SAC", display: "SAC" },
-  {
-    value: "reward_classifier",
-    label: "Reward Classifier",
-    display: "Reward Classifier",
-  },
+  // reward_classifier deliberately absent: it isn't a policy in the pinned
+  // lerobot (separate RewardModelConfig registry — scores outcomes, doesn't
+  // output actions) so lerobot-train can never construct it. Re-add alongside
+  // a dedicated reward-model training pathway if that lands after a pin bump;
+  // policyTypeDisplayName's fallback keeps any old records legible meanwhile.
 ];
 
 // Full display name for a policy type value; falls back to the raw value so
