@@ -15,10 +15,14 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
+
+import lelab.server as server_mod
+from lelab.utils import config as cfg
 
 # A browser sends an Accept header that prefers HTML on navigations/hard-reloads.
 BROWSER_ACCEPT = {"accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"}
@@ -79,6 +83,50 @@ def test_delete_calibration_config_rejects_unsafe_name(client: TestClient, unsaf
     body = response.json()
     assert body["success"] is False
     assert "Invalid configuration name" in body["message"]
+
+
+def test_delete_in_use_calibration_config_unassigns_robots(
+    client: TestClient, tmp_lerobot_home, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Deleting an in-use config is ALLOWED; the referencing robots are
+    unassigned (arm returns to "needs calibration") and reported back."""
+    robots_dir = tmp_lerobot_home / "robots"
+    robots_dir.mkdir(exist_ok=True)
+    monkeypatch.setattr(cfg, "ROBOTS_PATH", str(robots_dir))
+    # server.py binds LEADER_CONFIG_PATH at import; repoint it at the tmp dir.
+    monkeypatch.setattr(server_mod, "LEADER_CONFIG_PATH", cfg.LEADER_CONFIG_PATH)
+
+    config_file = Path(cfg.LEADER_CONFIG_PATH) / "mycal.json"
+    config_file.write_text("{}")
+    cfg.save_robot_record("armA", {"mode": "single", "leader_config": "mycal"}, allow_create=True)
+
+    resp = client.delete("/calibration-configs/teleop/mycal")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["success"] is True
+    assert body["unassigned"] == [{"robot": "armA", "fields": ["leader_config"]}]
+    assert "armA" in body["message"]
+    # The file is gone (this dir IS where lerobot loads calibrations from, so
+    # no stale copy can keep working) and the record is unassigned + dirty.
+    assert not config_file.exists()
+    record = cfg.get_robot_record("armA")
+    assert record["leader_config"] == ""
+    assert cfg.is_robot_record_clean(record) is False
+
+
+def test_delete_unused_calibration_config_reports_no_unassignments(
+    client: TestClient, tmp_lerobot_home, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(server_mod, "LEADER_CONFIG_PATH", cfg.LEADER_CONFIG_PATH)
+    config_file = Path(cfg.LEADER_CONFIG_PATH) / "spare.json"
+    config_file.write_text("{}")
+
+    resp = client.delete("/calibration-configs/teleop/spare")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["success"] is True
+    assert body["unassigned"] == []
+    assert not config_file.exists()
 
 
 def test_upsert_robot_rejects_same_side_config_conflict(

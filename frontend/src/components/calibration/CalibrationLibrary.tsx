@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Download, Pencil, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -99,12 +99,25 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
   }, [refresh, reloadToken]);
 
   // Keep a valid selection: prefer the current pick, then the in-use config,
-  // then the first available.
+  // then the first available. Exception: when the ASSIGNMENT changes (a manual
+  // or auto calibration completed under a new name and the backend repointed
+  // the robot), snap the selection to it — otherwise the dropdown would keep
+  // showing the previous pick with a stale "Use … for this robot" button.
+  // The assignment change is only "consumed" once the new name is actually in
+  // the list, so it survives fetchRobot() and the list refresh landing in
+  // either order.
+  const lastAssignedRef = useRef(assignedConfig);
   useEffect(() => {
+    const assignedChanged = lastAssignedRef.current !== assignedConfig;
+    const assignedInList =
+      !!assignedConfig && configs.some((c) => c.name === assignedConfig);
+    if (!assignedChanged || assignedInList) {
+      lastAssignedRef.current = assignedConfig;
+    }
     setSelected((prev) => {
+      if (assignedChanged && assignedInList) return assignedConfig;
       if (prev && configs.some((c) => c.name === prev)) return prev;
-      if (assignedConfig && configs.some((c) => c.name === assignedConfig))
-        return assignedConfig;
+      if (assignedInList) return assignedConfig;
       return configs[0]?.name ?? null;
     });
   }, [configs, assignedConfig]);
@@ -150,8 +163,22 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
       );
       const data = await res.json().catch(() => ({}));
       if (data.success) {
-        toast({ title: "Config deleted", description: `Removed "${name}".` });
+        // Robots that referenced the deleted config were unassigned
+        // server-side; those arms are back to "needs calibration".
+        const unassigned = (data.unassigned ?? []) as { robot: string }[];
+        toast({
+          title: "Config deleted",
+          description: unassigned.length
+            ? `Removed "${name}". ${unassigned
+                .map((u) => u.robot)
+                .join(", ")} now needs calibration before use.`
+            : `Removed "${name}".`,
+        });
         setConfigs((prev) => prev.filter((c) => c.name !== name));
+        if (unassigned.length) {
+          // Refetch the robot so the arm's status flips to uncalibrated.
+          await onAssigned?.();
+        }
       } else {
         toast({
           title: "Delete failed",
@@ -166,7 +193,7 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
         variant: "destructive",
       });
     }
-  }, [baseUrl, fetchWithHeaders, device, pendingDelete, toast]);
+  }, [baseUrl, fetchWithHeaders, device, pendingDelete, toast, onAssigned]);
 
   const assignToRobot = useCallback(async () => {
     if (!selected || !robotName) return;
@@ -435,10 +462,16 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
             <DialogTitle>Delete config "{pendingDelete}"?</DialogTitle>
             <DialogDescription className="text-slate-400">
               This permanently deletes the calibration file — you'd have to
-              recalibrate the arm to recreate it. A config still assigned to a
-              robot can't be deleted (reassign it first).
+              recalibrate the arm to recreate it.
             </DialogDescription>
           </DialogHeader>
+          {pendingDelete !== null && pendingDelete === assignedConfig && (
+            <p className="text-sm text-amber-400">
+              This config is in use: deleting it will leave this arm
+              uncalibrated. It will need to be recalibrated (or have another
+              config assigned) before it can be used again.
+            </p>
+          )}
           <DialogFooter className="flex gap-2 justify-end">
             <Button
               variant="outline"

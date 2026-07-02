@@ -20,6 +20,8 @@ from pathlib import Path
 
 import pytest
 
+from lelab.utils import config as cfg
+
 
 @pytest.fixture(autouse=True)
 def _patch_robots_path(tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -555,32 +557,63 @@ def test_with_lelab_tag_dedupes() -> None:
     assert with_lelab_tag(["robotics", LELAB_TAG, "lerobot"]) == ["robotics", LELAB_TAG, "lerobot"]
 
 
-def test_config_referencing_robots_finds_active_users(tmp_lerobot_home: Path) -> None:
-    from lelab.utils import config as cfg
-
+def test_clear_config_references_unassigns_matching_records(tmp_lerobot_home: Path) -> None:
+    """Deleting a config unassigns every robot that pointed at it — on the
+    right side (device_type) only — and reports which fields were cleared."""
     cfg.save_robot_record(
         "arm1",
         {"mode": "single", "leader_config": "calib_a", "follower_config": "calib_b"},
         allow_create=True,
     )
-    assert cfg.config_referencing_robots("teleop", "calib_a") == ["arm1"]
-    assert cfg.config_referencing_robots("robot", "calib_b") == ["arm1"]
-    assert cfg.config_referencing_robots("teleop", "unused") == []
+    # A second robot sharing the same leader config is unassigned too.
+    cfg.save_robot_record("arm2", {"mode": "single", "leader_config": "calib_a"}, allow_create=True)
+
+    assert cfg.clear_config_references("teleop", "calib_a") == [
+        {"robot": "arm1", "fields": ["leader_config"]},
+        {"robot": "arm2", "fields": ["leader_config"]},
+    ]
+    assert cfg.get_robot_record("arm1")["leader_config"] == ""
+    assert cfg.get_robot_record("arm2")["leader_config"] == ""
+    # The follower slot (other side) is untouched, and the record is now dirty.
+    assert cfg.get_robot_record("arm1")["follower_config"] == "calib_b"
+    assert cfg.is_robot_record_clean(cfg.get_robot_record("arm1")) is False
+
+    # A config nobody references clears nothing.
+    assert cfg.clear_config_references("teleop", "unused") == []
 
 
-def test_config_referencing_robots_ignores_stale_right_config_in_single_mode(
-    tmp_lerobot_home: Path,
-) -> None:
-    """A right_* config left over after switching back to single must not block
-    deletion; it only counts when the robot is actually bimanual."""
-    from lelab.utils import config as cfg
-
+def test_clear_config_references_clears_stale_right_slot_too(tmp_lerobot_home: Path) -> None:
+    """A right_* reference is cleared even when the robot is back in single
+    mode — the file is gone, so the stale name must not resurface on a mode
+    switch. Both slots are reported when both matched."""
     cfg.save_robot_record(
         "arm1",
-        {"mode": "single", "leader_config": "left", "right_leader_config": "stale"},
+        {"mode": "single", "leader_config": "gone", "right_leader_config": "gone"},
         allow_create=True,
     )
-    assert cfg.config_referencing_robots("teleop", "stale") == []
+    assert cfg.clear_config_references("teleop", "gone") == [
+        {"robot": "arm1", "fields": ["leader_config", "right_leader_config"]}
+    ]
+    record = cfg.get_robot_record("arm1")
+    assert record["leader_config"] == ""
+    assert record["right_leader_config"] == ""
 
-    cfg.save_robot_record("arm1", {"mode": "bimanual"}, allow_create=False)
-    assert cfg.config_referencing_robots("teleop", "stale") == ["arm1"]
+
+def test_clear_config_references_accepts_json_extension(tmp_lerobot_home: Path) -> None:
+    """Callers may pass 'name.json'; matching is on the stem."""
+    cfg.save_robot_record("arm1", {"mode": "single", "follower_config": "calib_b"}, allow_create=True)
+    assert cfg.clear_config_references("robot", "calib_b.json") == [
+        {"robot": "arm1", "fields": ["follower_config"]}
+    ]
+    assert cfg.get_robot_record("arm1")["follower_config"] == ""
+
+
+def test_setup_calibration_files_rejects_unassigned_arm(tmp_lerobot_home: Path) -> None:
+    """An empty config name (arm unassigned / needs calibration) fails with a
+    legible message instead of an IsADirectoryError from shutil.copy2."""
+    with pytest.raises(FileNotFoundError, match="leader arm has no calibration assigned"):
+        cfg.setup_calibration_files("", "whatever.json")
+    with pytest.raises(FileNotFoundError, match="follower arm has no calibration assigned"):
+        cfg.setup_calibration_files("whatever.json", "  ")
+    with pytest.raises(FileNotFoundError, match="follower arm has no calibration assigned"):
+        cfg.setup_follower_calibration_file("")

@@ -90,6 +90,8 @@ from .utils import config
 from .utils.config import (
     FOLLOWER_CONFIG_PATH,
     LEADER_CONFIG_PATH,
+    clear_config_references,
+    config_slot_conflict,
     delete_robot_record,
     detect_port_after_disconnect,
     find_available_ports,
@@ -99,8 +101,6 @@ from .utils.config import (
     get_saved_robot_port,
     is_robot_record_clean,
     is_valid_robot_name,
-    config_referencing_robots,
-    config_slot_conflict,
     list_robot_records,
     port_slot_conflict,
     rename_calibration_config,
@@ -1042,26 +1042,27 @@ def delete_calibration_config(device_type: str, config_name: str):
         if not os.path.exists(file_path):
             return {"success": False, "message": "Configuration file not found"}
 
-        # Refuse if a robot still uses this config — deleting it would break that
-        # robot (needs recalibration). Reassign/switch/delete those robots first.
-        users = config_referencing_robots(device_type, config_name)
-        if users:
-            return JSONResponse(
-                status_code=409,
-                content={
-                    "success": False,
-                    "message": f"'{config_name}' is in use by {', '.join(users)}. "
-                    "Reassign a different config to those robots first.",
-                },
-            )
-
-        # Delete the file
+        # Delete the file. This dir IS the location lerobot reads calibrations
+        # from (setup_calibration_files' source == target), so removing the file
+        # removes the only copy — nothing stale can silently keep working.
         os.remove(file_path)
         logger.info(f"Deleted calibration config: {file_path}")
 
+        # Unassign every robot record that still pointed at this config, so
+        # those arms return to the "needs calibration" state instead of
+        # dangling on a missing file. The response lists them so the UI can
+        # refresh the affected robots.
+        unassigned = clear_config_references(device_type, config_name)
+        if unassigned:
+            robots = ", ".join(u["robot"] for u in unassigned)
+            message = f"Configuration '{config_name}' deleted. Robot(s) {robots} now need calibration before use."
+        else:
+            message = f"Configuration '{config_name}' deleted successfully"
+
         return {
             "success": True,
-            "message": f"Configuration '{config_name}' deleted successfully",
+            "message": message,
+            "unassigned": unassigned,
         }
 
     except Exception as e:
