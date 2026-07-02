@@ -11,6 +11,11 @@ import DatasetPicker from "@/components/landing/DatasetPicker";
 import DatasetInfoCard from "@/components/landing/DatasetInfoCard";
 import MergeDatasetsDialog from "@/components/landing/MergeDatasetsDialog";
 import JobsSection from "@/components/jobs/JobsSection";
+import { POLICY_TYPE_OPTIONS } from "@/components/training/types";
+import {
+  fetchPolicyAvailability,
+  PolicyAvailability,
+} from "@/lib/policyAvailability";
 
 import UsageInstructionsModal from "@/components/landing/UsageInstructionsModal";
 import { useHfAuth } from "@/contexts/HfAuthContext";
@@ -77,6 +82,26 @@ const Landing = () => {
   const navigate = useNavigate();
   const { toast } = useToast();
 
+  // Which policy types this backend's lerobot pin can actually train.
+  // Buttons stay enabled until the (cached) answer arrives: most types are
+  // valid, so briefly optimistic beats greying the whole card on every visit.
+  const [policyAvailability, setPolicyAvailability] =
+    useState<PolicyAvailability | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    fetchPolicyAvailability(baseUrl, fetchWithHeaders)
+      .then((a) => {
+        if (!cancelled) setPolicyAvailability(a);
+      })
+      .catch(() => {
+        // Backend unreachable — leave all buttons enabled; training itself
+        // will surface the real error.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [baseUrl, fetchWithHeaders]);
+
   // Clear camera state and release streams when returning to landing page
   useEffect(() => {
     if (cameras.length > 0) {
@@ -112,7 +137,10 @@ const Landing = () => {
     }
   };
 
-  const handleTrainingClick = () => navigate("/training");
+  // Each model-type button is a direct entry into training: the Training page
+  // reads `policyType` from router state and preselects it in the config form.
+  const handleTrainingClick = (policyType: string) =>
+    navigate("/training", { state: { policyType } });
 
   // Picking a dataset here selects it for training (the single source of truth);
   // Training reads it from the persisted selection.
@@ -342,13 +370,33 @@ const Landing = () => {
               <h3 className="font-semibold text-lg text-left h-10 flex items-center">
                 Create a model
               </h3>
-              <Button
-                onClick={handleTrainingClick}
-                disabled={!selectedDataset}
-                className="w-full bg-green-500 hover:bg-green-600 text-white"
-              >
-                Training
-              </Button>
+              <div className="grid grid-cols-3 gap-2">
+                {POLICY_TYPE_OPTIONS.map((policy) => {
+                  const unavailable =
+                    policyAvailability?.[policy.value] === false;
+                  return (
+                    // Tooltip lives on a wrapper span: the disabled Button
+                    // gets pointer-events-none, which would swallow `title`.
+                    <span
+                      key={policy.value}
+                      title={
+                        unavailable
+                          ? "Not available in this lerobot version"
+                          : `Train a ${policy.label} model`
+                      }
+                    >
+                      <Button
+                        onClick={() => handleTrainingClick(policy.value)}
+                        disabled={!selectedDataset || unavailable}
+                        size="sm"
+                        className="w-full bg-green-500 hover:bg-green-600 text-white px-2"
+                      >
+                        <span className="truncate">{policy.label}</span>
+                      </Button>
+                    </span>
+                  );
+                })}
+              </div>
               {!selectedDataset && (
                 <p className="text-xs text-gray-500">Select a dataset first.</p>
               )}

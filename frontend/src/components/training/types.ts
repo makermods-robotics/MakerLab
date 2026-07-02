@@ -26,6 +26,10 @@ export interface TrainingConfig {
   // Set by the "Continue training" flow (source run + checkpoint step).
   resume_from_job_id?: string;
   resume_from_step?: number;
+  // Set by the "Fine-tune" flow: fresh run initialized from a source
+  // checkpoint's weights (resume stays false).
+  finetune_from_job_id?: string;
+  finetune_from_step?: number;
 
   // Weights & Biases
   wandb_enable: boolean;
@@ -47,6 +51,38 @@ export interface TrainingConfig {
 
   // Advanced configuration
   use_policy_training_preset: boolean;
+}
+
+// The policy types the trainer supports. The model is chosen up-front on the
+// landing page's "Create a model" card (one button per type, short `label`);
+// the training config then shows it frozen using the full `display` name.
+export const POLICY_TYPE_OPTIONS: {
+  value: string;
+  label: string;
+  display: string;
+}[] = [
+  { value: "act", label: "ACT", display: "ACT (Action Chunking Transformer)" },
+  { value: "diffusion", label: "Diffusion", display: "Diffusion Policy" },
+  { value: "pi0", label: "PI0", display: "PI0" },
+  { value: "smolvla", label: "SmolVLA", display: "SmolVLA" },
+  { value: "tdmpc", label: "TD-MPC", display: "TD-MPC" },
+  { value: "vqbet", label: "VQ-BeT", display: "VQ-BeT" },
+  { value: "pi0_fast", label: "PI0 Fast", display: "PI0 Fast" },
+  { value: "sac", label: "SAC", display: "SAC" },
+  {
+    value: "reward_classifier",
+    label: "Reward Classifier",
+    display: "Reward Classifier",
+  },
+];
+
+// Full display name for a policy type value; falls back to the raw value so
+// types coming from older job records still render something legible.
+export function policyTypeDisplayName(value: string): string {
+  return (
+    POLICY_TYPE_OPTIONS.find((o) => o.value === value)?.display ||
+    value.toUpperCase()
+  );
 }
 
 export interface TrainingStatus {
