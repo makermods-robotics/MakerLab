@@ -34,6 +34,7 @@ Usage examples:
 """
 
 import argparse
+import signal
 import sys
 import time
 from collections.abc import Callable
@@ -690,8 +691,16 @@ def calibrate_single_motor(
 
 # ====================== CLI entry ======================
 
+def _handle_sigterm(signum, frame) -> None:
+    """LeLab's Stop button terminates this subprocess with SIGTERM; raise
+    KeyboardInterrupt so _run_with_bus releases torque (safe_disable_all)
+    instead of dying with the arm still energized."""
+    raise KeyboardInterrupt
+
+
 def main() -> int:
     """CLI: based on arguments, invoke full calibration, unfold-only, or single-servo calibration."""
+    signal.signal(signal.SIGTERM, _handle_sigterm)
     args = parse_args()
     # LeLab runs this as a subprocess (no TTY). Without a TTY the "press Enter"
     # prompts have no one to answer them, so run non-interactively — every

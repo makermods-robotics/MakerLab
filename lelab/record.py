@@ -32,6 +32,7 @@ from lerobot.scripts.lerobot_record import RecordConfig
 from lerobot.teleoperators.bi_so_leader import BiSOLeaderConfig
 from lerobot.teleoperators.so_leader import SO101LeaderConfig
 
+from .teleoperate import force_disable_torque
 from .utils.config import (
     FOLLOWER_CONFIG_PATH,
     LEADER_CONFIG_PATH,
@@ -943,6 +944,11 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict) -> LeRobotDatase
         log_say("Stop recording", cfg.play_sounds, blocking=True)
 
     finally:
+        # Belt and braces: disable torque explicitly before disconnect, so a
+        # failure inside disconnect() can't leave an arm energized (rigid).
+        # force_disable_torque logs any failure at ERROR level with the port.
+        force_disable_torque(robot, "robot")
+        force_disable_torque(teleop, "teleop")
         robot.disconnect()
         if teleop:
             teleop.disconnect()

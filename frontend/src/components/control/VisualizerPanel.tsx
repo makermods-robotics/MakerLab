@@ -1,6 +1,7 @@
 import React from "react";
 import { Button } from "@/components/ui/button";
-import { ArrowLeft } from "lucide-react";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { ArrowLeft, AlertTriangle } from "lucide-react";
 import { cn } from "@/lib/utils";
 import UrdfViewer from "../UrdfViewer";
 import Logo from "@/components/Logo";
@@ -38,6 +39,16 @@ const VisualizerPanel: React.FC<VisualizerPanelProps> = ({
           <div className="w-px h-6 bg-gray-700" />
           <h2 className="text-xl font-medium text-gray-200">Teleoperation</h2>
         </div>
+        {/* Stopping (back arrow, closing the tab, an error) disconnects the
+            follower, which releases motor torque — warn before it happens. */}
+        <Alert className="mb-4 bg-amber-900/40 border-amber-700 text-amber-100">
+          <AlertTriangle className="h-4 w-4" />
+          <AlertDescription>
+            Stopping releases motor torque — the follower arm will go limp and
+            fall under gravity. Move it to a low, supported pose before
+            stopping or leaving this page.
+          </AlertDescription>
+        </Alert>
         {bimanual ? (
           <div className="flex-1 flex flex-col sm:flex-row gap-2 min-h-[50vh] lg:min-h-0">
             <div className="flex-1 flex flex-col">

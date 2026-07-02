@@ -81,6 +81,10 @@ teleoperation_active = False
 teleoperation_thread: threading.Thread | None = None
 current_robot = None
 current_teleop = None
+# Set by the worker's cleanup when torque disable/disconnect failed, i.e. an arm
+# may be left energized (rigid). Cleared on start; surfaced in the stop response
+# and the /teleoperation-status payload so the frontend can warn the user.
+last_cleanup_error: str | None = None
 # Guards the start path; the worker owns disconnect so stop() does not race.
 _state_lock = threading.Lock()
 
@@ -163,18 +167,81 @@ def get_joint_positions_from_robot(robot, prefix: str = "", calibration=None) ->
         return {urdf[0]: 0.0 for urdf in _SO101_URDF_JOINTS.values()}
 
 
-def _safe_disconnect(device) -> None:
-    """Disconnect a robot/teleop device, swallowing (but logging) any error.
+def _device_buses(device) -> list:
+    """The motor bus(es) of a robot/teleop device.
 
-    Used on the connection-failure cleanup path so one device's failure can't
-    leave the other holding its serial port open.
+    A single-arm device exposes ``.bus``; a bimanual BiSO device exposes
+    ``left_arm``/``right_arm`` sub-arms which each carry their own bus.
     """
     if device is None:
-        return
+        return []
+    arms = [
+        arm
+        for arm in (getattr(device, "left_arm", None), getattr(device, "right_arm", None))
+        if arm is not None
+    ]
+    targets = arms if arms else [device]
+    return [target.bus for target in targets if getattr(target, "bus", None) is not None]
+
+
+def _device_ports(device) -> str:
+    """Comma-separated serial port(s) of a device, for error messages."""
+    ports = [str(bus.port) for bus in _device_buses(device) if getattr(bus, "port", None)]
+    return ", ".join(ports) if ports else "unknown port"
+
+
+def force_disable_torque(device, label: str = "device") -> list[str]:
+    """Explicitly disable torque on every motor of a device, motor by motor.
+
+    Belt-and-braces step to run *before* ``device.disconnect()``. lerobot's
+    disconnect does disable torque itself, but any exception on the way there
+    leaves the arm energized: one motor's failed write aborts the disable for
+    all remaining motors (and skips closing the port), and the error is easy
+    to swallow on a cleanup path. Going motor by motor means one bad motor
+    can't leave the other joints locked.
+
+    Returns a list of problem descriptions — empty when torque was disabled on
+    every motor. Each problem is also logged at ERROR level naming the port.
+    """
+    problems: list[str] = []
+    for bus in _device_buses(device):
+        failed: list[str] = []
+        for motor in getattr(bus, "motors", None) or {}:
+            try:
+                bus.disable_torque(motor, num_retry=5)
+            except Exception as e:
+                failed.append(f"{motor}: {e}")
+        if failed:
+            port = getattr(bus, "port", None) or "unknown port"
+            message = (
+                f"TORQUE MAY STILL BE ENABLED on {port} ({label}; failed motors — {'; '.join(failed)}). "
+                "The arm can stay rigid; unplug its power to release it."
+            )
+            logger.error(message)
+            problems.append(message)
+    return problems
+
+
+def _safe_disconnect(device, label: str = "device") -> str | None:
+    """Disconnect a robot/teleop device, swallowing (but logging) any error.
+
+    Used on cleanup paths so one device's failure can't leave the other
+    holding its serial port open. Returns an error message when the disconnect
+    failed — lerobot's disconnect is also what releases motor torque, so a
+    failure here can leave the arm energized (rigid) — or None on success.
+    """
+    if device is None:
+        return None
     try:
         device.disconnect()
+        return None
     except Exception as e:
-        logger.warning(f"Error disconnecting device during cleanup: {e}")
+        message = (
+            f"Failed to disconnect the {label} ({_device_ports(device)}): {e}. "
+            "TORQUE MAY STILL BE ENABLED — the arm can stay rigid; unplug its power to release it."
+        )
+        logger.error(message)
+        return message
 
 
 def _connect_bimanual(request: TeleoperateRequest):
@@ -236,8 +303,8 @@ def _connect_bimanual(request: TeleoperateRequest):
         logger.info("Successfully connected to both bimanual arms")
         return robot, teleop_device
     except Exception:
-        _safe_disconnect(robot)
-        _safe_disconnect(teleop_device)
+        _safe_disconnect(robot, "follower arms")
+        _safe_disconnect(teleop_device, "leader arms")
         raise
 
 
@@ -249,7 +316,7 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
     dying silently in the worker thread while the API has already claimed
     success. Only the teleoperation loop runs in the background thread.
     """
-    global teleoperation_active, teleoperation_thread, current_robot, current_teleop
+    global teleoperation_active, teleoperation_thread, current_robot, current_teleop, last_cleanup_error
 
     from . import record as _record, rollout as _rollout
 
@@ -261,6 +328,7 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
         if _rollout.inference_active:
             return {"success": False, "message": "Inference is currently active. Stop it first."}
         teleoperation_active = True
+        last_cleanup_error = None
 
     robot = None
     teleop_device = None
@@ -338,7 +406,7 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
         is_bimanual = hasattr(robot, "left_arm") and hasattr(robot, "right_arm")
 
         def teleoperation_worker():
-            global teleoperation_active, current_robot, current_teleop
+            global teleoperation_active, current_robot, current_teleop, last_cleanup_error
 
             logger.info("Starting teleoperation loop...")
             try:
@@ -377,8 +445,17 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
             except Exception as e:
                 logger.error(f"Error during teleoperation loop: {e}")
             finally:
-                _safe_disconnect(robot)
-                _safe_disconnect(teleop_device)
+                # Belt and braces: disable torque explicitly before disconnect.
+                # disconnect() disables torque too, but if it fails partway the
+                # error is swallowed here and the arm stays energized (rigid) —
+                # so make the disable explicit, and make any failure loud.
+                problems = force_disable_torque(robot, "follower arm")
+                problems += force_disable_torque(teleop_device, "leader arm")
+                for device, label in ((robot, "follower arm"), (teleop_device, "leader arm")):
+                    error = _safe_disconnect(device, label)
+                    if error:
+                        problems.append(error)
+                last_cleanup_error = " ".join(problems) if problems else None
                 logger.info("Teleoperation stopped")
                 teleoperation_active = False
                 current_robot = None
@@ -399,8 +476,8 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
     except Exception as e:
         # Connection (or setup) failed before the loop started: release any
         # device that did open, reset state, and surface the error.
-        _safe_disconnect(robot)
-        _safe_disconnect(teleop_device)
+        _safe_disconnect(robot, "follower arm")
+        _safe_disconnect(teleop_device, "leader arm")
         teleoperation_active = False
         current_robot = None
         current_teleop = None
@@ -430,7 +507,25 @@ def handle_stop_teleoperation() -> dict[str, Any]:
         worker.join(timeout=5.0)
         if worker.is_alive():
             logger.warning("Teleoperation worker did not exit within 5s")
+            teleoperation_thread = None
+            return {
+                "success": True,
+                "message": "Teleoperation stop requested, but the worker has not shut down yet",
+                "warning": (
+                    "The teleoperation worker did not shut down within 5s, so the arms may not have "
+                    "been released. If an arm stays rigid, unplug its power to release it."
+                ),
+            }
     teleoperation_thread = None
+
+    # The worker has exited, so its cleanup already ran; if disabling torque or
+    # disconnecting failed, tell the caller — the arm may still be energized.
+    if last_cleanup_error:
+        return {
+            "success": True,
+            "message": "Teleoperation stopped, but releasing the arms reported a problem",
+            "warning": last_cleanup_error,
+        }
 
     return {"success": True, "message": "Teleoperation stopped successfully"}
 
@@ -442,6 +537,9 @@ def handle_teleoperation_status() -> dict[str, Any]:
         "available_controls": {
             "stop_teleoperation": teleoperation_active,
         },
+        # Non-None when the last session's cleanup could not release an arm
+        # (torque may still be enabled); cleared when a new session starts.
+        "last_cleanup_error": last_cleanup_error,
         "message": "Teleoperation status retrieved successfully",
     }
 

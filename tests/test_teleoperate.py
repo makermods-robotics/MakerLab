@@ -164,3 +164,93 @@ def test_start_teleoperation_disconnects_follower_when_leader_fails(
     # The already-connected follower must have been cleaned up.
     assert created["follower"].disconnected is True
     assert teleop.teleoperation_active is False
+
+
+class _FakeBus:
+    """Motor bus double for the explicit torque-disable cleanup step."""
+
+    def __init__(self, port: str = "COM_FAKE", failing: tuple[str, ...] = ()) -> None:
+        self.port = port
+        self.motors = {"shoulder_pan": 1, "elbow_flex": 3, "gripper": 6}
+        self.failing = set(failing)
+        self.disabled: list[tuple[str, int]] = []
+
+    def disable_torque(self, motor: str, num_retry: int = 0) -> None:
+        if motor in self.failing:
+            raise ConnectionError(f"no response from {motor}")
+        self.disabled.append((motor, num_retry))
+
+
+class _FakeArm:
+    def __init__(self, bus: _FakeBus) -> None:
+        self.bus = bus
+
+
+def test_force_disable_torque_disables_every_motor() -> None:
+    from lelab.teleoperate import force_disable_torque
+
+    bus = _FakeBus()
+    problems = force_disable_torque(_FakeArm(bus), "follower arm")
+
+    assert problems == []
+    # Every motor is disabled individually, with retries.
+    assert [motor for motor, _ in bus.disabled] == list(bus.motors)
+    assert all(num_retry == 5 for _, num_retry in bus.disabled)
+
+
+def test_force_disable_torque_reports_failed_motor_and_port() -> None:
+    """One bad motor must not stop the others from being released, and the
+    problem message must be unmistakable: it names the port and warns that
+    torque may still be enabled (the arm stays rigid until power is pulled).
+    """
+    from lelab.teleoperate import force_disable_torque
+
+    bus = _FakeBus(port="COM_FOLLOWER", failing=("elbow_flex",))
+    problems = force_disable_torque(_FakeArm(bus), "follower arm")
+
+    assert len(problems) == 1
+    assert "TORQUE MAY STILL BE ENABLED" in problems[0]
+    assert "COM_FOLLOWER" in problems[0]
+    assert "elbow_flex" in problems[0]
+    # The remaining motors were still disabled despite the failure.
+    assert [motor for motor, _ in bus.disabled] == ["shoulder_pan", "gripper"]
+
+
+def test_force_disable_torque_handles_bimanual_and_none() -> None:
+    from lelab.teleoperate import force_disable_torque
+
+    class _BiDevice:
+        def __init__(self) -> None:
+            self.left_arm = _FakeArm(_FakeBus(port="COM_LEFT"))
+            self.right_arm = _FakeArm(_FakeBus(port="COM_RIGHT", failing=("gripper",)))
+
+    device = _BiDevice()
+    problems = force_disable_torque(device, "follower arms")
+
+    # Both sub-arm buses are handled; only the right one reports a problem.
+    assert len(device.left_arm.bus.disabled) == 3
+    assert len(problems) == 1
+    assert "COM_RIGHT" in problems[0]
+
+    assert force_disable_torque(None, "nothing") == []
+
+
+def test_stop_teleoperation_surfaces_cleanup_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the worker's cleanup could not release an arm, the stop response
+    must carry a warning instead of claiming a clean disconnect.
+    """
+    import lelab.teleoperate as teleop
+
+    monkeypatch.setattr(teleop, "teleoperation_active", True)
+    monkeypatch.setattr(teleop, "teleoperation_thread", None)
+    monkeypatch.setattr(
+        teleop, "last_cleanup_error", "TORQUE MAY STILL BE ENABLED on COM_FOLLOWER (follower arm)."
+    )
+
+    result = teleop.handle_stop_teleoperation()
+
+    assert result["success"] is True
+    assert "TORQUE MAY STILL BE ENABLED" in result["warning"]
+    assert teleop.teleoperation_active is False

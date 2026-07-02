@@ -26,7 +26,15 @@ const TeleoperationPage = () => {
         method: "POST",
       });
       const data = await res.json();
-      if (data?.success) {
+      if (data?.warning) {
+        // Cleanup could not release an arm — torque may still be enabled and
+        // the arm can stay rigid. Make this loud instead of claiming success.
+        toast({
+          title: "Teleoperation stopped — check the arm",
+          description: data.warning,
+          variant: "destructive",
+        });
+      } else if (data?.success) {
         toast({
           title: "Teleoperation stopped",
           description: "The arm was disconnected cleanly.",
