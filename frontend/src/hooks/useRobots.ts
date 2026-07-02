@@ -147,7 +147,10 @@ export const useRobots = () => {
         const res = await fetchWithHeaders(`${baseUrl}/robots/${encodeURIComponent(name)}`, {
           method: "DELETE",
         });
-        if (!res.ok) {
+        // 404 = the record is already gone (deleted elsewhere, or removed on
+        // disk out-of-band). The user's intent is fulfilled either way — drop
+        // it from the local list instead of showing a scary failure.
+        if (!res.ok && res.status !== 404) {
           const text = await res.text();
           toast({ title: "Delete failed", description: text, variant: "destructive" });
           return false;
@@ -159,7 +162,10 @@ export const useRobots = () => {
         setSelectedName((prev) => (prev === name ? null : prev));
         toast({
           title: "Robot deleted",
-          description: `Removed "${name}". Calibration files are kept in the library.`,
+          description:
+            res.status === 404
+              ? `"${name}" was already removed — updated the list.`
+              : `Removed "${name}". Calibration files are kept in the library.`,
         });
         return true;
       } catch (e) {
