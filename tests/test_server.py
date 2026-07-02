@@ -133,9 +133,7 @@ def test_delete_unused_calibration_config_reports_no_unassignments(
     assert not config_file.exists()
 
 
-def test_upsert_robot_rejects_same_side_config_conflict(
-    client: TestClient, tmp_lerobot_home
-) -> None:
+def test_upsert_robot_rejects_same_side_config_conflict(client: TestClient, tmp_lerobot_home) -> None:
     """Assigning one config to both same-side arms of a bimanual robot is a 409."""
     client.post(
         "/robots/bi?create=true",
@@ -265,9 +263,7 @@ def test_policy_optimizer_defaults_reports_availability(client: TestClient) -> N
 
 
 @pytest.mark.parametrize("unsafe_name", ["evil..name", "..config", "back\\door"])
-def test_download_calibration_config_rejects_unsafe_name(
-    client: TestClient, unsafe_name: str
-) -> None:
+def test_download_calibration_config_rejects_unsafe_name(client: TestClient, unsafe_name: str) -> None:
     response = client.get(f"/calibration-configs/teleop/{unsafe_name}/download")
     assert response.status_code == 400
     assert "Invalid configuration name" in response.json()["message"]
@@ -326,23 +322,17 @@ _GOOD_CALIBRATION = {
 
 
 def test_upload_calibration_config_rejects_bad_device_type(client: TestClient) -> None:
-    response = client.post(
-        "/calibration-configs/bogus/upload", json={"name": "x", "data": _GOOD_CALIBRATION}
-    )
+    response = client.post("/calibration-configs/bogus/upload", json={"name": "x", "data": _GOOD_CALIBRATION})
     assert response.status_code == 400
 
 
 def test_upload_calibration_config_rejects_malformed_data(client: TestClient) -> None:
-    response = client.post(
-        "/calibration-configs/teleop/upload", json={"name": "x", "data": {"m": {"id": 1}}}
-    )
+    response = client.post("/calibration-configs/teleop/upload", json={"name": "x", "data": {"m": {"id": 1}}})
     assert response.status_code == 400
     assert "missing" in response.json()["message"]
 
 
-def test_upload_calibration_config_writes_then_409_on_collision(
-    client: TestClient, tmp_lerobot_home
-) -> None:
+def test_upload_calibration_config_writes_then_409_on_collision(client: TestClient, tmp_lerobot_home) -> None:
     """First upload writes; a second under the same name is rejected (no overwrite)."""
     first = client.post(
         "/calibration-configs/teleop/upload", json={"name": "armA", "data": _GOOD_CALIBRATION}

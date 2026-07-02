@@ -362,10 +362,12 @@ def get_configs():
     # Get all available calibration configs as STEMS (no .json) — the canonical
     # user-facing name. The .json is only the on-disk filename.
     leader_configs = [
-        os.path.splitext(os.path.basename(f))[0] for f in glob.glob(os.path.join(LEADER_CONFIG_PATH, "*.json"))
+        os.path.splitext(os.path.basename(f))[0]
+        for f in glob.glob(os.path.join(LEADER_CONFIG_PATH, "*.json"))
     ]
     follower_configs = [
-        os.path.splitext(os.path.basename(f))[0] for f in glob.glob(os.path.join(FOLLOWER_CONFIG_PATH, "*.json"))
+        os.path.splitext(os.path.basename(f))[0]
+        for f in glob.glob(os.path.join(FOLLOWER_CONFIG_PATH, "*.json"))
     ]
 
     return {"leader_configs": leader_configs, "follower_configs": follower_configs}
@@ -600,9 +602,7 @@ def datasets_info(repo_id: str):
     size on disk). repo_id is a query param because repo ids contain '/'."""
     info = dataset_browser.get_local_dataset_info(repo_id)
     if info is None:
-        raise HTTPException(
-            status_code=404, detail=f"Dataset '{repo_id}' not found in the local cache"
-        )
+        raise HTTPException(status_code=404, detail=f"Dataset '{repo_id}' not found in the local cache")
     return info
 
 
@@ -1280,7 +1280,9 @@ def delete_calibration_config(device_type: str, config_name: str):
         unassigned = clear_config_references(device_type, config_name)
         if unassigned:
             robots = ", ".join(u["robot"] for u in unassigned)
-            message = f"Configuration '{config_name}' deleted. Robot(s) {robots} now need calibration before use."
+            message = (
+                f"Configuration '{config_name}' deleted. Robot(s) {robots} now need calibration before use."
+            )
         else:
             message = f"Configuration '{config_name}' deleted successfully"
 
@@ -1314,7 +1316,9 @@ def download_calibration_config(device_type: str, config_name: str):
     # config_name is interpolated into a filename, so reject path-traversal
     # characters before touching the filesystem (same guard as delete).
     if not is_valid_robot_name(config_name):
-        return JSONResponse(status_code=400, content={"success": False, "message": "Invalid configuration name"})
+        return JSONResponse(
+            status_code=400, content={"success": False, "message": "Invalid configuration name"}
+        )
 
     # Robot records store config names WITH the .json extension while this
     # resource is otherwise stem-based; accept either form so callers that pass
@@ -1324,7 +1328,9 @@ def download_calibration_config(device_type: str, config_name: str):
 
     file_path = os.path.join(config_path, f"{config_name}.json")
     if not os.path.exists(file_path):
-        return JSONResponse(status_code=404, content={"success": False, "message": "Configuration file not found"})
+        return JSONResponse(
+            status_code=404, content={"success": False, "message": "Configuration file not found"}
+        )
 
     try:
         with open(file_path, "rb") as f:
@@ -1359,11 +1365,16 @@ def upload_calibration_config(device_type: str, body: dict):
     if reason == "invalid_device":
         return JSONResponse(status_code=400, content={"success": False, "message": "Invalid device type"})
     if reason == "invalid_name":
-        return JSONResponse(status_code=400, content={"success": False, "message": "Invalid configuration name"})
+        return JSONResponse(
+            status_code=400, content={"success": False, "message": "Invalid configuration name"}
+        )
     if reason == "name_taken":
         return JSONResponse(
             status_code=409,
-            content={"success": False, "message": f"A config named '{saved}' already exists. Choose a different name."},
+            content={
+                "success": False,
+                "message": f"A config named '{saved}' already exists. Choose a different name.",
+            },
         )
     if reason.startswith("invalid_data:"):
         return JSONResponse(status_code=400, content={"success": False, "message": reason.split(":", 1)[1]})
@@ -1378,7 +1389,9 @@ def rename_calibration_config_endpoint(device_type: str, config_name: str, body:
     """
     new_name = (body or {}).get("new_name", "")
     if not isinstance(new_name, str):
-        return JSONResponse(status_code=400, content={"success": False, "message": "new_name must be a string"})
+        return JSONResponse(
+            status_code=400, content={"success": False, "message": "new_name must be a string"}
+        )
 
     ok, reason = rename_calibration_config(device_type, config_name, new_name)
     if ok:
@@ -1816,7 +1829,9 @@ def rename_robot(name: str, data: dict):
     """
     new_name = (data or {}).get("new_name", "")
     if not isinstance(new_name, str):
-        return JSONResponse(status_code=400, content={"status": "error", "message": "new_name must be a string"})
+        return JSONResponse(
+            status_code=400, content={"status": "error", "message": "new_name must be a string"}
+        )
     new_name = new_name.strip()
 
     ok, reason = rename_robot_record(name, new_name)
