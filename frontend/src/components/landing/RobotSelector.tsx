@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
 import { Plus, Check, ChevronsUpDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -33,6 +33,7 @@ const RobotSelector: React.FC<RobotSelectorProps> = ({
 }) => {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
+  const inputRef = useRef<HTMLInputElement>(null);
 
   const trimmed = query.trim();
   const matchesExisting = availableNames.some(
@@ -40,11 +41,14 @@ const RobotSelector: React.FC<RobotSelectorProps> = ({
   );
   const canCreate = trimmed.length > 0 && !matchesExisting;
 
-  const createDisabled = !canCreate;
+  // Only a name collision disables the row; with an empty query it stays
+  // clickable and focuses the input, so the "type a name first" step is
+  // discoverable instead of a dead grayed-out button.
+  const createDisabled = matchesExisting;
   const createLabel = matchesExisting
     ? "Already exists"
     : trimmed === ""
-      ? "Create new robot…"
+      ? "Type a name to create a new robot…"
       : `Create "${trimmed}"`;
 
   const reset = () => {
@@ -58,6 +62,10 @@ const RobotSelector: React.FC<RobotSelectorProps> = ({
   };
 
   const handleCreate = async () => {
+    if (trimmed === "") {
+      inputRef.current?.focus();
+      return;
+    }
     if (!canCreate) return;
     const ok = await onCreateNew(trimmed);
     if (ok) reset();
@@ -88,6 +96,7 @@ const RobotSelector: React.FC<RobotSelectorProps> = ({
       >
         <Command className="bg-gray-800">
           <CommandInput
+            ref={inputRef}
             placeholder="Search or type new name..."
             value={query}
             onValueChange={setQuery}

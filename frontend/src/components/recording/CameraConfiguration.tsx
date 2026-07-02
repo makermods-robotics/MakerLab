@@ -71,6 +71,14 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
   const [selectedCameraIndex, setSelectedCameraIndex] = useState<string>("");
   const [cameraName, setCameraName] = useState("");
 
+  // The camera currently picked in the dropdown (not yet added). Drives the
+  // immediate live preview shown before the camera is named.
+  const selectedCamera = selectedCameraIndex
+    ? availableCameras.find(
+        (cam) => cam.index === parseInt(selectedCameraIndex)
+      )
+    : undefined;
+
   // cv2's AVFoundation order is uniqueID-sorted, so plugging/unplugging a
   // device between sessions shifts indices. The browser device_id stays
   // stable per-origin, so use it to refresh each seeded camera's
@@ -199,90 +207,101 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
       <div className="bg-gray-800/50 rounded-lg p-4 space-y-4">
         <h4 className="text-md font-medium text-gray-300">Add Camera</h4>
 
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-          <div className="space-y-2">
-            <div className="flex items-center justify-between">
-              <Label className="text-sm font-medium text-gray-300">
-                Available Cameras
-              </Label>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                onClick={() => refreshCameras()}
-                disabled={isLoadingCameras}
-                className="h-6 w-6 text-gray-400 hover:text-white"
-                title="Rescan for cameras (e.g. after plugging in a new USB camera)"
-                aria-label="Rescan for cameras"
-              >
-                <RefreshCw
-                  className={`w-3.5 h-3.5 ${isLoadingCameras ? "animate-spin" : ""}`}
-                />
-              </Button>
-            </div>
-            <Select
-              value={selectedCameraIndex}
-              onValueChange={setSelectedCameraIndex}
-              disabled={isLoadingCameras}
-            >
-              <SelectTrigger className="bg-gray-800 border-gray-700 text-white">
-                <SelectValue
-                  placeholder={
-                    isLoadingCameras ? "Loading cameras..." : "Select camera"
-                  }
-                />
-              </SelectTrigger>
-              <SelectContent className="bg-gray-800 border-gray-700">
-                {availableCameras.map((camera) => {
-                  const alreadyAdded = cameras.some(
-                    (cam) =>
-                      cam.camera_index === camera.index ||
-                      (camera.deviceId && cam.device_id === camera.deviceId),
-                  );
-                  return (
-                    <SelectItem
-                      key={camera.index}
-                      value={camera.index.toString()}
-                      className="text-white hover:bg-gray-700"
-                      disabled={!camera.available || alreadyAdded}
-                    >
-                      <div className="flex flex-col">
-                        <span className="font-medium">{camera.name}</span>
-                        <span className="text-xs text-gray-400">
-                          Index {camera.index}
-                          {alreadyAdded && " · already added"}
-                        </span>
-                      </div>
-                    </SelectItem>
-                  );
-                })}
-              </SelectContent>
-            </Select>
-          </div>
-
-          <div className="space-y-2">
+        <div className="space-y-2">
+          <div className="flex items-center justify-between">
             <Label className="text-sm font-medium text-gray-300">
-              Camera Name
+              Available Cameras
             </Label>
-            <Input
-              value={cameraName}
-              onChange={(e) => setCameraName(e.target.value)}
-              placeholder="e.g., workspace_cam"
-              className="bg-gray-800 border-gray-700 text-white"
-            />
-          </div>
-
-          <div className="space-y-2 flex flex-col justify-end">
             <Button
-              onClick={addCamera}
-              className="bg-blue-500 hover:bg-blue-600 text-white"
-              disabled={!selectedCameraIndex || !cameraName.trim()}
+              type="button"
+              variant="ghost"
+              size="icon"
+              onClick={() => refreshCameras()}
+              disabled={isLoadingCameras}
+              className="h-6 w-6 text-gray-400 hover:text-white"
+              title="Rescan for cameras (e.g. after plugging in a new USB camera)"
+              aria-label="Rescan for cameras"
             >
-              <Plus className="w-4 h-4 mr-2" />
-              Add Camera
+              <RefreshCw
+                className={`w-3.5 h-3.5 ${isLoadingCameras ? "animate-spin" : ""}`}
+              />
             </Button>
           </div>
+          <Select
+            value={selectedCameraIndex}
+            onValueChange={setSelectedCameraIndex}
+            disabled={isLoadingCameras}
+          >
+            <SelectTrigger className="bg-gray-800 border-gray-700 text-white">
+              <SelectValue
+                placeholder={
+                  isLoadingCameras ? "Loading cameras..." : "Select camera"
+                }
+              />
+            </SelectTrigger>
+            <SelectContent className="bg-gray-800 border-gray-700">
+              {availableCameras.map((camera) => {
+                const alreadyAdded = cameras.some(
+                  (cam) =>
+                    cam.camera_index === camera.index ||
+                    (camera.deviceId && cam.device_id === camera.deviceId),
+                );
+                return (
+                  <SelectItem
+                    key={camera.index}
+                    value={camera.index.toString()}
+                    className="text-white hover:bg-gray-700"
+                    disabled={!camera.available || alreadyAdded}
+                  >
+                    <div className="flex flex-col">
+                      <span className="font-medium">{camera.name}</span>
+                      <span className="text-xs text-gray-400">
+                        Index {camera.index}
+                        {alreadyAdded && " · already added"}
+                      </span>
+                    </div>
+                  </SelectItem>
+                );
+              })}
+            </SelectContent>
+          </Select>
         </div>
+
+        {/* Live preview appears as soon as a camera is selected; naming +
+            confirmation happens alongside it. */}
+        {selectedCamera && (
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div className="bg-gray-900 rounded-lg border border-gray-700 overflow-hidden">
+              <CameraStreamBox
+                deviceId={selectedCamera.deviceId}
+                paused={streamsPaused}
+              />
+            </div>
+
+            <div className="flex flex-col justify-center gap-4">
+              <div className="space-y-2">
+                <Label className="text-sm font-medium text-gray-300">
+                  Camera Name
+                </Label>
+                <Input
+                  value={cameraName}
+                  onChange={(e) => setCameraName(e.target.value)}
+                  placeholder="e.g., workspace_cam"
+                  className="bg-gray-800 border-gray-700 text-white"
+                />
+              </div>
+
+              <Button
+                onClick={addCamera}
+                className="bg-blue-500 hover:bg-blue-600 text-white"
+                disabled={!selectedCameraIndex || !cameraName.trim()}
+              >
+                <Plus className="w-4 h-4 mr-2" />
+                Add Camera
+              </Button>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Configured Cameras */}
@@ -316,6 +335,48 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
   );
 };
 
+interface CameraStreamBoxProps {
+  deviceId: string;
+  paused: boolean;
+}
+
+/** Live browser stream for a camera by deviceId. Used both for the
+ * pre-add preview (as soon as a camera is picked in the dropdown) and for
+ * each configured camera's card. The underlying useCameraStream hook stops
+ * the browser stream on deviceId change and on unmount, so switching
+ * cameras or closing the dialog releases the device. */
+const CameraStreamBox: React.FC<CameraStreamBoxProps> = ({
+  deviceId,
+  paused,
+}) => {
+  const { videoRef, hasError: streamError } = useCameraStream(deviceId, paused);
+  const showVideo = !paused && deviceId && !streamError;
+  return (
+    <div className="aspect-[4/3] bg-gray-800 relative">
+      {showVideo ? (
+        <video
+          ref={videoRef}
+          autoPlay
+          muted
+          playsInline
+          className="w-full h-full object-cover"
+        />
+      ) : (
+        <div className="w-full h-full flex flex-col items-center justify-center">
+          <VideoOff className="w-8 h-8 text-gray-500 mb-2" />
+          <span className="text-gray-500 text-sm">
+            {paused
+              ? "Preview paused"
+              : deviceId
+              ? "Preview failed"
+              : "No browser match"}
+          </span>
+        </div>
+      )}
+    </div>
+  );
+};
+
 interface CameraPreviewProps {
   camera: CameraConfig;
   paused: boolean;
@@ -329,35 +390,9 @@ const CameraPreview: React.FC<CameraPreviewProps> = ({
   onRemove,
   onUpdate,
 }) => {
-  const { videoRef, hasError: streamError } = useCameraStream(
-    camera.device_id,
-    paused
-  );
-  const showVideo = !paused && camera.device_id && !streamError;
   return (
     <div className="bg-gray-900 rounded-lg border border-gray-700 overflow-hidden">
-      <div className="aspect-[4/3] bg-gray-800 relative">
-        {showVideo ? (
-          <video
-            ref={videoRef}
-            autoPlay
-            muted
-            playsInline
-            className="w-full h-full object-cover"
-          />
-        ) : (
-          <div className="w-full h-full flex flex-col items-center justify-center">
-            <VideoOff className="w-8 h-8 text-gray-500 mb-2" />
-            <span className="text-gray-500 text-sm">
-              {paused
-                ? "Preview paused"
-                : camera.device_id
-                ? "Preview failed"
-                : "No browser match"}
-            </span>
-          </div>
-        )}
-      </div>
+      <CameraStreamBox deviceId={camera.device_id} paused={paused} />
 
       {/* Camera Info */}
       <div className="p-3 space-y-2">
