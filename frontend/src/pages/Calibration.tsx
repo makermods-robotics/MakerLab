@@ -40,6 +40,7 @@ import {
   Hand,
   RefreshCw,
   Wand2,
+  Trash2,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import Logo from "@/components/Logo";
@@ -163,6 +164,8 @@ const Calibration = () => {
     : [];
   const [overwritePromptOpen, setOverwritePromptOpen] = useState(false);
   const [wiggling, setWiggling] = useState(false);
+  // Touch-to-identify: watching every port for a hand-moved shoulder-pan swing.
+  const [detecting, setDetecting] = useState(false);
   const [autoCalPromptOpen, setAutoCalPromptOpen] = useState(false);
   const [autoCal, setAutoCal] = useState<{
     active: boolean;
@@ -367,6 +370,44 @@ const Calibration = () => {
       });
     } finally {
       setWiggling(false);
+    }
+  };
+
+  // The inverse of Wiggle: instead of driving a motor, the backend watches
+  // every detected port (read-only) while the user swings the arm's base by
+  // hand, then reports which port saw the motion. On success the detected
+  // port is assigned to the CURRENT device/arm slot.
+  const handleDetect = async () => {
+    setDetecting(true);
+    try {
+      const res = await fetchWithHeaders(`${baseUrl}/identify-arm`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}), // empty = watch all detected ports
+      });
+      const data = await res.json();
+      if (data.success && data.port) {
+        setPort(data.port);
+        persistPort(data.port);
+        toast({
+          title: "Arm identified",
+          description: `${data.message} Port assigned to this arm.`,
+        });
+      } else {
+        toast({
+          title: "No arm detected",
+          description: data.message,
+          variant: "destructive",
+        });
+      }
+    } catch (e) {
+      toast({
+        title: "Detect failed",
+        description: String(e),
+        variant: "destructive",
+      });
+    } finally {
+      setDetecting(false);
     }
   };
 
@@ -694,9 +735,12 @@ const Calibration = () => {
   // Write the port for the current side straight into the robot record, so a
   // re-detected USB port (which shuffles on reboot/reconnect) sticks without
   // needing a full re-calibration. Mirrors the camera write-back above.
+  // An empty string is a valid value: it CLEARS the assignment (arm
+  // disconnected), which the backend merge accepts and never treats as a
+  // port conflict.
   const persistPort = useCallback(
     async (nextPort: string) => {
-      if (!robotName || !nextPort) return;
+      if (!robotName) return;
       // Skip redundant writes when the value already matches the record.
       if (robot && robot[portField] === nextPort) return;
       try {
@@ -947,7 +991,7 @@ const Calibration = () => {
                 >
                   Port *
                 </Label>
-                <div className="flex gap-2">
+                <div className="flex flex-wrap gap-2">
                   <Select
                     value={port}
                     onValueChange={(v) => {
@@ -957,7 +1001,7 @@ const Calibration = () => {
                   >
                     <SelectTrigger
                       id="port"
-                      className="bg-slate-700 border-slate-600 text-white rounded-md flex-1"
+                      className="bg-slate-700 border-slate-600 text-white rounded-md flex-1 min-w-[200px]"
                     >
                       <SelectValue
                         placeholder={
@@ -1000,6 +1044,21 @@ const Calibration = () => {
                     type="button"
                     variant="outline"
                     size="icon"
+                    onClick={() => {
+                      setPort("");
+                      persistPort("");
+                    }}
+                    disabled={!port}
+                    title="Clear port — release it without assigning another"
+                    aria-label="Clear port"
+                    className="border-slate-600 hover:border-red-500 text-slate-400 hover:text-red-400 bg-slate-700 hover:bg-slate-600 shrink-0"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="icon"
                     onClick={fetchPorts}
                     disabled={portsLoading}
                     title="Rescan ports"
@@ -1009,18 +1068,56 @@ const Calibration = () => {
                       className={`w-4 h-4 ${portsLoading ? "animate-spin" : ""}`}
                     />
                   </Button>
+                </div>
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={handleDetect}
+                    disabled={
+                      detecting ||
+                      wiggling ||
+                      calibrationStatus.calibration_active ||
+                      autoCal.active
+                    }
+                    title="Identify by hand: swing the arm's base left and right"
+                    className="w-32 shrink-0 border-slate-600 hover:border-emerald-500 text-slate-400 hover:text-emerald-400 bg-slate-700 hover:bg-slate-600"
+                  >
+                    {detecting ? (
+                      <Loader2 className="w-4 h-4 mr-1 animate-spin" />
+                    ) : (
+                      <Hand className="w-4 h-4 mr-1" />
+                    )}
+                    {detecting ? "Watching…" : "Detect"}
+                  </Button>
+                  <p className="flex-1 min-w-[200px] text-xs text-slate-400">
+                    Identify by hand — swing the arm's base left and right; the
+                    port that moves is assigned.
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
                   <Button
                     type="button"
                     variant="outline"
                     onClick={handleWiggle}
                     disabled={!port || wiggling}
                     title="Move the gripper on this port to see which arm it is"
-                    className="border-slate-600 hover:border-yellow-500 text-slate-400 hover:text-yellow-400 bg-slate-700 hover:bg-slate-600 shrink-0"
+                    className="w-32 shrink-0 border-slate-600 hover:border-yellow-500 text-slate-400 hover:text-yellow-400 bg-slate-700 hover:bg-slate-600"
                   >
                     <Hand className="w-4 h-4 mr-1" />
                     {wiggling ? "Wiggling…" : "Wiggle"}
                   </Button>
+                  <p className="flex-1 min-w-[200px] text-xs text-slate-400">
+                    Legacy: drives the gripper ±200 ticks to confirm a port —
+                    prefer Detect when possible.
+                  </p>
                 </div>
+                {detecting && (
+                  <p className="text-xs text-emerald-400">
+                    Swing the base of the arm left and right — the port that
+                    sees the motion will be assigned to this arm.
+                  </p>
+                )}
               </div>
 
               {!isBimanual && (

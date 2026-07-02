@@ -44,6 +44,7 @@ from .merge import MergeRequest, handle_merge_status, handle_start_merge
 # Import our custom calibration functionality
 from .auto_calibrate import AutoCalibrationRequest, auto_calibration_manager
 from .calibrate import CalibrationRequest, calibration_manager
+from .identify import identify_arm_by_motion
 from .motor_power import read_supply_voltage
 from .wiggle import wiggle_gripper
 from .jobs import (
@@ -1205,6 +1206,18 @@ class WiggleRequest(BaseModel):
 async def wiggle(request: WiggleRequest):
     """Wiggle the gripper on a port so the user can see which arm it is."""
     return await wiggle_gripper(request.port)
+
+
+class IdentifyArmRequest(BaseModel):
+    # Candidate ports to watch; empty/omitted = all detected arm ports.
+    ports: list[str] | None = None
+
+
+@app.post("/identify-arm")
+async def identify_arm(request: IdentifyArmRequest):
+    """The inverse of /wiggle: the user swings an arm's base (shoulder pan) by
+    hand and we report which port saw the motion. Read-only — no motor writes."""
+    return await identify_arm_by_motion(request.ports)
 
 
 @app.get("/supply-voltage")
