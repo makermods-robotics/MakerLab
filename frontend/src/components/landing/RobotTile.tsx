@@ -65,6 +65,20 @@ const RobotTile: React.FC<RobotTileProps> = ({
   };
   const status = robot ? (robot.is_clean ? "Ready" : "Needs configuration") : null;
   const teleopDisabled = !robot || !robot.is_clean;
+  // Mirrors CalibrationLibrary's conditional amber warning in its delete
+  // dialog: only warn about losing assignments when the robot has some.
+  const hasAssignments =
+    !!robot &&
+    [
+      robot.leader_port,
+      robot.follower_port,
+      robot.leader_config,
+      robot.follower_config,
+      robot.right_leader_port,
+      robot.right_follower_port,
+      robot.right_leader_config,
+      robot.right_follower_config,
+    ].some(Boolean);
 
   return (
     <div className="bg-gray-800 rounded-lg border border-gray-700 p-3 flex flex-col gap-2 relative">
@@ -211,7 +225,7 @@ const RobotTile: React.FC<RobotTileProps> = ({
             <DialogFooter className="flex gap-2 justify-end">
               <Button
                 variant="outline"
-                className="border-gray-600 text-gray-300"
+                className="border-gray-600 text-gray-700 dark:text-gray-300"
                 onClick={() => setRenameOpen(false)}
               >
                 Cancel
@@ -232,16 +246,23 @@ const RobotTile: React.FC<RobotTileProps> = ({
         <Dialog open={confirmDelete} onOpenChange={setConfirmDelete}>
           <DialogContent className="bg-gray-900 border-gray-800 text-white">
             <DialogHeader>
-              <DialogTitle>Delete robot config?</DialogTitle>
+              <DialogTitle>Delete robot "{robot.name}"?</DialogTitle>
               <DialogDescription className="text-gray-400">
-                This deletes the robot config file from disk. Calibration files
-                are not removed. This cannot be undone.
+                This permanently deletes the saved robot config — you'd have to
+                create and configure it again.
               </DialogDescription>
             </DialogHeader>
+            {hasAssignments && (
+              <p className="text-sm text-amber-400">
+                This robot has ports and calibrations assigned: those
+                assignments will be removed. The calibration files themselves
+                are kept in the library and stay reusable.
+              </p>
+            )}
             <DialogFooter className="flex gap-2 justify-end">
               <Button
                 variant="outline"
-                className="border-gray-600 text-gray-300"
+                className="border-gray-600 text-gray-700 dark:text-gray-300"
                 onClick={() => setConfirmDelete(false)}
               >
                 Cancel

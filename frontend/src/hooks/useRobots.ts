@@ -149,7 +149,7 @@ export const useRobots = () => {
         });
         if (!res.ok) {
           const text = await res.text();
-          toast({ title: "Failed to delete", description: text, variant: "destructive" });
+          toast({ title: "Delete failed", description: text, variant: "destructive" });
           return false;
         }
         setRecords((prev) => {
@@ -157,9 +157,13 @@ export const useRobots = () => {
           return rest;
         });
         setSelectedName((prev) => (prev === name ? null : prev));
+        toast({
+          title: "Robot deleted",
+          description: `Removed "${name}". Calibration files are kept in the library.`,
+        });
         return true;
       } catch (e) {
-        toast({ title: "Network error", description: String(e), variant: "destructive" });
+        toast({ title: "Delete failed", description: String(e), variant: "destructive" });
         return false;
       }
     },
