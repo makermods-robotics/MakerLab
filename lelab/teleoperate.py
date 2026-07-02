@@ -35,6 +35,7 @@ from .utils.config import (
     bimanual_base,
     setup_calibration_files,
 )
+from .utils.devices import _force_close_device_resources
 
 logger = logging.getLogger(__name__)
 
@@ -401,6 +402,12 @@ def _safe_disconnect(device, label: str = "device") -> str | None:
             "TORQUE MAY STILL BE ENABLED — the arm can stay rigid; unplug its power to release it."
         )
         logger.error(message)
+        # Last resort (upstream): force-close the serial port(s) and cameras so a
+        # failed disconnect can't leave the port handle open until process exit.
+        # Buses live on sub-arms for bimanual BiSO devices, so hit those too.
+        for target in (device, getattr(device, "left_arm", None), getattr(device, "right_arm", None)):
+            if target is not None:
+                _force_close_device_resources(target, logger)
         return message
 
 

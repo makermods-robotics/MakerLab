@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import VisualizerPanel from "@/components/control/VisualizerPanel";
+import TeleopCameraPanel from "@/components/control/TeleopCameraPanel";
 import { useToast } from "@/hooks/use-toast";
 import { useApi } from "@/contexts/ApiContext";
 import { useRobots } from "@/hooks/useRobots";
@@ -110,7 +111,12 @@ const TeleoperationPage = () => {
   return (
     <div className="min-h-screen bg-black flex items-center justify-center p-2 sm:p-4">
       <div className="w-full h-[95vh] flex">
-        <VisualizerPanel onGoBack={handleGoBack} className="lg:w-full" bimanual={bimanual} />
+        <VisualizerPanel
+          onGoBack={handleGoBack}
+          className="lg:w-full"
+          bimanual={bimanual}
+          rightSlot={<TeleopCameraPanel />}
+        />
       </div>
     </div>
   );
