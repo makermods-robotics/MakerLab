@@ -11,9 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for lelab.calibrate — manager initial state and request schema."""
+"""Tests for lelab.calibrate — manager initial state, request schema, and the
+post-recording centering guard."""
 
 from __future__ import annotations
+
+from lelab.calibrate import find_off_center_joints
 
 
 def test_calibration_status_defaults_to_idle() -> None:
@@ -94,3 +97,41 @@ def test_start_calibration_refuses_existing_config_without_overwrite(tmp_lerobot
     # The guard returns before activating or spawning the worker thread.
     assert mgr.status.calibration_active is False
     assert mgr.calibration_thread is None
+
+
+def test_find_off_center_joints_passes_centered_ranges() -> None:
+    """Ranges whose midpoints sit on the raw-tick center (2047) all pass."""
+    ranges = {
+        "shoulder_pan": (1047, 3047),  # midpoint exactly 2047
+        "shoulder_lift": (1500, 2600),  # midpoint 2050, well within tolerance
+        "elbow_flex": (1000, 3000),
+        "wrist_flex": (1200, 2900),
+    }
+    assert find_off_center_joints(ranges) == []
+
+
+def test_find_off_center_joints_names_the_skewed_joint() -> None:
+    """A range lying almost entirely to one side of 2047 is flagged by name."""
+    ranges = {
+        "shoulder_pan": (1047, 3047),  # centered, passes
+        "shoulder_lift": (2000, 3600),  # midpoint 2800, 753 off vs 320 allowed
+    }
+    assert find_off_center_joints(ranges) == ["shoulder_lift"]
+
+
+def test_find_off_center_joints_exempts_gripper_and_wrist_roll() -> None:
+    """Gripper is legitimately homed closed, and wrist_roll is a full-turn
+    motor upstream — both skip the check no matter how skewed their range is."""
+    ranges = {
+        "gripper": (2000, 3500),  # midpoint 2750, would fail if checked
+        "wrist_roll": (2500, 4000),  # midpoint 3250, would fail if checked
+    }
+    assert find_off_center_joints(ranges) == []
+
+
+def test_find_off_center_joints_tolerance_boundary() -> None:
+    """Deviation equal to 20% of the range width passes; one tick more fails."""
+    # Width 2000 -> 400 ticks allowed. Midpoint 2447 deviates by exactly 400.
+    assert find_off_center_joints({"elbow_flex": (1447, 3447)}) == []
+    # Midpoint 2448 deviates by 401 — just over the line.
+    assert find_off_center_joints({"elbow_flex": (1448, 3448)}) == ["elbow_flex"]

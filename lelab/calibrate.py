@@ -43,6 +43,49 @@ from .utils.config import calibration_dir_for_device, save_robot_record
 
 logger = logging.getLogger(__name__)
 
+# Raw-tick center of the 12-bit (0-4095) Feetech encoder. Step 1 homing offsets
+# the start pose to read ~2047, so a calibration that really started from the
+# documented middle position records a range whose midpoint sits near this value.
+ENCODER_MID_TICK = 2047
+
+# Allowed deviation of a recorded range's midpoint from ENCODER_MID_TICK, as a
+# fraction of the recorded range width.
+CENTERING_TOLERANCE = 0.2
+
+# Joints exempt from the centering check: users legitimately home the gripper
+# closed (~580 ticks of midpoint deviation on real data), and wrist_roll is a
+# full-turn motor upstream (lerobot's CLI calibration forces its range to
+# 0-4095 instead of recording it), so its recorded midpoint carries no meaning.
+CENTERING_EXEMPT_MOTORS = frozenset({"gripper", "wrist_roll"})
+
+
+def find_off_center_joints(ranges: dict[str, tuple[float, float]]) -> list[str]:
+    """Return the joints whose recorded range is not centered on the start pose.
+
+    `ranges` maps motor name to (range_min, range_max) in raw ticks. A joint
+    passes when |ENCODER_MID_TICK - (range_min + range_max) / 2| is at most
+    CENTERING_TOLERANCE of the range width; a larger deviation means the joint
+    started near one of its limits rather than mid-range, so the homing offsets
+    captured in step 1 would skew the saved calibration.
+    """
+    offending = []
+    for motor, (range_min, range_max) in ranges.items():
+        if motor in CENTERING_EXEMPT_MOTORS:
+            continue
+        midpoint = (range_min + range_max) / 2
+        if abs(ENCODER_MID_TICK - midpoint) > CENTERING_TOLERANCE * (range_max - range_min):
+            offending.append(motor)
+    return offending
+
+
+class CalibrationCenteringError(Exception):
+    """Raised when the recorded ranges show calibration didn't start mid-pose.
+
+    Detected after range recording, before anything is saved: if a joint's
+    recorded range is heavily skewed to one side of the raw-tick center, the
+    arm was not in the documented middle position when calibration began.
+    """
+
 
 class CalibrationDiscontinuityError(Exception):
     """Raised when a motor position reading jumps across the encoder wrap-around.
@@ -318,8 +361,8 @@ class CalibrationManager:
             logger.info("Calibration completed successfully")
             self._cleanup_and_finish("Calibration completed successfully", status="completed")
 
-        except CalibrationDiscontinuityError as e:
-            logger.error(f"Calibration discontinuity: {e}")
+        except (CalibrationCenteringError, CalibrationDiscontinuityError) as e:
+            logger.error(f"Calibration aborted: {e}")
             self._update_status(error=str(e))
             self._cleanup_and_finish(str(e), status="error")
         except Exception as e:
@@ -489,6 +532,19 @@ class CalibrationManager:
     def _complete_calibration(self):
         """Complete the calibration and save results"""
         logger.info("Completing calibration...")
+
+        # Centering guard: fail before anything is written if the recorded
+        # ranges show the arm didn't start from the middle pose (see
+        # find_off_center_joints). The worker's error path cleans up, so no
+        # half-written calibration file is left behind.
+        off_center = find_off_center_joints(
+            {motor: (self._mins[motor], self._maxes[motor]) for motor in self._mins}
+        )
+        if off_center:
+            raise CalibrationCenteringError(
+                f"Start pose wasn't the middle position: {', '.join(off_center)}. "
+                "Re-run calibration starting from the middle pose."
+            )
 
         # Log motor information for debugging
         logger.info("Motor configuration:")
