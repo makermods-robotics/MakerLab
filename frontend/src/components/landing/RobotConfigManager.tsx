@@ -52,6 +52,8 @@ const RobotConfigManager: React.FC<RobotConfigManagerProps> = ({
           right_follower_port: robot.right_follower_port,
           right_leader_config: robot.right_leader_config,
           right_follower_config: robot.right_follower_config,
+          // Follower torque limit for the session (10-100% of full power).
+          motor_power: robot.motor_power ?? 100,
         }),
       });
       const data = await res.json();
@@ -59,10 +61,21 @@ const RobotConfigManager: React.FC<RobotConfigManagerProps> = ({
       // failures (arm not connected, already active), so gate on `data.success`
       // — not just `res.ok` — or we'd navigate to an empty teleop screen.
       if (res.ok && data.success) {
-        toast({
-          title: "Teleoperation Started",
-          description: data.message || `Started teleoperation for ${robot.name}.`,
-        });
+        // A success can carry a warn-but-allow arm-identity finding (e.g. the
+        // arm's servos hold a different saved calibration). Make it visible —
+        // it used to be silently dropped.
+        if (data.warning) {
+          toast({
+            title: "Started with a warning",
+            description: data.warning,
+            duration: 10000,
+          });
+        } else {
+          toast({
+            title: "Teleoperation Started",
+            description: data.message || `Started teleoperation for ${robot.name}.`,
+          });
+        }
         navigate("/teleoperation");
       } else {
         toast({

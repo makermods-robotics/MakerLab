@@ -13,6 +13,8 @@ export interface StartInferenceRequest {
     fps?: number;
   }>;
   duration_s: number;
+  // Follower torque limit for the session (10-100% of full power).
+  motor_power?: number;
 }
 
 export interface InferenceStatus {
@@ -32,8 +34,8 @@ export async function startInference(
   baseUrl: string,
   fetcher: Fetcher,
   request: StartInferenceRequest,
-): Promise<{ message: string; log_path: string }> {
-  return apiRequest<{ message: string; log_path: string }>(
+): Promise<{ message: string; log_path: string; warning?: string }> {
+  return apiRequest<{ message: string; log_path: string; warning?: string }>(
     baseUrl,
     fetcher,
     "/start-inference",

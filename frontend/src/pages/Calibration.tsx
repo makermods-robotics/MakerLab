@@ -726,6 +726,79 @@ const Calibration = () => {
     [robotName, portField, robot, baseUrl, fetchWithHeaders, toast],
   );
 
+  // --- Motor power (per-robot, persisted) -------------------------------
+  // Local slider position while dragging; persisted to the robot record on
+  // release so we don't fire a POST per pixel. Applied to the follower's
+  // motors at the start of each teleop/record/inference session.
+  const [powerDraft, setPowerDraft] = useState(100);
+  useEffect(() => {
+    setPowerDraft(robot?.motor_power ?? 100);
+  }, [robot?.motor_power]);
+
+  const commitMotorPower = useCallback(async () => {
+    if (!robotName || !robot) return;
+    // powerDraft may be fractional when the slider is geared in decivolts;
+    // persist the nearest integer percent, clamped to the backend's 10-100.
+    const percentInt = Math.min(100, Math.max(10, Math.round(powerDraft)));
+    if (percentInt === robot.motor_power) return;
+    try {
+      const res = await fetchWithHeaders(
+        `${baseUrl}/robots/${encodeURIComponent(robotName)}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ motor_power: percentInt }),
+        },
+      );
+      const data = await res.json();
+      if (res.ok && data.robot) {
+        setRobot(data.robot);
+      }
+    } catch (e) {
+      console.error("Failed to save motor power:", e);
+    }
+  }, [robotName, robot, powerDraft, baseUrl, fetchWithHeaders]);
+
+  // One-shot supply-voltage reading (a REAL measured voltage from the servos'
+  // Present_Voltage register — distinct from the motor-power torque fraction).
+  // Read once per port selection, never polled: the backend connects, reads,
+  // and releases the port immediately so calibration/teleop can grab it.
+  const [voltage, setVoltage] = useState<number | null>(null);
+  useEffect(() => {
+    setVoltage(null);
+    if (!port) return;
+    // Don't touch the serial port while a calibration session may hold it.
+    if (calibrationStatus.calibration_active || autoCal.active) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetchWithHeaders(
+          `${baseUrl}/supply-voltage?port=${encodeURIComponent(port)}`,
+        );
+        const data = await res.json();
+        if (!cancelled && data.success && typeof data.voltage === "number") {
+          setVoltage(data.voltage);
+        }
+      } catch {
+        // Informational only — leave the reading blank on failure.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // Re-read only when the port changes; the active flags are read at fire
+    // time but must not re-trigger a read when a session ends.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [port, baseUrl, fetchWithHeaders]);
+
+  // Slider gearing: with a supply reading, the slider steps in 0.1 V of the
+  // computed drive-voltage ceiling (decivolt units: min = 10% floor, max =
+  // full supply, step = 1 dv). Without a reading, plain 1% steps.
+  const supplyDv =
+    voltage != null && voltage > 0 ? Math.round(voltage * 10) : null;
+  const powerDv =
+    supplyDv != null ? Math.round((supplyDv * powerDraft) / 100) : null;
+
   const getStatusDisplay = () => {
     switch (calibrationStatus.status) {
       case "idle":
@@ -1020,6 +1093,70 @@ const Calibration = () => {
                       Auto-calibrate
                     </Button>
                   </>
+                )}
+
+                {robot && (
+                  <div className="space-y-1 pt-1">
+                    <div className="flex items-center gap-3">
+                      <Label
+                        htmlFor="motorPower"
+                        className="text-sm font-medium text-slate-300 shrink-0"
+                      >
+                        Motor power
+                      </Label>
+                      <input
+                        id="motorPower"
+                        type="range"
+                        min={supplyDv != null ? Math.round(supplyDv * 0.1) : 10}
+                        max={supplyDv ?? 100}
+                        step={1}
+                        value={powerDv ?? powerDraft}
+                        onChange={(e) => {
+                          const v = Number(e.target.value);
+                          setPowerDraft(
+                            supplyDv != null ? (v / supplyDv) * 100 : v,
+                          );
+                        }}
+                        onPointerUp={commitMotorPower}
+                        onKeyUp={commitMotorPower}
+                        onBlur={commitMotorPower}
+                        className="flex-1 h-1.5 accent-blue-500 cursor-pointer"
+                        aria-label="Motor power"
+                      />
+                      {powerDv != null ? (
+                        <span
+                          className="font-mono text-right leading-tight shrink-0"
+                          title="Approximate maximum average drive voltage: supply × power setting."
+                        >
+                          <span className="block text-sm text-slate-200">
+                            ≈ {(powerDv / 10).toFixed(1)} V
+                          </span>
+                          <span className="block text-[11px] text-slate-500">
+                            {Math.round(powerDraft)}%
+                          </span>
+                        </span>
+                      ) : (
+                        <span className="text-sm font-mono text-slate-200 w-12 text-right shrink-0">
+                          {Math.round(powerDraft)}%
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex items-start justify-between gap-2 text-xs text-slate-500">
+                      <span>
+                        Lower = gentler movements and weaker grip; below 10% the
+                        arm can't hold its own weight. Resets to the saved value
+                        each session.
+                      </span>
+                      {voltage != null && (
+                        <span
+                          className="font-mono text-slate-400 shrink-0"
+                          title="Measured servo bus supply voltage on the selected port"
+                        >
+                          Supply: {voltage.toFixed(1)}V
+                        </span>
+                      )}
+                    </div>
+                  </div>
                 )}
 
                 {/* Persistent while a session is active: ending calibration

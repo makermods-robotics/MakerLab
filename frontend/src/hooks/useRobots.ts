@@ -20,6 +20,9 @@ export interface RobotRecord {
   right_leader_config: string;
   right_follower_config: string;
   cameras: CameraConfig[];
+  // Follower torque as a percentage of full power (10-100, default 100).
+  // Written to the servos' volatile torque-limit register at session start.
+  motor_power: number;
   is_clean: boolean;
 }
 

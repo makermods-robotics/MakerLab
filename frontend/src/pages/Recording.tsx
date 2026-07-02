@@ -42,6 +42,8 @@ interface RecordingConfig {
   follower_port: string;
   leader_config: string;
   follower_config: string;
+  // Follower torque limit for the session (10-100% of full power).
+  motor_power?: number;
   dataset_repo_id: string;
   single_task: string;
   num_episodes: number;
@@ -98,6 +100,10 @@ const Recording = () => {
   const warningFiredForPhaseRef = useRef<{ phase: Phase | null; episode: number | null; tick: number }>({ phase: null, episode: null, tick: 0 });
   // Guards against React StrictMode double-invocation of the start effect.
   const startInitiatedRef = useRef(false);
+  // The arm-identity guard runs inside the backend's recording worker (after
+  // the start response), so its warn-but-allow findings arrive via the status
+  // poll. Show them once, not on every 1s tick.
+  const identityWarningShownRef = useRef(false);
 
   const toggleMute = useCallback(() => {
     setMutedState((prev) => {
@@ -151,6 +157,15 @@ const Recording = () => {
         if (!response.ok) return;
         const status = await response.json();
         setBackendStatus(status);
+
+        if (status.warning && !identityWarningShownRef.current) {
+          identityWarningShownRef.current = true;
+          toast({
+            title: "Recording started with a warning",
+            description: status.warning,
+            duration: 10000,
+          });
+        }
 
         const currentOptimistic = optimisticPhaseRef.current;
         if (currentOptimistic && status.current_phase === currentOptimistic) {

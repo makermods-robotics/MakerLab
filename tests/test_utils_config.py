@@ -147,6 +147,80 @@ def test_robot_record_merges_fields(tmp_lerobot_home: Path) -> None:
     assert loaded["follower_port"] == "/dev/b"
 
 
+def test_robot_record_merge_clears_field_with_empty_string(tmp_lerobot_home: Path) -> None:
+    """An empty string is a valid merge value: it CLEARS the field (e.g. releasing
+    a port without assigning another), it does not preserve the old value."""
+    from lelab.utils import config as cfg
+
+    cfg.save_robot_record(
+        "clear_test", {"leader_port": "/dev/a", "follower_port": "/dev/b"}, allow_create=True
+    )
+    cfg.save_robot_record("clear_test", {"leader_port": ""}, allow_create=False)
+
+    loaded = cfg.get_robot_record("clear_test")
+    assert loaded is not None
+    assert loaded["leader_port"] == ""
+    assert loaded["follower_port"] == "/dev/b"
+
+
+def test_clamp_motor_power_bounds_and_fallback(tmp_lerobot_home: Path) -> None:
+    from lelab.utils import config as cfg
+
+    assert cfg.clamp_motor_power(55) == 55
+    assert cfg.clamp_motor_power(5) == cfg.MOTOR_POWER_MIN
+    assert cfg.clamp_motor_power(150) == cfg.MOTOR_POWER_MAX
+    assert cfg.clamp_motor_power(42.9) == 42
+    # Non-numeric (including bool — a subclass of int) → full power, never raise.
+    assert cfg.clamp_motor_power(None) == cfg.DEFAULT_MOTOR_POWER
+    assert cfg.clamp_motor_power("50") == cfg.DEFAULT_MOTOR_POWER
+    assert cfg.clamp_motor_power(True) == cfg.DEFAULT_MOTOR_POWER
+
+
+def test_robot_record_motor_power_defaults_to_full(tmp_lerobot_home: Path) -> None:
+    """Records saved before the field existed (or fresh ones) read back as 100."""
+    from lelab.utils import config as cfg
+
+    # A pre-motor_power record on disk: write raw JSON without the field.
+    path = Path(cfg.ROBOTS_PATH) / "old_bot.json"
+    path.write_text(json.dumps({"name": "old_bot", "mode": "single", "leader_port": "/dev/a"}))
+
+    loaded = cfg.get_robot_record("old_bot")
+    assert loaded is not None
+    assert loaded["motor_power"] == cfg.DEFAULT_MOTOR_POWER
+
+
+def test_robot_record_motor_power_merge_clamps_and_ignores_invalid(
+    tmp_lerobot_home: Path,
+) -> None:
+    from lelab.utils import config as cfg
+
+    cfg.save_robot_record("power_bot", {"motor_power": 60}, allow_create=True)
+    assert cfg.get_robot_record("power_bot")["motor_power"] == 60
+
+    # Out-of-range values are clamped, not rejected.
+    cfg.save_robot_record("power_bot", {"motor_power": 5}, allow_create=False)
+    assert cfg.get_robot_record("power_bot")["motor_power"] == cfg.MOTOR_POWER_MIN
+    cfg.save_robot_record("power_bot", {"motor_power": 500}, allow_create=False)
+    assert cfg.get_robot_record("power_bot")["motor_power"] == cfg.MOTOR_POWER_MAX
+
+    # A wrongly-typed value is ignored (keeps the existing setting), matching
+    # the known-typed-fields-only merge of the string/list fields.
+    cfg.save_robot_record("power_bot", {"motor_power": "25"}, allow_create=False)
+    assert cfg.get_robot_record("power_bot")["motor_power"] == cfg.MOTOR_POWER_MAX
+
+
+def test_robot_record_motor_power_clamped_on_read(tmp_lerobot_home: Path) -> None:
+    """A corrupted on-disk value never reaches consumers un-clamped."""
+    from lelab.utils import config as cfg
+
+    path = Path(cfg.ROBOTS_PATH) / "corrupt_bot.json"
+    path.write_text(json.dumps({"name": "corrupt_bot", "mode": "single", "motor_power": 9000}))
+    assert cfg.get_robot_record("corrupt_bot")["motor_power"] == cfg.MOTOR_POWER_MAX
+
+    path.write_text(json.dumps({"name": "corrupt_bot", "mode": "single", "motor_power": "junk"}))
+    assert cfg.get_robot_record("corrupt_bot")["motor_power"] == cfg.DEFAULT_MOTOR_POWER
+
+
 def test_rename_robot_record_moves_file_and_preserves_fields(
     tmp_lerobot_home: Path,
 ) -> None:

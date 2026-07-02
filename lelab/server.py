@@ -44,6 +44,7 @@ from .merge import MergeRequest, handle_merge_status, handle_start_merge
 # Import our custom calibration functionality
 from .auto_calibrate import AutoCalibrationRequest, auto_calibration_manager
 from .calibrate import CalibrationRequest, calibration_manager
+from .motor_power import read_supply_voltage
 from .wiggle import wiggle_gripper
 from .jobs import (
     JobAlreadyRunningError,
@@ -1192,6 +1193,14 @@ class WiggleRequest(BaseModel):
 async def wiggle(request: WiggleRequest):
     """Wiggle the gripper on a port so the user can see which arm it is."""
     return await wiggle_gripper(request.port)
+
+
+@app.get("/supply-voltage")
+async def supply_voltage(port: str = ""):
+    """One-shot, read-only supply-voltage reading (Present_Voltage) from the arm
+    on `port`. Connects, reads, and releases the port immediately — never holds
+    it — so calibration/teleoperation can grab the port right after."""
+    return await read_supply_voltage(port)
 
 
 # Runs in a fresh Python — see _avfoundation_cameras_in_cv2_order for why.

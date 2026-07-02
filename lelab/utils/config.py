@@ -365,6 +365,27 @@ _BIMANUAL_CONFIG_FIELDS = (
 )
 _ROBOT_STRING_FIELDS = _SINGLE_CONFIG_FIELDS + _BIMANUAL_CONFIG_FIELDS
 _ROBOT_LIST_FIELDS = ("cameras",)
+
+# Follower motor power, as a percentage of full torque (see lelab/motor_power.py
+# for how it's written to the servos). Bounded below because under ~10% the arm
+# can't reliably hold its own weight; 100 = stock behavior.
+MOTOR_POWER_MIN = 10
+MOTOR_POWER_MAX = 100
+DEFAULT_MOTOR_POWER = 100
+
+
+def clamp_motor_power(value: object) -> int:
+    """Coerce a motor_power value to a safe integer percent in [10, 100].
+
+    Anything non-numeric (including bool, a subclass of int) falls back to full
+    power — the register's own power-on default — rather than raising, so a
+    corrupted record can never block a session start.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return DEFAULT_MOTOR_POWER
+    return max(MOTOR_POWER_MIN, min(MOTOR_POWER_MAX, int(value)))
+
+
 # Config-name fields whose stored value may carry a ".json" extension to strip.
 _CONFIG_NAME_FIELDS = ("leader_config", "follower_config", "right_leader_config", "right_follower_config")
 _VALID_MODES = ("single", "bimanual")
@@ -385,7 +406,7 @@ def is_valid_robot_name(name: str) -> bool:
 
 
 def _empty_record(name: str) -> dict:
-    record: dict = {"name": name, "mode": _DEFAULT_MODE}
+    record: dict = {"name": name, "mode": _DEFAULT_MODE, "motor_power": DEFAULT_MOTOR_POWER}
     for field in _ROBOT_STRING_FIELDS:
         record[field] = ""
     for field in _ROBOT_LIST_FIELDS:
@@ -418,6 +439,10 @@ def get_robot_record(name: str) -> dict | None:
     # Guard against an unknown mode on disk.
     if record.get("mode") not in _VALID_MODES:
         record["mode"] = _DEFAULT_MODE
+    # Older records have no motor_power (→ full power via _empty_record); an
+    # out-of-range or corrupted value on disk is clamped so every consumer
+    # sees a safe 10-100 integer.
+    record["motor_power"] = clamp_motor_power(record.get("motor_power"))
     return record
 
 
@@ -463,6 +488,11 @@ def save_robot_record(name: str, data: dict, allow_create: bool = True) -> bool:
     for field in _ROBOT_LIST_FIELDS:
         if field in data and isinstance(data[field], list):
             record[field] = data[field]
+    # Same known-typed-fields-only merge as above: a numeric motor_power is
+    # clamped to the safe range, anything else is ignored (keeps existing).
+    value = data.get("motor_power")
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        record["motor_power"] = clamp_motor_power(value)
     if data.get("mode") in _VALID_MODES:
         record["mode"] = data["mode"]
     record.setdefault("mode", _DEFAULT_MODE)
