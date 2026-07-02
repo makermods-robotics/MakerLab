@@ -1662,16 +1662,46 @@ def upsert_robot(name: str, data: dict, create: bool = False):
     if not is_valid_robot_name(name):
         return JSONResponse(status_code=400, content={"status": "error", "message": "Invalid robot name"})
 
+    body = data or {}
+    existing = get_robot_record(name) or {}
+
+    # Mode is fixed at creation. A bimanual rig is a different machine (different
+    # robot_type on datasets, forced _left/_right calibration naming, different
+    # arms/cameras), and allowing a live toggle was a recurring stale-state bug
+    # source. On the patch path (no ?create=true) reject any body `mode` that
+    # differs from the stored value; a same-value echo stays a no-op. On create
+    # the mode in the body is what establishes it.
+    if (
+        not create
+        and existing
+        and body.get("mode") in ("single", "bimanual")
+        and body["mode"] != existing.get("mode", "single")
+    ):
+        return JSONResponse(
+            status_code=409,
+            content={
+                "status": "error",
+                "message": "Mode is fixed at creation — create a new robot for a bimanual (or single-arm) setup.",
+            },
+        )
+
+    # Effective mode for the slot/port conflict checks below. Because mode can't
+    # change on an existing record, this is the stored mode for patches and the
+    # body mode for creates (defaulting to single).
+    effective_mode = (
+        body["mode"]
+        if create and body.get("mode") in ("single", "bimanual")
+        else existing.get("mode", "single")
+    )
+
     # Reject assigning the same calibration to both same-side arms of a bimanual
     # robot — that would point two physical arms at one calibration. Only checked
-    # when the request actually touches a config slot or the mode, so unrelated
-    # edits (cameras, ports) aren't blocked even on a pre-existing conflict.
-    body = data or {}
-    slot_fields = ("mode", "leader_config", "follower_config", "right_leader_config", "right_follower_config")
-    if any(f in body for f in slot_fields):
-        existing = get_robot_record(name) or {}
-        prospective = {"mode": body["mode"] if body.get("mode") in ("single", "bimanual") else existing.get("mode", "single")}
-        for f in ("leader_config", "follower_config", "right_leader_config", "right_follower_config"):
+    # when the request actually touches a config slot, so unrelated edits
+    # (cameras, ports) aren't blocked even on a pre-existing conflict.
+    config_fields = ("leader_config", "follower_config", "right_leader_config", "right_follower_config")
+    if any(f in body for f in config_fields):
+        prospective = {"mode": effective_mode}
+        for f in config_fields:
             prospective[f] = body[f] if isinstance(body.get(f), str) else existing.get(f, "")
         side = config_slot_conflict(prospective)
         if side:
@@ -1685,12 +1715,11 @@ def upsert_robot(name: str, data: dict, create: bool = False):
             )
 
     # Reject assigning one serial port to more than one arm — each physical arm
-    # is its own USB device. Checked when the request touches a port or the mode.
-    port_fields = ("mode", "leader_port", "follower_port", "right_leader_port", "right_follower_port")
-    if any(f in body for f in port_fields):
-        existing = get_robot_record(name) or {}
-        prospective = {"mode": body["mode"] if body.get("mode") in ("single", "bimanual") else existing.get("mode", "single")}
-        for f in ("leader_port", "follower_port", "right_leader_port", "right_follower_port"):
+    # is its own USB device. Checked when the request touches a port.
+    port_field_names = ("leader_port", "follower_port", "right_leader_port", "right_follower_port")
+    if any(f in body for f in port_field_names):
+        prospective = {"mode": effective_mode}
+        for f in port_field_names:
             prospective[f] = body[f] if isinstance(body.get(f), str) else existing.get(f, "")
         dup_port = port_slot_conflict(prospective)
         if dup_port:
@@ -1702,20 +1731,6 @@ def upsert_robot(name: str, data: dict, create: bool = False):
                     "Each arm needs its own serial port.",
                 },
             )
-
-    # Switching to single mode retires the right arm — clear its stale ports so
-    # they don't linger as "taken" in the port picker, and its stale configs so
-    # the record doesn't silently keep pointing at right-arm calibrations that
-    # single mode never validates (is_robot_record_clean and the slot-conflict
-    # guards ignore right_* fields in single mode).
-    if (data or {}).get("mode") == "single":
-        data = {
-            **(data or {}),
-            "right_leader_port": "",
-            "right_follower_port": "",
-            "right_leader_config": "",
-            "right_follower_config": "",
-        }
 
     try:
         if create:

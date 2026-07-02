@@ -98,7 +98,7 @@ export const useRobots = () => {
   }, []);
 
   const createRobot = useCallback(
-    async (rawName: string): Promise<boolean> => {
+    async (rawName: string, mode: RobotMode = "single"): Promise<boolean> => {
       const name = rawName.trim();
       if (!name) {
         toast({ title: "Missing name", description: "Robot name cannot be empty.", variant: "destructive" });
@@ -112,7 +112,7 @@ export const useRobots = () => {
         const res = await fetchWithHeaders(`${baseUrl}/robots/${encodeURIComponent(name)}?create=true`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: "{}",
+          body: JSON.stringify({ mode }),
         });
         if (res.status === 409) {
           toast({
@@ -223,32 +223,6 @@ export const useRobots = () => {
     [baseUrl, fetchWithHeaders, toast]
   );
 
-  const setRobotMode = useCallback(
-    async (name: string, mode: RobotMode): Promise<boolean> => {
-      try {
-        const res = await fetchWithHeaders(`${baseUrl}/robots/${encodeURIComponent(name)}`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ mode }),
-        });
-        if (!res.ok) {
-          const text = await res.text();
-          toast({ title: "Failed to change mode", description: text, variant: "destructive" });
-          return false;
-        }
-        const data = await res.json();
-        if (data.robot) {
-          setRecords((prev) => ({ ...prev, [name]: data.robot }));
-        }
-        return true;
-      } catch (e) {
-        toast({ title: "Network error", description: String(e), variant: "destructive" });
-        return false;
-      }
-    },
-    [baseUrl, fetchWithHeaders, toast]
-  );
-
   const selectedRecord = useMemo(
     () => (selectedName ? records[selectedName] ?? null : null),
     [selectedName, records]
@@ -269,7 +243,6 @@ export const useRobots = () => {
     clearSelection,
     createRobot,
     renameRobot,
-    setRobotMode,
     deleteRobot,
   };
 };

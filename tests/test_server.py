@@ -176,45 +176,37 @@ def test_upsert_robot_clears_port_with_empty_string(client: TestClient, tmp_lero
     assert client.post("/robots/d", json={"leader_port": "/dev/b"}).status_code == 200
 
 
-def test_switch_to_single_mode_clears_right_arm_ports_and_configs(
-    client: TestClient, tmp_lerobot_home
-) -> None:
-    """Switching a bimanual robot to single mode retires the right arm: its
-    ports AND configs are blanked. Single mode never validates or displays the
-    right_* fields, so stale values would silently survive (a robot in single
-    mode carrying right_leader_config from its bimanual past) and its ports
-    would linger as "taken" in the port picker."""
-    client.post(
-        "/robots/bi2?create=true",
-        json={
-            "mode": "bimanual",
-            "leader_config": "L1",
-            "follower_config": "F1",
-            "right_leader_config": "L2",
-            "right_follower_config": "F2",
-            "leader_port": "/dev/a",
-            "follower_port": "/dev/b",
-            "right_leader_port": "/dev/c",
-            "right_follower_port": "/dev/d",
-        },
-    )
+@pytest.mark.parametrize("mode", ["single", "bimanual"])
+def test_create_robot_accepts_mode(client: TestClient, tmp_lerobot_home, mode: str) -> None:
+    """Mode is established at creation for both values."""
+    resp = client.post(f"/robots/created_{mode}?create=true", json={"mode": mode})
+    assert resp.status_code == 200
+    assert resp.json()["robot"]["mode"] == mode
 
-    resp = client.post("/robots/bi2", json={"mode": "single"})
+
+def test_upsert_robot_rejects_mode_change_on_existing_record(client: TestClient, tmp_lerobot_home) -> None:
+    """Mode is fixed at creation. A patch that flips the stored mode is a 409;
+    creating a new robot is the migration path instead."""
+    client.post("/robots/fixed?create=true", json={"mode": "single"})
+
+    resp = client.post("/robots/fixed", json={"mode": "bimanual"})
+    assert resp.status_code == 409
+    assert "fixed at creation" in resp.json()["message"]
+    # The stored mode is untouched by the rejected patch.
+    assert client.get("/robots/fixed").json()["robot"]["mode"] == "single"
+
+
+def test_upsert_robot_allows_same_mode_echo(client: TestClient, tmp_lerobot_home) -> None:
+    """Calibration write-backs echo the full record (including its current
+    mode); a same-value mode in the body must stay a no-op, not a 409."""
+    client.post("/robots/echo?create=true", json={"mode": "bimanual"})
+
+    # Echo the existing mode alongside a real edit — must succeed.
+    resp = client.post("/robots/echo", json={"mode": "bimanual", "leader_port": "/dev/a"})
     assert resp.status_code == 200
     robot = resp.json()["robot"]
-    assert robot["mode"] == "single"
-    for field in (
-        "right_leader_port",
-        "right_follower_port",
-        "right_leader_config",
-        "right_follower_config",
-    ):
-        assert robot[field] == "", f"{field} should be cleared on switch to single"
-    # The left arm is untouched.
-    assert robot["leader_config"] == "L1"
-    assert robot["follower_config"] == "F1"
+    assert robot["mode"] == "bimanual"
     assert robot["leader_port"] == "/dev/a"
-    assert robot["follower_port"] == "/dev/b"
 
 
 def _access_record(method: str, path: str, status: int) -> logging.LogRecord:

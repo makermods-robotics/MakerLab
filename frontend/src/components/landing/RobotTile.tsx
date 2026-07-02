@@ -24,11 +24,10 @@ interface RobotTileProps {
   availableNames: string[];
   isLoading: boolean;
   onSelect: (name: string) => void;
-  onCreateNew: (name: string) => Promise<boolean>;
+  onCreateNew: (name: string, mode: RobotMode) => Promise<boolean>;
   onConfigure: (name: string) => void;
   onTeleop: (robot: RobotRecord) => void;
   onRename: (oldName: string, newName: string) => Promise<boolean>;
-  onSetMode: (name: string, mode: RobotMode) => Promise<boolean>;
   onDelete: (name: string) => void;
 }
 
@@ -42,7 +41,6 @@ const RobotTile: React.FC<RobotTileProps> = ({
   onConfigure,
   onTeleop,
   onRename,
-  onSetMode,
   onDelete,
 }) => {
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -155,24 +153,11 @@ const RobotTile: React.FC<RobotTileProps> = ({
       {robot && (
         <div className="flex items-center gap-2">
           <span className="text-xs text-gray-400 shrink-0">Arms</span>
-          <div className="flex rounded-md border border-gray-700 overflow-hidden text-xs">
-            {(["single", "bimanual"] as const).map((m) => (
-              <button
-                key={m}
-                type="button"
-                onClick={() => {
-                  if (robot.mode !== m) onSetMode(robot.name, m);
-                }}
-                className={`px-3 py-1 transition-colors ${
-                  robot.mode === m
-                    ? "bg-blue-600 text-white"
-                    : "bg-gray-900 text-gray-400 hover:text-white"
-                }`}
-              >
-                {m === "single" ? "Single" : "Bimanual"}
-              </button>
-            ))}
-          </div>
+          {/* Mode is fixed at creation — display only. A bimanual rig is a
+              separate machine; migrating means creating a new robot. */}
+          <span className="rounded-md border border-gray-700 bg-gray-900 px-3 py-1 text-xs text-gray-200">
+            {robot.mode === "bimanual" ? "Bimanual" : "Single arm"}
+          </span>
         </div>
       )}
 

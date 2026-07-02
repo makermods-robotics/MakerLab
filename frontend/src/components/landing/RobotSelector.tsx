@@ -24,15 +24,29 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { RobotMode } from "@/hooks/useRobots";
 import { cn } from "@/lib/utils";
 
 interface RobotSelectorProps {
   selectedName: string | null;
   availableNames: string[];
   onSelect: (name: string) => void;
-  onCreateNew: (name: string) => Promise<boolean>;
+  onCreateNew: (name: string, mode: RobotMode) => Promise<boolean>;
   isLoading: boolean;
 }
+
+const MODE_OPTIONS: { value: RobotMode; label: string; description: string }[] = [
+  {
+    value: "single",
+    label: "Single arm",
+    description: "One leader + one follower",
+  },
+  {
+    value: "bimanual",
+    label: "Bimanual",
+    description: "Two leader/follower pairs (4 arms)",
+  },
+];
 
 const RobotSelector: React.FC<RobotSelectorProps> = ({
   selectedName,
@@ -45,6 +59,7 @@ const RobotSelector: React.FC<RobotSelectorProps> = ({
   const [query, setQuery] = useState("");
   const [createOpen, setCreateOpen] = useState(false);
   const [newName, setNewName] = useState("");
+  const [newMode, setNewMode] = useState<RobotMode>("single");
   const [creating, setCreating] = useState(false);
 
   const handlePickExisting = (name: string) => {
@@ -61,6 +76,7 @@ const RobotSelector: React.FC<RobotSelectorProps> = ({
     // carry it into the dialog.
     const seed = query.trim();
     setNewName(seed !== "" && !nameExists(seed) ? seed : "");
+    setNewMode("single");
     setOpen(false);
     setCreateOpen(true);
   };
@@ -75,10 +91,11 @@ const RobotSelector: React.FC<RobotSelectorProps> = ({
     try {
       // useRobots handles validation, API errors, and toasts; on success it
       // also selects the new robot. We only manage the dialog here.
-      const ok = await onCreateNew(trimmedNewName);
+      const ok = await onCreateNew(trimmedNewName, newMode);
       if (ok) {
         setCreateOpen(false);
         setNewName("");
+        setNewMode("single");
         setQuery("");
       }
     } finally {
@@ -162,14 +179,18 @@ const RobotSelector: React.FC<RobotSelectorProps> = ({
         open={createOpen}
         onOpenChange={(o) => {
           setCreateOpen(o);
-          if (!o) setNewName("");
+          if (!o) {
+            setNewName("");
+            setNewMode("single");
+          }
         }}
       >
         <DialogContent className="bg-gray-800 border-gray-700 text-white sm:max-w-md">
           <DialogHeader>
             <DialogTitle className="text-white">Create a new robot</DialogTitle>
             <DialogDescription className="text-gray-400">
-              Choose a name for the new robot.
+              Choose a name and arm layout. The layout is fixed once created — a
+              bimanual rig is a separate robot.
             </DialogDescription>
           </DialogHeader>
           <form
@@ -197,6 +218,45 @@ const RobotSelector: React.FC<RobotSelectorProps> = ({
                   A robot with this name already exists.
                 </p>
               )}
+            </div>
+            <div>
+              <Label className="text-gray-300">Arm layout</Label>
+              <div
+                role="radiogroup"
+                aria-label="Arm layout"
+                className="mt-1 grid grid-cols-2 gap-2"
+              >
+                {MODE_OPTIONS.map((opt) => {
+                  const selected = newMode === opt.value;
+                  return (
+                    <button
+                      key={opt.value}
+                      type="button"
+                      role="radio"
+                      aria-checked={selected}
+                      onClick={() => setNewMode(opt.value)}
+                      className={cn(
+                        "rounded-md border px-3 py-2 text-left transition-colors",
+                        selected
+                          ? "border-green-500 bg-green-500/10"
+                          : "border-gray-600 bg-gray-900 hover:border-gray-500"
+                      )}
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm font-medium text-white">
+                          {opt.label}
+                        </span>
+                        {selected && (
+                          <Check className="h-4 w-4 text-green-400" />
+                        )}
+                      </div>
+                      <p className="mt-0.5 text-xs text-gray-400">
+                        {opt.description}
+                      </p>
+                    </button>
+                  );
+                })}
+              </div>
             </div>
             <DialogFooter>
               <Button
