@@ -396,7 +396,7 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
         <Button
           size="sm"
           variant="outline"
-          className="w-full h-7 border-blue-500/50 text-blue-300 hover:bg-blue-900/20 hover:text-blue-200"
+          className="w-full h-7 border-blue-500/50 text-blue-700 hover:text-blue-800 dark:text-blue-300 hover:bg-blue-900/20 dark:hover:text-blue-200"
           disabled={assigning}
           onClick={assignToRobot}
         >
@@ -433,7 +433,7 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
           <DialogFooter className="flex gap-2 justify-end">
             <Button
               variant="outline"
-              className="border-slate-600 text-slate-300"
+              className="border-slate-600 text-slate-700 dark:text-slate-300"
               onClick={() => setRenameOpen(false)}
             >
               Cancel
@@ -475,7 +475,7 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
           <DialogFooter className="flex gap-2 justify-end">
             <Button
               variant="outline"
-              className="border-slate-600 text-slate-300"
+              className="border-slate-600 text-slate-700 dark:text-slate-300"
               onClick={() => setPendingDelete(null)}
             >
               Cancel

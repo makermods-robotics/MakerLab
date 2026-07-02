@@ -148,7 +148,7 @@ const ImportCalibrationButton: React.FC<ImportCalibrationButtonProps> = ({
           <DialogFooter className="flex gap-2 justify-end">
             <Button
               variant="outline"
-              className="border-slate-600 text-slate-300"
+              className="border-slate-600 text-slate-700 dark:text-slate-300"
               onClick={() => setOpen(false)}
             >
               Cancel

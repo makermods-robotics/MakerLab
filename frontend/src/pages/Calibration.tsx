@@ -1087,7 +1087,7 @@ const Calibration = () => {
                       onClick={() => setAutoCalPromptOpen(true)}
                       variant="outline"
                       disabled={!robotName || !deviceType || !port}
-                      className="w-full border-purple-500/50 text-purple-300 hover:bg-purple-900/20 hover:text-purple-200 rounded-full py-5"
+                      className="w-full border-purple-500/50 text-purple-700 hover:bg-purple-900/20 hover:text-purple-800 dark:text-purple-300 dark:hover:text-purple-200 rounded-full py-5"
                     >
                       <Wand2 className="w-5 h-5 mr-2" />
                       Auto-calibrate
@@ -1214,7 +1214,7 @@ const Calibration = () => {
                   <DialogFooter className="flex gap-2 justify-end">
                     <Button
                       variant="outline"
-                      className="border-slate-600 text-slate-300"
+                      className="border-slate-600 text-slate-700 dark:text-slate-300"
                       onClick={() => setAutoCalPromptOpen(false)}
                     >
                       Cancel
@@ -1246,7 +1246,7 @@ const Calibration = () => {
                   <DialogFooter className="flex gap-2 justify-end">
                     <Button
                       variant="outline"
-                      className="border-slate-600 text-slate-300"
+                      className="border-slate-600 text-slate-700 dark:text-slate-300"
                       onClick={() => setOverwritePromptOpen(false)}
                     >
                       Cancel

@@ -220,7 +220,7 @@ const Recording = () => {
     pollStatus();
     const statusInterval = setInterval(pollStatus, 1000);
     return () => clearInterval(statusInterval);
-  }, [recordingSessionStarted, recordingConfig, navigate, baseUrl, fetchWithHeaders]);
+  }, [recordingSessionStarted, recordingConfig, navigate, baseUrl, fetchWithHeaders, toast]);
 
   const formatTime = (seconds: number): string => {
     const mins = Math.floor(seconds / 60);
@@ -478,7 +478,7 @@ const Recording = () => {
           <Button
             onClick={() => navigate("/")}
             variant="outline"
-            className="border-gray-500 hover:border-gray-200 text-gray-300 hover:text-white"
+            className="border-gray-500 hover:border-gray-200 text-gray-700 hover:text-gray-900 dark:text-gray-300 dark:hover:text-white"
           >
             <ArrowLeft className="w-4 h-4 mr-2" />
             Back to Home

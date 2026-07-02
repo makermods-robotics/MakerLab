@@ -283,7 +283,7 @@ const Upload = () => {
             <Button
               onClick={() => navigate("/")}
               variant="outline"
-              className="border-gray-500 hover:border-gray-200 text-gray-300 hover:text-white"
+              className="border-gray-500 hover:border-gray-200 text-gray-700 hover:text-gray-900 dark:text-gray-300 dark:hover:text-white"
             >
               <ArrowLeft className="w-4 h-4 mr-2" />
               Back to Home
@@ -294,7 +294,7 @@ const Upload = () => {
               size="icon"
               disabled={isDeleting}
               aria-label="Delete dataset from disk"
-              className="border-red-500/40 text-red-400 hover:border-red-400 hover:text-red-300 hover:bg-red-500/10"
+              className="border-red-500/40 text-red-600 hover:text-red-700 dark:text-red-400 hover:border-red-400 dark:hover:text-red-300 hover:bg-red-500/10"
             >
               <Trash2 className="w-4 h-4" />
             </Button>
@@ -514,7 +514,7 @@ const Upload = () => {
                     onClick={handleSkipUpload}
                     disabled={isUploading}
                     variant="outline"
-                    className="border-gray-600 text-gray-300 hover:bg-gray-800 hover:text-white py-4 px-8 text-lg"
+                    className="border-gray-600 text-gray-700 dark:text-gray-300 hover:bg-gray-800 hover:text-white py-4 px-8 text-lg"
                   >
                     Skip Upload
                   </Button>
