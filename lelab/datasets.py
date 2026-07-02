@@ -161,6 +161,49 @@ def _read_task_strings(meta_dir: Path) -> list[str]:
     return []
 
 
+def _count_task_episodes(meta_dir: Path) -> dict[str, int]:
+    """Episodes per task string, from the per-episode ``tasks`` column.
+
+    Same mapping the recording picker uses (see ``handle_get_dataset_info`` in
+    record.py): each episode lists the task strings it uses, and an episode
+    counts once per distinct task. Read directly from the metadata files —
+    v3.0 keeps episode rows in ``meta/episodes/chunk-*/file-*.parquet`` (only
+    the ``tasks`` column is loaded, not the wide per-episode stats), v2.x in
+    ``meta/episodes.jsonl`` — so the endpoint stays a cheap file read instead
+    of a full ``LeRobotDataset`` load. Unreadable/absent episode metadata
+    degrades to an empty dict (counts render as 0).
+    """
+    counts: dict[str, int] = {}
+
+    episodes_dir = meta_dir / "episodes"
+    if episodes_dir.is_dir():
+        for parquet_path in sorted(episodes_dir.glob("**/*.parquet")):
+            try:
+                table = pq.read_table(parquet_path, columns=["tasks"])
+            except Exception as e:
+                logger.warning(f"Could not read {parquet_path}: {e}")
+                continue
+            for episode_tasks in table.column("tasks").to_pylist():
+                for task in set(episode_tasks or []):
+                    counts[str(task)] = counts.get(str(task), 0) + 1
+        return counts
+
+    jsonl_path = meta_dir / "episodes.jsonl"
+    if jsonl_path.is_file():
+        try:
+            for line in jsonl_path.read_text().splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                obj = json.loads(line)
+                for task in set(obj.get("tasks") or []):
+                    counts[str(task)] = counts.get(str(task), 0) + 1
+        except (OSError, ValueError) as e:
+            logger.warning(f"Could not read {jsonl_path}: {e}")
+
+    return counts
+
+
 def _dir_size_bytes(path: Path) -> int:
     """Total size of all files under `path`. Unreadable files are skipped."""
     total = 0
@@ -200,6 +243,12 @@ def get_local_dataset_info(repo_id: str) -> dict[str, Any] | None:
     features = info.get("features") or {}
     cameras = [key[len(CAMERA_FEATURE_PREFIX) :] for key in features if key.startswith(CAMERA_FEATURE_PREFIX)]
 
+    # Same {task, num_episodes} shape as record.py's handle_get_dataset_info.
+    task_counts = _count_task_episodes(path / "meta")
+    tasks = [
+        {"task": task, "num_episodes": task_counts.get(task, 0)} for task in _read_task_strings(path / "meta")
+    ]
+
     return {
         "repo_id": repo_id,
         "total_episodes": int(info.get("total_episodes") or 0),
@@ -207,7 +256,7 @@ def get_local_dataset_info(repo_id: str) -> dict[str, Any] | None:
         "fps": info.get("fps"),
         "robot_type": info.get("robot_type"),
         "cameras": cameras,
-        "tasks": _read_task_strings(path / "meta"),
+        "tasks": tasks,
         "size_bytes": _dir_size_bytes(path),
     }
 

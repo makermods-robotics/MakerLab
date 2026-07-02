@@ -20,6 +20,12 @@ export async function listDatasets(
   });
 }
 
+/** One task string with how many episodes use it (0 = count unavailable). */
+export interface DatasetTask {
+  task: string;
+  num_episodes: number;
+}
+
 export interface DatasetInfo {
   repo_id: string;
   total_episodes: number;
@@ -27,7 +33,7 @@ export interface DatasetInfo {
   fps: number | null;
   robot_type: string | null;
   cameras: string[];
-  tasks: string[];
+  tasks: DatasetTask[];
   size_bytes: number;
 }
 

@@ -164,6 +164,23 @@ def test_get_local_dataset_info_returns_full_details(
         pa.table({"task_index": [1, 0], "task": ["second task", "first task"]}),
         d / "meta" / "tasks.parquet",
     )
+    # v3.0 episode metadata: per-episode `tasks` column split across chunked
+    # parquet files — 18 episodes of "first task", 2 of "second task".
+    episodes_dir = d / "meta" / "episodes" / "chunk-000"
+    episodes_dir.mkdir(parents=True)
+    pq.write_table(
+        pa.table({"episode_index": list(range(15)), "tasks": [["first task"]] * 15}),
+        episodes_dir / "file-000.parquet",
+    )
+    pq.write_table(
+        pa.table(
+            {
+                "episode_index": list(range(15, 20)),
+                "tasks": [["first task"]] * 3 + [["second task"]] * 2,
+            }
+        ),
+        episodes_dir / "file-001.parquet",
+    )
     (d / "data").mkdir()
     (d / "data" / "file-000.parquet").write_bytes(b"x" * 1234)
 
@@ -174,7 +191,10 @@ def test_get_local_dataset_info_returns_full_details(
     assert result["fps"] == 30
     assert result["robot_type"] == "so_follower"
     assert result["cameras"] == ["wrist", "front"]
-    assert result["tasks"] == ["first task", "second task"]
+    assert result["tasks"] == [
+        {"task": "first task", "num_episodes": 18},
+        {"task": "second task", "num_episodes": 2},
+    ]
     # Directory walk covers data + meta files, so at least the data blob.
     assert result["size_bytes"] >= 1234
 
@@ -194,10 +214,41 @@ def test_get_local_dataset_info_reads_v2_tasks_jsonl(
         json.dumps({"task_index": 0, "task": "alpha"}),
     ]
     (d / "meta" / "tasks.jsonl").write_text("\n".join(lines))
+    # v2.x episode metadata: episodes.jsonl with per-episode `tasks` lists.
+    ep_lines = [
+        json.dumps({"episode_index": 0, "tasks": ["alpha"], "length": 50}),
+        json.dumps({"episode_index": 1, "tasks": ["beta"], "length": 50}),
+        json.dumps({"episode_index": 2, "tasks": ["beta"], "length": 50}),
+    ]
+    (d / "meta" / "episodes.jsonl").write_text("\n".join(ep_lines))
 
     result = get_local_dataset_info("old_format")
     assert result is not None
-    assert result["tasks"] == ["alpha", "beta"]
+    assert result["tasks"] == [
+        {"task": "alpha", "num_episodes": 1},
+        {"task": "beta", "num_episodes": 2},
+    ]
+
+
+def test_get_local_dataset_info_single_task_missing_episode_metadata(
+    tmp_lerobot_home: Path,
+) -> None:
+    """Task strings without episode metadata still render — counts degrade to 0."""
+    from lelab.datasets import get_local_dataset_info
+
+    d = _write_info(
+        tmp_lerobot_home,
+        "alice/solo",
+        {"total_episodes": 5, "total_frames": 500, "fps": 30, "features": {}},
+    )
+    pq.write_table(
+        pa.table({"task_index": [0], "task": ["only task"]}),
+        d / "meta" / "tasks.parquet",
+    )
+
+    result = get_local_dataset_info("alice/solo")
+    assert result is not None
+    assert result["tasks"] == [{"task": "only task", "num_episodes": 0}]
 
 
 def test_get_local_dataset_info_zero_episodes_and_no_cameras(

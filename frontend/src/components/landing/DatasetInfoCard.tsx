@@ -1,8 +1,13 @@
 import React, { useEffect, useState } from "react";
-import { AlertTriangle } from "lucide-react";
+import { AlertTriangle, ChevronDown } from "lucide-react";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 import { useApi } from "@/contexts/ApiContext";
 import { ApiError } from "@/lib/apiClient";
-import { DatasetInfo, getDatasetInfo } from "@/lib/replayApi";
+import { DatasetInfo, DatasetTask, getDatasetInfo } from "@/lib/replayApi";
 
 /** 16723 -> "16.7k", 950 -> "950" */
 const formatCount = (n: number): string => {
@@ -49,7 +54,53 @@ const Row: React.FC<{ label: string; children: React.ReactNode }> = ({
   </div>
 );
 
-const MAX_TASKS_SHOWN = 3;
+/**
+ * Tasks row content. One task renders inline (with its episode count when
+ * known); several render as a collapsible disclosure — closed it reads
+ * "N tasks", open it lists each task with its episode count right-aligned.
+ */
+const TaskList: React.FC<{ tasks: DatasetTask[] }> = ({ tasks }) => {
+  const [open, setOpen] = useState(false);
+
+  if (tasks.length === 1) {
+    const { task, num_episodes } = tasks[0];
+    return (
+      <span className="flex items-baseline gap-1.5">
+        <span className="min-w-0 truncate" title={task}>
+          {task}
+        </span>
+        {num_episodes > 0 && (
+          <span className="shrink-0 text-gray-500">· {num_episodes} ep</span>
+        )}
+      </span>
+    );
+  }
+
+  return (
+    <Collapsible open={open} onOpenChange={setOpen}>
+      <CollapsibleTrigger className="flex items-center gap-1 text-gray-300 hover:text-gray-100">
+        {tasks.length} tasks
+        <ChevronDown
+          className={`h-3 w-3 text-gray-500 transition-transform ${open ? "rotate-180" : ""}`}
+        />
+      </CollapsibleTrigger>
+      <CollapsibleContent>
+        <ul className="mt-1 space-y-0.5">
+          {tasks.map(({ task, num_episodes }) => (
+            <li key={task} className="flex items-baseline gap-2">
+              <span className="min-w-0 flex-1 truncate" title={task}>
+                {task}
+              </span>
+              <span className="shrink-0 text-gray-500">
+                {num_episodes} ep
+              </span>
+            </li>
+          ))}
+        </ul>
+      </CollapsibleContent>
+    </Collapsible>
+  );
+};
 
 interface DatasetInfoCardProps {
   repoId: string;
@@ -134,18 +185,7 @@ const DatasetInfoCard: React.FC<DatasetInfoCardProps> = ({ repoId }) => {
 
           {info.tasks.length > 0 && (
             <Row label="Tasks">
-              <span className="block">
-                {info.tasks.slice(0, MAX_TASKS_SHOWN).map((task) => (
-                  <span key={task} className="block truncate" title={task}>
-                    {task}
-                  </span>
-                ))}
-                {info.tasks.length > MAX_TASKS_SHOWN && (
-                  <span className="text-gray-500">
-                    +{info.tasks.length - MAX_TASKS_SHOWN} more
-                  </span>
-                )}
-              </span>
+              <TaskList tasks={info.tasks} />
             </Row>
           )}
 
