@@ -17,6 +17,7 @@ LocalJobRunner.start() (see plan, "Discovered issue")."""
 from __future__ import annotations
 
 import json as _json
+import os
 from pathlib import Path
 
 import pytest
@@ -404,6 +405,99 @@ def test_register_imported_rejects_unusable_source(tmp_path) -> None:
         reg.register_imported(str(empty))
 
 
+def test_rename_sets_display_name_and_persists(tmp_path) -> None:
+    """Rename is a metadata-only alias: trimmed, persisted to job.json, and the
+    immutable identity (id / name / output_dir) is untouched."""
+    from lelab.jobs import JobRegistry
+
+    model = tmp_path / "model"
+    _make_pretrained(model)
+    reg = JobRegistry(tmp_path / "root")
+    rec = reg.register_imported(str(model))
+    assert rec.display_name is None
+
+    renamed = reg.rename(rec.id, "  pick-and-place v2  ")
+    assert renamed.display_name == "pick-and-place v2"  # trimmed
+    assert renamed.id == rec.id
+    assert renamed.name == rec.name
+    assert renamed.output_dir == str(model.resolve())
+
+    # Round-trips through job.json on a fresh registry.
+    reg2 = JobRegistry(tmp_path / "root")
+    assert reg2.get(rec.id).display_name == "pick-and-place v2"
+
+
+def test_rename_rejects_empty_and_path_characters(tmp_path) -> None:
+    from lelab.jobs import JobRegistry
+
+    model = tmp_path / "model"
+    _make_pretrained(model)
+    reg = JobRegistry(tmp_path / "root")
+    rec = reg.register_imported(str(model))
+
+    with pytest.raises(ValueError, match="empty"):
+        reg.rename(rec.id, "   ")
+    with pytest.raises(ValueError, match="Invalid"):
+        reg.rename(rec.id, "evil/../name")
+    assert reg.get(rec.id).display_name is None  # nothing persisted
+
+
+def test_rename_unknown_job_raises(tmp_path) -> None:
+    from lelab.jobs import JobNotFoundError, JobRegistry
+
+    reg = JobRegistry(tmp_path / "root")
+    with pytest.raises(JobNotFoundError):
+        reg.rename("nope", "anything")
+
+
+def test_rename_allows_duplicate_aliases(tmp_path) -> None:
+    """Aliases are display-only (not file keys like calibration/robot names),
+    so uniqueness is deliberately NOT enforced."""
+    from lelab.jobs import JobRecord, JobRegistry
+    from lelab.train import TrainingRequest
+
+    reg = JobRegistry(tmp_path / "root")
+    for jid in ("A", "B"):
+        reg._records[jid] = JobRecord(
+            id=jid,
+            name=jid,
+            state="done",
+            config=TrainingRequest(dataset_repo_id="d"),
+            output_dir=str(reg._output_root / jid / "run"),
+            started_at=0.0,
+        )
+    reg.rename("A", "same alias")
+    reg.rename("B", "same alias")
+    assert reg.get("A").display_name == "same alias"
+    assert reg.get("B").display_name == "same alias"
+
+
+def test_job_json_without_display_name_loads_with_none(tmp_path) -> None:
+    """Registry files written before the alias field existed load fine, and a
+    subsequent rename persists the new field alongside the old ones."""
+    from lelab.jobs import JobRegistry
+
+    root = tmp_path / "root"
+    job_dir = root / "old-job"
+    job_dir.mkdir(parents=True)
+    meta = {
+        "id": "old-job",
+        "name": "ACT · user/ds",
+        "state": "done",
+        "config": {"dataset_repo_id": "user/ds", "policy_type": "act"},
+        "output_dir": str(job_dir / "run"),
+        "started_at": 1.0,
+    }
+    (job_dir / "job.json").write_text(_json.dumps(meta))
+
+    reg = JobRegistry(root)
+    assert reg.get("old-job").display_name is None
+
+    reg.rename("old-job", "legacy run")
+    data = _json.loads((job_dir / "job.json").read_text())
+    assert data["display_name"] == "legacy run"
+
+
 def test_register_imported_hub_repo(monkeypatch, tmp_path) -> None:
     from lelab.jobs import JobRegistry
 
@@ -411,7 +505,10 @@ def test_register_imported_hub_repo(monkeypatch, tmp_path) -> None:
         def list_repo_files(self, repo_id, repo_type):
             return ["config.json", "model.safetensors"]
 
-    monkeypatch.setattr("lelab.utils.hf_auth.shared_hf_api", lambda: FakeApi())
+    # Patch the symbol where jobs.py binds it (`from .utils.hf_auth import
+    # shared_hf_api`) — patching it in its home module has no effect on the
+    # already-bound name and the test would hit the network.
+    monkeypatch.setattr("lelab.jobs.shared_hf_api", lambda: FakeApi())
     reg = JobRegistry(tmp_path / "root")
     rec = reg.register_imported("user/some-model")
 
@@ -420,3 +517,227 @@ def test_register_imported_hub_repo(monkeypatch, tmp_path) -> None:
     assert rec.output_dir == ""
     cks = reg.list_checkpoints(rec.id)
     assert [c.ref for c in cks] == ["user/some-model@root"]
+
+
+def test_register_imported_local_dir_is_idempotent(tmp_path) -> None:
+    """Importing the same local dir twice returns the EXISTING record — same
+    id, display alias untouched, no second registry entry."""
+    from lelab.jobs import JobRegistry
+
+    model = tmp_path / "model"
+    _make_pretrained(model)
+    reg = JobRegistry(tmp_path / "root")
+    first = reg.register_imported(str(model))
+    reg.rename(first.id, "my import")
+
+    again = reg.register_imported(str(model), name="ignored on duplicate")
+    assert again.id == first.id
+    assert again.display_name == "my import"
+    assert len([r for r in reg.list(limit=100) if r.runner == "imported"]) == 1
+
+
+def test_register_imported_hub_repo_is_idempotent(monkeypatch, tmp_path) -> None:
+    from lelab.jobs import JobRegistry
+
+    class FakeApi:
+        def list_repo_files(self, repo_id, repo_type):
+            return ["config.json", "model.safetensors"]
+
+    monkeypatch.setattr("lelab.jobs.shared_hf_api", lambda: FakeApi())
+    reg = JobRegistry(tmp_path / "root")
+    first = reg.register_imported("user/some-model")
+    again = reg.register_imported("user/some-model")
+    assert again.id == first.id
+    assert len([r for r in reg.list(limit=100) if r.runner == "imported"]) == 1
+
+
+def test_find_imported_hub_id_compare_is_case_insensitive(monkeypatch, tmp_path) -> None:
+    """REVERSAL of the earlier exact-match choice, prompted by a real duplicate
+    that slipped through on a case-only difference: HF repo ids are practically
+    unique case-insensitively (the Hub redirects across casings), and the
+    failure mode of exact matching is silent duplicate cards."""
+    from lelab.jobs import JobRegistry
+
+    class FakeApi:
+        def list_repo_files(self, repo_id, repo_type):
+            return ["config.json"]
+
+    monkeypatch.setattr("lelab.jobs.shared_hf_api", lambda: FakeApi())
+    reg = JobRegistry(tmp_path / "root")
+    first = reg.register_imported("user/some-model")
+    assert reg.find_imported("user/some-model") is not None
+    assert reg.find_imported("User/Some-Model") is not None
+    assert reg.register_imported("USER/SOME-MODEL").id == first.id
+
+
+def test_register_imported_hub_url_normalizes_to_repo_id(monkeypatch, tmp_path) -> None:
+    """A pasted model-page URL is normalized to the bare repo id at the boundary
+    — both for storage (so checkpoint listing works) and for dedup."""
+    from lelab.jobs import JobRegistry
+
+    class FakeApi:
+        def list_repo_files(self, repo_id, repo_type):
+            assert repo_id == "user/some-model"  # bare id, never the pasted URL
+            return ["config.json"]
+
+    monkeypatch.setattr("lelab.jobs.shared_hf_api", lambda: FakeApi())
+    reg = JobRegistry(tmp_path / "root")
+    first = reg.register_imported("https://huggingface.co/user/some-model/")
+    assert first.hf_repo_id == "user/some-model"
+    assert reg.register_imported("user/some-model").id == first.id
+    assert reg.register_imported("  https://hf.co/user/some-model ").id == first.id
+    assert len([r for r in reg.list(limit=100) if r.runner == "imported"]) == 1
+
+
+def _case_variant_dir(path: Path) -> Path | None:
+    """A differently-cased spelling of `path` that still resolves to the same
+    directory — only possible on a case-insensitive filesystem (macOS default,
+    where the real bug happened). None on case-sensitive filesystems."""
+    variant = path.parent / path.name.swapcase()
+    try:
+        if str(variant) != str(path) and variant.is_dir() and os.path.samefile(variant, path):
+            return variant
+    except OSError:
+        pass
+    return None
+
+
+def test_find_imported_local_matches_case_variant_spelling(tmp_path) -> None:
+    """Regression from the real duplicate pair: the same directory imported as
+    '/Users/mokuroh54/…/smolvla_real_5k/pretrained_model' and
+    '/Users/Mokuroh54/…' (case-insensitive macOS filesystem; Path.resolve()
+    preserves the typed case) produced two cards, because identity was an
+    exact string compare. Identity is now filesystem identity (samefile)."""
+    from lelab.jobs import JobRegistry
+
+    model = tmp_path / "so101-real" / "smolvla_real_5k" / "pretrained_model"
+    _make_pretrained(model)
+    variant = _case_variant_dir(model)
+    if variant is None:
+        pytest.skip("requires a case-insensitive filesystem (the real bug's environment)")
+
+    reg = JobRegistry(tmp_path / "root")
+    first = reg.register_imported(str(model))
+    again = reg.register_imported(str(variant))
+    assert again.id == first.id
+    assert len([r for r in reg.list(limit=100) if r.runner == "imported"]) == 1
+
+
+def test_boot_sweep_collapses_real_case_variant_duplicate_pair(tmp_path) -> None:
+    """Fixture mirrors the real pair found in the live registry:
+      smolvla_imported_2026-06-27_16-19-02  name='smolvla 5k'
+        output_dir '…/mokuroh54/…/smolvla_real_5k/pretrained_model'
+      smolvla_imported_2026-07-02_14-24-15  name='Imported · pretrained_model'
+        output_dir '…/Mokuroh54/…' (same directory, different case)
+    The sweep groups local imports by device:inode, so the pair collapses to
+    the oldest record and the newer job.json-only dir is removed."""
+    from lelab.jobs import JobNotFoundError, JobRegistry
+
+    model = tmp_path / "so101-real" / "smolvla_real_5k" / "pretrained_model"
+    _make_pretrained(model)
+    variant = _case_variant_dir(model)
+    if variant is None:
+        pytest.skip("requires a case-insensitive filesystem (the real bug's environment)")
+
+    root = tmp_path / "root"
+    _write_imported_pointer(
+        root, "smolvla_imported_2026-06-27_16-19-02", str(model), started_at=1782548342.584353
+    )
+    _write_imported_pointer(
+        root, "smolvla_imported_2026-07-02_14-24-15", str(variant), started_at=1782973455.742018
+    )
+
+    reg = JobRegistry(root)
+    kept = reg.get("smolvla_imported_2026-06-27_16-19-02")
+    assert kept.output_dir == str(model)
+    with pytest.raises(JobNotFoundError):
+        reg.get("smolvla_imported_2026-07-02_14-24-15")
+    assert not (root / "smolvla_imported_2026-07-02_14-24-15").exists()
+
+
+def test_unique_job_id_suffixes_on_same_second_collision(tmp_path, monkeypatch) -> None:
+    """_generate_job_id has second-granularity timestamps; two different models
+    imported within the same second must not overwrite each other."""
+    from lelab import jobs as jobs_mod
+
+    monkeypatch.setattr(jobs_mod, "_generate_job_id", lambda p, d: "act_imported_T")
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    _make_pretrained(a)
+    _make_pretrained(b)
+    reg = jobs_mod.JobRegistry(tmp_path / "root")
+    r1 = reg.register_imported(str(a))
+    r2 = reg.register_imported(str(b))
+    assert r1.id == "act_imported_T"
+    assert r2.id == "act_imported_T-2"
+    assert {r.id for r in reg.list(limit=100)} == {r1.id, r2.id}
+
+
+def _write_imported_pointer(
+    root: Path, job_id: str, output_dir: str, started_at: float, display_name: str | None = None
+) -> Path:
+    """Lay out an on-disk imported pseudo-job dir (job.json only), the way
+    older lelab versions left duplicates behind before dedup-at-registration."""
+    job_dir = root / job_id
+    job_dir.mkdir(parents=True)
+    meta = {
+        "id": job_id,
+        "name": f"Imported · {job_id}",
+        "display_name": display_name,
+        "state": "done",
+        "config": {"dataset_repo_id": "(imported)", "policy_type": "act"},
+        "output_dir": output_dir,
+        "started_at": started_at,
+        "ended_at": started_at,
+        "runner": "imported",
+    }
+    (job_dir / "job.json").write_text(_json.dumps(meta))
+    return job_dir
+
+
+def test_boot_sweep_collapses_duplicate_imports_keeping_oldest(tmp_path) -> None:
+    """Pre-existing duplicate pointers collapse on load: oldest kept, the
+    newest duplicate's alias migrated onto it, duplicate job.json-only dirs
+    removed."""
+    from lelab.jobs import JobNotFoundError, JobRegistry
+
+    model = tmp_path / "model"
+    _make_pretrained(model)
+    root = tmp_path / "root"
+    _write_imported_pointer(root, "A", str(model.resolve()), started_at=1.0)
+    _write_imported_pointer(root, "B", str(model.resolve()), started_at=2.0, display_name="nice name")
+
+    reg = JobRegistry(root)
+    kept = reg.get("A")
+    assert kept.display_name == "nice name"  # migrated from the newer dup
+    with pytest.raises(JobNotFoundError):
+        reg.get("B")
+    assert not (root / "B").exists()  # contained only job.json → removed
+    # The migrated alias is persisted on the keeper.
+    assert _json.loads((root / "A" / "job.json").read_text())["display_name"] == "nice name"
+    # Idempotent: a fresh load sees one record and nothing left to collapse.
+    reg2 = JobRegistry(root)
+    assert reg2.get("A").display_name == "nice name"
+
+
+def test_boot_sweep_never_deletes_dirs_with_extra_content(tmp_path) -> None:
+    """A duplicate whose dir holds more than job.json is only dropped from the
+    in-memory map — its files stay on disk."""
+    from lelab.jobs import JobNotFoundError, JobRegistry
+
+    model = tmp_path / "model"
+    _make_pretrained(model)
+    root = tmp_path / "root"
+    _write_imported_pointer(root, "A", str(model.resolve()), started_at=1.0, display_name="keeper alias")
+    dup_dir = _write_imported_pointer(
+        root, "B", str(model.resolve()), started_at=2.0, display_name="dup alias"
+    )
+    (dup_dir / "extra.safetensors").write_text("")  # anything beyond job.json
+
+    reg = JobRegistry(root)
+    kept = reg.get("A")
+    assert kept.display_name == "keeper alias"  # keeper's own alias wins
+    with pytest.raises(JobNotFoundError):
+        reg.get("B")
+    assert (dup_dir / "job.json").exists()  # nothing deleted
+    assert (dup_dir / "extra.safetensors").exists()

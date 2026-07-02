@@ -80,6 +80,15 @@ class TrainingRequest(BaseModel):
     # needs the checkpoint's train_config.json to reconstruct the run).
     resume_from_job_id: str | None = None
     resume_from_step: int | None = None
+    # Set by the "Fine-tune" flow: start a FRESH run (fresh optimizer, step 0)
+    # whose weights are initialized from an imported/existing checkpoint. Unlike
+    # resume, this needs no optimizer/step state — weights-only is exactly the
+    # point. The UI picks a source + step; JobRegistry resolves them into
+    # `policy_pretrained_path` (the checkpoint's pretrained_model dir or Hub ref
+    # that lerobot's --policy.pretrained_path accepts).
+    finetune_from_job_id: str | None = None
+    finetune_from_step: int | None = None
+    policy_pretrained_path: str | None = None
     job_name: str | None = None
 
     # Weights & Biases
@@ -168,6 +177,13 @@ def build_training_command(
 
     # Policy
     cmd.extend(["--policy.type", request.policy_type])
+    # Fine-tune: initialize weights (+ processors) from an existing checkpoint.
+    # This is a normal FRESH run (--resume false below) — lerobot loads only the
+    # weights via pretrained_path, starting a new optimizer at step 0. Equals
+    # form (like config_path) to be safe against value parsing. Never emitted on
+    # the resume branch above.
+    if request.policy_pretrained_path:
+        cmd.append(f"--policy.pretrained_path={request.policy_pretrained_path}")
 
     # Core training params
     cmd.extend(["--steps", str(request.steps)])

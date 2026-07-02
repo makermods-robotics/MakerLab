@@ -42,6 +42,12 @@ export interface TrainingRequest {
   // resume from. The backend resolves these into the checkpoint's config_path.
   resume_from_job_id?: string;
   resume_from_step?: number;
+  // Set by the "Fine-tune" flow: start a fresh run whose weights are init'd
+  // from an imported/existing checkpoint. The backend resolves these into
+  // policy_pretrained_path (which it also accepts directly).
+  finetune_from_job_id?: string;
+  finetune_from_step?: number;
+  policy_pretrained_path?: string;
   wandb_enable: boolean;
   wandb_project?: string;
   wandb_entity?: string;
@@ -62,6 +68,9 @@ export interface TrainingRequest {
 export interface JobRecord {
   id: string;
   name: string;
+  // User-set display alias (rename is metadata-only; the id / output dir /
+  // hub repo id never change). Null/absent ⇒ show `name`.
+  display_name?: string | null;
   state: JobState;
   config: TrainingRequest;
   output_dir: string;
@@ -182,16 +191,41 @@ export async function startTrainingJob(
   }
 }
 
+// Importing an already-registered source is idempotent: the backend returns
+// the EXISTING record with `already_imported: true` instead of a new entry.
+export type ImportModelResult = JobRecord & { already_imported?: boolean };
+
 export async function importModel(
   baseUrl: string,
   fetcher: Fetcher,
   source: string,
   name?: string,
-): Promise<JobRecord> {
-  return apiRequest<JobRecord>(baseUrl, fetcher, "/jobs/import", {
+): Promise<ImportModelResult> {
+  return apiRequest<ImportModelResult>(baseUrl, fetcher, "/jobs/import", {
     method: "POST",
     body: name ? { source, name } : { source },
     action: "Import model",
+  });
+}
+
+/** The name to display for a job: the user's alias, falling back to the
+ * original (auto-generated or import-time) name. */
+export function jobDisplayName(job: JobRecord): string {
+  return job.display_name?.trim() || job.name;
+}
+
+/** Set a job's display alias. Metadata-only — the job id, output dir, and
+ * hub repo id are immutable identity and never change on rename. */
+export async function renameJob(
+  baseUrl: string,
+  fetcher: Fetcher,
+  id: string,
+  newName: string,
+): Promise<JobRecord> {
+  return apiRequest<JobRecord>(baseUrl, fetcher, `/jobs/${id}/rename`, {
+    method: "POST",
+    body: { new_name: newName },
+    action: "Rename job",
   });
 }
 

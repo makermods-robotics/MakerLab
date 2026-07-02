@@ -15,14 +15,17 @@
 import asyncio
 import contextlib
 import glob
+import io
 import json
 import logging
 import os
 import queue
+import re
 import subprocess
 import sys
 import threading
 import time
+import zipfile
 from pathlib import Path
 from typing import Any, Literal
 
@@ -39,21 +42,21 @@ from starlette.types import Scope
 from lerobot.policies.factory import make_policy_config
 
 from . import datasets as dataset_browser
-from .merge import MergeRequest, handle_merge_status, handle_start_merge
 
 # Import our custom calibration functionality
 from .auto_calibrate import AutoCalibrationRequest, auto_calibration_manager
 from .calibrate import CalibrationRequest, calibration_manager
 from .identify import identify_arm_by_motion
-from .motor_power import read_supply_voltage
-from .wiggle import wiggle_gripper
 from .jobs import (
     JobAlreadyRunningError,
     JobNotFoundError,
     JobNotRunningError,
     JobTarget,
+    _list_local_checkpoints,
     job_registry,
 )
+from .merge import MergeRequest, handle_merge_status, handle_start_merge
+from .motor_power import read_supply_voltage
 
 # Import our custom recording functionality
 from .record import (
@@ -125,6 +128,7 @@ from .utils.system import (
     handle_install_wandb_extra_status,
     warn_if_cuda_mismatch,
 )
+from .wiggle import wiggle_gripper
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -643,11 +647,23 @@ class ImportModelRequest(BaseModel):
 
 @app.post("/jobs/import", status_code=201)
 def import_model(body: ImportModelRequest):
-    """Register an external model (local dir or HF repo) as a pseudo-job."""
+    """Register an external model (local dir or HF repo) as a pseudo-job.
+
+    Importing an already-registered source is idempotent: the registry
+    returns the EXISTING record (id and display alias preserved), and the
+    response carries `already_imported: true` with a 200 (not 201) so the
+    frontend can say "already imported" instead of pretending a new entry
+    was created."""
     try:
-        return job_registry.register_imported(body.source, body.name)
+        existing = job_registry.find_imported(body.source)
+        record = job_registry.register_imported(body.source, body.name)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if existing is not None and existing.id == record.id:
+        payload = record.model_dump(mode="json")
+        payload["already_imported"] = True
+        return JSONResponse(status_code=200, content=payload)
+    return record
 
 
 @app.get("/jobs")
@@ -796,6 +812,84 @@ def get_checkpoint_policy_config(job_id: str, step: int):
         raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found") from exc
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/jobs/{job_id}/checkpoints/{step}/download")
+def download_checkpoint(job_id: str, step: int):
+    """Stream a zip of a local checkpoint's `pretrained_model/` directory.
+
+    This bundles the portable, importable model (config.json + weights +
+    pre/post-processors) — NOT the large `training_state/` optimizer dir.
+    Hub-hosted models are downloadable from their HF page, so only local runs
+    are supported here.
+    """
+    try:
+        record = job_registry.get(job_id)
+    except JobNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found") from exc
+
+    if record.runner != "local":
+        raise HTTPException(
+            status_code=400,
+            detail="Only local checkpoints can be downloaded; Hub models are available on their HF page.",
+        )
+
+    # The pretrained_model dir comes from _list_local_checkpoints (which resolves
+    # it under record.output_dir/checkpoints/<step>), not from user input, so
+    # path traversal isn't a concern. Match on the int step, never a raw path.
+    checkpoint = next((c for c in _list_local_checkpoints(record.output_dir) if c.step == step), None)
+    if checkpoint is None:
+        raise HTTPException(status_code=404, detail=f"Job {job_id!r} has no checkpoint at step {step}")
+
+    pretrained_dir = Path(checkpoint.ref)
+
+    buffer = io.BytesIO()
+    # safetensors weights are already incompressible, so DEFLATE would burn CPU
+    # for ~no gain; store uncompressed.
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_STORED) as zf:
+        for path in sorted(pretrained_dir.rglob("*")):
+            if path.is_file():
+                zf.write(path, arcname=path.relative_to(pretrained_dir).as_posix())
+    buffer.seek(0)
+
+    # Build a filesystem-safe filename from the job's display alias (falling
+    # back to its name) + step, then to the job id if sanitising leaves
+    # nothing usable.
+    safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", record.display_name or record.name).strip("_")
+    if not safe_name:
+        safe_name = job_id
+    filename = f"{safe_name}_step_{step}.zip"
+
+    logger.info("Downloading checkpoint for job %s at step %d", job_id, step)
+
+    return Response(
+        content=buffer.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+class RenameJobBody(BaseModel):
+    new_name: str
+
+
+@app.post("/jobs/{job_id}/rename")
+def rename_job(job_id: str, body: RenameJobBody):
+    """Set a job's display alias (shown in place of the auto-generated name).
+
+    Metadata-only: never moves the output directory or rewrites the run id /
+    hub repo id — those are the job's immutable identity (resume lineage,
+    imported-model dedup, and remote HF/W&B names key off them). Validation
+    (trim, reject empty, is_valid-style character guard) lives in
+    JobRegistry.rename; unlike calibration/robot renames, aliases are
+    display-only and need not be unique.
+    """
+    try:
+        return job_registry.rename(job_id, body.new_name)
+    except JobNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

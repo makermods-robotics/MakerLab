@@ -2,7 +2,16 @@ import React, { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { JobRecord } from "@/lib/jobsApi";
+import { Input } from "@/components/ui/input";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { JobRecord, jobDisplayName, renameJob } from "@/lib/jobsApi";
 import {
   Square,
   X,
@@ -11,11 +20,14 @@ import {
   Loader2,
   XCircle,
   ExternalLink,
+  Pencil,
   Play,
   FastForward,
   Download,
+  Sparkles,
 } from "lucide-react";
 import { useApi } from "@/contexts/ApiContext";
+import { useToast } from "@/hooks/use-toast";
 import { JobCheckpoint, listJobCheckpoints } from "@/lib/checkpointsApi";
 import CheckpointDropdown from "@/components/jobs/CheckpointDropdown";
 import PolicyExtraDialog from "@/components/training/PolicyExtraDialog";
@@ -25,6 +37,8 @@ interface Props {
   onStop: (id: string) => void;
   onDelete: (id: string) => void;
   onPlay: (job: JobRecord, step: number) => void;
+  // Called after a successful rename so the parent can refetch the list.
+  onRenamed?: () => void;
   // Runs this job was resumed from, nearest-parent first. Rendered nested and
   // hidden from the top-level list so a resumed lineage reads as one entry.
   ancestors?: JobRecord[];
@@ -61,14 +75,19 @@ const JobCard: React.FC<Props> = ({
   onStop,
   onDelete,
   onPlay,
+  onRenamed,
   ancestors = [],
 }) => {
   const navigate = useNavigate();
   const { baseUrl, fetchWithHeaders } = useApi();
+  const { toast } = useToast();
   const present = statePresentation[job.state];
   const Icon = present.Icon;
   const isRunning = job.state === "running";
   const isImported = job.runner === "imported";
+  // Alias-aware display name; the true identity (run id / hub repo id) stays
+  // visible as muted subtext when an alias is set.
+  const displayName = jobDisplayName(job);
   const importedSource = job.hf_repo_id || job.output_dir;
   const stateLabel = isImported ? "Imported" : present.label;
   const isStarting = isRunning && job.metrics.total_steps === 0;
@@ -107,6 +126,48 @@ const JobCard: React.FC<Props> = ({
     installHint: string;
   } | null>(null);
   const [extraDialogOpen, setExtraDialogOpen] = useState(false);
+
+  // Rename dialog (mirrors CalibrationLibrary's rename UI). Sets a display
+  // alias only — the run id / output dir / hub repo id never change.
+  const [renameOpen, setRenameOpen] = useState(false);
+  const [renameValue, setRenameValue] = useState("");
+  const [renameError, setRenameError] = useState<string | null>(null);
+  const [renaming, setRenaming] = useState(false);
+
+  const openRename = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setRenameValue(displayName);
+    setRenameError(null);
+    setRenameOpen(true);
+  };
+
+  const doRename = async () => {
+    const next = renameValue.trim();
+    if (!next) {
+      setRenameError("Name cannot be empty.");
+      return;
+    }
+    if (next === displayName) {
+      setRenameOpen(false);
+      return;
+    }
+    setRenaming(true);
+    setRenameError(null);
+    try {
+      await renameJob(baseUrl, fetchWithHeaders, job.id, next);
+      toast({
+        title: "Model renamed",
+        description: `"${displayName}" → "${next}".`,
+      });
+      setRenameOpen(false);
+      onRenamed?.();
+    } catch (e) {
+      // 400/404 keep the dialog open with the message for a retry.
+      setRenameError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRenaming(false);
+    }
+  };
 
   // Key ancestors by id+count so the frequent list refreshes (which hand us new
   // array refs) don't refetch unless the lineage actually changed.
@@ -240,7 +301,7 @@ const JobCard: React.FC<Props> = ({
         resume: {
           jobId: selectedJob.id,
           step: selectedStep,
-          name: selectedJob.name,
+          name: jobDisplayName(selectedJob),
           datasetRepoId: selectedJob.config.dataset_repo_id,
           policyType: selectedJob.config.policy_type,
           sourceSteps: selectedJob.config.steps,
@@ -249,6 +310,68 @@ const JobCard: React.FC<Props> = ({
         },
       },
     });
+  };
+
+  // Fine-tune: start a FRESH run whose weights are initialized from this
+  // (imported) model's checkpoint. Unlike Continue (which needs optimizer/step
+  // state and is local-only), fine-tuning works from weights-only imports —
+  // which is exactly what imported models are. Gate on an imported source with
+  // a selectable checkpoint.
+  const canFinetune =
+    selectedJob.runner === "imported" &&
+    !isRunning &&
+    lineageCheckpoints.length > 0 &&
+    selectedStep != null;
+
+  const handleFinetune = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (selectedStep == null) return;
+    navigate("/training", {
+      state: {
+        finetune: {
+          jobId: selectedJob.id,
+          step: selectedStep,
+          name: jobDisplayName(selectedJob),
+          policyType: selectedJob.config.policy_type,
+        },
+      },
+    });
+  };
+
+  // A local checkpoint can be exported as a zip while training continues, so
+  // (unlike Continue) this doesn't gate on !isRunning.
+  const canDownload =
+    selectedJob.runner === "local" &&
+    lineageCheckpoints.length > 0 &&
+    selectedStep != null;
+
+  const handleDownload = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (selectedStep == null) return;
+    try {
+      const res = await fetchWithHeaders(
+        `${baseUrl}/jobs/${selectedJob.id}/checkpoints/${selectedStep}/download`,
+      );
+      if (!res.ok) {
+        toast({ title: "Download failed", variant: "destructive" });
+        return;
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${jobDisplayName(selectedJob)}_step_${selectedStep}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      toast({
+        title: "Download failed",
+        description: String(err),
+        variant: "destructive",
+      });
+    }
   };
 
   const showProgressBar = isRunning;
@@ -274,43 +397,66 @@ const JobCard: React.FC<Props> = ({
             />
             {stateLabel}
           </div>
-          {job.runner === "hf_cloud" && job.hf_job_url ? (
+          <div className="flex items-center gap-0.5">
             <Button
               variant="ghost"
               size="icon"
-              asChild
+              onClick={openRename}
               className="h-7 w-7 text-slate-400 hover:text-white"
-              aria-label="Open Hub job page"
+              aria-label="Rename model"
+              title="Rename"
             >
-              <a
-                href={job.hf_job_url}
-                target="_blank"
-                rel="noopener noreferrer"
-                onClick={(e) => e.stopPropagation()}
+              <Pencil className="w-3.5 h-3.5" />
+            </Button>
+            {job.runner === "hf_cloud" && job.hf_job_url ? (
+              <Button
+                variant="ghost"
+                size="icon"
+                asChild
+                className="h-7 w-7 text-slate-400 hover:text-white"
+                aria-label="Open Hub job page"
               >
-                <ExternalLink className="w-3.5 h-3.5" />
-              </a>
-            </Button>
-          ) : (
-            <Button
-              variant="ghost"
-              size="icon"
-              onClick={handleAction}
-              className="h-7 w-7 text-slate-400 hover:text-white"
-              aria-label={isRunning ? "Stop job" : "Delete job"}
-            >
-              {isRunning ? (
-                <Square className="w-3.5 h-3.5" />
-              ) : (
-                <X className="w-3.5 h-3.5" />
-              )}
-            </Button>
-          )}
+                <a
+                  href={job.hf_job_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <ExternalLink className="w-3.5 h-3.5" />
+                </a>
+              </Button>
+            ) : (
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={handleAction}
+                className="h-7 w-7 text-slate-400 hover:text-white"
+                aria-label={isRunning ? "Stop job" : "Delete job"}
+              >
+                {isRunning ? (
+                  <Square className="w-3.5 h-3.5" />
+                ) : (
+                  <X className="w-3.5 h-3.5" />
+                )}
+              </Button>
+            )}
+          </div>
         </div>
         <div>
-          <div className="text-white font-semibold truncate" title={job.name}>
-            {job.name}
+          <div
+            className="text-white font-semibold truncate"
+            title={displayName}
+          >
+            {displayName}
           </div>
+          {/* When aliased, keep the true identity visible: the run id for
+              trainings (imported models already show their repo id / path in
+              the subtitle below). */}
+          {!isImported && job.display_name ? (
+            <div className="text-[11px] text-slate-500 truncate" title={job.id}>
+              {job.id}
+            </div>
+          ) : null}
           {/* Imported subtitles are file paths — truncate the *start* (rtl
               flips the ellipsis to the left) so the more useful tail stays
               visible. The leading LRM keeps the path's first "/" from being
@@ -337,7 +483,7 @@ const JobCard: React.FC<Props> = ({
           </div>
         ) : null}
         {showInferenceRow ? (
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <CheckpointDropdown
               checkpoints={checkpoints}
               selectedStep={selectedStep}
@@ -356,10 +502,34 @@ const JobCard: React.FC<Props> = ({
                 size="sm"
                 variant="outline"
                 onClick={handleContinue}
-                className="h-8 gap-1 border-sky-500/50 text-sky-300 hover:bg-sky-500/10"
+                className="h-8 gap-1 border-sky-500/50 text-sky-700 dark:text-sky-300 hover:bg-sky-500/10"
                 aria-label="Continue training from this checkpoint"
               >
                 <FastForward className="w-3.5 h-3.5" /> Continue
+              </Button>
+            ) : null}
+            {canFinetune ? (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={handleFinetune}
+                className="h-8 gap-1 border-violet-500/50 text-violet-700 dark:text-violet-300 hover:bg-violet-500/10"
+                aria-label="Fine-tune a new run from this model's weights"
+                title="Fine-tune a new run from this model's weights"
+              >
+                <Sparkles className="w-3.5 h-3.5" /> Fine-tune
+              </Button>
+            ) : null}
+            {canDownload ? (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={handleDownload}
+                className="h-8 gap-1 border-slate-500/50 text-slate-700 dark:text-slate-300 hover:bg-slate-500/10"
+                aria-label="Download this checkpoint"
+                title="Download this checkpoint"
+              >
+                <Download className="w-3.5 h-3.5" /> Download
               </Button>
             ) : null}
           </div>
@@ -372,13 +542,68 @@ const JobCard: React.FC<Props> = ({
               e.stopPropagation();
               setExtraDialogOpen(true);
             }}
-            className="h-8 gap-1.5 border-amber-500/50 text-amber-300 hover:bg-amber-500/10"
+            className="h-8 gap-1.5 border-amber-500/50 text-amber-700 dark:text-amber-300 hover:bg-amber-500/10"
           >
             <Download className="w-3.5 h-3.5" /> Install{" "}
             {missingExtra.installTarget}
           </Button>
         ) : null}
       </CardContent>
+      <Dialog open={renameOpen} onOpenChange={setRenameOpen}>
+        <DialogContent
+          className="bg-slate-900 border-slate-800 text-white"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <DialogHeader>
+            <DialogTitle>Rename model</DialogTitle>
+            <DialogDescription className="text-slate-400">
+              Sets a display name only — the underlying{" "}
+              {isImported && job.hf_repo_id ? "Hub repo" : "run"} (
+              <span className="font-mono text-slate-300">
+                {isImported ? importedSource : job.id}
+              </span>
+              ) is not moved or changed.
+            </DialogDescription>
+          </DialogHeader>
+          <Input
+            value={renameValue}
+            onChange={(e) => {
+              setRenameValue(e.target.value);
+              setRenameError(null);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                void doRename();
+              }
+            }}
+            autoFocus
+            placeholder="New name"
+            className="bg-slate-800 border-slate-700 text-white"
+          />
+          {renameError && <p className="text-sm text-red-400">{renameError}</p>}
+          <DialogFooter className="flex gap-2 justify-end">
+            <Button
+              variant="outline"
+              className="border-slate-600 text-slate-700 dark:text-slate-300"
+              onClick={() => setRenameOpen(false)}
+            >
+              Cancel
+            </Button>
+            <Button
+              className="bg-blue-600 hover:bg-blue-700 text-white"
+              disabled={
+                renaming ||
+                !renameValue.trim() ||
+                renameValue.trim() === displayName
+              }
+              onClick={doRename}
+            >
+              {renaming ? "Renaming…" : "Rename"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       {missingExtra ? (
         <PolicyExtraDialog
           open={extraDialogOpen}

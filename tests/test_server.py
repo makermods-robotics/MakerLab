@@ -396,6 +396,8 @@ def test_import_model_route_returns_record(client, monkeypatch) -> None:
     }
     from lelab.jobs import JobRecord
 
+    # No pre-existing entry for this source → fresh 201 path.
+    monkeypatch.setattr(server.job_registry, "find_imported", lambda source: None)
     monkeypatch.setattr(
         server.job_registry,
         "register_imported",
@@ -404,6 +406,38 @@ def test_import_model_route_returns_record(client, monkeypatch) -> None:
     resp = client.post("/jobs/import", json={"source": "/tmp/model"})
     assert resp.status_code == 201
     assert resp.json()["runner"] == "imported"
+    assert "already_imported" not in resp.json()
+
+
+def test_import_model_route_flags_duplicate_with_200(client, monkeypatch) -> None:
+    """Re-importing an already-registered source returns the EXISTING record
+    with already_imported=true and a 200 (not 201)."""
+    from lelab import server
+    from lelab.jobs import JobRecord
+
+    existing = JobRecord(
+        id="act_imported_x",
+        name="Imported · model",
+        display_name="my alias",
+        state="done",
+        config={"dataset_repo_id": "(imported)", "policy_type": "act"},
+        output_dir="/tmp/model",
+        started_at=1.0,
+        ended_at=1.0,
+        runner="imported",
+    )
+    monkeypatch.setattr(server.job_registry, "find_imported", lambda source: existing)
+    monkeypatch.setattr(
+        server.job_registry,
+        "register_imported",
+        lambda source, name=None: existing,
+    )
+    resp = client.post("/jobs/import", json={"source": "/tmp/model"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["already_imported"] is True
+    assert body["id"] == "act_imported_x"
+    assert body["display_name"] == "my alias"  # alias preserved on re-import
 
 
 def test_import_model_route_maps_value_error_to_400(client, monkeypatch) -> None:
@@ -412,7 +446,58 @@ def test_import_model_route_maps_value_error_to_400(client, monkeypatch) -> None
     def boom(source, name=None):
         raise ValueError("No usable model at '/tmp/x'")
 
+    monkeypatch.setattr(server.job_registry, "find_imported", lambda source: None)
     monkeypatch.setattr(server.job_registry, "register_imported", boom)
     resp = client.post("/jobs/import", json={"source": "/tmp/x"})
     assert resp.status_code == 400
     assert "No usable model" in resp.json()["detail"]
+
+
+def test_rename_job_route_returns_updated_record(client, monkeypatch) -> None:
+    from lelab import server
+    from lelab.jobs import JobRecord
+
+    fake = {
+        "id": "act_ds_x",
+        "name": "ACT · user/ds",
+        "display_name": "my run",
+        "state": "done",
+        "config": {"dataset_repo_id": "user/ds", "policy_type": "act"},
+        "output_dir": "/tmp/run",
+        "started_at": 1.0,
+    }
+    seen = {}
+
+    def fake_rename(job_id, new_name):
+        seen["args"] = (job_id, new_name)
+        return JobRecord(**fake)
+
+    monkeypatch.setattr(server.job_registry, "rename", fake_rename)
+    resp = client.post("/jobs/act_ds_x/rename", json={"new_name": "my run"})
+    assert resp.status_code == 200
+    assert resp.json()["display_name"] == "my run"
+    assert seen["args"] == ("act_ds_x", "my run")
+
+
+def test_rename_job_route_maps_not_found_to_404(client, monkeypatch) -> None:
+    from lelab import server
+    from lelab.jobs import JobNotFoundError
+
+    def boom(job_id, new_name):
+        raise JobNotFoundError(job_id)
+
+    monkeypatch.setattr(server.job_registry, "rename", boom)
+    resp = client.post("/jobs/nope/rename", json={"new_name": "x"})
+    assert resp.status_code == 404
+
+
+def test_rename_job_route_maps_value_error_to_400(client, monkeypatch) -> None:
+    from lelab import server
+
+    def boom(job_id, new_name):
+        raise ValueError("Display name cannot be empty.")
+
+    monkeypatch.setattr(server.job_registry, "rename", boom)
+    resp = client.post("/jobs/act_ds_x/rename", json={"new_name": "   "})
+    assert resp.status_code == 400
+    assert "empty" in resp.json()["detail"]
