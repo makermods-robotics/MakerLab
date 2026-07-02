@@ -15,10 +15,15 @@
 
 from __future__ import annotations
 
+import logging
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
+
+import lelab.server as server_mod
+from lelab.utils import config as cfg
 
 # A browser sends an Accept header that prefers HTML on navigations/hard-reloads.
 BROWSER_ACCEPT = {"accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"}
@@ -81,9 +86,51 @@ def test_delete_calibration_config_rejects_unsafe_name(client: TestClient, unsaf
     assert "Invalid configuration name" in body["message"]
 
 
-def test_upsert_robot_rejects_same_side_config_conflict(
-    client: TestClient, tmp_lerobot_home
+def test_delete_in_use_calibration_config_unassigns_robots(
+    client: TestClient, tmp_lerobot_home, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Deleting an in-use config is ALLOWED; the referencing robots are
+    unassigned (arm returns to "needs calibration") and reported back."""
+    robots_dir = tmp_lerobot_home / "robots"
+    robots_dir.mkdir(exist_ok=True)
+    monkeypatch.setattr(cfg, "ROBOTS_PATH", str(robots_dir))
+    # server.py binds LEADER_CONFIG_PATH at import; repoint it at the tmp dir.
+    monkeypatch.setattr(server_mod, "LEADER_CONFIG_PATH", cfg.LEADER_CONFIG_PATH)
+
+    config_file = Path(cfg.LEADER_CONFIG_PATH) / "mycal.json"
+    config_file.write_text("{}")
+    cfg.save_robot_record("armA", {"mode": "single", "leader_config": "mycal"}, allow_create=True)
+
+    resp = client.delete("/calibration-configs/teleop/mycal")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["success"] is True
+    assert body["unassigned"] == [{"robot": "armA", "fields": ["leader_config"]}]
+    assert "armA" in body["message"]
+    # The file is gone (this dir IS where lerobot loads calibrations from, so
+    # no stale copy can keep working) and the record is unassigned + dirty.
+    assert not config_file.exists()
+    record = cfg.get_robot_record("armA")
+    assert record["leader_config"] == ""
+    assert cfg.is_robot_record_clean(record) is False
+
+
+def test_delete_unused_calibration_config_reports_no_unassignments(
+    client: TestClient, tmp_lerobot_home, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(server_mod, "LEADER_CONFIG_PATH", cfg.LEADER_CONFIG_PATH)
+    config_file = Path(cfg.LEADER_CONFIG_PATH) / "spare.json"
+    config_file.write_text("{}")
+
+    resp = client.delete("/calibration-configs/teleop/spare")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["success"] is True
+    assert body["unassigned"] == []
+    assert not config_file.exists()
+
+
+def test_upsert_robot_rejects_same_side_config_conflict(client: TestClient, tmp_lerobot_home) -> None:
     """Assigning one config to both same-side arms of a bimanual robot is a 409."""
     client.post(
         "/robots/bi?create=true",
@@ -109,10 +156,111 @@ def test_upsert_robot_rejects_shared_port(client: TestClient, tmp_lerobot_home) 
     assert client.post("/robots/p", json={"follower_port": "/dev/b"}).status_code == 200
 
 
+def test_upsert_robot_clears_port_with_empty_string(client: TestClient, tmp_lerobot_home) -> None:
+    """Posting an empty-string port releases the assignment (disconnect without
+    reconnecting), and two cleared ports never count as a shared-port conflict."""
+    client.post("/robots/d?create=true", json={"leader_port": "/dev/a", "follower_port": "/dev/b"})
+
+    resp = client.post("/robots/d", json={"leader_port": ""})
+    assert resp.status_code == 200
+    assert resp.json()["robot"]["leader_port"] == ""
+
+    # Clearing the other arm too must not trip the duplicate-port guard.
+    resp = client.post("/robots/d", json={"follower_port": ""})
+    assert resp.status_code == 200
+    assert resp.json()["robot"]["follower_port"] == ""
+
+    # A cleared port doesn't block re-assigning that port to the other arm.
+    assert client.post("/robots/d", json={"leader_port": "/dev/b"}).status_code == 200
+
+
+@pytest.mark.parametrize("mode", ["single", "bimanual"])
+def test_create_robot_accepts_mode(client: TestClient, tmp_lerobot_home, mode: str) -> None:
+    """Mode is established at creation for both values."""
+    resp = client.post(f"/robots/created_{mode}?create=true", json={"mode": mode})
+    assert resp.status_code == 200
+    assert resp.json()["robot"]["mode"] == mode
+
+
+def test_upsert_robot_rejects_mode_change_on_existing_record(client: TestClient, tmp_lerobot_home) -> None:
+    """Mode is fixed at creation. A patch that flips the stored mode is a 409;
+    creating a new robot is the migration path instead."""
+    client.post("/robots/fixed?create=true", json={"mode": "single"})
+
+    resp = client.post("/robots/fixed", json={"mode": "bimanual"})
+    assert resp.status_code == 409
+    assert "fixed at creation" in resp.json()["message"]
+    # The stored mode is untouched by the rejected patch.
+    assert client.get("/robots/fixed").json()["robot"]["mode"] == "single"
+
+
+def test_upsert_robot_allows_same_mode_echo(client: TestClient, tmp_lerobot_home) -> None:
+    """Calibration write-backs echo the full record (including its current
+    mode); a same-value mode in the body must stay a no-op, not a 409."""
+    client.post("/robots/echo?create=true", json={"mode": "bimanual"})
+
+    # Echo the existing mode alongside a real edit — must succeed.
+    resp = client.post("/robots/echo", json={"mode": "bimanual", "leader_port": "/dev/a"})
+    assert resp.status_code == 200
+    robot = resp.json()["robot"]
+    assert robot["mode"] == "bimanual"
+    assert robot["leader_port"] == "/dev/a"
+
+
+def _access_record(method: str, path: str, status: int) -> logging.LogRecord:
+    """Build a LogRecord shaped like uvicorn.access emits:
+    args = (client_addr, method, full_path, http_version, status_code)."""
+    return logging.LogRecord(
+        name="uvicorn.access",
+        level=logging.INFO,
+        pathname="",
+        lineno=0,
+        msg='%s - "%s %s HTTP/%s" %d',
+        args=("127.0.0.1:1234", method, path, "1.1", status),
+        exc_info=None,
+    )
+
+
+def test_status_poll_access_filter_drops_only_successful_status_gets() -> None:
+    """The uvicorn.access filter silences ~2 Hz status polls but keeps errors,
+    writes, and every other path."""
+    f = server_mod._StatusPollAccessFilter()
+
+    # High-frequency polls with 2xx are dropped (query string ignored).
+    assert f.filter(_access_record("GET", "/teleoperation-status", 200)) is False
+    assert f.filter(_access_record("GET", "/auto-calibration-status", 200)) is False
+    assert f.filter(_access_record("GET", "/jobs?limit=20", 200)) is False
+
+    # Errors on those same paths must still log.
+    assert f.filter(_access_record("GET", "/recording-status", 500)) is True
+    assert f.filter(_access_record("GET", "/jobs", 404)) is True
+
+    # Writes and non-status paths are untouched.
+    assert f.filter(_access_record("POST", "/jobs/training", 201)) is True
+    assert f.filter(_access_record("GET", "/health", 200)) is True
+    # Subpaths of /jobs (log tails, checkpoints) are NOT silenced.
+    assert f.filter(_access_record("GET", "/jobs/abc123/logs", 200)) is True
+
+    # Records that don't look like uvicorn access lines pass through.
+    other = logging.LogRecord("uvicorn.access", logging.INFO, "", 0, "plain", None, None)
+    assert f.filter(other) is True
+
+
+def test_policy_optimizer_defaults_reports_availability(client: TestClient) -> None:
+    """`available` marks which policy types this lerobot pin can construct.
+    act must work everywhere; reward_classifier registers under lerobot's
+    rewards registry (not the policy registry) in this pin, so it's out."""
+    data = client.get("/policy-optimizer-defaults").json()
+    assert set(data["available"]) == set(data["defaults"])
+    assert data["available"]["act"] is True
+    assert data["defaults"]["act"] is not None
+    assert data["available"]["pi0_fast"] is True
+    assert data["available"]["reward_classifier"] is False
+    assert data["defaults"]["reward_classifier"] is None
+
+
 @pytest.mark.parametrize("unsafe_name", ["evil..name", "..config", "back\\door"])
-def test_download_calibration_config_rejects_unsafe_name(
-    client: TestClient, unsafe_name: str
-) -> None:
+def test_download_calibration_config_rejects_unsafe_name(client: TestClient, unsafe_name: str) -> None:
     response = client.get(f"/calibration-configs/teleop/{unsafe_name}/download")
     assert response.status_code == 400
     assert "Invalid configuration name" in response.json()["message"]
@@ -171,23 +319,17 @@ _GOOD_CALIBRATION = {
 
 
 def test_upload_calibration_config_rejects_bad_device_type(client: TestClient) -> None:
-    response = client.post(
-        "/calibration-configs/bogus/upload", json={"name": "x", "data": _GOOD_CALIBRATION}
-    )
+    response = client.post("/calibration-configs/bogus/upload", json={"name": "x", "data": _GOOD_CALIBRATION})
     assert response.status_code == 400
 
 
 def test_upload_calibration_config_rejects_malformed_data(client: TestClient) -> None:
-    response = client.post(
-        "/calibration-configs/teleop/upload", json={"name": "x", "data": {"m": {"id": 1}}}
-    )
+    response = client.post("/calibration-configs/teleop/upload", json={"name": "x", "data": {"m": {"id": 1}}})
     assert response.status_code == 400
     assert "missing" in response.json()["message"]
 
 
-def test_upload_calibration_config_writes_then_409_on_collision(
-    client: TestClient, tmp_lerobot_home
-) -> None:
+def test_upload_calibration_config_writes_then_409_on_collision(client: TestClient, tmp_lerobot_home) -> None:
     """First upload writes; a second under the same name is rejected (no overwrite)."""
     first = client.post(
         "/calibration-configs/teleop/upload", json={"name": "armA", "data": _GOOD_CALIBRATION}
@@ -348,6 +490,8 @@ def test_import_model_route_returns_record(client, monkeypatch) -> None:
     }
     from lelab.jobs import JobRecord
 
+    # No pre-existing entry for this source → fresh 201 path.
+    monkeypatch.setattr(server.job_registry, "find_imported", lambda source: None)
     monkeypatch.setattr(
         server.job_registry,
         "register_imported",
@@ -356,6 +500,38 @@ def test_import_model_route_returns_record(client, monkeypatch) -> None:
     resp = client.post("/jobs/import", json={"source": "/tmp/model"})
     assert resp.status_code == 201
     assert resp.json()["runner"] == "imported"
+    assert "already_imported" not in resp.json()
+
+
+def test_import_model_route_flags_duplicate_with_200(client, monkeypatch) -> None:
+    """Re-importing an already-registered source returns the EXISTING record
+    with already_imported=true and a 200 (not 201)."""
+    from lelab import server
+    from lelab.jobs import JobRecord
+
+    existing = JobRecord(
+        id="act_imported_x",
+        name="Imported · model",
+        display_name="my alias",
+        state="done",
+        config={"dataset_repo_id": "(imported)", "policy_type": "act"},
+        output_dir="/tmp/model",
+        started_at=1.0,
+        ended_at=1.0,
+        runner="imported",
+    )
+    monkeypatch.setattr(server.job_registry, "find_imported", lambda source: existing)
+    monkeypatch.setattr(
+        server.job_registry,
+        "register_imported",
+        lambda source, name=None: existing,
+    )
+    resp = client.post("/jobs/import", json={"source": "/tmp/model"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["already_imported"] is True
+    assert body["id"] == "act_imported_x"
+    assert body["display_name"] == "my alias"  # alias preserved on re-import
 
 
 def test_import_model_route_maps_value_error_to_400(client, monkeypatch) -> None:
@@ -364,7 +540,58 @@ def test_import_model_route_maps_value_error_to_400(client, monkeypatch) -> None
     def boom(source, name=None):
         raise ValueError("No usable model at '/tmp/x'")
 
+    monkeypatch.setattr(server.job_registry, "find_imported", lambda source: None)
     monkeypatch.setattr(server.job_registry, "register_imported", boom)
     resp = client.post("/jobs/import", json={"source": "/tmp/x"})
     assert resp.status_code == 400
     assert "No usable model" in resp.json()["detail"]
+
+
+def test_rename_job_route_returns_updated_record(client, monkeypatch) -> None:
+    from lelab import server
+    from lelab.jobs import JobRecord
+
+    fake = {
+        "id": "act_ds_x",
+        "name": "ACT · user/ds",
+        "display_name": "my run",
+        "state": "done",
+        "config": {"dataset_repo_id": "user/ds", "policy_type": "act"},
+        "output_dir": "/tmp/run",
+        "started_at": 1.0,
+    }
+    seen = {}
+
+    def fake_rename(job_id, new_name):
+        seen["args"] = (job_id, new_name)
+        return JobRecord(**fake)
+
+    monkeypatch.setattr(server.job_registry, "rename", fake_rename)
+    resp = client.post("/jobs/act_ds_x/rename", json={"new_name": "my run"})
+    assert resp.status_code == 200
+    assert resp.json()["display_name"] == "my run"
+    assert seen["args"] == ("act_ds_x", "my run")
+
+
+def test_rename_job_route_maps_not_found_to_404(client, monkeypatch) -> None:
+    from lelab import server
+    from lelab.jobs import JobNotFoundError
+
+    def boom(job_id, new_name):
+        raise JobNotFoundError(job_id)
+
+    monkeypatch.setattr(server.job_registry, "rename", boom)
+    resp = client.post("/jobs/nope/rename", json={"new_name": "x"})
+    assert resp.status_code == 404
+
+
+def test_rename_job_route_maps_value_error_to_400(client, monkeypatch) -> None:
+    from lelab import server
+
+    def boom(job_id, new_name):
+        raise ValueError("Display name cannot be empty.")
+
+    monkeypatch.setattr(server.job_registry, "rename", boom)
+    resp = client.post("/jobs/act_ds_x/rename", json={"new_name": "   "})
+    assert resp.status_code == 400
+    assert "empty" in resp.json()["detail"]

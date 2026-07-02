@@ -20,6 +20,9 @@ export interface RobotRecord {
   right_leader_config: string;
   right_follower_config: string;
   cameras: CameraConfig[];
+  // Follower torque as a percentage of full power (10-100, default 100).
+  // Written to the servos' volatile torque-limit register at session start.
+  motor_power: number;
   is_clean: boolean;
 }
 
@@ -95,7 +98,7 @@ export const useRobots = () => {
   }, []);
 
   const createRobot = useCallback(
-    async (rawName: string): Promise<boolean> => {
+    async (rawName: string, mode: RobotMode = "single"): Promise<boolean> => {
       const name = rawName.trim();
       if (!name) {
         toast({ title: "Missing name", description: "Robot name cannot be empty.", variant: "destructive" });
@@ -109,7 +112,7 @@ export const useRobots = () => {
         const res = await fetchWithHeaders(`${baseUrl}/robots/${encodeURIComponent(name)}?create=true`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: "{}",
+          body: JSON.stringify({ mode }),
         });
         if (res.status === 409) {
           toast({
@@ -144,9 +147,12 @@ export const useRobots = () => {
         const res = await fetchWithHeaders(`${baseUrl}/robots/${encodeURIComponent(name)}`, {
           method: "DELETE",
         });
-        if (!res.ok) {
+        // 404 = the record is already gone (deleted elsewhere, or removed on
+        // disk out-of-band). The user's intent is fulfilled either way — drop
+        // it from the local list instead of showing a scary failure.
+        if (!res.ok && res.status !== 404) {
           const text = await res.text();
-          toast({ title: "Failed to delete", description: text, variant: "destructive" });
+          toast({ title: "Delete failed", description: text, variant: "destructive" });
           return false;
         }
         setRecords((prev) => {
@@ -154,9 +160,16 @@ export const useRobots = () => {
           return rest;
         });
         setSelectedName((prev) => (prev === name ? null : prev));
+        toast({
+          title: "Robot deleted",
+          description:
+            res.status === 404
+              ? `"${name}" was already removed — updated the list.`
+              : `Removed "${name}". Calibration files are kept in the library.`,
+        });
         return true;
       } catch (e) {
-        toast({ title: "Network error", description: String(e), variant: "destructive" });
+        toast({ title: "Delete failed", description: String(e), variant: "destructive" });
         return false;
       }
     },
@@ -210,32 +223,6 @@ export const useRobots = () => {
     [baseUrl, fetchWithHeaders, toast]
   );
 
-  const setRobotMode = useCallback(
-    async (name: string, mode: RobotMode): Promise<boolean> => {
-      try {
-        const res = await fetchWithHeaders(`${baseUrl}/robots/${encodeURIComponent(name)}`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ mode }),
-        });
-        if (!res.ok) {
-          const text = await res.text();
-          toast({ title: "Failed to change mode", description: text, variant: "destructive" });
-          return false;
-        }
-        const data = await res.json();
-        if (data.robot) {
-          setRecords((prev) => ({ ...prev, [name]: data.robot }));
-        }
-        return true;
-      } catch (e) {
-        toast({ title: "Network error", description: String(e), variant: "destructive" });
-        return false;
-      }
-    },
-    [baseUrl, fetchWithHeaders, toast]
-  );
-
   const selectedRecord = useMemo(
     () => (selectedName ? records[selectedName] ?? null : null),
     [selectedName, records]
@@ -256,7 +243,6 @@ export const useRobots = () => {
     clearSelection,
     createRobot,
     renameRobot,
-    setRobotMode,
     deleteRobot,
   };
 };

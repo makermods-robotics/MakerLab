@@ -20,6 +20,92 @@ export async function listDatasets(
   });
 }
 
+/** One task string with how many episodes use it (0 = count unavailable). */
+export interface DatasetTask {
+  task: string;
+  num_episodes: number;
+}
+
+export interface DatasetInfo {
+  repo_id: string;
+  total_episodes: number;
+  total_frames: number;
+  fps: number | null;
+  robot_type: string | null;
+  cameras: string[];
+  tasks: DatasetTask[];
+  size_bytes: number;
+}
+
+/** Detail view of a locally-cached dataset (404 if it's Hub-only). */
+export async function getDatasetInfo(
+  baseUrl: string,
+  fetcher: Fetcher,
+  repoId: string,
+  signal?: AbortSignal,
+): Promise<DatasetInfo> {
+  return apiRequest<DatasetInfo>(
+    baseUrl,
+    fetcher,
+    `/datasets/info?repo_id=${encodeURIComponent(repoId)}`,
+    { signal, action: "Dataset info" },
+  );
+}
+
+/** Whether a dataset with this id exists on the Hub. "unknown" is the
+ * offline/unauthenticated degrade — the card shows no badge for it. */
+export type HubStatusValue = "on_hub" | "local_only" | "unknown";
+
+export interface HubStatus {
+  repo_id: string;
+  status: HubStatusValue;
+  url: string | null;
+}
+
+/** Hub existence check, fetched lazily/separately so it never blocks the
+ * info card render. */
+export async function getDatasetHubStatus(
+  baseUrl: string,
+  fetcher: Fetcher,
+  repoId: string,
+  signal?: AbortSignal,
+): Promise<HubStatus> {
+  return apiRequest<HubStatus>(
+    baseUrl,
+    fetcher,
+    `/datasets/hub-status?repo_id=${encodeURIComponent(repoId)}`,
+    { signal, action: "Hub status" },
+  );
+}
+
+export interface UploadResult {
+  success: boolean;
+  message?: string;
+  dataset_url?: string;
+  docs_url?: string;
+  num_episodes?: number;
+}
+
+/** Push a locally-cached dataset to the Hub. Synchronous + slow (datasets are
+ * 100+ MB): callers must show an in-flight state and not impose a short client
+ * timeout. Returns the endpoint's friendly {success, message, docs_url} shape
+ * rather than throwing on a handled auth failure. */
+export async function uploadDataset(
+  baseUrl: string,
+  fetcher: Fetcher,
+  repoId: string,
+  tags: string[],
+  isPrivate: boolean,
+  signal?: AbortSignal,
+): Promise<UploadResult> {
+  return apiRequest<UploadResult>(baseUrl, fetcher, "/upload-dataset", {
+    method: "POST",
+    body: { dataset_repo_id: repoId, tags, private: isPrivate },
+    action: "Upload dataset",
+    signal,
+  });
+}
+
 export async function deleteDataset(
   baseUrl: string,
   fetcher: Fetcher,

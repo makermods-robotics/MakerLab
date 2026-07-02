@@ -15,14 +15,17 @@
 import asyncio
 import contextlib
 import glob
+import io
 import json
 import logging
 import os
 import queue
+import re
 import subprocess
 import sys
 import threading
 import time
+import zipfile
 from pathlib import Path
 from typing import Any, Literal
 
@@ -39,19 +42,21 @@ from starlette.types import Scope
 from lerobot.policies.factory import make_policy_config
 
 from . import datasets as dataset_browser
-from .merge import MergeRequest, handle_merge_status, handle_start_merge
 
 # Import our custom calibration functionality
 from .auto_calibrate import AutoCalibrationRequest, auto_calibration_manager
 from .calibrate import CalibrationRequest, calibration_manager
-from .wiggle import wiggle_gripper
+from .identify import identify_arm_by_motion
 from .jobs import (
     JobAlreadyRunningError,
     JobNotFoundError,
     JobNotRunningError,
     JobTarget,
+    _list_local_checkpoints,
     job_registry,
 )
+from .merge import MergeRequest, handle_merge_status, handle_start_merge
+from .motor_power import read_supply_voltage
 
 # Import our custom recording functionality
 from .record import (
@@ -90,6 +95,8 @@ from .utils import config
 from .utils.config import (
     FOLLOWER_CONFIG_PATH,
     LEADER_CONFIG_PATH,
+    clear_config_references,
+    config_slot_conflict,
     delete_robot_record,
     detect_port_after_disconnect,
     find_available_ports,
@@ -99,8 +106,6 @@ from .utils.config import (
     get_saved_robot_port,
     is_robot_record_clean,
     is_valid_robot_name,
-    config_referencing_robots,
-    config_slot_conflict,
     list_robot_records,
     port_slot_conflict,
     rename_calibration_config,
@@ -123,10 +128,50 @@ from .utils.system import (
     handle_install_wandb_extra_status,
     warn_if_cuda_mismatch,
 )
+from .wiggle import wiggle_gripper
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# High-frequency read-only status polls (~2 Hz each from the frontend) that
+# drown the uvicorn access log and bury real warnings (a torque warning was
+# once lost in this noise). Successful GETs to these EXACT paths (query string
+# ignored) are dropped from the access log; non-GETs, other paths (including
+# subpaths like /jobs/{id}/logs), and error responses still log.
+_QUIET_STATUS_POLL_PATHS = {
+    "/auto-calibration-status",
+    "/calibration-status",
+    "/teleoperation-status",
+    "/recording-status",
+    "/joint-positions",
+    "/jobs",
+}
+
+
+class _StatusPollAccessFilter(logging.Filter):
+    """Drop uvicorn.access records for successful high-frequency status polls.
+
+    uvicorn.access records carry args = (client_addr, method, full_path,
+    http_version, status_code); anything else passes through untouched.
+    Only affects the access log — app-level loggers are not filtered.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if not isinstance(args, tuple) or len(args) != 5:
+            return True
+        _, method, full_path, _, status_code = args
+        if method != "GET" or not isinstance(status_code, int):
+            return True
+        # Errors (and redirects-gone-wrong) must still log.
+        if status_code >= 400:
+            return True
+        path = str(full_path).split("?", 1)[0]
+        return path not in _QUIET_STATUS_POLL_PATHS
+
+
+logging.getLogger("uvicorn.access").addFilter(_StatusPollAccessFilter())
 
 
 class StartTrainingBody(BaseModel):
@@ -309,18 +354,23 @@ def get_configs():
     # Get all available calibration configs as STEMS (no .json) — the canonical
     # user-facing name. The .json is only the on-disk filename.
     leader_configs = [
-        os.path.splitext(os.path.basename(f))[0] for f in glob.glob(os.path.join(LEADER_CONFIG_PATH, "*.json"))
+        os.path.splitext(os.path.basename(f))[0]
+        for f in glob.glob(os.path.join(LEADER_CONFIG_PATH, "*.json"))
     ]
     follower_configs = [
-        os.path.splitext(os.path.basename(f))[0] for f in glob.glob(os.path.join(FOLLOWER_CONFIG_PATH, "*.json"))
+        os.path.splitext(os.path.basename(f))[0]
+        for f in glob.glob(os.path.join(FOLLOWER_CONFIG_PATH, "*.json"))
     ]
 
     return {"leader_configs": leader_configs, "follower_configs": follower_configs}
 
 
-# Frontend policy_type -> lerobot registry name. Same string except pi0_fast,
-# whose registry key is "pi0fast" in this lerobot pin (and is still likely
-# unavailable -> null). Keep in sync with the EssentialsCard Select options.
+# Frontend policy_type -> lerobot registry name. In this lerobot pin the names
+# match 1:1 (pi0_fast registers as "pi0_fast", not the older "pi0fast").
+# reward_classifier is NOT a policy in this pin: it registers under the
+# separate RewardModelConfig registry (lerobot/rewards/), so make_policy_config
+# raises for it and it reports available=False below. Keep in sync with
+# POLICY_TYPE_OPTIONS in frontend/src/components/training/types.ts.
 _POLICY_TYPE_TO_LEROBOT = {
     "act": "act",
     "diffusion": "diffusion",
@@ -328,7 +378,7 @@ _POLICY_TYPE_TO_LEROBOT = {
     "smolvla": "smolvla",
     "tdmpc": "tdmpc",
     "vqbet": "vqbet",
-    "pi0_fast": "pi0fast",
+    "pi0_fast": "pi0_fast",
     "sac": "sac",
     "reward_classifier": "reward_classifier",
 }
@@ -361,13 +411,31 @@ def get_policy_optimizer_defaults():
     + optimizer type) so the training UI can show the real "policy default"
     instead of a generic placeholder.
 
-    Every frontend policy_type is included; policies whose preset is unavailable
-    in this lerobot pin (e.g. pi0_fast, reward_classifier) map to null.
+    Every frontend policy_type is included. `available` says whether this
+    lerobot pin can construct the policy config at all — false means a training
+    run with that type is doomed at policy construction, so the UI disables the
+    button (e.g. reward_classifier, which isn't a policy in this pin). Policies
+    whose config exists but whose optimizer preset can't be read stay available
+    with a null entry in `defaults`.
     """
     defaults: dict[str, Any] = {}
+    available: dict[str, bool] = {}
     for frontend_name, lerobot_name in _POLICY_TYPE_TO_LEROBOT.items():
         try:
-            preset = make_policy_config(lerobot_name).get_optimizer_preset()
+            config = make_policy_config(lerobot_name)
+        except Exception as e:
+            logger.warning(
+                "Policy %r (lerobot %r) is unavailable in this lerobot install: %s",
+                frontend_name,
+                lerobot_name,
+                e,
+            )
+            available[frontend_name] = False
+            defaults[frontend_name] = None
+            continue
+        available[frontend_name] = True
+        try:
+            preset = config.get_optimizer_preset()
             defaults[frontend_name] = {
                 "optimizer": _optimizer_name_from_preset(preset),
                 "lr": preset.lr,
@@ -383,7 +451,7 @@ def get_policy_optimizer_defaults():
             )
             defaults[frontend_name] = None
 
-    return {"defaults": defaults}
+    return {"defaults": defaults, "available": available}
 
 
 @app.post("/move-arm")
@@ -469,6 +537,27 @@ def datasets_list():
     Each entry carries a `source` field: "local", "hub", or "both".
     """
     return dataset_browser.list_all_datasets()
+
+
+@app.get("/datasets/info")
+def datasets_info(repo_id: str):
+    """Detail card for one locally-cached dataset (episodes, cameras, tasks,
+    size on disk). repo_id is a query param because repo ids contain '/'."""
+    info = dataset_browser.get_local_dataset_info(repo_id)
+    if info is None:
+        raise HTTPException(status_code=404, detail=f"Dataset '{repo_id}' not found in the local cache")
+    return info
+
+
+@app.get("/datasets/hub-status")
+def datasets_hub_status(repo_id: str):
+    """Whether a dataset repo with this id exists on the Hub.
+
+    Fetched lazily by the info card (separate from /datasets/info) so it never
+    blocks the card render. Degrades to status "unknown" offline/unauthenticated
+    — see get_hub_status. repo_id is a query param because repo ids contain '/'.
+    """
+    return dataset_browser.get_hub_status(repo_id)
 
 
 @app.post("/datasets/merge")
@@ -629,11 +718,23 @@ class ImportModelRequest(BaseModel):
 
 @app.post("/jobs/import", status_code=201)
 def import_model(body: ImportModelRequest):
-    """Register an external model (local dir or HF repo) as a pseudo-job."""
+    """Register an external model (local dir or HF repo) as a pseudo-job.
+
+    Importing an already-registered source is idempotent: the registry
+    returns the EXISTING record (id and display alias preserved), and the
+    response carries `already_imported: true` with a 200 (not 201) so the
+    frontend can say "already imported" instead of pretending a new entry
+    was created."""
     try:
-        return job_registry.register_imported(body.source, body.name)
+        existing = job_registry.find_imported(body.source)
+        record = job_registry.register_imported(body.source, body.name)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if existing is not None and existing.id == record.id:
+        payload = record.model_dump(mode="json")
+        payload["already_imported"] = True
+        return JSONResponse(status_code=200, content=payload)
+    return record
 
 
 @app.get("/jobs")
@@ -782,6 +883,84 @@ def get_checkpoint_policy_config(job_id: str, step: int):
         raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found") from exc
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/jobs/{job_id}/checkpoints/{step}/download")
+def download_checkpoint(job_id: str, step: int):
+    """Stream a zip of a local checkpoint's `pretrained_model/` directory.
+
+    This bundles the portable, importable model (config.json + weights +
+    pre/post-processors) — NOT the large `training_state/` optimizer dir.
+    Hub-hosted models are downloadable from their HF page, so only local runs
+    are supported here.
+    """
+    try:
+        record = job_registry.get(job_id)
+    except JobNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found") from exc
+
+    if record.runner != "local":
+        raise HTTPException(
+            status_code=400,
+            detail="Only local checkpoints can be downloaded; Hub models are available on their HF page.",
+        )
+
+    # The pretrained_model dir comes from _list_local_checkpoints (which resolves
+    # it under record.output_dir/checkpoints/<step>), not from user input, so
+    # path traversal isn't a concern. Match on the int step, never a raw path.
+    checkpoint = next((c for c in _list_local_checkpoints(record.output_dir) if c.step == step), None)
+    if checkpoint is None:
+        raise HTTPException(status_code=404, detail=f"Job {job_id!r} has no checkpoint at step {step}")
+
+    pretrained_dir = Path(checkpoint.ref)
+
+    buffer = io.BytesIO()
+    # safetensors weights are already incompressible, so DEFLATE would burn CPU
+    # for ~no gain; store uncompressed.
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_STORED) as zf:
+        for path in sorted(pretrained_dir.rglob("*")):
+            if path.is_file():
+                zf.write(path, arcname=path.relative_to(pretrained_dir).as_posix())
+    buffer.seek(0)
+
+    # Build a filesystem-safe filename from the job's display alias (falling
+    # back to its name) + step, then to the job id if sanitising leaves
+    # nothing usable.
+    safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", record.display_name or record.name).strip("_")
+    if not safe_name:
+        safe_name = job_id
+    filename = f"{safe_name}_step_{step}.zip"
+
+    logger.info("Downloading checkpoint for job %s at step %d", job_id, step)
+
+    return Response(
+        content=buffer.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+class RenameJobBody(BaseModel):
+    new_name: str
+
+
+@app.post("/jobs/{job_id}/rename")
+def rename_job(job_id: str, body: RenameJobBody):
+    """Set a job's display alias (shown in place of the auto-generated name).
+
+    Metadata-only: never moves the output directory or rewrites the run id /
+    hub repo id — those are the job's immutable identity (resume lineage,
+    imported-model dedup, and remote HF/W&B names key off them). Validation
+    (trim, reject empty, is_valid-style character guard) lives in
+    JobRegistry.rename; unlike calibration/robot renames, aliases are
+    display-only and need not be unique.
+    """
+    try:
+        return job_registry.rename(job_id, body.new_name)
+    except JobNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -1042,26 +1221,29 @@ def delete_calibration_config(device_type: str, config_name: str):
         if not os.path.exists(file_path):
             return {"success": False, "message": "Configuration file not found"}
 
-        # Refuse if a robot still uses this config — deleting it would break that
-        # robot (needs recalibration). Reassign/switch/delete those robots first.
-        users = config_referencing_robots(device_type, config_name)
-        if users:
-            return JSONResponse(
-                status_code=409,
-                content={
-                    "success": False,
-                    "message": f"'{config_name}' is in use by {', '.join(users)}. "
-                    "Reassign a different config to those robots first.",
-                },
-            )
-
-        # Delete the file
+        # Delete the file. This dir IS the location lerobot reads calibrations
+        # from (setup_calibration_files' source == target), so removing the file
+        # removes the only copy — nothing stale can silently keep working.
         os.remove(file_path)
         logger.info(f"Deleted calibration config: {file_path}")
 
+        # Unassign every robot record that still pointed at this config, so
+        # those arms return to the "needs calibration" state instead of
+        # dangling on a missing file. The response lists them so the UI can
+        # refresh the affected robots.
+        unassigned = clear_config_references(device_type, config_name)
+        if unassigned:
+            robots = ", ".join(u["robot"] for u in unassigned)
+            message = (
+                f"Configuration '{config_name}' deleted. Robot(s) {robots} now need calibration before use."
+            )
+        else:
+            message = f"Configuration '{config_name}' deleted successfully"
+
         return {
             "success": True,
-            "message": f"Configuration '{config_name}' deleted successfully",
+            "message": message,
+            "unassigned": unassigned,
         }
 
     except Exception as e:
@@ -1088,7 +1270,9 @@ def download_calibration_config(device_type: str, config_name: str):
     # config_name is interpolated into a filename, so reject path-traversal
     # characters before touching the filesystem (same guard as delete).
     if not is_valid_robot_name(config_name):
-        return JSONResponse(status_code=400, content={"success": False, "message": "Invalid configuration name"})
+        return JSONResponse(
+            status_code=400, content={"success": False, "message": "Invalid configuration name"}
+        )
 
     # Robot records store config names WITH the .json extension while this
     # resource is otherwise stem-based; accept either form so callers that pass
@@ -1098,7 +1282,9 @@ def download_calibration_config(device_type: str, config_name: str):
 
     file_path = os.path.join(config_path, f"{config_name}.json")
     if not os.path.exists(file_path):
-        return JSONResponse(status_code=404, content={"success": False, "message": "Configuration file not found"})
+        return JSONResponse(
+            status_code=404, content={"success": False, "message": "Configuration file not found"}
+        )
 
     try:
         with open(file_path, "rb") as f:
@@ -1133,11 +1319,16 @@ def upload_calibration_config(device_type: str, body: dict):
     if reason == "invalid_device":
         return JSONResponse(status_code=400, content={"success": False, "message": "Invalid device type"})
     if reason == "invalid_name":
-        return JSONResponse(status_code=400, content={"success": False, "message": "Invalid configuration name"})
+        return JSONResponse(
+            status_code=400, content={"success": False, "message": "Invalid configuration name"}
+        )
     if reason == "name_taken":
         return JSONResponse(
             status_code=409,
-            content={"success": False, "message": f"A config named '{saved}' already exists. Choose a different name."},
+            content={
+                "success": False,
+                "message": f"A config named '{saved}' already exists. Choose a different name.",
+            },
         )
     if reason.startswith("invalid_data:"):
         return JSONResponse(status_code=400, content={"success": False, "message": reason.split(":", 1)[1]})
@@ -1152,7 +1343,9 @@ def rename_calibration_config_endpoint(device_type: str, config_name: str, body:
     """
     new_name = (body or {}).get("new_name", "")
     if not isinstance(new_name, str):
-        return JSONResponse(status_code=400, content={"success": False, "message": "new_name must be a string"})
+        return JSONResponse(
+            status_code=400, content={"success": False, "message": "new_name must be a string"}
+        )
 
     ok, reason = rename_calibration_config(device_type, config_name, new_name)
     if ok:
@@ -1191,6 +1384,26 @@ class WiggleRequest(BaseModel):
 async def wiggle(request: WiggleRequest):
     """Wiggle the gripper on a port so the user can see which arm it is."""
     return await wiggle_gripper(request.port)
+
+
+class IdentifyArmRequest(BaseModel):
+    # Candidate ports to watch; empty/omitted = all detected arm ports.
+    ports: list[str] | None = None
+
+
+@app.post("/identify-arm")
+async def identify_arm(request: IdentifyArmRequest):
+    """The inverse of /wiggle: the user swings an arm's base (shoulder pan) by
+    hand and we report which port saw the motion. Read-only — no motor writes."""
+    return await identify_arm_by_motion(request.ports)
+
+
+@app.get("/supply-voltage")
+async def supply_voltage(port: str = ""):
+    """One-shot, read-only supply-voltage reading (Present_Voltage) from the arm
+    on `port`. Connects, reads, and releases the port immediately — never holds
+    it — so calibration/teleoperation can grab the port right after."""
+    return await read_supply_voltage(port)
 
 
 # Runs in a fresh Python — see _avfoundation_cameras_in_cv2_order for why.
@@ -1473,16 +1686,46 @@ def upsert_robot(name: str, data: dict, create: bool = False):
     if not is_valid_robot_name(name):
         return JSONResponse(status_code=400, content={"status": "error", "message": "Invalid robot name"})
 
+    body = data or {}
+    existing = get_robot_record(name) or {}
+
+    # Mode is fixed at creation. A bimanual rig is a different machine (different
+    # robot_type on datasets, forced _left/_right calibration naming, different
+    # arms/cameras), and allowing a live toggle was a recurring stale-state bug
+    # source. On the patch path (no ?create=true) reject any body `mode` that
+    # differs from the stored value; a same-value echo stays a no-op. On create
+    # the mode in the body is what establishes it.
+    if (
+        not create
+        and existing
+        and body.get("mode") in ("single", "bimanual")
+        and body["mode"] != existing.get("mode", "single")
+    ):
+        return JSONResponse(
+            status_code=409,
+            content={
+                "status": "error",
+                "message": "Mode is fixed at creation — create a new robot for a bimanual (or single-arm) setup.",
+            },
+        )
+
+    # Effective mode for the slot/port conflict checks below. Because mode can't
+    # change on an existing record, this is the stored mode for patches and the
+    # body mode for creates (defaulting to single).
+    effective_mode = (
+        body["mode"]
+        if create and body.get("mode") in ("single", "bimanual")
+        else existing.get("mode", "single")
+    )
+
     # Reject assigning the same calibration to both same-side arms of a bimanual
     # robot — that would point two physical arms at one calibration. Only checked
-    # when the request actually touches a config slot or the mode, so unrelated
-    # edits (cameras, ports) aren't blocked even on a pre-existing conflict.
-    body = data or {}
-    slot_fields = ("mode", "leader_config", "follower_config", "right_leader_config", "right_follower_config")
-    if any(f in body for f in slot_fields):
-        existing = get_robot_record(name) or {}
-        prospective = {"mode": body["mode"] if body.get("mode") in ("single", "bimanual") else existing.get("mode", "single")}
-        for f in ("leader_config", "follower_config", "right_leader_config", "right_follower_config"):
+    # when the request actually touches a config slot, so unrelated edits
+    # (cameras, ports) aren't blocked even on a pre-existing conflict.
+    config_fields = ("leader_config", "follower_config", "right_leader_config", "right_follower_config")
+    if any(f in body for f in config_fields):
+        prospective = {"mode": effective_mode}
+        for f in config_fields:
             prospective[f] = body[f] if isinstance(body.get(f), str) else existing.get(f, "")
         side = config_slot_conflict(prospective)
         if side:
@@ -1496,12 +1739,11 @@ def upsert_robot(name: str, data: dict, create: bool = False):
             )
 
     # Reject assigning one serial port to more than one arm — each physical arm
-    # is its own USB device. Checked when the request touches a port or the mode.
-    port_fields = ("mode", "leader_port", "follower_port", "right_leader_port", "right_follower_port")
-    if any(f in body for f in port_fields):
-        existing = get_robot_record(name) or {}
-        prospective = {"mode": body["mode"] if body.get("mode") in ("single", "bimanual") else existing.get("mode", "single")}
-        for f in ("leader_port", "follower_port", "right_leader_port", "right_follower_port"):
+    # is its own USB device. Checked when the request touches a port.
+    port_field_names = ("leader_port", "follower_port", "right_leader_port", "right_follower_port")
+    if any(f in body for f in port_field_names):
+        prospective = {"mode": effective_mode}
+        for f in port_field_names:
             prospective[f] = body[f] if isinstance(body.get(f), str) else existing.get(f, "")
         dup_port = port_slot_conflict(prospective)
         if dup_port:
@@ -1513,11 +1755,6 @@ def upsert_robot(name: str, data: dict, create: bool = False):
                     "Each arm needs its own serial port.",
                 },
             )
-
-    # Switching to single mode retires the right arm — clear its stale ports so
-    # they don't linger as "taken" in the port picker.
-    if (data or {}).get("mode") == "single":
-        data = {**(data or {}), "right_leader_port": "", "right_follower_port": ""}
 
     try:
         if create:
@@ -1546,7 +1783,9 @@ def rename_robot(name: str, data: dict):
     """
     new_name = (data or {}).get("new_name", "")
     if not isinstance(new_name, str):
-        return JSONResponse(status_code=400, content={"status": "error", "message": "new_name must be a string"})
+        return JSONResponse(
+            status_code=400, content={"status": "error", "message": "new_name must be a string"}
+        )
     new_name = new_name.strip()
 
     ok, reason = rename_robot_record(name, new_name)

@@ -39,6 +39,8 @@ from typing import Literal, Protocol, runtime_checkable
 from pydantic import BaseModel
 
 from .train import TrainingRequest
+from .utils.config import is_valid_robot_name
+from .utils.hf_auth import shared_hf_api
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +73,11 @@ class LogLine(BaseModel):
 class JobRecord(BaseModel):
     id: str
     name: str
+    # User-editable display alias set via JobRegistry.rename. Display-only:
+    # the immutable identity (id / output_dir / hf_repo_id) never changes on
+    # rename, so resume lineage, imported-model dedup, and remote HF/W&B
+    # names stay intact. None ⇒ the UI falls back to `name`.
+    display_name: str | None = None
     state: JobState
     config: TrainingRequest
     output_dir: str
@@ -613,6 +620,59 @@ def _resolve_resume_config_path(source: JobRecord, step: int | None) -> str:
     return str(train_config.resolve())
 
 
+def _resolve_finetune_pretrained_path(source: JobRecord, step: int | None) -> str:
+    """Return a `--policy.pretrained_path` value that initializes a FRESH run's
+    weights from `source`'s checkpoint at `step` (or its latest if step is None).
+
+    Unlike resume, this does NOT require training_state/ — weights-only is the
+    whole point of fine-tuning. lerobot's PreTrainedConfig.pretrained_path loads
+    the policy weights (and processors) from a local pretrained_model dir or a
+    Hub repo on a non-resume run.
+
+    Handles every source shape via its own checkpoint listing:
+      * imported local / normal local run → a `local` ref that is the absolute
+        pretrained_model dir; returned directly (e.g. a flat imported dir
+        becomes a step-0 checkpoint whose ref is the dir itself).
+      * imported hub / cloud run → a `hub` ref ('repo@checkpoints/<step>' or
+        'repo@root'); we return the plain repo id (the root model). lerobot's
+        pretrained_path takes a repo id, not a sub-path, so a specific hub
+        sub-step can't be targeted — see the limitation note below.
+
+    Raises ValueError (→ HTTP 400) with a user-facing message when the source
+    has no usable checkpoint.
+    """
+    if source.runner == "imported":
+        if source.hf_repo_id:
+            checkpoints = _list_imported_hub(shared_hf_api(), source.hf_repo_id)
+        else:
+            checkpoints = _list_imported_local(source.output_dir)
+    elif source.runner == "local":
+        checkpoints = _list_local_checkpoints(source.output_dir)
+    else:  # hf_cloud
+        checkpoints = _list_hub_checkpoints(shared_hf_api(), source.hf_repo_id)
+
+    if not checkpoints:
+        raise ValueError(
+            f"Source {source.id!r} has no usable checkpoint to fine-tune from."
+        )
+    if step is None:
+        chosen = checkpoints[-1]  # step-sorted; take the latest
+    else:
+        chosen = next((c for c in checkpoints if c.step == step), None)
+        if chosen is None:
+            raise ValueError(f"Source {source.id!r} has no checkpoint at step {step}.")
+
+    if chosen.source == "local":
+        # chosen.ref is the absolute pretrained_model dir lerobot loads directly.
+        return chosen.ref
+    # Hub ref: 'repo@checkpoints/<step_dir>' or 'repo@root'. lerobot's
+    # pretrained_path accepts a repo id (root model), not a sub-step path, so we
+    # hand back the repo portion. Fine-tuning from a specific hub sub-step isn't
+    # supported here — it uses whatever weights live at the repo root.
+    repo_id = chosen.ref.split("@", 1)[0]
+    return repo_id
+
+
 _CLOUD_CKPT_TTL_SECONDS = 30.0
 _CKPT_PATH_RE = re.compile(r"^checkpoints/(\d+)/pretrained_model/config\.json$")
 
@@ -726,6 +786,49 @@ def _generate_job_id(policy_type: str, dataset_repo_id: str) -> str:
     return f"{policy_type}_{dataset_slug}_{timestamp}"
 
 
+# Accepted in place of a bare repo id when importing from the Hub — users
+# paste the model page URL as often as the id.
+_HUB_URL_PREFIXES = (
+    "https://huggingface.co/",
+    "http://huggingface.co/",
+    "https://hf.co/",
+    "http://hf.co/",
+    "huggingface.co/",
+    "hf.co/",
+)
+
+
+def _normalize_import_source(source: str) -> str:
+    """Boundary normalization for import sources, applied before both storing
+    and comparing: trim whitespace, strip a pasted Hub URL prefix down to the
+    bare repo id, and drop trailing slashes. Local absolute paths start with
+    '/' so the URL prefixes never match them."""
+    src = source.strip()
+    lowered = src.lower()
+    for prefix in _HUB_URL_PREFIXES:
+        if lowered.startswith(prefix):
+            src = src[len(prefix) :]
+            break
+    return src.rstrip("/")
+
+
+def _paths_are_same_dir(a: str, b: str) -> bool:
+    """True when two path strings refer to the same directory on disk.
+
+    os.path.samefile compares device+inode, so it survives spellings that a
+    string compare misses — most importantly case variants on the (default)
+    case-insensitive macOS filesystem: a real duplicate pair was registered as
+    '/Users/mokuroh54/…' and '/Users/Mokuroh54/…' because Path.resolve()
+    preserves the typed case. Falls back to exact string equality when either
+    path can't be stat'ed (e.g. the recorded source has since moved)."""
+    if a == b:
+        return True
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return False
+
+
 def _job_dir(output_root: Path, job_id: str) -> Path:
     return output_root / job_id
 
@@ -786,6 +889,7 @@ class JobRegistry:
 
         self._migrate_legacy_cwd_jobs()
         self._load_from_disk()
+        self._dedupe_imported_records()
         self._start_watchdog()
 
     def _migrate_legacy_cwd_jobs(self) -> None:
@@ -913,6 +1017,32 @@ class JobRegistry:
                     if r.state == "running" and r.runner == "local":
                         raise JobAlreadyRunningError(r.id)
 
+            # Resume and fine-tune are distinct and mutually exclusive: resume
+            # continues optimizer+step from a checkpoint (needs training_state);
+            # fine-tune starts a FRESH run whose weights are init'd from a
+            # checkpoint (weights-only is fine). Reject the nonsensical combo up
+            # front rather than letting one silently win.
+            if config.resume and config.finetune_from_job_id:
+                raise ValueError(
+                    "A run can't both resume and fine-tune. Resume continues an "
+                    "existing run's optimizer/step; fine-tune starts a fresh run "
+                    "from a checkpoint's weights."
+                )
+
+            # Fine-tune: turn the selected source run + step into the
+            # pretrained_path lerobot loads weights from. A fresh run (resume
+            # stays false); no training_state required. Resolved under the lock
+            # and before the record so a bad selection fails with no orphan.
+            if config.finetune_from_job_id:
+                source = self._records.get(config.finetune_from_job_id)
+                if source is None:
+                    raise ValueError(
+                        f"Fine-tune source {config.finetune_from_job_id!r} not found."
+                    )
+                config.policy_pretrained_path = _resolve_finetune_pretrained_path(
+                    source, config.finetune_from_step
+                )
+
             # Resume: turn the selected source run + step into the config_path
             # lerobot needs. Do this under the lock (source lookup) and before
             # creating the record so a bad selection fails cleanly with no
@@ -934,7 +1064,7 @@ class JobRegistry:
                         "resume manually."
                     )
 
-            job_id = _generate_job_id(config.policy_type, config.dataset_repo_id)
+            job_id = self._unique_job_id(config.policy_type, config.dataset_repo_id)
             job_dir = _job_dir(self._output_root, job_id)
             lerobot_output_dir = str(job_dir / "run")
             name = (
@@ -988,6 +1118,49 @@ class JobRegistry:
         self._notify_change()
         return record
 
+    def _unique_job_id(self, policy_type: str, dataset_repo_id: str) -> str:
+        """_generate_job_id with a collision guard. The generated id embeds a
+        second-granularity timestamp, so two jobs created within the same
+        second would otherwise share an id and silently overwrite each other
+        in the registry (and on disk). Suffix -2, -3, … until unused."""
+        base = _generate_job_id(policy_type, dataset_repo_id)
+        job_id = base
+        n = 2
+        while job_id in self._records or _job_dir(self._output_root, job_id).exists():
+            job_id = f"{base}-{n}"
+            n += 1
+        return job_id
+
+    def find_imported(self, source: str) -> JobRecord | None:
+        """Return the already-registered imported record for `source`, if any.
+
+        `source` is normalized first (whitespace, pasted Hub URLs, trailing
+        slashes — see _normalize_import_source). Identity per import kind:
+          * local dir → filesystem identity of the resolved path vs the stored
+            output_dir (_paths_are_same_dir: samefile, so case variants on a
+            case-insensitive filesystem and moved-cwd spellings still match —
+            a plain string compare demonstrably missed a real duplicate pair);
+          * hub repo → hf_repo_id compared CASE-INSENSITIVELY. Reversal of the
+            earlier exact-match choice: HF repo ids are practically unique
+            case-insensitively (the Hub redirects across casings), and the
+            failure mode of exact matching is silent duplicates.
+        """
+        src = _normalize_import_source(source)
+        if not src:
+            return None
+        local_path = Path(src).expanduser()
+        local_key = str(local_path.resolve()) if local_path.is_dir() else None
+        with self._lock:
+            for r in self._records.values():
+                if r.runner != "imported":
+                    continue
+                if local_key is not None:
+                    if not r.hf_repo_id and r.output_dir and _paths_are_same_dir(r.output_dir, local_key):
+                        return r
+                elif (r.hf_repo_id or "").lower() == src.lower():
+                    return r
+        return None
+
     def register_imported(self, source: str, name: str | None = None) -> JobRecord:
         """Register an externally-trained model as a pointer-only pseudo-job.
 
@@ -995,10 +1168,20 @@ class JobRegistry:
         output_dir) or, failing that, a Hugging Face repo id (stored in
         hf_repo_id). The source must expose at least one checkpoint under the
         auto-detect rules, else ValueError. Nothing is copied; delete only
-        removes the pointer."""
-        src = source.strip()
+        removes the pointer.
+
+        Idempotent per source: importing an already-registered path/repo
+        returns the EXISTING record (its id and display alias untouched)
+        instead of creating a second entry — see find_imported for the
+        identity keys. The source is normalized first (whitespace, pasted Hub
+        URLs, trailing slashes), and the normalized form is what gets stored."""
+        src = _normalize_import_source(source)
         if not src:
             raise ValueError("source is required")
+
+        existing = self.find_imported(src)
+        if existing is not None:
+            return existing
 
         local_path = Path(src).expanduser()
         if local_path.is_dir():
@@ -1007,8 +1190,6 @@ class JobRegistry:
             output_dir, hf_repo_id = resolved, None
             label = local_path.name or resolved
         else:
-            from .utils.hf_auth import shared_hf_api
-
             ckpts = _list_imported_hub(shared_hf_api(), src)
             output_dir, hf_repo_id = "", src
             label = src
@@ -1027,20 +1208,46 @@ class JobRegistry:
         with contextlib.suppress(Exception):
             policy_type = str(_read_checkpoint_config(ckpts[-1]).get("type") or "model")
 
-        job_id = _generate_job_id(policy_type, "imported")
-        record = JobRecord(
-            id=job_id,
-            name=name or f"Imported · {label}",
-            state="done",
-            config=TrainingRequest(dataset_repo_id="(imported)", policy_type=policy_type),
-            output_dir=output_dir,
-            started_at=time.time(),
-            ended_at=time.time(),
-            runner="imported",
-            hf_repo_id=hf_repo_id,
-        )
         with self._lock:
+            job_id = self._unique_job_id(policy_type, "imported")
+            record = JobRecord(
+                id=job_id,
+                name=name or f"Imported · {label}",
+                state="done",
+                config=TrainingRequest(dataset_repo_id="(imported)", policy_type=policy_type),
+                output_dir=output_dir,
+                started_at=time.time(),
+                ended_at=time.time(),
+                runner="imported",
+                hf_repo_id=hf_repo_id,
+            )
             self._records[job_id] = record
+            self._persist(record, force=True)
+        self._notify_change()
+        return record
+
+    def rename(self, job_id: str, new_name: str) -> JobRecord:
+        """Set a job's display alias. Metadata-only by design: the immutable
+        identity (run id, output_dir, hub repo id) is never touched, so resume
+        lineage (charts stitch across runs by id), live training/inference
+        reads, imported-model hub identity (dedup on re-import), and remote
+        HF Jobs / W&B names all keep working. The UI shows the alias and falls
+        back to `name` when unset.
+
+        Aliases are display-only, so uniqueness is NOT enforced (unlike
+        calibration/robot renames, where the name is a file key). The same
+        is_valid-style guard is applied for consistency (rejects path-ish
+        characters); trimmed; empty ⇒ ValueError (→ HTTP 400)."""
+        name = new_name.strip()
+        if not name:
+            raise ValueError("Display name cannot be empty.")
+        if not is_valid_robot_name(name):
+            raise ValueError("Invalid display name.")
+        with self._lock:
+            record = self._records.get(job_id)
+            if record is None:
+                raise JobNotFoundError(job_id)
+            record.display_name = name
             self._persist(record, force=True)
         self._notify_change()
         return record
@@ -1164,8 +1371,6 @@ class JobRegistry:
         cached = self._cloud_ckpt_cache.get(repo_id)
         if cached is not None and cached[0] > now:
             return cached[1]
-        from .utils.hf_auth import shared_hf_api  # lazy: keeps unit-test imports cheap
-
         result = fetch(shared_hf_api(), repo_id)
         self._cloud_ckpt_cache[repo_id] = (now + _CLOUD_CKPT_TTL_SECONDS, result)
         return result
@@ -1285,6 +1490,82 @@ class JobRegistry:
                         record.ended_at = time.time()
                     self._write_meta(record)
             self._records[record.id] = record
+
+    def _dedupe_imported_records(self) -> None:
+        """One-time collapse of duplicate imported pointers left behind before
+        dedup-at-registration existed (same local path or hub repo id
+        registered more than once).
+
+        Runs at boot, after _load_from_disk and before the watchdog starts
+        (single-threaded, so no lock needed). Per identity group: keep the
+        OLDEST record; if the keeper has no alias, migrate the newest
+        duplicate's display_name onto it. Duplicates are dropped from the
+        in-memory map; their job dir is deleted ONLY when it contains nothing
+        but job.json — anything else (weights, logs, leftovers) means the
+        files stay put and we just log. Conservative by design: malformed
+        pointers (no identity) are left alone entirely."""
+        groups: dict[tuple[str, str], list[JobRecord]] = {}
+        for r in self._records.values():
+            if r.runner != "imported":
+                continue
+            if r.hf_repo_id:
+                # Case-insensitive: HF repo ids are practically unique
+                # case-insensitively (same reversal as find_imported).
+                key = ("hub", r.hf_repo_id.lower())
+            elif r.output_dir:
+                # Filesystem identity (device:inode) so spellings that differ
+                # only by case on a case-insensitive filesystem — the real
+                # duplicate pair — group together. Unstat-able paths (source
+                # moved/deleted) fall back to the raw string: conservative,
+                # they only group with byte-identical spellings.
+                try:
+                    st = os.stat(r.output_dir)
+                    key = ("local", f"{st.st_dev}:{st.st_ino}")
+                except OSError:
+                    key = ("local", r.output_dir)
+            else:
+                continue  # no identity — when in doubt, keep it
+            groups.setdefault(key, []).append(r)
+
+        for (kind, _ident), records in groups.items():
+            if len(records) < 2:
+                continue
+            records.sort(key=lambda r: r.started_at)
+            keeper, dupes = records[0], records[1:]
+            if keeper.display_name is None:
+                # Newest aliased duplicate wins — it's the user's latest word.
+                for dup in reversed(dupes):
+                    if dup.display_name:
+                        keeper.display_name = dup.display_name
+                        self._write_meta(keeper)
+                        break
+            for dup in dupes:
+                self._records.pop(dup.id, None)
+                dup_dir = _job_dir(self._output_root, dup.id)
+                removed = False
+                if dup_dir.is_dir():
+                    try:
+                        only_meta = [p.name for p in dup_dir.iterdir()] == ["job.json"]
+                    except OSError:
+                        only_meta = False
+                    if only_meta:
+                        shutil.rmtree(dup_dir, ignore_errors=True)
+                        removed = True
+                    else:
+                        logger.info(
+                            "Duplicate imported model %s: leaving %s in place "
+                            "(contains more than job.json).",
+                            dup.id,
+                            dup_dir,
+                        )
+                logger.info(
+                    "Collapsed duplicate imported model %s into %s (same %s %r)%s",
+                    dup.id,
+                    keeper.id,
+                    kind,
+                    keeper.hf_repo_id or keeper.output_dir,
+                    "" if removed else " — pointer dropped from the registry only",
+                )
 
     def _start_watchdog(self) -> None:
         self._watchdog_thread = threading.Thread(

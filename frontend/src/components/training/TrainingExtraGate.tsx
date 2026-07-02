@@ -4,7 +4,7 @@ import { useInstallExtra } from "@/hooks/useInstallExtra";
 import {
   InstallProgress,
   InstallTitleIcon,
-  RestartInstructions,
+  ReadyInstructions,
   installTitle,
 } from "./InstallProgress";
 
@@ -45,7 +45,7 @@ const TrainingExtraGate: React.FC<Props> = ({ installHint }) => {
                 to enable the Training page.
               </>
             }
-            doneDescription={<RestartInstructions purpose="training" />}
+            doneDescription={<ReadyInstructions purpose="training" />}
           />
         </CardContent>
       </Card>

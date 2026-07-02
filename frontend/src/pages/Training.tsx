@@ -32,6 +32,7 @@ import {
   getJob,
   getJobLogs,
   getJobLogFile,
+  jobDisplayName,
   listJobs,
   startTrainingJob,
   stopJob,
@@ -47,6 +48,21 @@ import { useRobots } from "@/hooks/useRobots";
 const POLL_INTERVAL_MS = 1000;
 const MAX_LOG_LINES = 5000;
 
+// The policy type is chosen before landing here (home-page model buttons, or
+// inherited by the Continue/Fine-tune flows) and arrives via router state.
+// Router state is lost on a hard refresh / direct visit, so mirror the last
+// resolved type in sessionStorage and fall back to it — the frozen Policy
+// display then survives a refresh instead of silently reverting to "act".
+const POLICY_TYPE_STORAGE_KEY = "lelab.training.policyType";
+
+function readStoredPolicyType(): string | null {
+  try {
+    return sessionStorage.getItem(POLICY_TYPE_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
 // Passed via router state by the "Continue" button on a completed local job.
 type ResumeSource = {
   jobId: string;
@@ -57,6 +73,16 @@ type ResumeSource = {
   sourceSteps: number; // the source run's configured total, for a sane prefill
   logFreq?: number; // the source run's log cadence, to preserve on resume
   saveFreq?: number; // the source run's checkpoint cadence, to preserve on resume
+};
+
+// Passed via router state by the "Fine-tune" button on an imported model. A
+// fine-tune is a FRESH run (fresh optimizer, step 0) whose weights are
+// initialized from the source checkpoint — distinct from resume.
+type FinetuneSource = {
+  jobId: string;
+  step: number | null; // null ⇒ latest checkpoint of the source
+  name: string;
+  policyType: string;
 };
 
 function jobToStatus(
@@ -110,6 +136,8 @@ function configToRequest(c: TrainingConfig): TrainingRequest {
     resume: c.resume,
     resume_from_job_id: c.resume_from_job_id,
     resume_from_step: c.resume_from_step,
+    finetune_from_job_id: c.finetune_from_job_id,
+    finetune_from_step: c.finetune_from_step,
     wandb_enable: c.wandb_enable,
     wandb_project: c.wandb_project,
     wandb_entity: c.wandb_entity,
@@ -132,10 +160,21 @@ const ConfigurationMode: React.FC = () => {
   const { toast } = useToast();
   const navigate = useNavigate();
   const location = useLocation();
-  const navState = location.state as { resume?: ResumeSource } | null;
+  const navState = location.state as {
+    resume?: ResumeSource;
+    finetune?: FinetuneSource;
+    // Set by the landing page's per-model-type "Create a model" buttons so
+    // the chosen policy arrives preselected. Direct visits have no state and
+    // fall back to the default.
+    policyType?: string;
+  } | null;
   const resumeSource = navState?.resume ?? null;
+  const finetuneSource = navState?.finetune ?? null;
+  const preselectedPolicyType = navState?.policyType ?? null;
   // Dataset is chosen on the home page (single source of truth); a resume
-  // inherits the source run's dataset.
+  // inherits the source run's dataset. A fine-tune trains on a NEW dataset
+  // (the imported model has none), so it uses the home-page selection like a
+  // normal fresh run.
   const { selectedDataset } = useSelectedDataset();
   const prefilledDatasetRepoId =
     resumeSource?.datasetRepoId ?? selectedDataset ?? "";
@@ -143,11 +182,17 @@ const ConfigurationMode: React.FC = () => {
   const [trainingConfig, setTrainingConfig] = useState<TrainingConfig>({
     target: { runner: "local" },
     dataset_repo_id: prefilledDatasetRepoId,
-    policy_type: resumeSource?.policyType ?? "act",
+    policy_type:
+      resumeSource?.policyType ??
+      finetuneSource?.policyType ??
+      preselectedPolicyType ??
+      readStoredPolicyType() ??
+      "act",
     job_name: "",
     // On resume, everything but steps is inherited from the checkpoint's
     // train_config.json; prefill steps above the source's total so the
-    // continuation actually trains further.
+    // continuation actually trains further. Fine-tune is a fresh run, so it
+    // uses the normal fresh default.
     steps: resumeSource ? resumeSource.sourceSteps * 2 : 10000,
     batch_size: 8,
     seed: 1000,
@@ -155,9 +200,14 @@ const ConfigurationMode: React.FC = () => {
     log_freq: resumeSource?.logFreq ?? 50,
     save_freq: resumeSource?.saveFreq ?? 1000,
     save_checkpoint: true,
+    // Fine-tune is NOT a resume — it's a fresh run whose weights are seeded from
+    // the source checkpoint. resume stays false; the backend resolves
+    // finetune_from_* into --policy.pretrained_path.
     resume: !!resumeSource,
     resume_from_job_id: resumeSource?.jobId,
     resume_from_step: resumeSource?.step ?? undefined,
+    finetune_from_job_id: finetuneSource?.jobId,
+    finetune_from_step: finetuneSource?.step ?? undefined,
     wandb_enable: false,
     wandb_mode: "online",
     wandb_disable_artifact: false,
@@ -166,6 +216,19 @@ const ConfigurationMode: React.FC = () => {
     optimizer_type: "adam",
     use_policy_training_preset: true,
   });
+
+  // Mirror the resolved (frozen) policy type so a refresh — which drops
+  // router state — restores the same choice via readStoredPolicyType().
+  useEffect(() => {
+    try {
+      sessionStorage.setItem(
+        POLICY_TYPE_STORAGE_KEY,
+        trainingConfig.policy_type,
+      );
+    } catch {
+      // storage unavailable (private mode) — refresh falls back to default
+    }
+  }, [trainingConfig.policy_type]);
 
   const [trainingExtraAvailable, setTrainingExtraAvailable] = useState<
     boolean | null
@@ -364,6 +427,23 @@ const ConfigurationMode: React.FC = () => {
             </p>
           </div>
         ) : null}
+        {finetuneSource ? (
+          <div className="max-w-3xl mx-auto mb-4 rounded-lg border border-violet-500/40 bg-violet-500/10 p-4 text-sm text-violet-100">
+            <div className="font-semibold">
+              Fine-tuning from “{finetuneSource.name}”
+              {finetuneSource.step != null
+                ? ` (step ${finetuneSource.step.toLocaleString()})`
+                : " (latest checkpoint)"}
+            </div>
+            <p className="mt-1 text-violet-200/80">
+              This starts a{" "}
+              <span className="font-medium">fresh run</span> (new optimizer, from
+              step 0) with the policy weights initialized from that model. Pick a{" "}
+              <span className="font-medium">dataset</span> to train on and set
+              your training parameters as usual.
+            </p>
+          </div>
+        ) : null}
         <ConfigurationTab
           config={trainingConfig}
           updateConfig={updateConfig}
@@ -390,7 +470,11 @@ const ConfigurationMode: React.FC = () => {
                 ) : (
                   <>
                     <Play className="w-5 h-5 mr-2" />{" "}
-                    {resumeSource ? "Continue Training" : "Start Training"}
+                    {resumeSource
+                      ? "Continue Training"
+                      : finetuneSource
+                        ? "Start Fine-tuning"
+                        : "Start Training"}
                   </>
                 )}
               </Button>
@@ -634,7 +718,9 @@ const MonitoringMode: React.FC<{ jobId: string }> = ({ jobId }) => {
             </Button>
             <div>
               <div className="flex items-center gap-2">
-                <h1 className="text-xl font-semibold text-white">{job.name}</h1>
+                <h1 className="text-xl font-semibold text-white">
+                  {jobDisplayName(job)}
+                </h1>
                 {job.runner === "hf_cloud" ? (
                   <span className="text-xs px-2 py-0.5 rounded bg-amber-900/40 text-amber-200 border border-amber-700">
                     HF · {job.hf_flavor ?? "cloud"}
@@ -667,6 +753,10 @@ const MonitoringMode: React.FC<{ jobId: string }> = ({ jobId }) => {
                   </a>
                 )}
               </div>
+              {/* When aliased, keep the immutable run id visible as subtext. */}
+              {job.display_name ? (
+                <p className="text-[11px] text-slate-500">{job.id}</p>
+              ) : null}
               <p className="text-xs text-slate-400">
                 {job.state}
                 {job.error_message ? ` — ${job.error_message}` : ""}

@@ -163,7 +163,7 @@ const PortDetectionModal: React.FC<PortDetectionModalProps> = ({
               <Button
                 onClick={handleCancel}
                 variant="outline"
-                className="border-gray-500 hover:border-gray-200 text-gray-300 hover:text-white px-8 py-2"
+                className="border-gray-500 hover:border-gray-200 text-gray-700 hover:text-gray-900 dark:text-gray-300 dark:hover:text-white px-8 py-2"
               >
                 Cancel
               </Button>
@@ -208,7 +208,7 @@ const PortDetectionModal: React.FC<PortDetectionModalProps> = ({
               <Button
                 onClick={handleCancel}
                 variant="outline"
-                className="border-gray-500 hover:border-gray-200 text-gray-300 hover:text-white px-8 py-2"
+                className="border-gray-500 hover:border-gray-200 text-gray-700 hover:text-gray-900 dark:text-gray-300 dark:hover:text-white px-8 py-2"
               >
                 Cancel
               </Button>

@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import VisualizerPanel from "@/components/control/VisualizerPanel";
+import TeleopCameraPanel from "@/components/control/TeleopCameraPanel";
 import { useToast } from "@/hooks/use-toast";
 import { useApi } from "@/contexts/ApiContext";
 import { useRobots } from "@/hooks/useRobots";
@@ -26,7 +27,43 @@ const TeleoperationPage = () => {
         method: "POST",
       });
       const data = await res.json();
-      if (data?.success) {
+      if (data?.warning) {
+        // Cleanup could not release an arm — torque may still be enabled and
+        // the arm can stay rigid. Make this loud instead of claiming success.
+        toast({
+          title: "Teleoperation stopped — check the arm",
+          description: data.warning,
+          variant: "destructive",
+        });
+      } else if (data?.releasing) {
+        // The backend drives the follower straight back to its session-start
+        // pose (no timed hold), then releases torque.
+        toast({
+          title: "Teleoperation stopped",
+          description:
+            data.message ?? "The arm returns to its starting position, then goes limp.",
+        });
+        // The release happens after this response returns, so check once
+        // after the return (progress-based, 10 s ceiling) whether it actually
+        // succeeded (the toast store is global, so this fires even after
+        // navigating away).
+        setTimeout(async () => {
+          try {
+            const status = await fetchWithHeaders(`${baseUrl}/teleoperation-status`).then((r) =>
+              r.json()
+            );
+            if (status?.last_cleanup_error) {
+              toast({
+                title: "Check the arm",
+                description: status.last_cleanup_error,
+                variant: "destructive",
+              });
+            }
+          } catch {
+            /* best-effort */
+          }
+        }, 13000);
+      } else if (data?.success) {
         toast({
           title: "Teleoperation stopped",
           description: "The arm was disconnected cleanly.",
@@ -74,7 +111,12 @@ const TeleoperationPage = () => {
   return (
     <div className="min-h-screen bg-black flex items-center justify-center p-2 sm:p-4">
       <div className="w-full h-[95vh] flex">
-        <VisualizerPanel onGoBack={handleGoBack} className="lg:w-full" bimanual={bimanual} />
+        <VisualizerPanel
+          onGoBack={handleGoBack}
+          className="lg:w-full"
+          bimanual={bimanual}
+          rightSlot={<TeleopCameraPanel />}
+        />
       </div>
     </div>
   );

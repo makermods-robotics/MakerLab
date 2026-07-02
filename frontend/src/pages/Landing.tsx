@@ -8,8 +8,14 @@ import Footer from "@/components/Footer";
 import RobotConfigManager from "@/components/landing/RobotConfigManager";
 import RecordingModal from "@/components/landing/RecordingModal";
 import DatasetPicker from "@/components/landing/DatasetPicker";
+import DatasetInfoCard from "@/components/landing/DatasetInfoCard";
 import MergeDatasetsDialog from "@/components/landing/MergeDatasetsDialog";
 import JobsSection from "@/components/jobs/JobsSection";
+import { POLICY_TYPE_OPTIONS } from "@/components/training/types";
+import {
+  fetchPolicyAvailability,
+  PolicyAvailability,
+} from "@/lib/policyAvailability";
 
 import UsageInstructionsModal from "@/components/landing/UsageInstructionsModal";
 import { useHfAuth } from "@/contexts/HfAuthContext";
@@ -40,14 +46,15 @@ const Landing = () => {
   const { baseUrl, fetchWithHeaders } = useApi();
 
   const {
+    records,
     selectedName,
     selectedRecord,
     availableNames,
     isLoading: isLoadingRobots,
     selectRobot,
+    clearSelection,
     createRobot,
     renameRobot,
-    setRobotMode,
     deleteRobot,
   } = useRobots();
 
@@ -75,6 +82,26 @@ const Landing = () => {
 
   const navigate = useNavigate();
   const { toast } = useToast();
+
+  // Which policy types this backend's lerobot pin can actually train.
+  // Buttons stay enabled until the (cached) answer arrives: most types are
+  // valid, so briefly optimistic beats greying the whole card on every visit.
+  const [policyAvailability, setPolicyAvailability] =
+    useState<PolicyAvailability | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    fetchPolicyAvailability(baseUrl, fetchWithHeaders)
+      .then((a) => {
+        if (!cancelled) setPolicyAvailability(a);
+      })
+      .catch(() => {
+        // Backend unreachable — leave all buttons enabled; training itself
+        // will surface the real error.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [baseUrl, fetchWithHeaders]);
 
   // Clear camera state and release streams when returning to landing page
   useEffect(() => {
@@ -111,7 +138,10 @@ const Landing = () => {
     }
   };
 
-  const handleTrainingClick = () => navigate("/training");
+  // Each model-type button is a direct entry into training: the Training page
+  // reads `policyType` from router state and preselects it in the config form.
+  const handleTrainingClick = (policyType: string) =>
+    navigate("/training", { state: { policyType } });
 
   // Picking a dataset here selects it for training (the single source of truth);
   // Training reads it from the persisted selection.
@@ -258,6 +288,8 @@ const Landing = () => {
       right_follower_port: robot.right_follower_port,
       right_leader_config: robot.right_leader_config,
       right_follower_config: robot.right_follower_config,
+      // Follower torque limit for the session (10-100% of full power).
+      motor_power: robot.motor_power ?? 100,
       dataset_repo_id: datasetRepoId,
       single_task: singleTask,
       num_episodes: numEpisodes,
@@ -288,19 +320,20 @@ const Landing = () => {
       >
         <div className="mx-auto max-w-7xl px-4 py-4 grid gap-4 grid-cols-1 lg:grid-cols-[1.2fr_2fr]">
           <RobotConfigManager
+            records={records}
             selectedName={selectedName}
             selectedRecord={selectedRecord}
             availableNames={availableNames}
             isLoading={isLoadingRobots}
             selectRobot={selectRobot}
+            clearSelection={clearSelection}
             createRobot={createRobot}
             renameRobot={renameRobot}
-            setRobotMode={setRobotMode}
             deleteRobot={deleteRobot}
           />
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             <div className="bg-gray-800 rounded-lg border border-gray-700 p-3 flex flex-col gap-2">
-              <h3 className="font-semibold text-lg text-left h-10 flex items-center">
+              <h3 className="font-semibold text-lg text-center h-10 flex items-center justify-center">
                 Dataset
               </h3>
               <DatasetPicker
@@ -326,6 +359,7 @@ const Landing = () => {
                   <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
                 </Button>
               </DatasetPicker>
+              {selectedDataset && <DatasetInfoCard repoId={selectedDataset} />}
               <button
                 type="button"
                 onClick={() => setShowMergeDialog(true)}
@@ -335,16 +369,36 @@ const Landing = () => {
               </button>
             </div>
             <div className="bg-gray-800 rounded-lg border border-gray-700 p-3 flex flex-col gap-2">
-              <h3 className="font-semibold text-lg text-left h-10 flex items-center">
+              <h3 className="font-semibold text-lg text-center h-10 flex items-center justify-center">
                 Create a model
               </h3>
-              <Button
-                onClick={handleTrainingClick}
-                disabled={!selectedDataset}
-                className="w-full bg-green-500 hover:bg-green-600 text-white"
-              >
-                Training
-              </Button>
+              <div className="grid grid-cols-3 gap-2">
+                {POLICY_TYPE_OPTIONS.map((policy) => {
+                  const unavailable =
+                    policyAvailability?.[policy.value] === false;
+                  return (
+                    // Tooltip lives on a wrapper span: the disabled Button
+                    // gets pointer-events-none, which would swallow `title`.
+                    <span
+                      key={policy.value}
+                      title={
+                        unavailable
+                          ? "Not available in this lerobot version"
+                          : `Train a ${policy.label} model`
+                      }
+                    >
+                      <Button
+                        onClick={() => handleTrainingClick(policy.value)}
+                        disabled={!selectedDataset || unavailable}
+                        size="sm"
+                        className="w-full bg-green-500 hover:bg-green-600 text-white px-2"
+                      >
+                        <span className="truncate">{policy.label}</span>
+                      </Button>
+                    </span>
+                  );
+                })}
+              </div>
               {!selectedDataset && (
                 <p className="text-xs text-gray-500">Select a dataset first.</p>
               )}

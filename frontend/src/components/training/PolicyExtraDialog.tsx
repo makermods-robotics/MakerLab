@@ -10,7 +10,7 @@ import { useInstallExtra } from "@/hooks/useInstallExtra";
 import {
   InstallProgress,
   InstallTitleIcon,
-  RestartInstructions,
+  ReadyInstructions,
   installTitle,
 } from "./InstallProgress";
 
@@ -70,7 +70,7 @@ const PolicyExtraDialog: React.FC<Props> = ({
                 which isn't in this environment yet. Install it to train this policy.
               </>
             }
-            doneDescription={<RestartInstructions purpose={`${policyType} training`} />}
+            doneDescription={<ReadyInstructions purpose={`${policyType} training`} />}
           />
         </div>
       </DialogContent>

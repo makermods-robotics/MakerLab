@@ -36,7 +36,11 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from .utils.config import setup_follower_calibration_file
+from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
+
+from .arm_identity import ArmIdentityError, ArmSlot, verify_devices
+from .motor_power import apply_motor_power
+from .utils.config import list_robot_records, setup_follower_calibration_file
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +52,12 @@ class InferenceRequest(BaseModel):
     task: str = ""
     cameras: dict[str, dict[str, Any]] = {}
     duration_s: int = 60
+    # Escape hatch for the arm-identity guard (see lelab/arm_identity.py):
+    # when true, run even if the connected arm doesn't match its calibration.
+    skip_identity_check: bool = False
+    # Follower torque as a percentage of full power (see lelab/motor_power.py).
+    # Clamped server-side to 10-100; written before the subprocess starts.
+    motor_power: int = 100
 
 
 inference_active: bool = False
@@ -139,6 +149,77 @@ def _resolve_policy_path(policy_ref: str) -> str:
     raise ValueError(f"Unrecognised policy ref: {policy_ref!r}")
 
 
+def _counterpart_leader_slots(follower_id: str) -> list[ArmSlot]:
+    """Leader config(s) paired with this follower config in saved robot records.
+
+    Inference only connects the follower, so the guard can't derive the
+    counterpart slot from the session itself (the way teleop/record do). Look
+    it up: any robot record whose follower slot is `follower_id` names the
+    leader config that belongs on the OTHER port — if the connected arm's
+    EEPROM fingerprint matches that config, the ports are swapped (hard block
+    instead of a generic warning)."""
+    slots: list[ArmSlot] = []
+    seen: set[tuple[str, str]] = set()
+    for record in list_robot_records():
+        for follower_field, leader_field, label in (
+            ("follower_config", "leader_config", "leader"),
+            ("right_follower_config", "right_leader_config", "right leader"),
+        ):
+            leader_name = record.get(leader_field) or ""
+            if record.get(follower_field) == follower_id and leader_name and (label, leader_name) not in seen:
+                seen.add((label, leader_name))
+                slots.append(ArmSlot(label, "leader", leader_name))
+    return slots
+
+
+def _preflight_arm_identity(port: str, follower_id: str) -> list[str]:
+    """Read-only identity check of the follower arm before the rollout
+    subprocess starts.
+
+    The subprocess itself can't be guarded (its stdin is pre-seeded with a
+    newline, which auto-confirms lerobot's "use the calibration file" prompt
+    and stamps the file into EEPROM on mismatch), so the check happens here:
+    connect the bare bus, verify, and release the port for the subprocess to
+    reopen. Raises ArmIdentityError on a hard mismatch; returns the
+    warn-but-allow messages otherwise."""
+    robot = SO101Follower(SO101FollowerConfig(port=port, id=follower_id))
+    robot.bus.connect()
+    try:
+        return verify_devices(((robot, "follower"),), extra_slots=_counterpart_leader_slots(follower_id))
+    finally:
+        # Reads only: torque was never enabled, so skip the torque-disable
+        # write and just close the port.
+        robot.bus.disconnect(disable_torque=False)
+
+
+def _preflight_motor_power(port: str, follower_id: str, percent: int) -> list[str]:
+    """Write the session motor power to the follower before the rollout
+    subprocess starts.
+
+    The subprocess itself can't be instrumented, but Torque_Limit is a RAM
+    register: it survives closing the serial port (only a power cycle resets
+    it), and the subprocess's connect()/configure() never writes it — so
+    setting it here and releasing the port is enough for the whole rollout.
+    Never raises: a failure degrades to full power (logged) and returns
+    warning messages instead of aborting the start."""
+    robot = SO101Follower(SO101FollowerConfig(port=port, id=follower_id))
+    try:
+        robot.bus.connect()
+        try:
+            return apply_motor_power(robot, percent, "follower arm")
+        finally:
+            # Torque was never enabled here; just release the port for the
+            # subprocess to reopen.
+            robot.bus.disconnect(disable_torque=False)
+    except Exception as exc:
+        message = (
+            f"Could not set motor power to {percent}% on {port}: {exc}. "
+            "The arm runs at its previous limit (full power after a power-up)."
+        )
+        logger.warning(message)
+        return [message]
+
+
 def _format_cameras_arg(cameras: dict[str, dict[str, Any]]) -> str:
     """Convert {name: {type, camera_index, width, height, fps}} into
     lerobot's CLI dict syntax. The frontend key `camera_index` is
@@ -190,6 +271,19 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
         # because lerobot appends `.json` itself when constructing
         # `calibration_dir / f"{id}.json"`.
         follower_id = setup_follower_calibration_file(request.follower_config)
+
+        # Arm-identity guard: refuse before the subprocess can move (or stamp
+        # the wrong calibration into) an arm that doesn't match its file.
+        identity_warnings: list[str] = []
+        if request.skip_identity_check:
+            logger.warning("Arm identity check SKIPPED by request (skip_identity_check=true)")
+        else:
+            identity_warnings = _preflight_arm_identity(request.follower_port, follower_id)
+
+        # Always written (even at 100%) so a gentler previous session can't
+        # linger when the arm was never power-cycled.
+        identity_warnings += _preflight_motor_power(request.follower_port, follower_id, request.motor_power)
+
         policy_path = _resolve_policy_path(request.policy_ref)
 
         cmd = [
@@ -241,6 +335,12 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
             name="inference-stdout-pump",
             daemon=True,
         ).start()
+    except ArmIdentityError as exc:
+        # The connected arm doesn't match its assigned calibration; the message
+        # is already user-facing. Subprocess never started — release the slot.
+        with _state_lock:
+            inference_active = False
+        return {"success": False, "status_code": 409, "message": str(exc)}
     except Exception as exc:
         logger.exception("Failed to start inference")
         # Subprocess never started — release the slot.
@@ -258,7 +358,10 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
             "log_path": str(log_path),
         }
     logger.info("Inference started: pid=%s policy=%s", proc.pid, policy_path)
-    return {"success": True, "message": "Inference started", "log_path": str(log_path)}
+    response = {"success": True, "message": "Inference started", "log_path": str(log_path)}
+    if identity_warnings:
+        response["warning"] = " ".join(identity_warnings)
+    return response
 
 
 def handle_stop_inference() -> dict[str, Any]:

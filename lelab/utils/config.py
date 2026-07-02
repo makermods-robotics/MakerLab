@@ -86,8 +86,25 @@ def _config_file_for(robot_type: RobotSide) -> str:
     raise ValueError(f"robot_type must be 'leader' or 'follower', got {robot_type!r}")
 
 
+def _require_assigned_config(config: str, side: str) -> None:
+    """Fail with a legible message when an arm has no calibration assigned.
+
+    An empty name would otherwise resolve to the calibration *directory* and
+    crash shutil.copy2 with an opaque IsADirectoryError. This happens when a
+    robot record's config field was cleared (e.g. its calibration config was
+    deleted) and a start request is issued anyway.
+    """
+    if not (config or "").strip():
+        raise FileNotFoundError(
+            f"The {side} arm has no calibration assigned. Calibrate it "
+            "(or assign a saved calibration config) before starting."
+        )
+
+
 def setup_calibration_files(leader_config: str, follower_config: str):
     """Setup calibration files in the correct locations for teleoperation and recording"""
+    _require_assigned_config(leader_config, "leader")
+    _require_assigned_config(follower_config, "follower")
     # Extract config names from file paths (remove .json extension)
     leader_config_name = os.path.splitext(leader_config)[0]
     follower_config_name = os.path.splitext(follower_config)[0]
@@ -135,6 +152,7 @@ def setup_calibration_files(leader_config: str, follower_config: str):
 
 def setup_follower_calibration_file(follower_config: str):
     """Setup follower calibration file in the correct location for replay functionality"""
+    _require_assigned_config(follower_config, "follower")
     # Extract config name from file path (remove .json extension)
     follower_config_name = os.path.splitext(follower_config)[0]
 
@@ -347,6 +365,27 @@ _BIMANUAL_CONFIG_FIELDS = (
 )
 _ROBOT_STRING_FIELDS = _SINGLE_CONFIG_FIELDS + _BIMANUAL_CONFIG_FIELDS
 _ROBOT_LIST_FIELDS = ("cameras",)
+
+# Follower motor power, as a percentage of full torque (see lelab/motor_power.py
+# for how it's written to the servos). Bounded below because under ~10% the arm
+# can't reliably hold its own weight; 100 = stock behavior.
+MOTOR_POWER_MIN = 10
+MOTOR_POWER_MAX = 100
+DEFAULT_MOTOR_POWER = 100
+
+
+def clamp_motor_power(value: object) -> int:
+    """Coerce a motor_power value to a safe integer percent in [10, 100].
+
+    Anything non-numeric (including bool, a subclass of int) falls back to full
+    power — the register's own power-on default — rather than raising, so a
+    corrupted record can never block a session start.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return DEFAULT_MOTOR_POWER
+    return max(MOTOR_POWER_MIN, min(MOTOR_POWER_MAX, int(value)))
+
+
 # Config-name fields whose stored value may carry a ".json" extension to strip.
 _CONFIG_NAME_FIELDS = ("leader_config", "follower_config", "right_leader_config", "right_follower_config")
 _VALID_MODES = ("single", "bimanual")
@@ -367,7 +406,7 @@ def is_valid_robot_name(name: str) -> bool:
 
 
 def _empty_record(name: str) -> dict:
-    record: dict = {"name": name, "mode": _DEFAULT_MODE}
+    record: dict = {"name": name, "mode": _DEFAULT_MODE, "motor_power": DEFAULT_MOTOR_POWER}
     for field in _ROBOT_STRING_FIELDS:
         record[field] = ""
     for field in _ROBOT_LIST_FIELDS:
@@ -400,6 +439,10 @@ def get_robot_record(name: str) -> dict | None:
     # Guard against an unknown mode on disk.
     if record.get("mode") not in _VALID_MODES:
         record["mode"] = _DEFAULT_MODE
+    # Older records have no motor_power (→ full power via _empty_record); an
+    # out-of-range or corrupted value on disk is clamped so every consumer
+    # sees a safe 10-100 integer.
+    record["motor_power"] = clamp_motor_power(record.get("motor_power"))
     return record
 
 
@@ -445,6 +488,11 @@ def save_robot_record(name: str, data: dict, allow_create: bool = True) -> bool:
     for field in _ROBOT_LIST_FIELDS:
         if field in data and isinstance(data[field], list):
             record[field] = data[field]
+    # Same known-typed-fields-only merge as above: a numeric motor_power is
+    # clamped to the safe range, anything else is ignored (keeps existing).
+    value = data.get("motor_power")
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        record["motor_power"] = clamp_motor_power(value)
     if data.get("mode") in _VALID_MODES:
         record["mode"] = data["mode"]
     record.setdefault("mode", _DEFAULT_MODE)
@@ -773,26 +821,31 @@ def rename_calibration_config(device_type: str, old_name: str, new_name: str) ->
     return True, ""
 
 
-def config_referencing_robots(device_type: str, config_name: str) -> list[str]:
-    """Names of robot records that actively reference this calibration config.
+def clear_config_references(device_type: str, config_name: str) -> list[dict]:
+    """Blank every robot-record field (on this side) that references this
+    calibration config, across ALL robot records — both the primary/left slot
+    and the bimanual right slot, regardless of mode. A stale right_* reference
+    in a single-mode record is cleared too: it points at a file that no longer
+    exists, so leaving it would resurface a dangling name on a mode switch.
 
-    Mirrors port_slot_conflict's mode rule: the right-arm slot only counts when
-    the record is bimanual, so a stale right_* config left over from a robot
-    since switched back to single doesn't block deletion. Deleting a config a
-    robot still uses would break that robot (it fails is_robot_record_clean and
-    can't teleoperate/record until recalibrated), so callers should refuse when
-    this returns any names.
+    Called when a calibration config is deleted: instead of refusing the
+    delete, the referencing arms are unassigned and return to the "needs
+    calibration" state (is_robot_record_clean → False, and teleop/record refuse
+    to start with a clear message until the arm is recalibrated or reassigned).
+
+    Returns [{"robot": <name>, "fields": [<cleared fields>]}] for each record
+    modified, so callers can tell the user which arms now need calibration.
     """
-    single_field = "leader_config" if device_type == "teleop" else "follower_config"
-    right_field = (
-        "right_leader_config" if device_type == "teleop" else "right_follower_config"
+    fields = (
+        ("leader_config", "right_leader_config")
+        if device_type == "teleop"
+        else ("follower_config", "right_follower_config")
     )
-    stem = config_name[: -len(".json")] if config_name.endswith(".json") else config_name
-    users: list[str] = []
+    stem = config_name.removesuffix(".json")
+    cleared: list[dict] = []
     for rec in list_robot_records():
-        fields = [single_field]
-        if rec.get("mode") == "bimanual":
-            fields.append(right_field)
-        if any(rec.get(f) == stem for f in fields):
-            users.append(rec.get("name", "?"))
-    return users
+        hit = [f for f in fields if rec.get(f) == stem]
+        if hit:
+            save_robot_record(rec["name"], dict.fromkeys(hit, ""), allow_create=False)
+            cleared.append({"robot": rec["name"], "fields": hit})
+    return cleared

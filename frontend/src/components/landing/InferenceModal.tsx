@@ -226,14 +226,25 @@ const InferenceModal: React.FC<Props> = ({
       };
     }
     try {
-      await startInference(baseUrl, fetchWithHeaders, {
+      const result = await startInference(baseUrl, fetchWithHeaders, {
         follower_port: robot.follower_port,
         follower_config: robot.follower_config,
         policy_ref: selectedRef,
         task,
         cameras: cameraDict,
         duration_s: durationS,
+        // Follower torque limit for the session (10-100% of full power).
+        motor_power: robot.motor_power ?? 100,
       });
+      // A success can carry a warn-but-allow arm-identity finding — surface
+      // it instead of silently dropping it.
+      if (result.warning) {
+        toast({
+          title: "Started with a warning",
+          description: result.warning,
+          duration: 10000,
+        });
+      }
       onOpenChange(false);
       navigate("/inference");
     } catch (e) {

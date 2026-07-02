@@ -30,6 +30,7 @@ import {
   CheckCircle,
   XCircle,
   AlertCircle,
+  AlertTriangle,
   Loader2,
   Play,
   Square,
@@ -39,6 +40,7 @@ import {
   Hand,
   RefreshCw,
   Wand2,
+  Trash2,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import Logo from "@/components/Logo";
@@ -160,8 +162,29 @@ const Calibration = () => {
         .map((f) => (robot[f] as string) || "")
         .filter(Boolean)
     : [];
+
+  // Human-readable name for a port slot, matching the labels the "Robot
+  // calibration" checklist renders. Bimanual distinguishes left/right; single
+  // mode has just Leader/Follower. Used by Detect's reassign toast to name the
+  // slot whose port it just took over.
+  const portFieldLabel = (field: keyof RobotRecord): string => {
+    switch (field) {
+      case "leader_port":
+        return isBimanual ? "Left Leader" : "Leader";
+      case "follower_port":
+        return isBimanual ? "Left Follower" : "Follower";
+      case "right_leader_port":
+        return "Right Leader";
+      case "right_follower_port":
+        return "Right Follower";
+      default:
+        return String(field);
+    }
+  };
   const [overwritePromptOpen, setOverwritePromptOpen] = useState(false);
   const [wiggling, setWiggling] = useState(false);
+  // Touch-to-identify: watching every port for a hand-moved shoulder-pan swing.
+  const [detecting, setDetecting] = useState(false);
   const [autoCalPromptOpen, setAutoCalPromptOpen] = useState(false);
   const [autoCal, setAutoCal] = useState<{
     active: boolean;
@@ -366,6 +389,78 @@ const Calibration = () => {
       });
     } finally {
       setWiggling(false);
+    }
+  };
+
+  // The inverse of Wiggle: instead of driving a motor, the backend watches
+  // every detected port (read-only) while the user swings the arm's base by
+  // hand, then reports which port saw the motion. On success the detected
+  // port is assigned to the CURRENT device/arm slot.
+  //
+  // Detect is physical ground truth — the user just swung THIS arm on THIS
+  // port — so if the record currently assigns the detected port to a DIFFERENT
+  // slot, that slot's entry is stale (typical after a cable swap). Rather than
+  // dead-ending on the backend's duplicate-port 409, we reassign: clear the
+  // stale slot and set the current slot in a single upsert (the backend's
+  // port-conflict guard evaluates the prospective merged record, so
+  // clearing+assigning together passes), then announce the release.
+  const handleDetect = async () => {
+    setDetecting(true);
+    try {
+      const res = await fetchWithHeaders(`${baseUrl}/identify-arm`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}), // empty = watch all detected ports
+      });
+      const data = await res.json();
+      if (data.success && data.port) {
+        // Which OTHER slot (if any) currently holds the detected port? Reuses
+        // the same portFields set the dropdown uses (right_* only in bimanual),
+        // so a single-arm robot's stale right_* ports don't trigger a release.
+        const conflictingField = robot
+          ? portFields.find(
+              (f) => f !== portField && (robot[f] as string) === data.port,
+            )
+          : undefined;
+
+        setPort(data.port);
+
+        if (conflictingField) {
+          // Reassign in one request: clear the stale slot, set the current one.
+          const releasedLabel = portFieldLabel(conflictingField);
+          const nextRobot = await persistPorts({
+            [conflictingField]: "",
+            [portField]: data.port,
+          });
+          if (nextRobot) {
+            toast({
+              title: "Arm identified — port moved",
+              description: `${data.message} This port was assigned to the ${releasedLabel}; moved it here. The ${releasedLabel} now needs a port.`,
+            });
+          }
+          // persistPorts surfaces its own error toast on failure.
+        } else {
+          persistPort(data.port);
+          toast({
+            title: "Arm identified",
+            description: `${data.message} Port assigned to this arm.`,
+          });
+        }
+      } else {
+        toast({
+          title: "No arm detected",
+          description: data.message,
+          variant: "destructive",
+        });
+      }
+    } catch (e) {
+      toast({
+        title: "Detect failed",
+        description: String(e),
+        variant: "destructive",
+      });
+    } finally {
+      setDetecting(false);
     }
   };
 
@@ -693,9 +788,12 @@ const Calibration = () => {
   // Write the port for the current side straight into the robot record, so a
   // re-detected USB port (which shuffles on reboot/reconnect) sticks without
   // needing a full re-calibration. Mirrors the camera write-back above.
+  // An empty string is a valid value: it CLEARS the assignment (arm
+  // disconnected), which the backend merge accepts and never treats as a
+  // port conflict.
   const persistPort = useCallback(
     async (nextPort: string) => {
-      if (!robotName || !nextPort) return;
+      if (!robotName) return;
       // Skip redundant writes when the value already matches the record.
       if (robot && robot[portField] === nextPort) return;
       try {
@@ -724,6 +822,115 @@ const Calibration = () => {
     },
     [robotName, portField, robot, baseUrl, fetchWithHeaders, toast],
   );
+
+  // Persist several port slots at once (used by Detect's reassign path: clear
+  // the stale slot AND set the current one in a single upsert). The backend's
+  // duplicate-port guard evaluates the prospective merged record, so a body
+  // that both clears and assigns passes. Returns the updated record on success,
+  // or null on failure (after surfacing the backend's message as a toast).
+  const persistPorts = useCallback(
+    async (patch: Partial<Record<keyof RobotRecord, string>>) => {
+      if (!robotName) return null;
+      try {
+        const res = await fetchWithHeaders(
+          `${baseUrl}/robots/${encodeURIComponent(robotName)}`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(patch),
+          },
+        );
+        const data = await res.json();
+        if (res.ok && data.robot) {
+          setRobot(data.robot);
+          return data.robot as RobotRecord;
+        }
+        toast({
+          title: "Couldn't assign port",
+          description: data.message || "Failed to save the port.",
+          variant: "destructive",
+        });
+        return null;
+      } catch (e) {
+        console.error("Failed to save ports to robot record:", e);
+        return null;
+      }
+    },
+    [robotName, baseUrl, fetchWithHeaders, toast],
+  );
+
+  // --- Motor power (per-robot, persisted) -------------------------------
+  // Local slider position while dragging; persisted to the robot record on
+  // release so we don't fire a POST per pixel. Applied to the follower's
+  // motors at the start of each teleop/record/inference session.
+  const [powerDraft, setPowerDraft] = useState(100);
+  useEffect(() => {
+    setPowerDraft(robot?.motor_power ?? 100);
+  }, [robot?.motor_power]);
+
+  const commitMotorPower = useCallback(async () => {
+    if (!robotName || !robot) return;
+    // powerDraft may be fractional when the slider is geared in decivolts;
+    // persist the nearest integer percent, clamped to the backend's 10-100.
+    const percentInt = Math.min(100, Math.max(10, Math.round(powerDraft)));
+    if (percentInt === robot.motor_power) return;
+    try {
+      const res = await fetchWithHeaders(
+        `${baseUrl}/robots/${encodeURIComponent(robotName)}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ motor_power: percentInt }),
+        },
+      );
+      const data = await res.json();
+      if (res.ok && data.robot) {
+        setRobot(data.robot);
+      }
+    } catch (e) {
+      console.error("Failed to save motor power:", e);
+    }
+  }, [robotName, robot, powerDraft, baseUrl, fetchWithHeaders]);
+
+  // One-shot supply-voltage reading (a REAL measured voltage from the servos'
+  // Present_Voltage register — distinct from the motor-power torque fraction).
+  // Read once per port selection, never polled: the backend connects, reads,
+  // and releases the port immediately so calibration/teleop can grab it.
+  const [voltage, setVoltage] = useState<number | null>(null);
+  useEffect(() => {
+    setVoltage(null);
+    if (!port) return;
+    // Don't touch the serial port while a calibration session may hold it.
+    if (calibrationStatus.calibration_active || autoCal.active) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetchWithHeaders(
+          `${baseUrl}/supply-voltage?port=${encodeURIComponent(port)}`,
+        );
+        const data = await res.json();
+        if (!cancelled && data.success && typeof data.voltage === "number") {
+          setVoltage(data.voltage);
+        }
+      } catch {
+        // Informational only — leave the reading blank on failure.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // Re-read only when the port changes; the active flags are read at fire
+    // time but must not re-trigger a read when a session ends.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [port, baseUrl, fetchWithHeaders]);
+
+  // Slider gearing: with a supply reading, the slider steps in 0.1 V of the
+  // computed drive-voltage ceiling (decivolt units: min = 10% floor, max =
+  // full supply, step = 1 dv). Without a reading, plain 1% steps.
+  const supplyDv =
+    voltage != null && voltage > 0 ? Math.round(voltage * 10) : null;
+  const powerDv =
+    supplyDv != null ? Math.round((supplyDv * powerDraft) / 100) : null;
 
   const getStatusDisplay = () => {
     switch (calibrationStatus.status) {
@@ -873,7 +1080,7 @@ const Calibration = () => {
                 >
                   Port *
                 </Label>
-                <div className="flex gap-2">
+                <div className="flex flex-wrap gap-2">
                   <Select
                     value={port}
                     onValueChange={(v) => {
@@ -883,7 +1090,7 @@ const Calibration = () => {
                   >
                     <SelectTrigger
                       id="port"
-                      className="bg-slate-700 border-slate-600 text-white rounded-md flex-1"
+                      className="bg-slate-700 border-slate-600 text-white rounded-md flex-1 min-w-[200px]"
                     >
                       <SelectValue
                         placeholder={
@@ -926,6 +1133,28 @@ const Calibration = () => {
                     type="button"
                     variant="outline"
                     size="icon"
+                    onClick={() => {
+                      setPort("");
+                      persistPort("");
+                    }}
+                    // Also gated during calibration: clearing wouldn't stop the
+                    // running session (the subprocess holds the serial port),
+                    // it would just desync the UI from the arm being measured.
+                    disabled={
+                      !port ||
+                      calibrationStatus.calibration_active ||
+                      autoCal.active
+                    }
+                    title="Clear port — release it without assigning another"
+                    aria-label="Clear port"
+                    className="border-slate-600 hover:border-red-500 text-slate-400 hover:text-red-400 bg-slate-700 hover:bg-slate-600 shrink-0"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="icon"
                     onClick={fetchPorts}
                     disabled={portsLoading}
                     title="Rescan ports"
@@ -935,18 +1164,62 @@ const Calibration = () => {
                       className={`w-4 h-4 ${portsLoading ? "animate-spin" : ""}`}
                     />
                   </Button>
+                </div>
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={handleDetect}
+                    disabled={
+                      detecting ||
+                      wiggling ||
+                      calibrationStatus.calibration_active ||
+                      autoCal.active
+                    }
+                    title="Identify by hand: swing the arm's base left and right"
+                    className="w-32 shrink-0 border-slate-600 hover:border-emerald-500 text-slate-400 hover:text-emerald-400 bg-slate-700 hover:bg-slate-600"
+                  >
+                    {detecting ? (
+                      <Loader2 className="w-4 h-4 mr-1 animate-spin" />
+                    ) : (
+                      <Hand className="w-4 h-4 mr-1" />
+                    )}
+                    {detecting ? "Watching…" : "Detect"}
+                  </Button>
+                  <p className="flex-1 min-w-[200px] text-xs text-slate-400">
+                    Identify by hand — swing the arm's base left and right; the
+                    port that moves is assigned.
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
                   <Button
                     type="button"
                     variant="outline"
                     onClick={handleWiggle}
-                    disabled={!port || wiggling}
+                    disabled={
+                      !port ||
+                      wiggling ||
+                      detecting ||
+                      calibrationStatus.calibration_active ||
+                      autoCal.active
+                    }
                     title="Move the gripper on this port to see which arm it is"
-                    className="border-slate-600 hover:border-yellow-500 text-slate-400 hover:text-yellow-400 bg-slate-700 hover:bg-slate-600 shrink-0"
+                    className="w-32 shrink-0 border-slate-600 hover:border-yellow-500 text-slate-400 hover:text-yellow-400 bg-slate-700 hover:bg-slate-600"
                   >
                     <Hand className="w-4 h-4 mr-1" />
                     {wiggling ? "Wiggling…" : "Wiggle"}
                   </Button>
+                  <p className="flex-1 min-w-[200px] text-xs text-slate-400">
+                    Legacy: drives the gripper ±200 ticks to confirm a port —
+                    prefer Detect when possible.
+                  </p>
                 </div>
+                {detecting && (
+                  <p className="text-xs text-emerald-400">
+                    Swing the base of the arm left and right — the port that
+                    sees the motion will be assigned to this arm.
+                  </p>
+                )}
               </div>
 
               {!isBimanual && (
@@ -1013,12 +1286,94 @@ const Calibration = () => {
                       onClick={() => setAutoCalPromptOpen(true)}
                       variant="outline"
                       disabled={!robotName || !deviceType || !port}
-                      className="w-full border-purple-500/50 text-purple-300 hover:bg-purple-900/20 hover:text-purple-200 rounded-full py-5"
+                      className="w-full border-purple-500/50 text-purple-700 hover:bg-purple-900/20 hover:text-purple-800 dark:text-purple-300 dark:hover:text-purple-200 rounded-full py-5"
                     >
                       <Wand2 className="w-5 h-5 mr-2" />
                       Auto-calibrate
                     </Button>
                   </>
+                )}
+
+                {robot && (
+                  <div className="space-y-1 pt-1">
+                    <div className="flex items-center gap-3">
+                      <Label
+                        htmlFor="motorPower"
+                        className="text-sm font-medium text-slate-300 shrink-0"
+                      >
+                        Motor power
+                      </Label>
+                      <input
+                        id="motorPower"
+                        type="range"
+                        min={supplyDv != null ? Math.round(supplyDv * 0.1) : 10}
+                        max={supplyDv ?? 100}
+                        step={1}
+                        value={powerDv ?? powerDraft}
+                        onChange={(e) => {
+                          const v = Number(e.target.value);
+                          setPowerDraft(
+                            supplyDv != null ? (v / supplyDv) * 100 : v,
+                          );
+                        }}
+                        onPointerUp={commitMotorPower}
+                        onKeyUp={commitMotorPower}
+                        onBlur={commitMotorPower}
+                        className="flex-1 h-1.5 accent-blue-500 cursor-pointer"
+                        aria-label="Motor power"
+                      />
+                      {powerDv != null ? (
+                        <span
+                          className="font-mono text-right leading-tight shrink-0"
+                          title="Approximate maximum average drive voltage: supply × power setting."
+                        >
+                          <span className="block text-sm text-slate-200">
+                            ≈ {(powerDv / 10).toFixed(1)} V
+                          </span>
+                          <span className="block text-[11px] text-slate-500">
+                            {Math.round(powerDraft)}%
+                          </span>
+                        </span>
+                      ) : (
+                        <span className="text-sm font-mono text-slate-200 w-12 text-right shrink-0">
+                          {Math.round(powerDraft)}%
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex items-start justify-between gap-2 text-xs text-slate-500">
+                      <span>
+                        Lower = gentler movements and weaker grip; below 10% the
+                        arm can't hold its own weight. Resets to the saved value
+                        each session.
+                      </span>
+                      {voltage != null && (
+                        <span
+                          className="font-mono text-slate-400 shrink-0"
+                          title="Measured servo bus supply voltage on the selected port"
+                        >
+                          Supply: {voltage.toFixed(1)}V
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* Manual calibration only: torque is off the whole session,
+                    which surprises novices (the arm is deliberately floppy).
+                    Auto-cal needs no standing warning — it ends gracefully
+                    (fold on completion, freeze + return-to-start on Stop) and
+                    its pre-start confirmation dialog carries the safety
+                    guidance. */}
+                {calibrationStatus.calibration_active && !autoCal.active && (
+                  <Alert className="bg-amber-900/40 border-amber-700 text-amber-100">
+                    <AlertTriangle className="h-4 w-4" />
+                    <AlertDescription>
+                      Motor torque is off — the arm won't hold its pose during
+                      calibration, and stays limp after you cancel or finish.
+                      Keep it low and supported so it can't drop onto the table
+                      edge.
+                    </AlertDescription>
+                  </Alert>
                 )}
 
                 {autoCal.logs.length > 0 && autoCal.status !== "idle" && (
@@ -1062,7 +1417,7 @@ const Calibration = () => {
                   <DialogFooter className="flex gap-2 justify-end">
                     <Button
                       variant="outline"
-                      className="border-slate-600 text-slate-300"
+                      className="border-slate-600 text-slate-700 dark:text-slate-300"
                       onClick={() => setAutoCalPromptOpen(false)}
                     >
                       Cancel
@@ -1094,7 +1449,7 @@ const Calibration = () => {
                   <DialogFooter className="flex gap-2 justify-end">
                     <Button
                       variant="outline"
-                      className="border-slate-600 text-slate-300"
+                      className="border-slate-600 text-slate-700 dark:text-slate-300"
                       onClick={() => setOverwritePromptOpen(false)}
                     >
                       Cancel
@@ -1366,8 +1721,11 @@ const Calibration = () => {
                       <Alert className="bg-purple-900/50 border-purple-700 text-purple-200">
                         <Activity className="h-4 w-4" />
                         <AlertDescription>
-                          <strong>Important:</strong> Move EACH joint through
-                          its full range. A check appears next to each joint
+                          <strong>Important:</strong> Move each joint through
+                          its full range —{" "}
+                          <strong>except the wrist roll</strong>: leave it near
+                          the middle. It rotates continuously and its range is
+                          set automatically. A check appears next to each joint
                           once its range is wide enough.
                         </AlertDescription>
                       </Alert>

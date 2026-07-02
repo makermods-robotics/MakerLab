@@ -243,7 +243,11 @@ const MergeDatasetsDialog: React.FC<Props> = ({
               <p className="text-sm text-red-300">{status.error}</p>
             ) : null}
             <div className="flex justify-end">
-              <Button variant="outline" onClick={() => onOpenChange(false)}>
+              <Button
+                variant="outline"
+                className="text-slate-900 dark:text-slate-100"
+                onClick={() => onOpenChange(false)}
+              >
                 {state === "done" ? "Done" : "Close"}
               </Button>
             </div>

@@ -11,7 +11,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { ConfigComponentProps } from "../types";
+import { ConfigComponentProps, policyTypeDisplayName } from "../types";
 import WandbInstallDialog from "../WandbInstallDialog";
 import { useApi } from "@/contexts/ApiContext";
 
@@ -92,35 +92,19 @@ const EssentialsCard: React.FC<ConfigComponentProps> = ({
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div>
-            <Label htmlFor="policy_type" className="text-slate-300">
-              Policy
-            </Label>
-            <Select
-              value={config.policy_type}
-              onValueChange={(value) => updateConfig("policy_type", value)}
+            <Label className="text-slate-300">Policy</Label>
+            {/* Frozen: the model type is chosen on the home page (or inherited
+                by the Continue / Fine-tune flows) — read-only here, same
+                pattern as the Dataset field above. */}
+            <div
+              id="policy_type"
+              className="mt-1 rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-white"
             >
-              <SelectTrigger
-                id="policy_type"
-                className="bg-slate-900 border-slate-600 text-white rounded-lg"
-              >
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent className="bg-slate-800 border-slate-600 text-white">
-                <SelectItem value="act">
-                  ACT (Action Chunking Transformer)
-                </SelectItem>
-                <SelectItem value="diffusion">Diffusion Policy</SelectItem>
-                <SelectItem value="pi0">PI0</SelectItem>
-                <SelectItem value="smolvla">SmolVLA</SelectItem>
-                <SelectItem value="tdmpc">TD-MPC</SelectItem>
-                <SelectItem value="vqbet">VQ-BeT</SelectItem>
-                <SelectItem value="pi0_fast">PI0 Fast</SelectItem>
-                <SelectItem value="sac">SAC</SelectItem>
-                <SelectItem value="reward_classifier">
-                  Reward Classifier
-                </SelectItem>
-              </SelectContent>
-            </Select>
+              {policyTypeDisplayName(config.policy_type)}
+            </div>
+            <p className="text-xs text-slate-500 mt-1">
+              Model chosen on the home page.
+            </p>
           </div>
 
           <div>
