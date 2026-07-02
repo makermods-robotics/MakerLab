@@ -134,6 +134,45 @@ from .wiggle import wiggle_gripper
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# High-frequency read-only status polls (~2 Hz each from the frontend) that
+# drown the uvicorn access log and bury real warnings (a torque warning was
+# once lost in this noise). Successful GETs to these EXACT paths (query string
+# ignored) are dropped from the access log; non-GETs, other paths (including
+# subpaths like /jobs/{id}/logs), and error responses still log.
+_QUIET_STATUS_POLL_PATHS = {
+    "/auto-calibration-status",
+    "/calibration-status",
+    "/teleoperation-status",
+    "/recording-status",
+    "/joint-positions",
+    "/jobs",
+}
+
+
+class _StatusPollAccessFilter(logging.Filter):
+    """Drop uvicorn.access records for successful high-frequency status polls.
+
+    uvicorn.access records carry args = (client_addr, method, full_path,
+    http_version, status_code); anything else passes through untouched.
+    Only affects the access log — app-level loggers are not filtered.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if not isinstance(args, tuple) or len(args) != 5:
+            return True
+        _, method, full_path, _, status_code = args
+        if method != "GET" or not isinstance(status_code, int):
+            return True
+        # Errors (and redirects-gone-wrong) must still log.
+        if status_code >= 400:
+            return True
+        path = str(full_path).split("?", 1)[0]
+        return path not in _QUIET_STATUS_POLL_PATHS
+
+
+logging.getLogger("uvicorn.access").addFilter(_StatusPollAccessFilter())
+
 
 class StartTrainingBody(BaseModel):
     """Wrapping body for POST /jobs/training. Adds optional target spec."""
@@ -324,9 +363,12 @@ def get_configs():
     return {"leader_configs": leader_configs, "follower_configs": follower_configs}
 
 
-# Frontend policy_type -> lerobot registry name. Same string except pi0_fast,
-# whose registry key is "pi0fast" in this lerobot pin (and is still likely
-# unavailable -> null). Keep in sync with the EssentialsCard Select options.
+# Frontend policy_type -> lerobot registry name. In this lerobot pin the names
+# match 1:1 (pi0_fast registers as "pi0_fast", not the older "pi0fast").
+# reward_classifier is NOT a policy in this pin: it registers under the
+# separate RewardModelConfig registry (lerobot/rewards/), so make_policy_config
+# raises for it and it reports available=False below. Keep in sync with
+# POLICY_TYPE_OPTIONS in frontend/src/components/training/types.ts.
 _POLICY_TYPE_TO_LEROBOT = {
     "act": "act",
     "diffusion": "diffusion",
@@ -334,7 +376,7 @@ _POLICY_TYPE_TO_LEROBOT = {
     "smolvla": "smolvla",
     "tdmpc": "tdmpc",
     "vqbet": "vqbet",
-    "pi0_fast": "pi0fast",
+    "pi0_fast": "pi0_fast",
     "sac": "sac",
     "reward_classifier": "reward_classifier",
 }
@@ -367,13 +409,31 @@ def get_policy_optimizer_defaults():
     + optimizer type) so the training UI can show the real "policy default"
     instead of a generic placeholder.
 
-    Every frontend policy_type is included; policies whose preset is unavailable
-    in this lerobot pin (e.g. pi0_fast, reward_classifier) map to null.
+    Every frontend policy_type is included. `available` says whether this
+    lerobot pin can construct the policy config at all — false means a training
+    run with that type is doomed at policy construction, so the UI disables the
+    button (e.g. reward_classifier, which isn't a policy in this pin). Policies
+    whose config exists but whose optimizer preset can't be read stay available
+    with a null entry in `defaults`.
     """
     defaults: dict[str, Any] = {}
+    available: dict[str, bool] = {}
     for frontend_name, lerobot_name in _POLICY_TYPE_TO_LEROBOT.items():
         try:
-            preset = make_policy_config(lerobot_name).get_optimizer_preset()
+            config = make_policy_config(lerobot_name)
+        except Exception as e:
+            logger.warning(
+                "Policy %r (lerobot %r) is unavailable in this lerobot install: %s",
+                frontend_name,
+                lerobot_name,
+                e,
+            )
+            available[frontend_name] = False
+            defaults[frontend_name] = None
+            continue
+        available[frontend_name] = True
+        try:
+            preset = config.get_optimizer_preset()
             defaults[frontend_name] = {
                 "optimizer": _optimizer_name_from_preset(preset),
                 "lr": preset.lr,
@@ -389,7 +449,7 @@ def get_policy_optimizer_defaults():
             )
             defaults[frontend_name] = None
 
-    return {"defaults": defaults}
+    return {"defaults": defaults, "available": available}
 
 
 @app.post("/move-arm")
@@ -1644,9 +1704,18 @@ def upsert_robot(name: str, data: dict, create: bool = False):
             )
 
     # Switching to single mode retires the right arm — clear its stale ports so
-    # they don't linger as "taken" in the port picker.
+    # they don't linger as "taken" in the port picker, and its stale configs so
+    # the record doesn't silently keep pointing at right-arm calibrations that
+    # single mode never validates (is_robot_record_clean and the slot-conflict
+    # guards ignore right_* fields in single mode).
     if (data or {}).get("mode") == "single":
-        data = {**(data or {}), "right_leader_port": "", "right_follower_port": ""}
+        data = {
+            **(data or {}),
+            "right_leader_port": "",
+            "right_follower_port": "",
+            "right_leader_config": "",
+            "right_follower_config": "",
+        }
 
     try:
         if create:

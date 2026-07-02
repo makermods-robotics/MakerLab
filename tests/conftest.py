@@ -54,11 +54,15 @@ def tmp_lerobot_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     follower_cfg_dir = cache / "configs" / "so_follower"
     port_dir = cache / "ports"
     saved_dir = cache / "saved_configs"
-    for d in (teleop_dir, robot_dir, leader_cfg_dir, follower_cfg_dir, port_dir, saved_dir):
+    robots_dir = cache / "robots"
+    for d in (teleop_dir, robot_dir, leader_cfg_dir, follower_cfg_dir, port_dir, saved_dir, robots_dir):
         d.mkdir(parents=True, exist_ok=True)
 
     monkeypatch.setattr(cfg, "CALIBRATION_BASE_PATH_TELEOP", str(teleop_dir))
     monkeypatch.setattr(cfg, "CALIBRATION_BASE_PATH_ROBOTS", str(robot_dir))
+    # Robot records (named robot configs). Without this, every test that
+    # exercises /robots writes into the developer's real ~/.cache dir.
+    monkeypatch.setattr(cfg, "ROBOTS_PATH", str(robots_dir))
     monkeypatch.setattr(cfg, "LEADER_CONFIG_PATH", str(leader_cfg_dir))
     monkeypatch.setattr(cfg, "FOLLOWER_CONFIG_PATH", str(follower_cfg_dir))
     monkeypatch.setattr(cfg, "PORT_CONFIG_PATH", str(port_dir))

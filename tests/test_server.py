@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -155,6 +156,117 @@ def test_upsert_robot_rejects_shared_port(client: TestClient, tmp_lerobot_home) 
     assert "/dev/a" in resp.json()["message"]
     # A distinct port is fine.
     assert client.post("/robots/p", json={"follower_port": "/dev/b"}).status_code == 200
+
+
+def test_upsert_robot_clears_port_with_empty_string(client: TestClient, tmp_lerobot_home) -> None:
+    """Posting an empty-string port releases the assignment (disconnect without
+    reconnecting), and two cleared ports never count as a shared-port conflict."""
+    client.post("/robots/d?create=true", json={"leader_port": "/dev/a", "follower_port": "/dev/b"})
+
+    resp = client.post("/robots/d", json={"leader_port": ""})
+    assert resp.status_code == 200
+    assert resp.json()["robot"]["leader_port"] == ""
+
+    # Clearing the other arm too must not trip the duplicate-port guard.
+    resp = client.post("/robots/d", json={"follower_port": ""})
+    assert resp.status_code == 200
+    assert resp.json()["robot"]["follower_port"] == ""
+
+    # A cleared port doesn't block re-assigning that port to the other arm.
+    assert client.post("/robots/d", json={"leader_port": "/dev/b"}).status_code == 200
+
+
+def test_switch_to_single_mode_clears_right_arm_ports_and_configs(
+    client: TestClient, tmp_lerobot_home
+) -> None:
+    """Switching a bimanual robot to single mode retires the right arm: its
+    ports AND configs are blanked. Single mode never validates or displays the
+    right_* fields, so stale values would silently survive (a robot in single
+    mode carrying right_leader_config from its bimanual past) and its ports
+    would linger as "taken" in the port picker."""
+    client.post(
+        "/robots/bi2?create=true",
+        json={
+            "mode": "bimanual",
+            "leader_config": "L1",
+            "follower_config": "F1",
+            "right_leader_config": "L2",
+            "right_follower_config": "F2",
+            "leader_port": "/dev/a",
+            "follower_port": "/dev/b",
+            "right_leader_port": "/dev/c",
+            "right_follower_port": "/dev/d",
+        },
+    )
+
+    resp = client.post("/robots/bi2", json={"mode": "single"})
+    assert resp.status_code == 200
+    robot = resp.json()["robot"]
+    assert robot["mode"] == "single"
+    for field in (
+        "right_leader_port",
+        "right_follower_port",
+        "right_leader_config",
+        "right_follower_config",
+    ):
+        assert robot[field] == "", f"{field} should be cleared on switch to single"
+    # The left arm is untouched.
+    assert robot["leader_config"] == "L1"
+    assert robot["follower_config"] == "F1"
+    assert robot["leader_port"] == "/dev/a"
+    assert robot["follower_port"] == "/dev/b"
+
+
+def _access_record(method: str, path: str, status: int) -> logging.LogRecord:
+    """Build a LogRecord shaped like uvicorn.access emits:
+    args = (client_addr, method, full_path, http_version, status_code)."""
+    return logging.LogRecord(
+        name="uvicorn.access",
+        level=logging.INFO,
+        pathname="",
+        lineno=0,
+        msg='%s - "%s %s HTTP/%s" %d',
+        args=("127.0.0.1:1234", method, path, "1.1", status),
+        exc_info=None,
+    )
+
+
+def test_status_poll_access_filter_drops_only_successful_status_gets() -> None:
+    """The uvicorn.access filter silences ~2 Hz status polls but keeps errors,
+    writes, and every other path."""
+    f = server_mod._StatusPollAccessFilter()
+
+    # High-frequency polls with 2xx are dropped (query string ignored).
+    assert f.filter(_access_record("GET", "/teleoperation-status", 200)) is False
+    assert f.filter(_access_record("GET", "/auto-calibration-status", 200)) is False
+    assert f.filter(_access_record("GET", "/jobs?limit=20", 200)) is False
+
+    # Errors on those same paths must still log.
+    assert f.filter(_access_record("GET", "/recording-status", 500)) is True
+    assert f.filter(_access_record("GET", "/jobs", 404)) is True
+
+    # Writes and non-status paths are untouched.
+    assert f.filter(_access_record("POST", "/jobs/training", 201)) is True
+    assert f.filter(_access_record("GET", "/health", 200)) is True
+    # Subpaths of /jobs (log tails, checkpoints) are NOT silenced.
+    assert f.filter(_access_record("GET", "/jobs/abc123/logs", 200)) is True
+
+    # Records that don't look like uvicorn access lines pass through.
+    other = logging.LogRecord("uvicorn.access", logging.INFO, "", 0, "plain", None, None)
+    assert f.filter(other) is True
+
+
+def test_policy_optimizer_defaults_reports_availability(client: TestClient) -> None:
+    """`available` marks which policy types this lerobot pin can construct.
+    act must work everywhere; reward_classifier registers under lerobot's
+    rewards registry (not the policy registry) in this pin, so it's out."""
+    data = client.get("/policy-optimizer-defaults").json()
+    assert set(data["available"]) == set(data["defaults"])
+    assert data["available"]["act"] is True
+    assert data["defaults"]["act"] is not None
+    assert data["available"]["pi0_fast"] is True
+    assert data["available"]["reward_classifier"] is False
+    assert data["defaults"]["reward_classifier"] is None
 
 
 @pytest.mark.parametrize("unsafe_name", ["evil..name", "..config", "back\\door"])
