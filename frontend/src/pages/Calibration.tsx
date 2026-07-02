@@ -1345,15 +1345,16 @@ const Calibration = () => {
                   </div>
                 )}
 
-                {/* Persistent while a session is active: ending calibration
-                    (cancel, finish, or error) leaves motor torque released, so
-                    the arm won't hold itself up. */}
+                {/* Persistent while a session is active. Auto-cal ends
+                    gracefully (fold on completion, freeze + return-to-start on
+                    Stop) — torque only drops in place on an error or a
+                    double-Stop. Manual calibration is torque-off throughout. */}
                 {(calibrationStatus.calibration_active || autoCal.active) && (
                   <Alert className="bg-amber-900/40 border-amber-700 text-amber-100">
                     <AlertTriangle className="h-4 w-4" />
                     <AlertDescription>
                       {autoCal.active
-                        ? "The arm goes limp when auto-calibration ends — motor torque is released on completion or failure and the arm falls under gravity. Keep the space beneath it clear and be ready to support it."
+                        ? "On Stop the arm freezes, returns to its starting position, and then goes limp (Stop twice to release immediately); on completion it folds first. Only an error drops torque in place — keep the space around the arm clear in case."
                         : "Motor torque is off — the arm won't hold its pose during calibration, and stays limp after you cancel or finish. Keep it low and supported so it can't drop onto the table edge."}
                     </AlertDescription>
                   </Alert>
