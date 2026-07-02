@@ -39,7 +39,7 @@ from pydantic import BaseModel
 from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
 
 from .arm_identity import ArmIdentityError, ArmSlot, verify_devices
-from .motor_power import apply_motor_power
+from .motor_power import apply_motor_power, clear_goal_velocity
 from .utils.config import list_robot_records, setup_follower_calibration_file
 
 logger = logging.getLogger(__name__)
@@ -193,20 +193,27 @@ def _preflight_arm_identity(port: str, follower_id: str) -> list[str]:
 
 
 def _preflight_motor_power(port: str, follower_id: str, percent: int) -> list[str]:
-    """Write the session motor power to the follower before the rollout
-    subprocess starts.
+    """Prime the follower's RAM motor registers before the rollout subprocess
+    starts.
 
-    The subprocess itself can't be instrumented, but Torque_Limit is a RAM
-    register: it survives closing the serial port (only a power cycle resets
-    it), and the subprocess's connect()/configure() never writes it — so
-    setting it here and releasing the port is enough for the whole rollout.
-    Never raises: a failure degrades to full power (logged) and returns
-    warning messages instead of aborting the start."""
+    The subprocess itself can't be instrumented, but Torque_Limit and
+    Goal_Velocity are both RAM registers: they survive closing the serial port
+    (only a power cycle resets them), and the subprocess's connect()/configure()
+    never writes them — so setting them here and releasing the port is enough
+    for the whole rollout. Two priming steps:
+      - apply_motor_power: the session torque cap (percent → Torque_Limit).
+      - clear_goal_velocity: reset any leftover speed cap a previous
+        arm-driving feature stamped (auto-cal fold/unfold=1000, rest-pose
+        return=400), which would otherwise throttle the whole rollout.
+    Never raises: a failure degrades to the previous register value (logged)
+    and returns warning messages instead of aborting the start."""
     robot = SO101Follower(SO101FollowerConfig(port=port, id=follower_id))
     try:
         robot.bus.connect()
         try:
-            return apply_motor_power(robot, percent, "follower arm")
+            return apply_motor_power(robot, percent, "follower arm") + clear_goal_velocity(
+                robot, "follower arm"
+            )
         finally:
             # Torque was never enabled here; just release the port for the
             # subprocess to reopen.

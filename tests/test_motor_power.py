@@ -123,6 +123,64 @@ def test_apply_motor_power_handles_none_device() -> None:
     assert apply_motor_power(None, 50) == []
 
 
+# ---------------------------------------------------------------------------
+# clear_goal_velocity: reset the RAM speed cap (Goal_Velocity=0) at session
+# start so a leftover cap (auto-cal fold/unfold=1000, rest-pose return=400)
+# can't throttle the next session. Mirrors apply_motor_power's shape.
+# ---------------------------------------------------------------------------
+
+
+def test_clear_goal_velocity_zeroes_every_follower_motor() -> None:
+    from lelab.motor_power import clear_goal_velocity
+
+    bus = _FakeBus(["shoulder_pan", "elbow_flex", "gripper"])
+    warnings = clear_goal_velocity(_FakeArm(bus))
+
+    assert warnings == []
+    assert len(bus.writes) == 3
+    for data_name, _motor, value, normalize, num_retry in bus.writes:
+        assert data_name == "Goal_Velocity"
+        assert value == 0  # 0 = uncapped servo default
+        assert normalize is False
+        assert num_retry > 0
+    assert {w[1] for w in bus.writes} == {"shoulder_pan", "elbow_flex", "gripper"}
+
+
+def test_clear_goal_velocity_covers_both_bimanual_arms() -> None:
+    from lelab.motor_power import clear_goal_velocity
+
+    left = _FakeBus(["gripper"], port="/dev/left")
+    right = _FakeBus(["gripper"], port="/dev/right")
+    warnings = clear_goal_velocity(_FakeBimanual(left, right))
+
+    assert warnings == []
+    assert left.writes == [("Goal_Velocity", "gripper", 0, False, 2)]
+    assert right.writes == [("Goal_Velocity", "gripper", 0, False, 2)]
+
+
+def test_clear_goal_velocity_failure_warns_but_does_not_abort() -> None:
+    """One bad motor must not stop the others, and the failure surfaces as a
+    warning message (the motor keeps its leftover cap) — never an exception, so
+    the session start still proceeds."""
+    from lelab.motor_power import clear_goal_velocity
+
+    bus = _FakeBus(["shoulder_pan", "elbow_flex", "gripper"], fail=("elbow_flex",))
+    warnings = clear_goal_velocity(_FakeArm(bus))
+
+    written = [w[1] for w in bus.writes]
+    assert written == ["shoulder_pan", "gripper"]  # the good motors were still cleared
+    assert len(warnings) == 1
+    assert "elbow_flex" in warnings[0]
+    assert "Goal_Velocity" in warnings[0]
+    assert "/dev/fake" in warnings[0]
+
+
+def test_clear_goal_velocity_handles_none_device() -> None:
+    from lelab.motor_power import clear_goal_velocity
+
+    assert clear_goal_velocity(None) == []
+
+
 def test_request_models_default_to_full_power() -> None:
     from lelab.record import RecordingRequest
     from lelab.rollout import InferenceRequest

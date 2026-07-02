@@ -27,7 +27,7 @@ from lerobot.teleoperators.bi_so_leader import BiSOLeader, BiSOLeaderConfig
 from lerobot.teleoperators.so_leader import SO101Leader, SO101LeaderConfig
 
 from .arm_identity import verify_devices
-from .motor_power import apply_motor_power, torque_limit_from_percent
+from .motor_power import apply_motor_power, clear_goal_velocity, torque_limit_from_percent
 from .rest_pose import capture_rest_pose, return_to_rest_pose
 from .utils.config import (
     FOLLOWER_CONFIG_PATH,
@@ -478,6 +478,10 @@ def _connect_bimanual(request: TeleoperateRequest):
         # human-held leader. After configure() so nothing overwrites it; a
         # failed write degrades to full power and is surfaced as a warning.
         identity_warnings += apply_motor_power(robot, request.motor_power, "follower arms")
+        # Clear any leftover Goal_Velocity speed cap a previous arm-driving
+        # feature stamped in RAM (auto-cal fold/unfold=1000, rest-pose return=400);
+        # followers only, never the human-held leader. See lelab/motor_power.py.
+        identity_warnings += clear_goal_velocity(robot, "follower arms")
         logger.info("Successfully connected to both bimanual arms")
         return robot, teleop_device, identity_warnings
     except Exception:
@@ -607,6 +611,11 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
             # human-held leader. After configure() so nothing overwrites it; a
             # failed write degrades to full power and is surfaced as a warning.
             identity_warnings += apply_motor_power(robot, request.motor_power, "follower arm")
+            # Clear any leftover Goal_Velocity speed cap a previous arm-driving
+            # feature stamped in RAM (auto-cal fold/unfold=1000, rest-pose
+            # return=400); follower only, never the human-held leader. See
+            # lelab/motor_power.py.
+            identity_warnings += clear_goal_velocity(robot, "follower arm")
             logger.info("Successfully connected to both devices")
 
         current_robot = robot

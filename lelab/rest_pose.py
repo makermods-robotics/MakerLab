@@ -95,6 +95,12 @@ def return_to_rest_pose(
     are written as-is: they were captured from this same session's calibration,
     so they are inherently within the arm's limits — no re-expression or
     clamping needed (unlike the auto-calibration twin). Never raises.
+
+    On EVERY exit path the gentle RETURN_POS_SPEED profile cap written into the
+    motors' RAM Goal_Velocity is reset to 0 (uncapped) before returning, so it
+    can't linger and throttle the next session — the RAM-persistent speed-cap
+    hazard that lelab/motor_power.clear_goal_velocity also guards at session
+    start (see _restore_goal_velocity).
     """
     motors = getattr(bus, "motors", None) or {}
     targets = {m: v for m, v in rest_pose.items() if m in motors}
@@ -107,8 +113,49 @@ def return_to_rest_pose(
         bus.sync_write("Goal_Position", targets, normalize=False)
     except Exception as e:
         logger.warning(f"Rest-pose return failed to start for the {label}: {e}")
+        # The gentle RETURN_POS_SPEED cap may already be stamped on some motors;
+        # clear it so it can't throttle the next session (see _restore_goal_velocity).
+        _restore_goal_velocity(bus, targets, label)
         return False, f"comm-error: {e}"
 
+    try:
+        return _run_return_loop(bus, targets, abort_event)
+    finally:
+        # Belt and braces: whatever the outcome (returned / settled / stalled /
+        # ceiling / cut-short), we wrote the gentle RETURN_POS_SPEED cap into the
+        # motors' RAM Goal_Velocity above. Reset it to 0 before the caller
+        # releases torque, so a slow-return speed cap can't linger and throttle
+        # the next teleop/record/inference session on this power-up. Best-effort.
+        _restore_goal_velocity(bus, targets, label)
+
+
+def _restore_goal_velocity(bus, targets: dict[str, int], label: str = "arm") -> None:
+    """Reset Goal_Velocity to 0 (uncapped) on the motors the return just drove.
+
+    The return writes a gentle RETURN_POS_SPEED profile cap into each motor's
+    RAM Goal_Velocity; that value is RAM-persistent across sessions (only a
+    power cycle resets it), so leaving it stamped would silently throttle the
+    next session's follower moves (the same leftover-cap mechanism the vendored
+    auto-cal fold/unfold=1000 and this module's return=400 both create — see
+    lelab/motor_power.clear_goal_velocity, the primary session-start guard).
+    Best-effort: a failed reset is logged and ignored — the release must run.
+    """
+    try:
+        bus.sync_write("Goal_Velocity", dict.fromkeys(targets, 0), normalize=False)
+    except Exception as e:
+        logger.warning(f"Could not reset the return speed cap (Goal_Velocity) for the {label}: {e}")
+
+
+def _run_return_loop(
+    bus,
+    targets: dict[str, int],
+    abort_event: threading.Event | None,
+) -> tuple[bool, str]:
+    """The poll-until-arrived loop of return_to_rest_pose (see its docstring).
+
+    Split out so return_to_rest_pose can wrap every exit path in a finally that
+    resets the Goal_Velocity cap without duplicating the reset at each return.
+    """
     time.sleep(RETURN_SETTLE_S)
     t0 = time.monotonic()
     best_dist: int | None = None

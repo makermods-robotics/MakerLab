@@ -34,7 +34,7 @@ from lerobot.teleoperators.so_leader import SO101LeaderConfig
 
 from .arm_identity import ArmIdentityError, verify_devices
 from .datasets import invalidate_hub_status
-from .motor_power import apply_motor_power
+from .motor_power import apply_motor_power, clear_goal_velocity
 from .teleoperate import force_disable_torque, hold_torque_release_grace
 from .utils.config import (
     FOLLOWER_CONFIG_PATH,
@@ -890,6 +890,10 @@ def record_with_web_events(
     # nothing overwrites this before the recording loop; a failed write
     # degrades to full power (logged inside) and must not abort the session.
     apply_motor_power(robot, motor_power, "follower arm")
+    # Clear any leftover Goal_Velocity speed cap a previous arm-driving feature
+    # stamped in RAM (auto-cal fold/unfold=1000, rest-pose return=400); the
+    # follower only, never the human-held leader. See lelab/motor_power.py.
+    clear_goal_velocity(robot, "follower arm")
 
     # Start with episode 1 - but track it properly
     current_episode = 1

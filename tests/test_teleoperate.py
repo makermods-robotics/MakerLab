@@ -514,7 +514,13 @@ def test_return_to_rest_pose_arrives_and_writes_gentle_goals(rest_clock: _RestCl
     # subtly-off landing is diagnosable from the log.
     assert reason.startswith("returned: max delta 5 ticks")
     assert "shoulder_lift=5" in reason
-    assert bus.sync_writes == [("Goal_Position", targets)]
+    # Goals land via one sync_write; the finally-restore then zeroes the gentle
+    # speed cap (Goal_Velocity is RAM-persistent — a leftover 400 would
+    # throttle the next session's follower until a power cycle).
+    assert bus.sync_writes == [
+        ("Goal_Position", targets),
+        ("Goal_Velocity", dict.fromkeys(targets, 0)),
+    ]
     speed_writes = [w for w in bus.writes if w[0] == "Goal_Velocity"]
     assert {w[2] for w in speed_writes} == {rest_pose.RETURN_POS_SPEED}
     assert {w[1] for w in speed_writes} == set(targets)
@@ -572,6 +578,112 @@ def test_return_to_rest_pose_without_pose_is_a_noop() -> None:
     bus = _RestBus()
     assert return_to_rest_pose(bus, {}) == (False, "no-pose")
     assert bus.sync_writes == []  # nothing written — straight to the release
+
+
+def _assert_speed_cap_restored(bus: _RestBus, targets: dict[str, int]) -> None:
+    """The last sync_write must zero the gentle Goal_Velocity cap on exactly
+    the motors the return drove (RAM-persistent: a leftover cap would throttle
+    the next session's follower until a power cycle)."""
+    assert bus.sync_writes[-1] == ("Goal_Velocity", dict.fromkeys(targets, 0))
+
+
+def test_return_restores_speed_cap_on_stall(rest_clock: _RestClock) -> None:
+    from lelab.rest_pose import return_to_rest_pose
+
+    bus = _RestBus(positions={"shoulder_pan": 1000})
+    arrived, reason = return_to_rest_pose(bus, {"shoulder_pan": 2000})
+
+    assert (arrived, reason[:7]) == (False, "stalled")
+    _assert_speed_cap_restored(bus, {"shoulder_pan": 2000})
+
+
+def test_return_restores_speed_cap_on_settled(rest_clock: _RestClock) -> None:
+    from lelab.rest_pose import return_to_rest_pose
+
+    bus = _RestBus(positions={"shoulder_pan": 1000}, moving=0)
+    arrived, reason = return_to_rest_pose(bus, {"shoulder_pan": 2000})
+
+    assert arrived is False
+    assert reason.startswith("settled")
+    _assert_speed_cap_restored(bus, {"shoulder_pan": 2000})
+
+
+def test_return_restores_speed_cap_on_cut_short(rest_clock: _RestClock) -> None:
+    import threading
+
+    from lelab.rest_pose import return_to_rest_pose
+
+    abort = threading.Event()
+    abort.set()
+    bus = _RestBus(positions={"shoulder_pan": 1000})
+
+    assert return_to_rest_pose(bus, {"shoulder_pan": 2000}, abort_event=abort) == (
+        False,
+        "cut-short",
+    )
+    _assert_speed_cap_restored(bus, {"shoulder_pan": 2000})
+
+
+def test_return_restores_speed_cap_on_ceiling(
+    rest_clock: _RestClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Force the pathological ceiling exit (positions creep just enough to
+    never stall) and check the cap is still zeroed on the way out."""
+    import lelab.rest_pose as rest_pose
+
+    bus = _RestBus(positions={"shoulder_pan": 1000})
+    original_sync_read = bus.sync_read
+
+    def _creeping_read(reg: str, normalize: bool = True) -> dict:
+        # Enough progress per poll to keep resetting the stall window.
+        bus.positions["shoulder_pan"] += rest_pose.RETURN_STALL_MIN_PROGRESS + 1
+        return original_sync_read(reg, normalize)
+
+    monkeypatch.setattr(bus, "sync_read", _creeping_read)
+    arrived, reason = rest_pose.return_to_rest_pose(bus, {"shoulder_pan": 10**6})
+
+    assert arrived is False
+    assert reason.startswith("ceiling")
+    _assert_speed_cap_restored(bus, {"shoulder_pan": 10**6})
+
+
+def test_return_restores_speed_cap_on_failed_start(rest_clock: _RestClock) -> None:
+    """A comm-error while writing the goals may have already stamped the
+    gentle cap on some motors — the best-effort zeroing must still run."""
+    from lelab.rest_pose import return_to_rest_pose
+
+    bus = _RestBus(positions={"shoulder_pan": 1000})
+
+    def _failing_write(reg: str, motor: str, value: int, normalize: bool = True) -> None:
+        raise ConnectionError("bus gone")
+
+    bus.write = _failing_write
+    arrived, reason = return_to_rest_pose(bus, {"shoulder_pan": 2000})
+
+    assert arrived is False
+    assert reason.startswith("comm-error")
+    _assert_speed_cap_restored(bus, {"shoulder_pan": 2000})
+
+
+def test_return_speed_cap_restore_failure_never_raises(rest_clock: _RestClock) -> None:
+    """The zeroing is best-effort: a dead bus at restore time must not raise —
+    the caller's torque release has to run no matter what."""
+    from lelab.rest_pose import return_to_rest_pose
+
+    targets = {"shoulder_pan": 1000}
+    bus = _RestBus(positions={"shoulder_pan": 1000})
+    original_sync_write = bus.sync_write
+
+    def _failing_sync_write(reg: str, values: dict, normalize: bool = True) -> None:
+        if reg == "Goal_Velocity":
+            raise ConnectionError("bus gone")
+        original_sync_write(reg, values, normalize)
+
+    bus.sync_write = _failing_sync_write
+    arrived, reason = return_to_rest_pose(bus, targets)
+
+    assert arrived is True  # the return itself still completed and reported
+    assert reason.startswith("returned")
 
 
 def test_return_followers_to_rest_covers_every_follower_bus(

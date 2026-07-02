@@ -301,6 +301,17 @@ def _graceful_stop(bus: FeetechMotorsBus, rest_pose: dict[str, int]) -> None:
     never prevent — or delay beyond the manager's SIGTERM grace — the real
     release. A SECOND KeyboardInterrupt (another Stop / SIGTERM) anywhere in
     here means "stop NOW": skip the rest and release instantly.
+
+    SPEED-CAP NOTE: the freeze/return here (and the fold/unfold on a NORMAL
+    completion) leave a nonzero Goal_Velocity stamped in the servos' RAM. That
+    register is NOT reset here on purpose: the fold path leaves speeds stamped
+    by design, safe_disable_all follows on every path anyway (it only cuts
+    torque, it does not touch Goal_Velocity), and — crucially — this subprocess
+    can't reach into the next feature's session. The leftover cap is cleared
+    where it matters, at the NEXT session's start, by
+    lelab/motor_power.clear_goal_velocity (the primary, durable fix). Adding a
+    reset here would be redundant on the stop path and would fight the fold
+    path, so the lelab side owns it.
     """
     try:
         print("\nStop requested: freezing the arm in place...")
