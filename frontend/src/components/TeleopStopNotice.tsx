@@ -26,7 +26,7 @@ const TeleopStopNotice = () => {
       toast({
         title: "Teleoperation stopped",
         description:
-          "Stopped when you left the page. The arm holds its pose for ~5 s after stopping, then goes limp.",
+          "Stopped when you left the page. The arm returns to its starting position, then goes limp.",
       });
     }
   }, [toast]);
