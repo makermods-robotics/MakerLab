@@ -555,8 +555,8 @@ def test_handle_start_inference_bimanual_builds_bi_so_follower_command(monkeypat
     monkeypatch.setattr(rollout, "bimanual_base_id", lambda name: "dual_arm")
     monkeypatch.setattr(
         rollout,
-        "stage_bimanual_calibrations",
-        lambda *a, **k: ("/staging/leader", "/staging/follower", "dual_arm"),
+        "stage_bimanual_follower_calibrations",
+        lambda *a, **k: ("/staging/follower", "dual_arm"),
     )
     monkeypatch.setattr(rollout, "_preflight_arm_identity", lambda *a, **k: [])
     monkeypatch.setattr(rollout, "_preflight_motor_power", lambda *a, **k: [])

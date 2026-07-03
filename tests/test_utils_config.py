@@ -696,6 +696,38 @@ def test_stage_bimanual_calibrations_blank_slot_raises(tmp_lerobot_home: Path) -
         cfg.stage_bimanual_calibrations("bot", "", "R", "FL", "FR")
 
 
+def test_stage_bimanual_follower_calibrations_stages_follower_only(tmp_lerobot_home: Path) -> None:
+    """Inference stages the follower side only. Repro of the startup bug: the
+    two follower library files exist under FOLLOWER_CONFIG_PATH but NO leader
+    file shares their names — staging must still succeed and land the follower
+    aliases, rather than failing looking for so_leader/<follower name>.json."""
+    from lelab.utils import config as cfg
+
+    # Real-world repro: follower configs "2"/"4"; leader dir has no 2/4.json.
+    (Path(cfg.FOLLOWER_CONFIG_PATH) / "2.json").write_text("FL")
+    (Path(cfg.FOLLOWER_CONFIG_PATH) / "4.json").write_text("FR")
+
+    follower_dir, base = cfg.stage_bimanual_follower_calibrations("mybot", "2", "4")
+    assert base == "mybot"
+    # Same layout as the full stager's follower dir.
+    assert follower_dir == os.path.join(cfg.LELAB_BISO_STAGING_PATH, "mybot", "follower")
+    assert (Path(follower_dir) / "mybot_left.json").read_text() == "FL"
+    assert (Path(follower_dir) / "mybot_right.json").read_text() == "FR"
+    # No leader staging dir is created — the leader side is never touched.
+    assert not os.path.exists(os.path.join(cfg.LELAB_BISO_STAGING_PATH, "mybot", "leader"))
+
+
+def test_stage_bimanual_follower_calibrations_missing_file_raises(tmp_lerobot_home: Path) -> None:
+    """A missing follower library file fails fast with the clear per-slot error
+    naming 'right follower' and the file, same as the full stager."""
+    from lelab.utils import config as cfg
+
+    (Path(cfg.FOLLOWER_CONFIG_PATH) / "2.json").write_text("FL")
+
+    with pytest.raises(FileNotFoundError, match="right follower.*4.json.*not found"):
+        cfg.stage_bimanual_follower_calibrations("mybot", "2", "4")
+
+
 def test_bimanual_base_id_uses_valid_name_else_default() -> None:
     from lelab.utils.config import DEFAULT_BIMANUAL_BASE, bimanual_base_id
 

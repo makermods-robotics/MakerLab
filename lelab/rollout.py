@@ -44,7 +44,7 @@ from .utils.config import (
     bimanual_base_id,
     list_robot_records,
     setup_follower_calibration_file,
-    stage_bimanual_calibrations,
+    stage_bimanual_follower_calibrations,
 )
 
 logger = logging.getLogger(__name__)
@@ -365,7 +365,8 @@ def _bimanual_robot_args(request: InferenceRequest, base: str, follower_staging:
     (left_arm_config / right_arm_config) sharing ONE calibration_dir + base id,
     loading each sub-arm's calibration as "<base>_left.json"/"<base>_right.json".
     `follower_staging` is the per-session dir the two library calibrations were
-    staged into under that convention (see stage_bimanual_calibrations). Cameras
+    staged into under that convention (see stage_bimanual_follower_calibrations).
+    Cameras
     go on the LEFT arm (BiSO re-exposes them prefixed "left_*"); the right arm is
     camera-free, matching the record/teleop bimanual shape."""
     args = [
@@ -428,16 +429,14 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
             # from one dir, with no way to point left/right at differently named
             # library files. Stage the two arbitrarily-named follower library
             # calibrations into that convention and point BiSO at the staging
-            # dir. Inference has NO leader arms, so only the follower side is
-            # staged — pass the follower calibrations for BOTH the leader and
-            # follower slots of stage_bimanual_calibrations (it stages a leader
-            # dir too, which we ignore here). The copy fails fast with a clear
-            # per-slot error if a library file is missing.
+            # dir. Inference has NO leader arms, so stage the follower side only
+            # — staging the leader side would require leader library files that
+            # this flow never uses (and usually don't exist under the follower's
+            # names). The copy fails fast with a clear per-slot error if a
+            # library file is missing.
             base = bimanual_base_id(request.robot_name)
-            _leader_staging, follower_staging, _ = stage_bimanual_calibrations(
+            follower_staging, _ = stage_bimanual_follower_calibrations(
                 base,
-                request.follower_config,
-                request.right_follower_config,
                 request.follower_config,
                 request.right_follower_config,
             )

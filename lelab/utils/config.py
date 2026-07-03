@@ -673,6 +673,19 @@ def bimanual_base_id(robot_name: str | None) -> str:
     return DEFAULT_BIMANUAL_BASE
 
 
+# BiSO staging dir layout, shared so leader/follower stagers agree on paths.
+# lerobot's BiSO devices load each sub-arm's calibration as "<base>_left.json"
+# /"<base>_right.json" from a single calibration_dir, so LeLab's arbitrary
+# library names can't be pointed at left/right directly — hence per-device
+# staging dirs under LELAB_BISO_STAGING_PATH/<base>/{leader,follower}/.
+def _bimanual_leader_staging_dir(base: str) -> str:
+    return os.path.join(LELAB_BISO_STAGING_PATH, base, "leader")
+
+
+def _bimanual_follower_staging_dir(base: str) -> str:
+    return os.path.join(LELAB_BISO_STAGING_PATH, base, "follower")
+
+
 def stage_bimanual_calibrations(
     base: str,
     leader_left: str,
@@ -682,24 +695,42 @@ def stage_bimanual_calibrations(
 ) -> tuple[str, str, str]:
     """Stage the four arbitrarily-named library calibrations for a BiSO session.
 
-    lerobot's BiSO devices load each sub-arm's calibration as "<base>_left.json"
-    /"<base>_right.json" from a single calibration_dir, so LeLab's arbitrary
-    library names can't be pointed at left/right directly. This copies the four
-    selected library files into per-device staging dirs under
-    LELAB_BISO_STAGING_PATH/<base>/leader/ and .../follower/, named to match the
-    convention, and returns the two staging dirs + the base id for building
+    Copies the four selected library files into per-device staging dirs named to
+    match lerobot's "<base>_left/right.json" convention, and returns the leader
+    staging dir, the follower staging dir, and the base id for building
     BiSO*Config(id=base, calibration_dir=<staging dir>). The copy OVERWRITES
     unconditionally every call so a recalibrated library file refreshes its stale
     staging alias. Any missing library file fails fast with a clear per-slot
     error BEFORE lerobot's connect() (an absent calibration makes lerobot fall
     into interactive recalibration, which hangs the headless thread).
+
+    Both sides are staged; use stage_bimanual_follower_calibrations for flows
+    (inference) that drive followers only.
     """
-    base_dir = os.path.join(LELAB_BISO_STAGING_PATH, base)
-    leader_staging = os.path.join(base_dir, "leader")
-    follower_staging = os.path.join(base_dir, "follower")
+    leader_staging = _bimanual_leader_staging_dir(base)
+    follower_staging = _bimanual_follower_staging_dir(base)
     _stage_one_side(LEADER_CONFIG_PATH, leader_staging, base, leader_left, leader_right, "leader")
     _stage_one_side(FOLLOWER_CONFIG_PATH, follower_staging, base, follower_left, follower_right, "follower")
     return leader_staging, follower_staging, base
+
+
+def stage_bimanual_follower_calibrations(
+    base: str,
+    follower_left: str,
+    follower_right: str,
+) -> tuple[str, str]:
+    """Stage only the two follower calibrations for a follower-only BiSO session.
+
+    Inference has no leader arms, so staging (and thus requiring) leader library
+    files would fail spuriously — the leader library dir need not even contain a
+    file matching the follower's name. Produces the identical follower staging
+    layout as stage_bimanual_calibrations (same dir, same "<base>_left/right.json"
+    names, same overwrite/fail-fast semantics) and returns (follower_staging_dir,
+    base).
+    """
+    follower_staging = _bimanual_follower_staging_dir(base)
+    _stage_one_side(FOLLOWER_CONFIG_PATH, follower_staging, base, follower_left, follower_right, "follower")
+    return follower_staging, base
 
 
 def port_slot_conflict(record: dict) -> str | None:
