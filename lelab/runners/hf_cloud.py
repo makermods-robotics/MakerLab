@@ -564,11 +564,14 @@ class HfCloudJobRunner:
             # — same behaviour as before.
             return
 
-        self._log_line(f"[upload] dataset {repo_id} not on Hub; pushing local copy...")
+        self._log_line(f"[upload] dataset {repo_id} not on Hub; pushing local copy (private)...")
         from lerobot.datasets import LeRobotDataset
 
         try:
-            LeRobotDataset(repo_id).push_to_hub(tags=with_lelab_tag(None), private=False)
+            # Private by default: a dataset the user only had locally shouldn't
+            # be silently made public by an implicit cloud-run upload. Mirrors
+            # the browser upload-then-train flow (which also uploads private).
+            LeRobotDataset(repo_id).push_to_hub(tags=with_lelab_tag(None), private=True)
         except Exception as exc:
             msg = f"Failed to upload local dataset {repo_id} to Hub: {exc}"
             self._log_line(f"[upload] {msg}")

@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { useToast } from "@/hooks/use-toast";
 import { useApi } from "@/contexts/ApiContext";
@@ -44,6 +44,10 @@ import { JobCheckpoint, listJobCheckpoints } from "@/lib/checkpointsApi";
 import CheckpointDropdown from "@/components/jobs/CheckpointDropdown";
 import InferenceModal from "@/components/landing/InferenceModal";
 import { useRobots } from "@/hooks/useRobots";
+import { useDatasets } from "@/hooks/useDatasets";
+import { useDatasetUpload } from "@/hooks/useDatasetUpload";
+import { getDatasetInfo } from "@/lib/replayApi";
+import LocalDatasetCloudNotice from "@/components/training/config/LocalDatasetCloudNotice";
 
 const POLL_INTERVAL_MS = 1000;
 const MAX_LOG_LINES = 5000;
@@ -246,6 +250,8 @@ const ConfigurationMode: React.FC = () => {
   const [authenticated, setAuthenticated] = useState<boolean>(false);
   const [flavors, setFlavors] = useState<RunnerFlavor[]>([]);
   const [hardwareLoading, setHardwareLoading] = useState(true);
+  // HF_HUB_OFFLINE on the backend: Hub writes (incl. dataset upload) disabled.
+  const [offline, setOffline] = useState<boolean>(false);
 
   useEffect(() => {
     fetchWithHeaders(`${baseUrl}/system/training-extra`)
@@ -278,10 +284,12 @@ const ConfigurationMode: React.FC = () => {
       .then((data) => {
         setAuthenticated(data.authenticated);
         setFlavors(data.flavors);
+        setOffline(!!data.offline);
       })
       .catch(() => {
         setAuthenticated(false);
         setFlavors([]);
+        setOffline(false);
       })
       .finally(() => setHardwareLoading(false));
   }, [baseUrl, fetchWithHeaders, auth.status]);
@@ -293,8 +301,96 @@ const ConfigurationMode: React.FC = () => {
     setTrainingConfig((prev) => ({ ...prev, [key]: value }));
   };
 
+  // Cloud training runs from the Hub, so a dataset that only exists in this
+  // machine's local cache must be uploaded first. We read the chosen dataset's
+  // `source` from the /datasets listing (already carries it) and, for a
+  // local-only + cloud combo, chain an upload before the job launches.
+  const { datasets } = useDatasets();
+  const datasetRepoId = trainingConfig.dataset_repo_id.trim();
+  const isCloud = trainingConfig.target.runner === "hf_cloud";
+  const selectedDatasetItem = datasets.find((d) => d.repo_id === datasetRepoId);
+  // Only "local" needs uploading; "both"/"hub" already exist on the Hub, and an
+  // unknown item (listing not yet loaded / dataset typed by hand) is left alone
+  // — the backend preflight is the belt-and-braces catch for that case.
+  const datasetLocalOnly = selectedDatasetItem?.source === "local";
+  const needsUpload = isCloud && datasetLocalOnly;
+
+  // Approximate on-disk size for the notice (cheap detail endpoint; local only).
+  const [datasetSizeBytes, setDatasetSizeBytes] = useState<number | null>(null);
+  useEffect(() => {
+    if (!needsUpload || !datasetRepoId) {
+      setDatasetSizeBytes(null);
+      return;
+    }
+    let cancelled = false;
+    getDatasetInfo(baseUrl, fetchWithHeaders, datasetRepoId)
+      .then((info) => {
+        if (!cancelled) setDatasetSizeBytes(info.size_bytes ?? null);
+      })
+      .catch(() => {
+        if (!cancelled) setDatasetSizeBytes(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [needsUpload, datasetRepoId, baseUrl, fetchWithHeaders]);
+
+  const [uploadError, setUploadError] = useState<string | null>(null);
+
+  // The actual job launch, factored out so it can run either directly (dataset
+  // already on the Hub) or as the upload's success continuation.
+  const launchJob = useCallback(async () => {
+    setIsStarting(true);
+    try {
+      const job = await startTrainingJob(
+        baseUrl,
+        fetchWithHeaders,
+        configToRequest(trainingConfig),
+      );
+      toast({ title: "Training Started", description: job.name });
+      navigate(`/training/${job.id}`);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      toast({ title: "Error", description: msg, variant: "destructive" });
+      // If the failure was the 409 case, refresh our running-job knowledge.
+      listJobs(baseUrl, fetchWithHeaders, 200)
+        .then((j) =>
+          setLocalJobRunning(
+            j.some((r) => r.runner === "local" && r.state === "running"),
+          ),
+        )
+        .catch(() => {});
+    } finally {
+      setIsStarting(false);
+    }
+  }, [baseUrl, fetchWithHeaders, trainingConfig, toast, navigate]);
+
+  // Latest launchJob without re-subscribing the upload hook every render.
+  const launchJobRef = useRef(launchJob);
+  launchJobRef.current = launchJob;
+
+  const { uploading, start: startUpload } = useDatasetUpload({
+    repoId: datasetRepoId,
+    onDone: () => {
+      // Upload finished: launch the cloud job exactly as a Hub dataset would.
+      setUploadError(null);
+      launchJobRef.current();
+    },
+    onError: (message) => {
+      // Upload failed: stop cleanly, surface the error, launch nothing (no
+      // orphan output repo — the job was never submitted).
+      setUploadError(message);
+      setIsStarting(false);
+      toast({
+        title: "Upload failed",
+        description: message,
+        variant: "destructive",
+      });
+    },
+  });
+
   const handleStart = async () => {
-    if (!trainingConfig.dataset_repo_id.trim()) {
+    if (!datasetRepoId) {
       toast({
         title: "Error",
         description: "Dataset repository ID is required",
@@ -327,29 +423,29 @@ const ConfigurationMode: React.FC = () => {
       // report any problem itself.
     }
 
-    setIsStarting(true);
-    try {
-      const job = await startTrainingJob(
-        baseUrl,
-        fetchWithHeaders,
-        configToRequest(trainingConfig),
-      );
-      toast({ title: "Training Started", description: job.name });
-      navigate(`/training/${job.id}`);
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      toast({ title: "Error", description: msg, variant: "destructive" });
-      // If the failure was the 409 case, refresh our running-job knowledge.
-      listJobs(baseUrl, fetchWithHeaders, 200)
-        .then((j) =>
-          setLocalJobRunning(
-            j.some((r) => r.runner === "local" && r.state === "running"),
-          ),
-        )
-        .catch(() => {});
-    } finally {
-      setIsStarting(false);
+    // Cloud run on a local-only dataset: upload first, then launch on success.
+    // The Start button is disabled while `uploading`, so we never reach here
+    // with an in-flight upload for this repo (the hook re-attaches on mount and
+    // will fire onDone/onError for one already running). On success the hook
+    // seeds a running status and its poll fires onDone → launchJob; a refusal
+    // (409 / dataset busy) is a hard stop surfaced in the notice.
+    if (needsUpload) {
+      setUploadError(null);
+      setIsStarting(true);
+      const err = await startUpload([], true /* private */);
+      if (err) {
+        setUploadError(err);
+        setIsStarting(false);
+        toast({
+          title: "Upload failed",
+          description: err,
+          variant: "destructive",
+        });
+      }
+      return;
     }
+
+    await launchJob();
   };
 
   if (trainingExtraAvailable === null) {
@@ -391,12 +487,18 @@ const ConfigurationMode: React.FC = () => {
     trainingConfig.steps <= resumeSource.step
       ? `Total steps must be greater than the checkpoint's step (${resumeSource.step.toLocaleString()}).`
       : null;
+  // A local-only dataset on a cloud run is uploadable — unless the backend is
+  // in offline mode, in which case uploads are impossible and Start is a hard
+  // block. (needsUpload is already gated on isCloud.)
+  const uploadBlockedOffline = needsUpload && offline;
   const startDisabled =
     isStarting ||
-    !trainingConfig.dataset_repo_id.trim() ||
+    uploading ||
+    !datasetRepoId ||
     localBlocked ||
     (targetRequiresAuth && !authenticated) ||
     targetMissingFlavor ||
+    uploadBlockedOffline ||
     resumeStepError != null;
   const startTooltip = localBlocked
     ? "Another local training is already running"
@@ -404,7 +506,9 @@ const ConfigurationMode: React.FC = () => {
       ? "Log in to Hugging Face to use cloud compute"
       : targetMissingFlavor
         ? "Select a hardware flavor"
-        : undefined;
+        : uploadBlockedOffline
+          ? "Offline mode is on — the dataset can't be uploaded to the Hub"
+          : undefined;
 
   return (
     <div className="min-h-screen bg-slate-900 text-white p-4">
@@ -451,6 +555,17 @@ const ConfigurationMode: React.FC = () => {
           flavors={flavors}
           hardwareLoading={hardwareLoading}
         />
+        {needsUpload ? (
+          <div className="max-w-3xl mx-auto mt-6">
+            <LocalDatasetCloudNotice
+              repoId={datasetRepoId}
+              sizeBytes={datasetSizeBytes}
+              offline={offline}
+              uploading={uploading}
+              errorMessage={uploadError}
+            />
+          </div>
+        ) : null}
         <div className="max-w-3xl mx-auto mt-6 flex flex-col items-end gap-2">
           {resumeStepError ? (
             <p className="text-sm text-red-400">{resumeStepError}</p>
@@ -463,7 +578,11 @@ const ConfigurationMode: React.FC = () => {
                 size="lg"
                 className="bg-green-500 hover:bg-green-600 text-white font-semibold px-6"
               >
-                {isStarting ? (
+                {uploading ? (
+                  <>
+                    <Loader2 className="w-5 h-5 mr-2 animate-spin" /> Uploading…
+                  </>
+                ) : isStarting ? (
                   <>
                     <Loader2 className="w-5 h-5 mr-2 animate-spin" /> Starting…
                   </>
@@ -474,7 +593,9 @@ const ConfigurationMode: React.FC = () => {
                       ? "Continue Training"
                       : finetuneSource
                         ? "Start Fine-tuning"
-                        : "Start Training"}
+                        : needsUpload
+                          ? "Upload & start training"
+                          : "Start Training"}
                   </>
                 )}
               </Button>

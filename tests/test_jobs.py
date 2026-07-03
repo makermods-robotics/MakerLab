@@ -762,3 +762,118 @@ def test_flat_feature_dim_returns_none_for_missing_or_non_1d() -> None:
     assert _flat_feature_dim({"shape": [3, 480, 640]}) is None  # a VISUAL feature
     assert _flat_feature_dim({"shape": []}) is None
     assert _flat_feature_dim({"shape": "nope"}) is None
+
+
+def test_cloud_start_rejects_local_only_dataset(tmp_path) -> None:
+    """A cloud (hf_cloud) run on a dataset that's only local raises
+    DatasetNotOnHubError before any record/runner is created — HF Jobs pods
+    resolve the dataset from the Hub, so a local-only one would fail remotely."""
+    from unittest.mock import patch
+
+    from lelab.jobs import DatasetNotOnHubError, JobRegistry, JobTarget
+    from lelab.train import TrainingRequest
+
+    reg = JobRegistry(tmp_path / "root")
+    cfg = TrainingRequest(dataset_repo_id="user/local_only", policy_type="act")
+    target = JobTarget(runner="hf_cloud", flavor="t4-small")
+
+    with (
+        patch(
+            "lelab.datasets.get_hub_status",
+            return_value={"repo_id": "user/local_only", "status": "local_only", "url": None},
+        ),
+        pytest.raises(DatasetNotOnHubError) as exc,
+    ):
+        reg.start(cfg, target)
+
+    assert exc.value.repo_id == "user/local_only"
+    assert "not on the Hugging Face Hub" in str(exc.value)
+    # Nothing was registered — the guard fires before the record is created.
+    assert reg.list(limit=10) == []
+
+
+def test_cloud_start_allows_hub_dataset(tmp_path) -> None:
+    """When the dataset is on the Hub, the preflight passes and the runner is
+    started (stubbed here — we assert the guard doesn't block, not a real
+    submission)."""
+    from unittest.mock import MagicMock, patch
+
+    from lelab.jobs import JobRegistry, JobTarget
+    from lelab.train import TrainingRequest
+
+    reg = JobRegistry(tmp_path / "root")
+    cfg = TrainingRequest(dataset_repo_id="user/on_hub", policy_type="act")
+    target = JobTarget(runner="hf_cloud", flavor="t4-small")
+
+    fake_runner = MagicMock()
+    fake_runner.hf_job_id.return_value = "job-xyz"
+    fake_runner.hf_job_url.return_value = "https://hf.co/jobs/job-xyz"
+
+    def _fake_runner_factory(*_args, **_kwargs):
+        return fake_runner
+
+    with (
+        patch(
+            "lelab.datasets.get_hub_status",
+            return_value={"repo_id": "user/on_hub", "status": "on_hub", "url": "u"},
+        ),
+        patch("lelab.runners.hf_cloud.HfCloudJobRunner", _fake_runner_factory),
+    ):
+        record = reg.start(cfg, target)
+
+    assert record.runner == "hf_cloud"
+    fake_runner.start.assert_called_once()
+
+
+def test_cloud_start_allows_unknown_status_dataset(tmp_path) -> None:
+    """An "unknown" hub status (offline / transient transport error) does NOT
+    block the run — a network blip must not wrongly refuse a real Hub dataset;
+    the existing _ensure_dataset_on_hub fallback handles a genuinely-missing
+    one. The guard only rejects a definitive "local_only"."""
+    from unittest.mock import MagicMock, patch
+
+    from lelab.jobs import JobRegistry, JobTarget
+    from lelab.train import TrainingRequest
+
+    reg = JobRegistry(tmp_path / "root")
+    cfg = TrainingRequest(dataset_repo_id="user/maybe", policy_type="act")
+    target = JobTarget(runner="hf_cloud", flavor="t4-small")
+
+    fake_runner = MagicMock()
+    fake_runner.hf_job_id.return_value = "job-xyz"
+    fake_runner.hf_job_url.return_value = None
+
+    with (
+        patch(
+            "lelab.datasets.get_hub_status",
+            return_value={"repo_id": "user/maybe", "status": "unknown", "url": None},
+        ),
+        patch("lelab.runners.hf_cloud.HfCloudJobRunner", lambda *a, **k: fake_runner),
+    ):
+        record = reg.start(cfg, target)
+
+    assert record.runner == "hf_cloud"
+
+
+def test_local_start_skips_hub_preflight(tmp_path) -> None:
+    """A local run on a local-only dataset is fine — no Hub involved — so the
+    preflight must not fire (get_hub_status is never consulted)."""
+    from unittest.mock import MagicMock, patch
+
+    from lelab.jobs import JobRegistry, JobTarget
+    from lelab.train import TrainingRequest
+
+    reg = JobRegistry(tmp_path / "root")
+    cfg = TrainingRequest(dataset_repo_id="user/local_only", policy_type="act")
+
+    fake_runner = MagicMock()
+    fake_runner.pid.return_value = 4242
+
+    with (
+        patch("lelab.datasets.get_hub_status") as get_status,
+        patch("lelab.jobs.LocalJobRunner", lambda *a, **k: fake_runner),
+    ):
+        record = reg.start(cfg, JobTarget(runner="local"))
+
+    get_status.assert_not_called()
+    assert record.runner == "local"

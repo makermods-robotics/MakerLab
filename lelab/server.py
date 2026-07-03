@@ -53,6 +53,7 @@ from .calibrate import CalibrationRequest, calibration_manager
 from .camera_preview import CameraOpenError, camera_preview_manager
 from .identify import identify_arm_by_motion
 from .jobs import (
+    DatasetNotOnHubError,
     JobAlreadyRunningError,
     JobNotFoundError,
     JobNotRunningError,
@@ -123,7 +124,13 @@ from .utils.config import (
     save_robot_port,
     save_robot_record,
 )
-from .utils.hf_auth import cached_whoami, handle_hf_auth_status, handle_hf_login, shared_hf_api
+from .utils.hf_auth import (
+    cached_whoami,
+    handle_hf_auth_status,
+    handle_hf_login,
+    hf_hub_offline,
+    shared_hf_api,
+)
 from .utils.system import (
     handle_get_cuda_status,
     handle_get_policy_extra,
@@ -747,6 +754,11 @@ async def create_training_job(req: Request):
         record = job_registry.start(body.config, body.target)
     except JobAlreadyRunningError as exc:
         raise HTTPException(status_code=409, detail=f"Job already running: {exc}") from exc
+    except DatasetNotOnHubError as exc:
+        # Cloud run on a local-only dataset. 409: the caller must upload the
+        # dataset first (the browser flow does this automatically before
+        # submitting, so this fires for non-UI callers).
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         # e.g. "flavor is required when runner is hf_cloud"
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1179,9 +1191,13 @@ def get_runners_hardware():
     keep this endpoint cheap (it can be re-fetched whenever auth state
     changes). The whoami cache is invalidated on login.
     """
+    # Offline mode disables every Hub write, so the cloud-training flow can't
+    # upload a local-only dataset. Surface it here (same fetch TargetCard uses)
+    # so the UI can keep Start disabled and explain why for those datasets.
+    offline = hf_hub_offline()
     info = cached_whoami()
     if info is None or not info.get("name"):
-        return {"authenticated": False, "username": None, "flavors": []}
+        return {"authenticated": False, "username": None, "flavors": [], "offline": offline}
     username: str = info["name"]
     api = shared_hf_api()
 
@@ -1191,7 +1207,7 @@ def get_runners_hardware():
             hw_list = api.list_jobs_hardware()
         except Exception as exc:
             logger.warning("list_jobs_hardware failed: %s", exc)
-            return {"authenticated": True, "username": username, "flavors": []}
+            return {"authenticated": True, "username": username, "flavors": [], "offline": offline}
         _flavors_cache["data"] = [
             {
                 "name": h.name,
@@ -1210,6 +1226,7 @@ def get_runners_hardware():
         "authenticated": True,
         "username": username,
         "flavors": _flavors_cache["data"],
+        "offline": offline,
     }
 
 

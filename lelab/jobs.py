@@ -872,6 +872,24 @@ class JobNotRunningError(Exception):
     """Raised when stop() is called on a non-running job."""
 
 
+class DatasetNotOnHubError(Exception):
+    """Raised by JobRegistry.start when a cloud (hf_cloud) run is requested on a
+    dataset that isn't on the Hub. HF Jobs pods resolve the dataset by repo_id
+    from the Hub — they can't see this machine's local cache — so a local-only
+    dataset would make the remote job fail. The UI's upload-then-train flow
+    makes this unreachable from the browser; this guard exists for non-UI
+    callers (and as belt-and-braces) so they get a clear 409 instead of a
+    remote crash. `repo_id` is the offending dataset."""
+
+    def __init__(self, repo_id: str) -> None:
+        self.repo_id = repo_id
+        super().__init__(
+            f"Dataset '{repo_id}' is not on the Hugging Face Hub. Cloud training "
+            "runs from the Hub, so upload the dataset first (or record/select one "
+            "that's already on the Hub)."
+        )
+
+
 class JobRegistry:
     """Owns the registry of training jobs and their persistence.
 
@@ -1026,6 +1044,21 @@ class JobRegistry:
         target = target or JobTarget()
         if target.runner == "hf_cloud" and not target.flavor:
             raise ValueError("flavor is required when runner is hf_cloud")
+
+        # Cloud preflight (belt-and-braces): the HF Jobs pod resolves the
+        # dataset by repo_id from the Hub and can't see this machine's local
+        # cache, so a local-only dataset would fail the remote job. Reject up
+        # front with a clear error instead of submitting a doomed job. Only a
+        # definitive "local_only" blocks; "unknown" (offline / transient
+        # transport error) is left to the existing _ensure_dataset_on_hub
+        # fallback so a network blip doesn't wrongly refuse a Hub dataset. The
+        # browser flow uploads-then-trains before ever reaching here, so this
+        # path is primarily for non-UI callers.
+        if target.runner == "hf_cloud":
+            from .datasets import get_hub_status
+
+            if get_hub_status(config.dataset_repo_id).get("status") == "local_only":
+                raise DatasetNotOnHubError(config.dataset_repo_id)
 
         with self._lock:
             # Local trainings are bounded by this machine's GPU/USB resources,
