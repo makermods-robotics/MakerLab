@@ -579,6 +579,65 @@ def _list_local_checkpoints(output_dir: str) -> list[JobCheckpoint]:
 _TRAIN_CONFIG_NAME = "train_config.json"
 
 
+# A Hub checkpoint's training_state/ is what makes it resumable (optimizer +
+# step). The cloud wrapper uploads the whole checkpoints/<step>/ entry, so both
+# subtrees land in the repo; this file is the cheapest existence probe.
+_HUB_TRAINING_STATE_FILE = "training_state/training_step.json"
+
+
+def _resolve_cloud_resume(source: JobRecord, step: int | None) -> tuple[str, str]:
+    """Return (repo_id, step_dir) identifying the Hub checkpoint a cloud run
+    should resume from (`step` = None ⇒ the latest available on the Hub).
+
+    The cloud container downloads checkpoints/<step_dir>/ (both pretrained_model/
+    and training_state/) from `repo_id` and hands lerobot the reconstructed
+    output-dir layout, so resume restores the optimizer and step counter — true
+    resume, not a weights-only re-init.
+
+    Raises ValueError (→ HTTP 400) with a user-facing message when the source
+    can't be resumed on the cloud: not a cloud run, no output repo, no
+    checkpoints at all (the run died before its first save), an unknown step, or
+    a checkpoint whose training_state/ never made it to the Hub.
+    """
+    if source.runner != "hf_cloud":
+        raise ValueError(
+            "This resume path is for cloud runs; local runs resume from their on-disk checkpoint instead."
+        )
+    if not source.hf_repo_id:
+        raise ValueError(f"Cloud run {source.id!r} has no output repo on the Hub to resume from.")
+    api = shared_hf_api()
+    checkpoints = _list_hub_checkpoints(api, source.hf_repo_id)
+    if not checkpoints:
+        raise ValueError(
+            f"Cloud run {source.id!r} left no checkpoints on the Hub — nothing to "
+            "resume from (the run died before its first save)."
+        )
+    if step is None:
+        chosen = checkpoints[-1]  # step-sorted; take the latest
+    else:
+        chosen = next((c for c in checkpoints if c.step == step), None)
+        if chosen is None:
+            raise ValueError(f"Cloud run {source.id!r} has no checkpoint at step {step}.")
+    # chosen.ref is 'repo@checkpoints/<step_dir>'; recover the zero-padded dir.
+    m = _HUB_CKPT_REF_RE.match(chosen.ref)
+    if not m:
+        raise ValueError(f"Unexpected checkpoint ref for cloud run {source.id!r}: {chosen.ref!r}")
+    step_dir = m.group("step_dir")
+    try:
+        files = set(api.list_repo_files(source.hf_repo_id, repo_type="model"))
+    except Exception as exc:
+        raise ValueError(
+            f"Could not read cloud run {source.id!r}'s repo to verify the "
+            f"checkpoint at step {chosen.step}: {exc}"
+        ) from exc
+    if f"checkpoints/{step_dir}/{_HUB_TRAINING_STATE_FILE}" not in files:
+        raise ValueError(
+            f"Checkpoint at step {chosen.step} has no optimizer/step state "
+            "(training_state/) on the Hub, so it can't be resumed."
+        )
+    return source.hf_repo_id, step_dir
+
+
 def _resolve_resume_config_path(source: JobRecord, step: int | None) -> str:
     """Return the train_config.json path lerobot needs to resume `source` from
     `step` (or its latest checkpoint if step is None).
@@ -1106,9 +1165,22 @@ class JobRegistry:
                         raise ValueError(
                             f"Resume source {config.resume_from_job_id!r} not found."
                         )
-                    config.config_path = _resolve_resume_config_path(
-                        source, config.resume_from_step
-                    )
+                    if source.runner == "hf_cloud":
+                        # An HF Job is immutable once ended: resuming a cloud run
+                        # launches a NEW cloud job that continues from the parent's
+                        # Hub checkpoint. Record the source repo + step dir; the
+                        # HfCloudJobRunner turns them into an in-container download
+                        # + reconstruct + --config_path. The dataset-on-Hub guard
+                        # (target.runner == hf_cloud above) still applies, so a
+                        # run whose dataset vanished fails the same way a fresh
+                        # cloud run would.
+                        repo_id, step_dir = _resolve_cloud_resume(source, config.resume_from_step)
+                        config.resume_from_hub_repo = repo_id
+                        config.resume_from_hub_step = step_dir
+                    else:
+                        config.config_path = _resolve_resume_config_path(
+                            source, config.resume_from_step
+                        )
                 elif not config.config_path:
                     raise ValueError(
                         "Resume is on but no source checkpoint was selected. Use "

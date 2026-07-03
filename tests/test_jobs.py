@@ -95,6 +95,103 @@ def test_resolve_resume_config_path_rejects_unknown_step(tmp_path) -> None:
         _resolve_resume_config_path(_record(out), 9999)
 
 
+def _cloud_record(repo_id: str | None = "user/act_ds_2026", state: str = "failed"):
+    from lelab.jobs import JobRecord
+    from lelab.train import TrainingRequest
+
+    return JobRecord(
+        id="cloud-1",
+        name="run",
+        state=state,
+        config=TrainingRequest(dataset_repo_id="user/ds", steps=10000),
+        output_dir="",
+        started_at=0.0,
+        runner="hf_cloud",
+        hf_repo_id=repo_id,
+    )
+
+
+class _FakeHubApi:
+    """Minimal HfApi stand-in: returns a fixed repo file listing."""
+
+    def __init__(self, files: list[str]) -> None:
+        self._files = files
+
+    def list_repo_files(self, repo_id, repo_type):
+        return self._files
+
+
+def test_resolve_cloud_resume_returns_repo_and_step_dir(monkeypatch) -> None:
+    from lelab.jobs import _resolve_cloud_resume
+
+    files = [
+        "checkpoints/005000/pretrained_model/config.json",
+        "checkpoints/005000/training_state/training_step.json",
+    ]
+    monkeypatch.setattr("lelab.jobs.shared_hf_api", lambda: _FakeHubApi(files))
+    repo_id, step_dir = _resolve_cloud_resume(_cloud_record(), 5000)
+    assert repo_id == "user/act_ds_2026"
+    assert step_dir == "005000"  # zero-padded dir name preserved
+
+
+def test_resolve_cloud_resume_defaults_to_latest(monkeypatch) -> None:
+    from lelab.jobs import _resolve_cloud_resume
+
+    files = [
+        "checkpoints/001000/pretrained_model/config.json",
+        "checkpoints/001000/training_state/training_step.json",
+        "checkpoints/003000/pretrained_model/config.json",
+        "checkpoints/003000/training_state/training_step.json",
+    ]
+    monkeypatch.setattr("lelab.jobs.shared_hf_api", lambda: _FakeHubApi(files))
+    _repo, step_dir = _resolve_cloud_resume(_cloud_record(), None)  # None ⇒ latest
+    assert step_dir == "003000"
+
+
+def test_resolve_cloud_resume_rejects_no_checkpoints(monkeypatch) -> None:
+    from lelab.jobs import _resolve_cloud_resume
+
+    monkeypatch.setattr("lelab.jobs.shared_hf_api", lambda: _FakeHubApi(["README.md"]))
+    with pytest.raises(ValueError, match="died before its first save"):
+        _resolve_cloud_resume(_cloud_record(), None)
+
+
+def test_resolve_cloud_resume_rejects_missing_training_state(monkeypatch) -> None:
+    from lelab.jobs import _resolve_cloud_resume
+
+    # Weights present but no training_state/ on the Hub ⇒ not resumable.
+    files = ["checkpoints/005000/pretrained_model/config.json"]
+    monkeypatch.setattr("lelab.jobs.shared_hf_api", lambda: _FakeHubApi(files))
+    with pytest.raises(ValueError, match="training_state"):
+        _resolve_cloud_resume(_cloud_record(), 5000)
+
+
+def test_resolve_cloud_resume_rejects_unknown_step(monkeypatch) -> None:
+    from lelab.jobs import _resolve_cloud_resume
+
+    files = [
+        "checkpoints/005000/pretrained_model/config.json",
+        "checkpoints/005000/training_state/training_step.json",
+    ]
+    monkeypatch.setattr("lelab.jobs.shared_hf_api", lambda: _FakeHubApi(files))
+    with pytest.raises(ValueError, match="no checkpoint at step 9999"):
+        _resolve_cloud_resume(_cloud_record(), 9999)
+
+
+def test_resolve_cloud_resume_rejects_non_cloud(tmp_path) -> None:
+    from lelab.jobs import _resolve_cloud_resume
+
+    with pytest.raises(ValueError, match="cloud"):
+        _resolve_cloud_resume(_record(tmp_path, runner="local"), None)
+
+
+def test_resolve_cloud_resume_rejects_missing_repo() -> None:
+    from lelab.jobs import _resolve_cloud_resume
+
+    with pytest.raises(ValueError, match="no output repo"):
+        _resolve_cloud_resume(_cloud_record(repo_id=None), None)
+
+
 def test_extract_wandb_run_url_finds_canonical_url() -> None:
     from lelab.jobs import extract_wandb_run_url
 

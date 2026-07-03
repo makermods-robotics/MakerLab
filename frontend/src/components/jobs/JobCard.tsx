@@ -294,16 +294,32 @@ const JobCard: React.FC<Props> = ({
     onPlay(selectedJob, selectedStep);
   };
 
-  // Resume is local-only (lerobot can't resume from the Hub) and needs a saved
-  // checkpoint with optimizer/step state — i.e. a finished local training run.
+  // Continue (local resume) needs a saved checkpoint with optimizer/step state
+  // on this machine — i.e. a finished local training run.
   const canContinue =
     selectedJob.runner === "local" &&
     !isRunning &&
     lineageCheckpoints.length > 0 &&
     selectedStep != null;
 
-  const handleContinue = (e: React.MouseEvent) => {
-    e.stopPropagation();
+  // Resume (cloud): an HF Job is immutable once ended, so this launches a NEW
+  // cloud job that continues from the parent's Hub checkpoint (restoring
+  // optimizer + step, unlike Fine-tune). Offered only on a cloud run that ended
+  // BEFORE its step target — a failed/interrupted/cancelled run with a saved
+  // checkpoint. A `done` run reached its target, so there's nothing to resume.
+  const endedBeforeTarget =
+    (selectedJob.state === "failed" || selectedJob.state === "interrupted") &&
+    (selectedJob.config.steps === 0 ||
+      selectedStep == null ||
+      selectedStep < selectedJob.config.steps);
+  const canResumeCloud =
+    selectedJob.runner === "hf_cloud" &&
+    !isRunning &&
+    lineageCheckpoints.length > 0 &&
+    selectedStep != null &&
+    endedBeforeTarget;
+
+  const goToResume = (runner: "local" | "hf_cloud") => {
     if (selectedStep == null) return;
     navigate("/training", {
       state: {
@@ -316,9 +332,21 @@ const JobCard: React.FC<Props> = ({
           sourceSteps: selectedJob.config.steps,
           logFreq: selectedJob.config.log_freq,
           saveFreq: selectedJob.config.save_freq,
+          runner,
+          flavor: runner === "hf_cloud" ? (selectedJob.hf_flavor ?? undefined) : undefined,
         },
       },
     });
+  };
+
+  const handleContinue = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    goToResume("local");
+  };
+
+  const handleResumeCloud = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    goToResume("hf_cloud");
   };
 
   // Fine-tune: start a FRESH run whose weights are initialized from this
@@ -522,6 +550,18 @@ const JobCard: React.FC<Props> = ({
                 aria-label="Continue training from this checkpoint"
               >
                 <FastForward className="w-3.5 h-3.5" /> Continue
+              </Button>
+            ) : null}
+            {canResumeCloud ? (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={handleResumeCloud}
+                className="h-8 gap-1 border-sky-500/50 text-sky-700 dark:text-sky-300 hover:bg-sky-500/10"
+                aria-label="Resume this cloud run from its last checkpoint"
+                title="Resume: launch a new cloud job continuing from this checkpoint"
+              >
+                <FastForward className="w-3.5 h-3.5" /> Resume
               </Button>
             ) : null}
             {canFinetune ? (

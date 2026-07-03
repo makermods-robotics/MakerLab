@@ -67,7 +67,8 @@ function readStoredPolicyType(): string | null {
   }
 }
 
-// Passed via router state by the "Continue" button on a completed local job.
+// Passed via router state by the "Continue" button on a completed local job,
+// or the "Resume" button on a cloud run that ended before its step target.
 type ResumeSource = {
   jobId: string;
   step: number | null; // null ⇒ resume from the latest checkpoint
@@ -77,6 +78,11 @@ type ResumeSource = {
   sourceSteps: number; // the source run's configured total, for a sane prefill
   logFreq?: number; // the source run's log cadence, to preserve on resume
   saveFreq?: number; // the source run's checkpoint cadence, to preserve on resume
+  // Cloud resume: the parent run's runner + flavor. A local Continue omits
+  // these (runner defaults to "local"). When "hf_cloud", the launched run
+  // targets the same flavor and continues into the parent's Hub output repo.
+  runner?: "local" | "hf_cloud";
+  flavor?: string;
 };
 
 // Passed via router state by the "Fine-tune" button on an imported model. A
@@ -184,7 +190,13 @@ const ConfigurationMode: React.FC = () => {
     resumeSource?.datasetRepoId ?? selectedDataset ?? "";
 
   const [trainingConfig, setTrainingConfig] = useState<TrainingConfig>({
-    target: { runner: "local" },
+    // A cloud resume inherits the parent run's target so the continuation runs
+    // on the same flavor and pushes into the same Hub repo; everything else
+    // defaults to a fresh local run.
+    target:
+      resumeSource?.runner === "hf_cloud"
+        ? { runner: "hf_cloud", flavor: resumeSource.flavor }
+        : { runner: "local" },
     dataset_repo_id: prefilledDatasetRepoId,
     policy_type:
       resumeSource?.policyType ??

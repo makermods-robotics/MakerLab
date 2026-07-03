@@ -227,6 +227,18 @@ def test_localize_rejects_resume_from_host_checkpoint() -> None:
         localize_config_for_cloud(config, "t4-small")
 
 
+def test_localize_allows_cloud_resume_from_hub() -> None:
+    """A cloud resume signals via resume_from_hub_repo (the wrapper downloads the
+    checkpoint from the Hub), not a host-local config_path — so localization must
+    NOT reject it. The host config_path stays unset here; the runner sets the
+    container path later."""
+    from lelab.runners.hf_cloud import localize_config_for_cloud
+
+    config = _request(resume=True, resume_from_hub_repo="user/parent-run", resume_from_hub_step="005000")
+    localize_config_for_cloud(config, "t4-small")  # no raise
+    assert config.policy_device == "cuda"
+
+
 def test_localize_rejects_local_pretrained_path_but_allows_hub_id() -> None:
     from lelab.runners.hf_cloud import localize_config_for_cloud
 
@@ -300,6 +312,42 @@ def test_wrapper_source_compiles_and_launches_an_argv_list() -> None:
     assert "subprocess.Popen(list(trainer_argv)" in WRAPPER_SOURCE
     assert "shlex.join(trainer_argv)" in WRAPPER_SOURCE
     assert re.search(r"^import .*\bshlex\b", WRAPPER_SOURCE, re.MULTILINE)  # imported up top
+
+
+def test_wrapper_source_handles_resume_download() -> None:
+    """Cloud resume: the wrapper must parse --resume-from, download the parent
+    checkpoint tree, refuse when training_state/ is absent, and pre-seed `seen`
+    so it never re-uploads the checkpoint it just pulled down."""
+    from lelab.runners.hf_cloud import WRAPPER_SOURCE
+
+    compile(WRAPPER_SOURCE, "<hf-jobs-wrapper>", "exec")  # still valid with the resume block
+    assert "--resume-from=" in WRAPPER_SOURCE
+    assert "snapshot_download" in WRAPPER_SOURCE
+    assert "training_state" in WRAPPER_SOURCE
+    assert "seen.add(step_dir)" in WRAPPER_SOURCE
+
+
+def test_cloud_resume_argv_keeps_lineage_in_parent_repo() -> None:
+    """A cloud-resume config resolves to a --config_path at the container path and
+    pushes into the parent's repo (same lineage), with resume essentials only."""
+    from lelab.train import TrainingRequest, build_training_command
+
+    req = TrainingRequest(
+        dataset_repo_id="user/ds",
+        resume=True,
+        steps=20000,
+        policy_push_to_hub=True,
+        policy_repo_id="user/parent-run",
+        config_path="/tmp/lelab/train/checkpoints/005000/pretrained_model/train_config.json",
+    )
+    cmd = build_training_command(req, output_dir="/tmp/lelab/train")
+    assert "--config_path=/tmp/lelab/train/checkpoints/005000/pretrained_model/train_config.json" in cmd
+    assert cmd[cmd.index("--policy.push_to_hub") + 1] == "true"
+    assert cmd[cmd.index("--policy.repo_id") + 1] == "user/parent-run"
+    assert cmd[cmd.index("--resume") + 1] == "true"
+    # Inherited from the checkpoint — never re-passed on resume.
+    assert "--dataset.repo_id" not in cmd
+    assert "--policy.type" not in cmd
 
 
 def test_wrapper_source_inlines_the_tested_install_plan() -> None:

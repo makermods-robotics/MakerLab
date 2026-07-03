@@ -167,10 +167,16 @@ def localize_config_for_cloud(config: TrainingRequest, flavor: str) -> None:
     Raises ValueError (→ HTTP 400) for host-path inputs that cannot work in
     the container, so the user gets a clear message instead of a remote crash.
     """
-    if config.config_path:
+    # A host-local config_path (the local-resume signal) can't exist in the
+    # container. Cloud resume uses resume_from_hub_repo instead — the wrapper
+    # downloads the checkpoint from the Hub and reconstructs the layout there,
+    # so that path is allowed and config_path is set to the container path later
+    # (in HfCloudJobRunner.start), never here.
+    if config.config_path and not config.resume_from_hub_repo:
         raise ValueError(
-            "Resuming on a cloud job isn't supported: the source checkpoint's "
-            "train_config.json lives on this machine, not in the container."
+            "Resuming on a cloud job from a local checkpoint isn't supported: the "
+            "source checkpoint's train_config.json lives on this machine, not in "
+            "the container. Resume a cloud run from its Hub output instead."
         )
     if config.policy_pretrained_path and Path(config.policy_pretrained_path).is_absolute():
         raise ValueError(
@@ -191,6 +197,12 @@ def localize_config_for_cloud(config: TrainingRequest, flavor: str) -> None:
 # wrapper reads --output_dir from the trainer argv and uploads checkpoints from
 # here to the Hub, so the lelab UI never reads this path directly.
 _CONTAINER_OUTPUT_DIR = "/tmp/lelab/train"  # nosec B108 — fixed path inside the remote HF Jobs container, not host-local
+
+# lerobot's per-checkpoint layout under <output_dir>/checkpoints/<step_dir>/.
+# Cloud resume reconstructs exactly this so the trainer's own resume path (which
+# reads config_path.parent.parent as the checkpoint dir) finds pretrained_model/
+# and training_state/ where it expects them.
+_CONTAINER_TRAIN_CONFIG_NAME = "train_config.json"
 
 # Inlined sidecar uploader for HF Jobs. Spawns the lerobot trainer as a
 # subprocess and concurrently uploads new <output_dir>/checkpoints/<step>/
@@ -218,6 +230,16 @@ sep = argv.index("--")
 wrapper_args = argv[:sep]
 trainer_argv = argv[sep + 1:]
 
+# Wrapper-side args: the pinned lerobot spec (first non---option token) plus
+# optional directives. --resume-from=<repo>@checkpoints/<step_dir> tells us to
+# download that checkpoint tree and reconstruct lerobot's output-dir layout so
+# the trainer's own resume path finds it (config_path.parent.parent).
+lerobot_spec = next((a for a in wrapper_args if not a.startswith("--")), None)
+resume_from = None
+for a in wrapper_args:
+    if a.startswith("--resume-from="):
+        resume_from = a.split("=", 1)[1]
+
 
 def _arg(name):
     """Return the value of --name=foo or --name foo from trainer_argv."""
@@ -236,10 +258,9 @@ if not output_dir or not repo_id:
     sys.exit(2)
 
 # The image ships whatever lerobot was latest when it was built; the trainer
-# argv is shaped for lelab's pinned lerobot. Install the exact pin (passed by
-# the submitter as the first wrapper arg) before launching, or the argument
-# surfaces drift apart (a real run died on argparse rc=2 over --eval_freq).
-lerobot_spec = wrapper_args[0] if wrapper_args else None
+# argv is shaped for lelab's pinned lerobot. Install the exact pin (passed as a
+# wrapper arg) before launching, or the argument surfaces drift apart (a real
+# run died on argparse rc=2 over --eval_freq).
 if lerobot_spec:
     install_label, install_cmds = _install_plan(
         lerobot_spec,
@@ -268,6 +289,42 @@ except Exception as exc:
     print(f"[wrapper] create_repo failed: {exc}", flush=True)
 
 seen = set()
+
+# Resume: download the parent checkpoint tree (pretrained_model/ +
+# training_state/) into <output_dir>/checkpoints/<step_dir>/ so lerobot's own
+# resume path (config_path.parent.parent) finds the optimizer + step state. The
+# step dir is pre-seeded into `seen` so the watcher never re-uploads the
+# checkpoint we just pulled down.
+if resume_from:
+    m = re.match(r"^(?P<repo>[^@]+)@checkpoints/(?P<step_dir>\d+)$", resume_from)
+    if not m:
+        print(f"[wrapper] bad --resume-from ref: {resume_from}", flush=True)
+        sys.exit(2)
+    src_repo, step_dir = m.group("repo"), m.group("step_dir")
+    dest = Path(output_dir) / "checkpoints" / step_dir
+    print(f"[wrapper] resuming: downloading {src_repo}@checkpoints/{step_dir}", flush=True)
+    try:
+        from huggingface_hub import snapshot_download
+
+        local_root = snapshot_download(
+            repo_id=src_repo,
+            repo_type="model",
+            allow_patterns=[f"checkpoints/{step_dir}/*"],
+        )
+        src = Path(local_root) / "checkpoints" / step_dir
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        # copytree from the snapshot cache (symlinked files) into a real tree the
+        # trainer can read/rewrite; resolve symlinks so lerobot sees plain files.
+        shutil.copytree(src, dest, symlinks=False)
+        if not (dest / "training_state").is_dir():
+            print("[wrapper] resume checkpoint has no training_state/; cannot resume", flush=True)
+            sys.exit(1)
+        seen.add(step_dir)
+        print(f"[wrapper] resume checkpoint ready at {dest}", flush=True)
+    except Exception as exc:
+        print(f"[wrapper] resume download failed: {exc}", flush=True)
+        sys.exit(1)
+
 stop_event = threading.Event()
 
 
@@ -453,19 +510,38 @@ class HfCloudJobRunner:
         # The mutated config is what gets persisted in JobRecord.config, so
         # the historical record reflects what actually ran.
         config.policy_push_to_hub = True
-        # job_id is already a unique slug like "act_dataset_2026-05-04_10-22-03".
-        config.policy_repo_id = f"{username}/{job_id}"
+        # Resume continues the SAME output repo as the parent run so the whole
+        # lineage lives in one place; a fresh run gets its own repo named after
+        # its unique job id slug (e.g. "act_dataset_2026-05-04_10-22-03").
+        resume_directive: str | None = None
+        if config.resume and config.resume_from_hub_repo:
+            config.policy_repo_id = config.resume_from_hub_repo
+            step_dir = config.resume_from_hub_step or "last"
+            # The wrapper downloads checkpoints/<step_dir>/ into this exact path;
+            # lerobot's resume reads config_path.parent.parent as the checkpoint
+            # dir, so both pretrained_model/ and training_state/ must live here.
+            config.config_path = (
+                f"{_CONTAINER_OUTPUT_DIR}/checkpoints/{step_dir}/pretrained_model/"
+                f"{_CONTAINER_TRAIN_CONFIG_NAME}"
+            )
+            resume_directive = f"--resume-from={config.resume_from_hub_repo}@checkpoints/{step_dir}"
+        else:
+            config.policy_repo_id = f"{username}/{job_id}"
 
         trainer_argv = build_training_command(config, _CONTAINER_OUTPUT_DIR)
-        # The wrapper expects `python -c WRAPPER_SOURCE <spec> -- <trainer argv>`.
+        # The wrapper expects `python -c WRAPPER_SOURCE <spec> [directives] -- <trainer argv>`.
         # `python -c` consumes the first non-option argument as the script,
-        # so we prepend a "--" sentinel of our own; the pinned-lerobot spec
-        # rides before it as a wrapper-side argument.
+        # so we prepend a "--" sentinel of our own; the pinned-lerobot spec and
+        # any wrapper directives (e.g. --resume-from) ride before it as
+        # wrapper-side arguments.
+        wrapper_side_args = [cloud_lerobot_spec(config.policy_type)]
+        if resume_directive is not None:
+            wrapper_side_args.append(resume_directive)
         wrapped_command = [
             "python",
             "-c",
             WRAPPER_SOURCE,
-            cloud_lerobot_spec(config.policy_type),
+            *wrapper_side_args,
             "--",
             *trainer_argv,
         ]

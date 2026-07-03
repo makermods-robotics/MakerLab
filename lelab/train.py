@@ -90,6 +90,18 @@ class TrainingRequest(BaseModel):
     finetune_from_step: int | None = None
     policy_pretrained_path: str | None = None
     job_name: str | None = None
+    # Cloud resume only. An HF Job is immutable once ended, so "resume a cloud
+    # run" means launching a NEW job that continues from a prior run's Hub
+    # checkpoint. Local resume points config_path at a host-local
+    # train_config.json; that file doesn't exist in the container, so cloud
+    # resume instead names the parent's Hub output repo + zero-padded step dir.
+    # The HfCloudJobRunner tells its in-container wrapper to download
+    # checkpoints/<step_dir>/ from this repo and reconstruct lerobot's output-dir
+    # layout, then resumes with --config_path pointing at the container path.
+    # Set by JobRegistry.start from resume_from_job_id/resume_from_step when the
+    # resume source is a cloud run; never set for local runs.
+    resume_from_hub_repo: str | None = None
+    resume_from_hub_step: str | None = None
 
     # Weights & Biases
     wandb_enable: bool = False
@@ -162,6 +174,12 @@ def build_training_command(
         cmd.extend(["--log_freq", str(request.log_freq)])
         cmd.extend(["--save_freq", str(request.save_freq)])
         cmd.extend(["--save_checkpoint", "true" if request.save_checkpoint else "false"])
+        # Cloud resume keeps pushing into the SAME output repo as the parent run
+        # so the whole lineage lives in one place. Local resume leaves these off
+        # (push_to_hub defaults false), so the resume flags stay minimal for it.
+        cmd.extend(["--policy.push_to_hub", "true" if request.policy_push_to_hub else "false"])
+        if request.policy_push_to_hub and request.policy_repo_id:
+            cmd.extend(["--policy.repo_id", request.policy_repo_id])
         if request.job_name:
             cmd.extend(["--job_name", request.job_name])
         return cmd
