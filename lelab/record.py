@@ -36,7 +36,8 @@ from lerobot.teleoperators.so_leader import SO101LeaderConfig
 from .arm_identity import ArmIdentityError, verify_devices
 from .datasets import _lerobot_cache_root, invalidate_hub_status
 from .motor_power import apply_motor_power, clear_goal_velocity
-from .teleoperate import force_disable_torque, hold_torque_release_grace
+from .rest_pose import capture_rest_pose
+from .teleoperate import _device_buses, _return_followers_to_rest, force_disable_torque
 from .utils.config import (
     FOLLOWER_CONFIG_PATH,
     LEADER_CONFIG_PATH,
@@ -75,13 +76,16 @@ identity_warnings: list[str] = []
 # both pass the active-flag check.
 _state_lock = threading.Lock()
 
-# True while the session's cleanup is holding torque for the release grace (see
-# teleoperate.TORQUE_RELEASE_GRACE_S): the recording loop is over but the arms
-# are still energized (holding position) and the serial ports are still held.
-# Surfaced in the status payload so the UI isn't lying about the arm's state.
+# True while the session's cleanup is driving the follower(s) back to their
+# session-start pose (and on through the release): the recording loop is over
+# but the arms are still energized (holding position, then moving home) and the
+# serial ports are still held. Surfaced in the status payload so the UI isn't
+# lying about the arm's state. No timed hold anymore — a normal stop returns the
+# follower to where the session started, then releases (same as teleop; see
+# lelab/rest_pose.py).
 releasing = False
-# Cuts the grace hold short: set by a second stop request ("release now") or by
-# a new start request that needs the serial ports. Cleared on start.
+# Cuts the post-stop return short: set by a second stop request ("release now")
+# or by a new start request that needs the serial ports. Cleared on start.
 _release_now = threading.Event()
 
 
@@ -513,8 +517,8 @@ def handle_stop_recording() -> dict[str, Any]:
     return {
         "success": True,
         "message": (
-            "Recording stop requested. When the session ends, the arm holds its pose for ~5 s "
-            "so you can guide it to a rest position — press Stop again to release it immediately."
+            "Recording stop requested. When the session ends, the arm returns to its starting "
+            "position, then goes limp — press Stop again to release it immediately."
         ),
         "session_ending": True,
     }
@@ -572,9 +576,9 @@ def handle_recording_status() -> dict[str, Any]:
         "recording_active": recording_active,
         "current_phase": current_phase,  # "preparing", "recording", "resetting", "completed"
         "session_ended": session_ended,  # New field to indicate session completion
-        # True during the post-session grace window: the recording loop is over
-        # but the arms are still energized (holding position) so the user can
-        # guide them to a rest position before torque is released.
+        # True during the post-session rest-pose return: the recording loop is
+        # over but the arm is still energized and driving back to its
+        # session-start pose before torque is released.
         "releasing": releasing,
         "available_controls": {
             "stop_recording": recording_active,  # ESC key replacement
@@ -585,9 +589,13 @@ def handle_recording_status() -> dict[str, Any]:
         "message": "Recording session failed with error - check logs"
         if current_phase == "error"
         else (
-            "Recording session has ended - stop polling"
-            if session_ended
-            else "Recording status retrieved successfully"
+            "Returning the arm to its rest position…"
+            if releasing
+            else (
+                "Recording session has ended - stop polling"
+                if session_ended
+                else "Recording status retrieved successfully"
+            )
         ),
     }
 
@@ -1095,6 +1103,18 @@ def record_with_web_events(
     # follower only, never the human-held leader. See lelab/motor_power.py.
     clear_goal_velocity(robot, "follower arm")
 
+    # Capture the follower's rest pose now — after connect/configure/identity
+    # guard, before the recording loop moves anything — so a normal stop can
+    # drive it back to where the user left it (same as teleop; see
+    # lelab/rest_pose.py). Followers only (a bimanual BiSO robot exposes two
+    # follower buses), NEVER the human-held leader. The gripper is excluded: at
+    # stop time it may be holding an object, and returning it to its (likely
+    # open) starting width would drop the object mid-return.
+    follower_rest_poses = [
+        (bus, {m: v for m, v in capture_rest_pose(bus).items() if m != "gripper"})
+        for bus in _device_buses(robot)
+    ]
+
     # Start with episode 1 - but track it properly
     current_episode = 1
     saved_episodes = 0  # Track how many episodes we've actually saved
@@ -1287,14 +1307,15 @@ def record_with_web_events(
 
     finally:
         try:
-            if ended_normally:
-                # User-initiated stop / planned session end: keep torque
-                # enabled for the grace window so the arms can be guided to a
-                # rest position before they go limp. Cut short by a second
-                # stop press or a new start (see _release_now). This only
-                # delays the release below — it never skips it.
+            if ended_normally and not _release_now.is_set():
+                # User-initiated stop / planned session end: no timed hold — the
+                # servos hold their last goal on their own in position mode — so
+                # drive the follower(s) straight back to their session-start
+                # pose, then release (same behavior as the teleop / auto-cal
+                # stop). A second stop (release-now) skips/aborts the return;
+                # error exits skip this — the bus may be gone, release ASAP.
                 releasing = True
-                hold_torque_release_grace(_release_now, label="recording arms")
+                _return_followers_to_rest(follower_rest_poses, _release_now)
             # Belt and braces: disable torque explicitly before disconnect, so a
             # failure inside disconnect() can't leave an arm energized (rigid).
             # force_disable_torque logs any failure at ERROR level with the port.

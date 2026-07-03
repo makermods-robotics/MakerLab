@@ -592,7 +592,8 @@ const Recording = () => {
           <AlertDialogHeader>
             <AlertDialogTitle>Stop recording?</AlertDialogTitle>
             <AlertDialogDescription className="text-gray-400">
-              Saved episodes are kept. The session will end and you'll be taken to the upload page.
+              Saved episodes are kept. The arm returns to its starting position, then goes limp, and
+              you'll be taken to the upload page.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

@@ -82,8 +82,9 @@ def test_stop_recording_during_release_grace_releases_now(
     assert "releasing" in result["message"].lower()
 
 
-def test_stop_recording_mentions_release_grace(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The first stop must tell the user about the post-session torque hold."""
+def test_stop_recording_mentions_rest_pose_return(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The first stop must tell the user the arm returns to its starting
+    position, then goes limp — no timed hold anymore (same as teleop)."""
     import lelab.record as record
 
     monkeypatch.setattr(record, "releasing", False)
@@ -93,7 +94,9 @@ def test_stop_recording_mentions_release_grace(monkeypatch: pytest.MonkeyPatch) 
     result = record.handle_stop_recording()
 
     assert result["success"] is True
-    assert "holds its pose" in result["message"]
+    assert "returns to its starting position" in result["message"]
+    assert "holds its pose" not in result["message"]  # the timed hold is gone
+    assert "Stop again" in result["message"]
 
 
 def test_record_finish_pending_release_cuts_grace_short(
@@ -142,11 +145,15 @@ def test_record_finish_pending_release_noop_when_idle(
 
 
 def test_recording_status_reports_releasing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """During the post-stop return the status must say the arm is still
+    energized and going home (releasing) rather than pretending the session
+    is fully over."""
     import lelab.record as record
 
     monkeypatch.setattr(record, "releasing", True)
     status = record.handle_recording_status()
     assert status["releasing"] is True
+    assert "returning the arm" in status["message"].lower()
 
 
 def test_create_record_config_pins_dshow_on_windows(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -393,6 +400,232 @@ def test_record_start_clears_stale_release_state_from_previous_double_stop(
     assert not stale.is_set()
     assert record.releasing is False
     assert record.recording_active is False
+
+
+# ---------------------------------------------------------------------------
+# Rest-pose return on session end (mirrors the teleop stop-path integration).
+# record_with_web_events captures each follower's pose at session start and, on
+# a NORMAL end, drives it back before releasing torque — same helpers as teleop
+# (lelab.rest_pose, lelab.teleoperate._return_followers_to_rest), so the shared
+# return logic itself is covered in tests/test_teleoperate.py. These tests pin
+# record's own finally-block wiring: normal end returns then releases, a
+# double-stop skips the return, an error skips it, the pose is captured per
+# follower, and the gripper is excluded.
+# ---------------------------------------------------------------------------
+
+
+class _RecReturnBus:
+    """Follower bus double: serves capture_rest_pose and records nothing else
+    (the return itself is spied via _return_followers_to_rest)."""
+
+    _MOTORS = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"]
+
+    def __init__(self, positions: dict[str, int] | None = None, port: str = "COM_FOLLOWER") -> None:
+        self.port = port
+        self.motors = dict.fromkeys(self._MOTORS)
+        self.positions = dict.fromkeys(self._MOTORS, 1000) if positions is None else dict(positions)
+
+    def sync_read(self, reg: str, normalize: bool = True) -> dict:
+        assert reg == "Present_Position" and normalize is False
+        return dict(self.positions)
+
+
+class _RecRobot:
+    """Follower robot double exposing one .bus for _device_buses/capture."""
+
+    def __init__(self, bus: _RecReturnBus) -> None:
+        self.bus = bus
+        self.disconnected = False
+
+    def disconnect(self) -> None:
+        self.disconnected = True
+
+
+def _run_record_session(
+    monkeypatch: pytest.MonkeyPatch,
+    robot: _RecRobot,
+    *,
+    stop_events: dict | None = None,
+    raise_in_loop: bool = False,
+    preset_release_now: bool = False,
+):
+    """Drive record_with_web_events with every lerobot dependency mocked so no
+    real hardware, dataset, or record_loop runs. Returns the spy call log for
+    _return_followers_to_rest (the rest-pose return) and the robot.
+
+    The loop runs a single episode: record_loop sets `stop_recording` (via the
+    supplied events) so the session ends normally after one save, unless
+    `raise_in_loop` makes record_loop raise (the error path)."""
+    import lelab.record as record
+
+    return_calls: list[tuple] = []
+
+    def _spy_return(rest_poses, abort_event):
+        return_calls.append((list(rest_poses), abort_event))
+
+    monkeypatch.setattr(record, "_return_followers_to_rest", _spy_return)
+    monkeypatch.setattr(record, "force_disable_torque", lambda device, label="": [])
+    monkeypatch.setattr(record, "apply_motor_power", lambda *a, **k: [])
+    monkeypatch.setattr(record, "clear_goal_velocity", lambda *a, **k: [])
+    monkeypatch.setattr(record, "verify_devices", lambda *a, **k: [])
+
+    if preset_release_now:
+        record._release_now.set()
+    else:
+        record._release_now.clear()
+
+    # lerobot symbols resolved at call time inside record_with_web_events.
+    monkeypatch.setattr("lerobot.robots.make_robot_from_config", lambda cfg: robot, raising=False)
+    monkeypatch.setattr(
+        "lerobot.teleoperators.make_teleoperator_from_config", lambda cfg: None, raising=False
+    )
+    monkeypatch.setattr(
+        "lerobot.processor.make_default_processors", lambda: (None, None, None), raising=False
+    )
+    monkeypatch.setattr(
+        "lerobot.utils.feature_utils.hw_to_dataset_features", lambda *a, **k: {}, raising=False
+    )
+    monkeypatch.setattr("lerobot.utils.utils.log_say", lambda *a, **k: None, raising=False)
+    monkeypatch.setattr(
+        "lerobot.common.control_utils.sanity_check_dataset_name", lambda *a, **k: None, raising=False
+    )
+
+    def _fake_record_loop(*args, **kwargs):
+        if raise_in_loop:
+            raise RuntimeError("bus died mid-episode")
+        events = kwargs.get("events")
+        if events is not None and kwargs.get("dataset") is not None:
+            events.update(stop_events or {"stop_recording": True, "_exit_early_triggered": True})
+
+    monkeypatch.setattr("lerobot.scripts.lerobot_record.record_loop", _fake_record_loop, raising=False)
+
+    class _FakeDataset:
+        num_episodes = 1
+        num_frames = 1
+        fps = 30
+        features = {"action": None}
+        meta = type("M", (), {"robot_type": "so101"})()
+
+        @staticmethod
+        def create(*args, **kwargs):
+            return _FakeDataset()
+
+        def save_episode(self) -> None:
+            pass
+
+        def clear_episode_buffer(self) -> None:
+            pass
+
+    monkeypatch.setattr("lerobot.datasets.LeRobotDataset", _FakeDataset, raising=False)
+
+    # robot.connect(calibrate=False) is called on the double.
+    robot.connect = lambda **kwargs: None  # type: ignore[attr-defined]
+    robot.name = "so101"  # type: ignore[attr-defined]
+    robot.cameras = {}  # type: ignore[attr-defined]
+    robot.action_features = {}  # type: ignore[attr-defined]
+    robot.observation_features = {}  # type: ignore[attr-defined]
+    robot.calibration = {}  # type: ignore[attr-defined]
+
+    cfg = record.create_record_config(
+        record.RecordingRequest(
+            leader_port="COM_LEADER",
+            follower_port="COM_FOLLOWER",
+            leader_config="leader",
+            follower_config="follower",
+            dataset_repo_id="tester/ds",
+            single_task="pick",
+            num_episodes=1,
+            video=False,
+        )
+    )
+    # No teleop device: keep the return path follower-only and simple.
+    cfg.teleop = None
+
+    web_events = {"exit_early": False, "stop_recording": False, "rerecord_episode": False}
+    error: Exception | None = None
+    try:
+        record.record_with_web_events(cfg, web_events)
+    except Exception as e:  # the error-path test expects this
+        error = e
+    return return_calls, robot, error
+
+
+def test_record_normal_end_returns_then_releases(monkeypatch: pytest.MonkeyPatch, tmp_lerobot_home) -> None:
+    """A normal session end drives the follower back to its captured start pose
+    (once), then disconnects — same as teleop's stop, no timed hold."""
+    import lelab.record as record
+
+    monkeypatch.setattr(record, "setup_calibration_files", lambda leader, follower: ("leader", "follower"))
+    bus = _RecReturnBus(positions=dict.fromkeys(_RecReturnBus._MOTORS, 1500))
+    robot = _RecRobot(bus)
+
+    return_calls, robot, error = _run_record_session(monkeypatch, robot)
+
+    assert error is None
+    assert len(return_calls) == 1  # the return ran exactly once
+    assert robot.disconnected is True
+    assert record.releasing is False  # reset in the finally
+
+
+def test_record_captures_pose_per_follower_excluding_gripper(
+    monkeypatch: pytest.MonkeyPatch, tmp_lerobot_home
+) -> None:
+    """The captured pose is the follower's raw ticks with the gripper removed
+    (it may be holding an object at stop time)."""
+    import lelab.record as record
+
+    monkeypatch.setattr(record, "setup_calibration_files", lambda leader, follower: ("leader", "follower"))
+    positions = {
+        "shoulder_pan": 1111,
+        "shoulder_lift": 2222,
+        "elbow_flex": 3333,
+        "wrist_flex": 4444,
+        "wrist_roll": 5555,
+        "gripper": 9999,
+    }
+    robot = _RecRobot(_RecReturnBus(positions=positions))
+
+    return_calls, _robot, error = _run_record_session(monkeypatch, robot)
+
+    assert error is None
+    (rest_poses, _abort) = return_calls[0]
+    assert len(rest_poses) == 1  # one follower bus
+    captured_bus, captured_pose = rest_poses[0]
+    assert captured_bus is robot.bus
+    assert "gripper" not in captured_pose  # excluded — may be holding an object
+    assert captured_pose == {k: v for k, v in positions.items() if k != "gripper"}
+
+
+def test_record_double_stop_skips_the_return(monkeypatch: pytest.MonkeyPatch, tmp_lerobot_home) -> None:
+    """A second stop (release-now) set before the session-end cleanup runs must
+    skip the return and release immediately, mirroring teleop."""
+    import lelab.record as record
+
+    monkeypatch.setattr(record, "setup_calibration_files", lambda leader, follower: ("leader", "follower"))
+    robot = _RecRobot(_RecReturnBus())
+
+    return_calls, robot, error = _run_record_session(monkeypatch, robot, preset_release_now=True)
+
+    assert error is None
+    assert return_calls == []  # release-now skipped the return
+    assert robot.disconnected is True
+
+
+def test_record_error_path_skips_return_and_releases(
+    monkeypatch: pytest.MonkeyPatch, tmp_lerobot_home
+) -> None:
+    """An exception in the loop (dead bus) skips the return entirely — the bus
+    may be gone, so release ASAP — but still disconnects."""
+    import lelab.record as record
+
+    monkeypatch.setattr(record, "setup_calibration_files", lambda leader, follower: ("leader", "follower"))
+    robot = _RecRobot(_RecReturnBus())
+
+    return_calls, robot, error = _run_record_session(monkeypatch, robot, raise_in_loop=True)
+
+    assert isinstance(error, RuntimeError)
+    assert return_calls == []  # error path never returns to rest
+    assert robot.disconnected is True
 
 
 # ---------------------------------------------------------------------------
