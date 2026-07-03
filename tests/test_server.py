@@ -15,8 +15,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime as _dt
 import logging
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -397,8 +400,6 @@ def test_connection_manager_tracks_connect_and_disconnect() -> None:
     fake_ws = MagicMock()
     fake_ws.accept = AsyncMock()
 
-    import asyncio
-
     asyncio.run(mgr.connect(fake_ws))
     assert fake_ws in mgr.active_connections
 
@@ -412,6 +413,122 @@ def test_connection_manager_broadcast_sync_does_not_block_without_loop() -> None
     mgr = ConnectionManager()
     # Should enqueue without raising even if there are no consumers.
     mgr.broadcast_joint_data_sync({"shoulder_pan.pos": 1.0})
+
+
+class _LoopThread:
+    """A real asyncio loop on a background thread, standing in for uvicorn's
+    event loop in ConnectionManager tests: websockets are accepted on it and
+    the broadcast worker must marshal sends back onto it."""
+
+    def __init__(self) -> None:
+        self.loop = asyncio.new_event_loop()
+        self._thread = threading.Thread(target=self.loop.run_forever, daemon=True)
+        self._thread.start()
+
+    def run(self, coro):
+        return asyncio.run_coroutine_threadsafe(coro, self.loop).result(timeout=2.0)
+
+    def close(self) -> None:
+        self.loop.call_soon_threadsafe(self.loop.stop)
+        self._thread.join(timeout=2.0)
+        self.loop.close()
+
+
+@pytest.fixture
+def ws_loop():
+    loop_thread = _LoopThread()
+    yield loop_thread
+    loop_thread.close()
+
+
+def _wait_for(predicate, timeout: float = 2.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return False
+
+
+def _fake_ws(send_json=None) -> MagicMock:
+    ws = MagicMock()
+    ws.accept = AsyncMock()
+    ws.send_json = send_json if send_json is not None else AsyncMock()
+    return ws
+
+
+def test_broadcast_sends_on_owning_loop_and_survives_dead_connection(ws_loop) -> None:
+    """A send failure must drop only that connection — not kill the worker —
+    and healthy sends must run on the loop that accepted the websocket
+    (regression: 'Task got Future attached to a different loop')."""
+    from lelab.server import ConnectionManager
+
+    mgr = ConnectionManager()
+    seen: dict[str, object] = {}
+
+    async def _record(data):
+        seen["loop"] = asyncio.get_running_loop()
+        seen["data"] = data
+
+    ws_ok = _fake_ws(send_json=AsyncMock(side_effect=_record))
+    ws_dead = _fake_ws(send_json=AsyncMock(side_effect=RuntimeError("client went away")))
+
+    ws_loop.run(mgr.connect(ws_ok))
+    ws_loop.run(mgr.connect(ws_dead))
+    worker = mgr.broadcast_thread
+    try:
+        mgr.broadcast_joint_data_sync({"shoulder_pan.pos": 1.0})
+
+        assert _wait_for(lambda: ws_dead not in mgr.active_connections)
+        assert ws_ok in mgr.active_connections
+        assert seen["loop"] is ws_loop.loop
+        assert seen["data"] == {"shoulder_pan.pos": 1.0}
+        assert mgr.is_running
+        assert worker.is_alive()
+
+        # The surviving connection keeps receiving broadcasts.
+        mgr.broadcast_joint_data_sync({"shoulder_pan.pos": 2.0})
+        assert _wait_for(lambda: seen.get("data") == {"shoulder_pan.pos": 2.0})
+    finally:
+        mgr.disconnect(ws_ok)
+
+
+def test_connection_manager_rapid_reconnect_restarts_worker(ws_loop) -> None:
+    """Disconnect-then-reconnect while broadcasts flow (browser reload during
+    teleop) must hand off cleanly to a fresh worker with no self-join
+    (regression: 'cannot join current thread' killing joint streaming)."""
+    from lelab.server import ConnectionManager
+
+    mgr = ConnectionManager()
+    ws1 = _fake_ws()
+    ws2 = _fake_ws()
+
+    ws_loop.run(mgr.connect(ws1))
+    first_worker = mgr.broadcast_thread
+    mgr.broadcast_joint_data_sync({"n": 1})
+    assert _wait_for(lambda: ws1.send_json.call_count >= 1)
+
+    # Last client drops: the worker is signaled to stop but never joined.
+    mgr.disconnect(ws1)
+    assert not mgr.is_running
+
+    # Immediate reconnect restarts broadcasting on a fresh worker.
+    ws_loop.run(mgr.connect(ws2))
+    assert mgr.is_running
+    second_worker = mgr.broadcast_thread
+    assert second_worker is not first_worker
+
+    try:
+        mgr.broadcast_joint_data_sync({"n": 2})
+        assert _wait_for(lambda: ws2.send_json.call_count >= 1)
+        ws2.send_json.assert_called_with({"n": 2})
+
+        # The replaced worker notices it's been superseded and exits on its
+        # own even though is_running is True again.
+        first_worker.join(timeout=2.0)
+        assert not first_worker.is_alive()
+    finally:
+        mgr.disconnect(ws2)
 
 
 def _install_fake_pygrabber(monkeypatch: pytest.MonkeyPatch, filter_graph_cls) -> None:
