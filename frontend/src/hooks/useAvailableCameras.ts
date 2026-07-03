@@ -31,17 +31,23 @@ export function useAvailableCameras({
   const refresh = useCallback(async (): Promise<AvailableCamera[]> => {
     setIsLoading(true);
     try {
-      // Need a permission grant before enumerateDevices() returns labels.
-      try {
-        const probe = await navigator.mediaDevices.getUserMedia({ video: true });
-        probe.getTracks().forEach((t) => t.stop());
-      } catch {
-        // ignore — we'll still try to enumerate, just without labels
-      }
+      // navigator.mediaDevices only exists in secure contexts (https or
+      // localhost). Without it, skip browser matching — backend cv2 indices
+      // still list and recording works, there are just no live previews.
+      let browserDevices: { deviceId: string; label: string }[] = [];
+      if (navigator.mediaDevices) {
+        // Need a permission grant before enumerateDevices() returns labels.
+        try {
+          const probe = await navigator.mediaDevices.getUserMedia({ video: true });
+          probe.getTracks().forEach((t) => t.stop());
+        } catch {
+          // ignore — we'll still try to enumerate, just without labels
+        }
 
-      const browserDevices = (await navigator.mediaDevices.enumerateDevices())
-        .filter((d) => d.kind === "videoinput")
-        .map((d) => ({ deviceId: d.deviceId, label: d.label }));
+        browserDevices = (await navigator.mediaDevices.enumerateDevices())
+          .filter((d) => d.kind === "videoinput")
+          .map((d) => ({ deviceId: d.deviceId, label: d.label }));
+      }
 
       const r = await fetchWithHeaders(`${baseUrl}/available-cameras`);
       if (!r.ok) {
@@ -92,10 +98,11 @@ export function useAvailableCameras({
   useEffect(() => {
     if (!enabled) return;
     refresh();
+    const md = navigator.mediaDevices;
+    if (!md) return; // insecure context: no hotplug events, refresh() ran once
     const handler = () => refresh();
-    navigator.mediaDevices.addEventListener("devicechange", handler);
-    return () =>
-      navigator.mediaDevices.removeEventListener("devicechange", handler);
+    md.addEventListener("devicechange", handler);
+    return () => md.removeEventListener("devicechange", handler);
   }, [enabled, refresh]);
 
   return { cameras, isLoading, refresh };

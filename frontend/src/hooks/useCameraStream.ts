@@ -37,12 +37,15 @@ export function useCameraStream(deviceId: string, paused: boolean) {
   // Only retry when we're actually in the error state, so an unrelated change
   // (e.g. plugging in a mic) never tears down a healthy stream.
   useEffect(() => {
+    // navigator.mediaDevices only exists in secure contexts (https/localhost);
+    // without it there's no stream to retry anyway.
+    const md = navigator.mediaDevices;
+    if (!md) return;
     const onDeviceChange = () => {
       if (hasErrorRef.current) setRetryKey((k) => k + 1);
     };
-    navigator.mediaDevices.addEventListener("devicechange", onDeviceChange);
-    return () =>
-      navigator.mediaDevices.removeEventListener("devicechange", onDeviceChange);
+    md.addEventListener("devicechange", onDeviceChange);
+    return () => md.removeEventListener("devicechange", onDeviceChange);
   }, []);
 
   useEffect(() => {
