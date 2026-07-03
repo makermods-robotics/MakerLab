@@ -43,13 +43,10 @@ const CameraThumbnail: React.FC<{
   paused: boolean;
 }> = ({ deviceId, cameraIndex, paused }) => {
   const { videoRef, hasError } = useCameraStream(deviceId, paused);
-  const [mjpegError, setMjpegError] = useState(false);
-  // A new index is a new stream — forget the previous one's failure.
-  useEffect(() => setMjpegError(false), [cameraIndex]);
 
   const showVideo = !paused && deviceId && !hasError;
-  const showMjpeg =
-    !paused && !deviceId && cameraIndex !== undefined && !mjpegError;
+  // BackendCameraStream owns its own failure/retry UI — no error latch here.
+  const showMjpeg = !paused && !deviceId && cameraIndex !== undefined;
 
   if (showVideo) {
     return (
@@ -66,7 +63,6 @@ const CameraThumbnail: React.FC<{
     return (
       <BackendCameraStream
         cameraIndex={cameraIndex}
-        onError={() => setMjpegError(true)}
         className="w-32 h-24 object-cover rounded border border-gray-700 bg-black"
       />
     );

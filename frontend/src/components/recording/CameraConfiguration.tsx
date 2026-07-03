@@ -359,16 +359,10 @@ const CameraStreamBox: React.FC<CameraStreamBoxProps> = ({
   cameraIndex,
 }) => {
   const { videoRef, hasError: streamError } = useCameraStream(deviceId, paused);
-  const [mjpegError, setMjpegError] = useState(false);
-  // Retry the backend stream on unpause (the 409-while-recording clears) and
-  // whenever the index changes (a new stream, not the failed one).
-  useEffect(() => {
-    if (!paused) setMjpegError(false);
-  }, [paused, cameraIndex]);
 
   const showVideo = !paused && deviceId && !streamError;
-  const showMjpeg =
-    !paused && !deviceId && cameraIndex !== undefined && !mjpegError;
+  // BackendCameraStream owns its own failure/retry UI — no error latch here.
+  const showMjpeg = !paused && !deviceId && cameraIndex !== undefined;
   return (
     <div className="aspect-[4/3] bg-gray-800 relative">
       {showVideo ? (
@@ -382,7 +376,6 @@ const CameraStreamBox: React.FC<CameraStreamBoxProps> = ({
       ) : showMjpeg ? (
         <BackendCameraStream
           cameraIndex={cameraIndex}
-          onError={() => setMjpegError(true)}
           className="w-full h-full object-cover"
         />
       ) : (
@@ -391,7 +384,7 @@ const CameraStreamBox: React.FC<CameraStreamBoxProps> = ({
           <span className="text-gray-500 text-sm">
             {paused
               ? "Preview paused"
-              : deviceId || mjpegError
+              : deviceId
               ? "Preview failed"
               : "No browser match"}
           </span>

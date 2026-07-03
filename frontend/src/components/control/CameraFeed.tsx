@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React from "react";
 import { VideoOff } from "lucide-react";
 import { useCameraStream } from "@/hooks/useCameraStream";
 import BackendCameraStream from "@/components/BackendCameraStream";
@@ -21,13 +21,10 @@ const CameraFeed: React.FC<CameraFeedProps> = ({
   label,
 }) => {
   const { videoRef, hasError } = useCameraStream(deviceId, false);
-  const [mjpegError, setMjpegError] = useState(false);
-  // A new index is a new stream — forget the previous one's failure.
-  useEffect(() => setMjpegError(false), [cameraIndex]);
 
   const showVideo = deviceId && !hasError;
-  const showMjpeg =
-    !showVideo && !deviceId && cameraIndex !== undefined && !mjpegError;
+  // BackendCameraStream owns its own failure/retry UI — no error latch here.
+  const showMjpeg = !showVideo && !deviceId && cameraIndex !== undefined;
 
   return (
     <div className="bg-gray-900 rounded-lg border border-gray-700 overflow-hidden">
@@ -43,14 +40,13 @@ const CameraFeed: React.FC<CameraFeedProps> = ({
         ) : showMjpeg ? (
           <BackendCameraStream
             cameraIndex={cameraIndex}
-            onError={() => setMjpegError(true)}
             className="w-full h-full object-cover"
           />
         ) : (
           <div className="w-full h-full flex flex-col items-center justify-center">
             <VideoOff className="w-8 h-8 text-gray-500 mb-2" />
             <span className="text-gray-500 text-sm">
-              {deviceId || mjpegError ? "Preview failed" : "No camera selected"}
+              {deviceId ? "Preview failed" : "No camera selected"}
             </span>
           </div>
         )}
