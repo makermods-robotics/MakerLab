@@ -25,6 +25,7 @@ import {
   FastForward,
   Download,
   Sparkles,
+  Upload,
 } from "lucide-react";
 import { useApi } from "@/contexts/ApiContext";
 import { useToast } from "@/hooks/use-toast";
@@ -85,6 +86,9 @@ const JobCard: React.FC<Props> = ({
   const Icon = present.Icon;
   const isRunning = job.state === "running";
   const isImported = job.runner === "imported";
+  // A Hub-backed import (vs a local-folder import) — provenance stays visible
+  // after an untracked Hub repo is unified into a tracked imported card.
+  const isHubImport = isImported && !!job.hf_repo_id;
   // Alias-aware display name; the true identity (run id / hub repo id) stays
   // visible as muted subtext when an alias is set.
   const displayName = jobDisplayName(job);
@@ -426,13 +430,24 @@ const JobCard: React.FC<Props> = ({
     >
       <CardContent className="p-4 space-y-3">
         <div className="flex items-start justify-between gap-2">
-          <div
-            className={`flex items-center gap-1.5 text-xs font-semibold ${present.color}`}
-          >
-            <Icon
-              className={`w-3.5 h-3.5 ${isRunning ? "animate-spin" : ""}`}
-            />
-            {stateLabel}
+          <div className="flex items-center gap-2">
+            <div
+              className={`flex items-center gap-1.5 text-xs font-semibold ${present.color}`}
+            >
+              <Icon
+                className={`w-3.5 h-3.5 ${isRunning ? "animate-spin" : ""}`}
+              />
+              {stateLabel}
+            </div>
+            {isHubImport ? (
+              <div
+                className="flex items-center gap-1 text-[11px] font-medium text-sky-400"
+                title="Imported from a Hugging Face Hub repo"
+              >
+                <Upload className="w-3 h-3" />
+                from Hub
+              </div>
+            ) : null}
           </div>
           <div className="flex items-center gap-0.5">
             <Button

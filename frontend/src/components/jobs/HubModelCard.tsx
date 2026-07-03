@@ -14,12 +14,29 @@ import { HubModel, deleteHubModel } from "@/lib/jobsApi";
 import { ApiError } from "@/lib/apiClient";
 import { useApi } from "@/contexts/ApiContext";
 import { useToast } from "@/hooks/use-toast";
-import { ExternalLink, Lock, Trash2, Upload } from "lucide-react";
+import {
+  ExternalLink,
+  Lock,
+  Play,
+  Sparkles,
+  Trash2,
+  Upload,
+} from "lucide-react";
 
 interface Props {
   model: HubModel;
   /** Called after a successful delete so the parent can drop the card. */
   onDeleted?: () => void;
+  /**
+   * Run inference / Fine-tune on this untracked Hub repo. The parent lazily
+   * auto-imports the repo (registering it as a tracked imported model), then
+   * proceeds exactly as it would for an imported-model card — so this card's
+   * primary actions match a regular model card without duplicating any flow.
+   */
+  onAction?: (
+    repoId: string,
+    action: "inference" | "finetune",
+  ) => void | Promise<void>;
 }
 
 function relativeTime(iso: string | null): string {
@@ -145,12 +162,27 @@ const DeleteHubModelDialog: React.FC<{
   );
 };
 
-const HubModelCard: React.FC<Props> = ({ model, onDeleted }) => {
+const HubModelCard: React.FC<Props> = ({ model, onDeleted, onAction }) => {
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [acting, setActing] = useState<"inference" | "finetune" | null>(null);
   const url = `https://huggingface.co/${model.repo_id}`;
   const shortName = model.repo_id.includes("/")
     ? model.repo_id.split("/").slice(1).join("/")
     : model.repo_id;
+
+  const runAction = async (
+    e: React.MouseEvent,
+    action: "inference" | "finetune",
+  ) => {
+    e.stopPropagation();
+    if (!onAction || acting) return;
+    setActing(action);
+    try {
+      await onAction(model.repo_id, action);
+    } finally {
+      setActing(null);
+    }
+  };
 
   return (
     <Card
@@ -208,6 +240,35 @@ const HubModelCard: React.FC<Props> = ({ model, onDeleted }) => {
             {model.repo_id} · updated {relativeTime(model.last_modified)}
           </div>
         </div>
+        {/* Same primary actions as an imported model card. Clicking either
+            lazily auto-imports the repo (in the parent) and then runs the
+            action — so a model trained on another machine is a first-class
+            citizen here. */}
+        {onAction ? (
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              size="icon"
+              onClick={(e) => runAction(e, "inference")}
+              disabled={acting !== null}
+              className="h-8 w-8 bg-green-500 hover:bg-green-600 text-white"
+              aria-label="Run inference with this model"
+              title="Run inference"
+            >
+              <Play className="w-4 h-4" />
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={(e) => runAction(e, "finetune")}
+              disabled={acting !== null}
+              className="h-8 gap-1 border-violet-500/50 text-violet-700 dark:text-violet-300 hover:bg-violet-500/10"
+              aria-label="Fine-tune a new run from this model's weights"
+              title="Fine-tune a new run from this model's weights"
+            >
+              <Sparkles className="w-3.5 h-3.5" /> Fine-tune
+            </Button>
+          </div>
+        ) : null}
       </CardContent>
       {/* Rendered inside the Card but its own click handling stops propagation
           so opening/closing the dialog never triggers the card's open-in-Hub. */}

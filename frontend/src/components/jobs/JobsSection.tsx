@@ -12,11 +12,16 @@ import {
   deleteJob,
   dismissHubJob,
   getJob,
+  importModel,
   isHubJobActive,
+  jobDisplayName,
   listHubJobs,
   listJobs,
   stopJob,
 } from "@/lib/jobsApi";
+import { ApiError } from "@/lib/apiClient";
+import { listJobCheckpoints } from "@/lib/checkpointsApi";
+import { useNavigate } from "react-router-dom";
 import JobCard from "./JobCard";
 import HubJobCard from "./HubJobCard";
 import HubModelCard from "./HubModelCard";
@@ -38,6 +43,7 @@ const isJobActive = (j: JobRecord) =>
 const JobsSection: React.FC = () => {
   const { baseUrl, fetchWithHeaders } = useApi();
   const { toast } = useToast();
+  const navigate = useNavigate();
 
   const [jobs, setJobs] = useState<JobRecord[]>([]);
   // Ancestors referenced via resume_from_job_id but paged out of the list, so a
@@ -186,10 +192,82 @@ const JobsSection: React.FC = () => {
     }
   };
 
-  const handlePlay = (job: JobRecord, step: number) => {
+  const handlePlay = (job: JobRecord, step: number | null) => {
     setInferenceJob(job);
     setInferenceStep(step);
     setInferenceModalOpen(true);
+  };
+
+  // Lazy auto-import: an untracked Hub model card's Run inference / Fine-tune
+  // buttons route through here. We first register the repo as an imported
+  // pseudo-job (idempotent — a re-import returns the existing record), then
+  // proceed exactly as if the user had clicked the action on the resulting
+  // imported-model card. The listing then re-renders the repo as a tracked
+  // imported card (see trackedRepoIds, which now also covers imported records),
+  // so the Hub card disappears on the next refresh.
+  //
+  // Husk repos (a cloud run that died before its first checkpoint save) have no
+  // usable model, so register_imported rejects them with a 400 — we catch it and
+  // show the plain "no checkpoints" answer instead of opening a broken modal.
+  const handleLazyImportAction = async (
+    repoId: string,
+    action: "inference" | "finetune",
+  ) => {
+    let record: JobRecord;
+    try {
+      record = await importModel(baseUrl, fetchWithHeaders, repoId);
+    } catch (e) {
+      const isHusk =
+        e instanceof ApiError && (e.status === 400 || e.status === 404);
+      toast({
+        title: isHusk ? "No checkpoints in this repo" : "Import failed",
+        description: isHusk
+          ? "The run likely died before its first checkpoint save."
+          : e instanceof Error
+            ? e.message
+            : String(e),
+        variant: "destructive",
+      });
+      return;
+    }
+    // The imported record now tracks this repo; drop the Hub card immediately
+    // rather than waiting for the WS/refresh round-trip.
+    refresh();
+    if (action === "inference") {
+      // initialStep = null: the inference modal loads the repo's checkpoints and
+      // auto-selects the latest (or shows its own empty-checkpoints message).
+      handlePlay(record, null);
+      return;
+    }
+    // Fine-tune needs a concrete checkpoint step to seed the training form.
+    try {
+      const cks = await listJobCheckpoints(baseUrl, fetchWithHeaders, record.id);
+      const latest = cks.length > 0 ? cks[cks.length - 1].step : null;
+      if (latest == null) {
+        toast({
+          title: "No checkpoints in this repo",
+          description: "The run likely died before its first checkpoint save.",
+          variant: "destructive",
+        });
+        return;
+      }
+      navigate("/training", {
+        state: {
+          finetune: {
+            jobId: record.id,
+            step: latest,
+            name: jobDisplayName(record),
+            policyType: record.config.policy_type,
+          },
+        },
+      });
+    } catch (e) {
+      toast({
+        title: "Couldn't start fine-tune",
+        description: e instanceof Error ? e.message : String(e),
+        variant: "destructive",
+      });
+    }
   };
 
   const handleDelete = async (id: string) => {
@@ -272,20 +350,25 @@ const JobsSection: React.FC = () => {
     () => filteredHubJobs.filter((h) => !trackedHfJobIds.has(h.id)),
     [filteredHubJobs, trackedHfJobIds],
   );
-  // Hide model repos that map 1-to-1 to a tracked cloud job (those already
-  // appear via JobCard); the remainder are past trainings the registry no
-  // longer remembers.
+  // Hide model repos already claimed by a tracked job — a cloud run (shown via
+  // JobCard) OR an imported model (also a JobCard, and the target a lazy
+  // auto-import lands on). Repo ids are compared case-insensitively to match
+  // the backend's find_imported dedup. The remainder are past trainings the
+  // registry no longer remembers, rendered as untracked Hub cards.
   const trackedRepoIds = useMemo(
     () =>
       new Set(
-        trackedCloudJobs
-          .map((j) => j.hf_repo_id)
+        [...trackedCloudJobs, ...importedJobs]
+          .map((j) => j.hf_repo_id?.toLowerCase())
           .filter((id): id is string => !!id),
       ),
-    [trackedCloudJobs],
+    [trackedCloudJobs, importedJobs],
   );
   const untrackedHubModels = useMemo(
-    () => filteredHubModels.filter((m) => !trackedRepoIds.has(m.repo_id)),
+    () =>
+      filteredHubModels.filter(
+        (m) => !trackedRepoIds.has(m.repo_id.toLowerCase()),
+      ),
     [filteredHubModels, trackedRepoIds],
   );
 
@@ -575,6 +658,7 @@ const JobsSection: React.FC = () => {
                 key={model.repo_id}
                 model={model}
                 onDeleted={refresh}
+                onAction={handleLazyImportAction}
               />
             ))}
           </div>
