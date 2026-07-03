@@ -1362,23 +1362,28 @@ const Calibration = () => {
                     Stop auto-calibration
                   </Button>
                 ) : (
+                  // Auto-calibrate is the default calibration mode: it's the
+                  // prominent primary action. Manual step-by-step calibration
+                  // stays fully available as the secondary button below — a user
+                  // who wants it just clicks it, but landing here nudges toward
+                  // the hands-off auto flow.
                   <>
                     <Button
-                      onClick={() => handleStartCalibration()}
-                      className="w-full bg-blue-600 hover:bg-blue-700 text-white rounded-full py-6 text-lg"
-                      disabled={!robotName || !deviceType || !port}
-                    >
-                      <Play className="w-5 h-5 mr-2" />
-                      Start Calibration
-                    </Button>
-                    <Button
                       onClick={() => setAutoCalPromptOpen(true)}
-                      variant="outline"
+                      className="w-full bg-purple-600 hover:bg-purple-700 text-white rounded-full py-6 text-lg"
                       disabled={!robotName || !deviceType || !port}
-                      className="w-full border-purple-500/50 text-purple-700 hover:bg-purple-900/20 hover:text-purple-800 dark:text-purple-300 dark:hover:text-purple-200 rounded-full py-5"
                     >
                       <Wand2 className="w-5 h-5 mr-2" />
                       Auto-calibrate
+                    </Button>
+                    <Button
+                      onClick={() => handleStartCalibration()}
+                      variant="outline"
+                      disabled={!robotName || !deviceType || !port}
+                      className="w-full border-blue-500/50 text-blue-700 hover:bg-blue-900/20 hover:text-blue-800 dark:text-blue-300 dark:hover:text-blue-200 rounded-full py-5"
+                    >
+                      <Play className="w-5 h-5 mr-2" />
+                      Calibrate manually
                     </Button>
                   </>
                 )}
