@@ -777,6 +777,25 @@ def _read_checkpoint_config(ckpt: JobCheckpoint) -> dict[str, object]:
         return json.load(f)
 
 
+def _flat_feature_dim(feat: object) -> int | None:
+    """Flat width of a policy feature (e.g. observation.state, action).
+
+    Checkpoint config features carry a `shape` list; for the proprioceptive
+    state and action these are 1-D — `[6]` for a single SO-101 arm, `[12]` for
+    a bimanual (two-arm) checkpoint. Returns the single dim, or None when the
+    feature is absent or not 1-D (nothing downstream should guess in that
+    case)."""
+    if not isinstance(feat, dict):
+        return None
+    shape = feat.get("shape")
+    if not isinstance(shape, (list, tuple)) or len(shape) != 1:
+        return None
+    try:
+        return int(shape[0])
+    except (TypeError, ValueError):
+        return None
+
+
 def _generate_job_id(policy_type: str, dataset_repo_id: str) -> str:
     """Build a sortable, collision-free job id from policy type and dataset slug."""
     from .train import _SLUG_RE
@@ -1392,8 +1411,9 @@ class JobRegistry:
             raise FileNotFoundError(f"No checkpoint at step {step} for job {record.id}")
         cfg = _read_checkpoint_config(match)
         policy_type = cfg.get("type")
+        input_features = cfg.get("input_features") or {}
         image_features: dict[str, dict[str, int]] = {}
-        for full_name, feat in (cfg.get("input_features") or {}).items():
+        for full_name, feat in input_features.items():
             if feat.get("type") != "VISUAL":
                 continue
             shape = feat.get("shape") or []
@@ -1408,6 +1428,13 @@ class JobRegistry:
             "policy_type": policy_type,
             "image_features": image_features,
             "requires_task": policy_type in _LANGUAGE_CONDITIONED_POLICY_TYPES,
+            # Flat proprioceptive state / action widths. For an SO-101 arm this
+            # is 6 (one per joint); a bimanual-trained checkpoint carries 12
+            # (two arms). The inference modal compares this against the selected
+            # robot's arm count to explain a single-arm/bimanual mismatch before
+            # the user hits Start. None when the checkpoint omits the feature.
+            "state_dim": _flat_feature_dim(input_features.get("observation.state")),
+            "action_dim": _flat_feature_dim((cfg.get("output_features") or {}).get("action")),
         }
 
     def delete(self, job_id: str) -> None:

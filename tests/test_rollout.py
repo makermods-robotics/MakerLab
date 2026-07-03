@@ -261,3 +261,50 @@ def test_handle_start_inference_blocked_when_already_active(monkeypatch) -> None
     assert result["success"] is False
     assert result["status_code"] == 409
     assert "already active" in result["message"]
+
+
+def test_handle_start_inference_pins_return_to_initial_position(monkeypatch, tmp_path) -> None:
+    """The stop dialog promises the follower eases back to its start pose on
+    teardown. That behaviour is lerobot's `return_to_initial_position`, which
+    defaults to True today — but we pin it explicitly so an upstream default
+    flip can't silently break the promise. Capture the rollout command and
+    assert the flag is present.
+
+    This is the one command-construction test: it stubs out the subprocess,
+    the stdout pump, and every hardware-touching preflight so nothing real is
+    started — we only inspect the argv handed to Popen."""
+    from lelab import rollout
+
+    monkeypatch.setattr(rollout, "setup_follower_calibration_file", lambda cfg: cfg)
+    monkeypatch.setattr(rollout, "_preflight_arm_identity", lambda *a, **k: [])
+    monkeypatch.setattr(rollout, "_preflight_motor_power", lambda *a, **k: [])
+    monkeypatch.setattr(rollout, "_resolve_policy_path", lambda ref: str(tmp_path / "pretrained_model"))
+    monkeypatch.setattr(rollout, "_detect_device", lambda: "cpu")
+
+    captured: dict = {}
+
+    class _FakeProc:
+        pid = 4321
+        stdin = None
+
+        def __init__(self, cmd, **kwargs):
+            captured["cmd"] = cmd
+            # Provide a stdin object so the newline-seeding block runs cleanly.
+            import io
+
+            self.stdin = io.BytesIO()
+
+    monkeypatch.setattr(rollout.subprocess, "Popen", _FakeProc)
+    # Don't spawn the real stdout-pump thread.
+    monkeypatch.setattr(
+        rollout.threading, "Thread", lambda *a, **k: type("_T", (), {"start": lambda self: None})()
+    )
+
+    result = rollout.handle_start_inference(_stub_request())
+    assert result["success"] is True, result
+
+    cmd = captured["cmd"]
+    assert "--return_to_initial_position=true" in cmd
+    # Sanity: the core rollout invocation is intact around our pinned flag.
+    assert "lerobot.scripts.lerobot_rollout" in cmd
+    assert "--strategy.type=base" in cmd

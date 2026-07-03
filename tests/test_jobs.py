@@ -741,3 +741,24 @@ def test_boot_sweep_never_deletes_dirs_with_extra_content(tmp_path) -> None:
         reg.get("B")
     assert (dup_dir / "job.json").exists()  # nothing deleted
     assert (dup_dir / "extra.safetensors").exists()
+
+
+def test_flat_feature_dim_reads_single_arm_and_bimanual_state() -> None:
+    """observation.state / action are 1-D: [6] for one SO-101 arm, [12] for a
+    bimanual (two-arm) checkpoint. The inference modal keys the single-arm vs
+    bimanual mismatch off this."""
+    from lelab.jobs import _flat_feature_dim
+
+    assert _flat_feature_dim({"type": "STATE", "shape": [6]}) == 6
+    assert _flat_feature_dim({"type": "STATE", "shape": [12]}) == 12
+    assert _flat_feature_dim({"type": "ACTION", "shape": (12,)}) == 12
+
+
+def test_flat_feature_dim_returns_none_for_missing_or_non_1d() -> None:
+    from lelab.jobs import _flat_feature_dim
+
+    assert _flat_feature_dim(None) is None
+    assert _flat_feature_dim({}) is None
+    assert _flat_feature_dim({"shape": [3, 480, 640]}) is None  # a VISUAL feature
+    assert _flat_feature_dim({"shape": []}) is None
+    assert _flat_feature_dim({"shape": "nope"}) is None

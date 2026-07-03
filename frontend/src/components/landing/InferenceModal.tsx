@@ -215,6 +215,26 @@ const InferenceModal: React.FC<Props> = ({
   // rather than silently running the policy on just the left-arm follower.
   const isBimanual = robot?.mode === "bimanual";
 
+  // The other mismatch axis: the CHECKPOINT was trained on a bimanual robot but
+  // the selected robot is single-arm. A bimanual-trained SO-101 checkpoint
+  // carries a 12-dim state/action (two 6-DOF arms) and left_/right_-prefixed
+  // camera names; a single follower can't supply a 12-dim observation, so the
+  // rollout would crash on a shape mismatch deep in the subprocess. Detect it
+  // here from the checkpoint's state dim (fall back to action dim) and explain
+  // it before Start, instead of letting the subprocess fail opaquely.
+  const SO101_DOF = 6;
+  const checkpointDim = policyConfig?.state_dim ?? policyConfig?.action_dim ?? null;
+  const checkpointArms =
+    checkpointDim != null && checkpointDim % SO101_DOF === 0
+      ? checkpointDim / SO101_DOF
+      : null;
+  // Only flag single-arm robot + bimanual checkpoint here. The reverse
+  // (bimanual robot) is already blocked above by `isBimanual`, and inference
+  // always drives exactly one follower.
+  const checkpointIsBimanual = checkpointArms != null && checkpointArms >= 2;
+  const robotCheckpointArmMismatch =
+    !!robot && !isBimanual && !!policyConfig && checkpointIsBimanual;
+
   const expectedCameraNames = policyConfig
     ? Object.keys(policyConfig.image_features)
     : [];
@@ -226,13 +246,21 @@ const InferenceModal: React.FC<Props> = ({
     !!robot &&
     robot.is_clean &&
     !isBimanual &&
+    !robotCheckpointArmMismatch &&
     selectedRef != null &&
     !!policyConfig &&
     allCamerasBound &&
     !submitting;
 
   const handleStart = async () => {
-    if (!robot || isBimanual || selectedRef == null || !policyConfig) return;
+    if (
+      !robot ||
+      isBimanual ||
+      robotCheckpointArmMismatch ||
+      selectedRef == null ||
+      !policyConfig
+    )
+      return;
     // Setting submitting=true makes every CameraPreview drop its
     // browser stream — required so the rollout subprocess can open the
     // same camera index via OpenCV without colliding on the device.
@@ -366,6 +394,19 @@ const InferenceModal: React.FC<Props> = ({
                 onChange={setSelectedStep}
               />
             )}
+            {robotCheckpointArmMismatch ? (
+              <Alert className="bg-amber-900/40 border-amber-700 text-amber-100">
+                <AlertTriangle className="h-4 w-4" />
+                <AlertDescription>
+                  This checkpoint was trained on a{" "}
+                  <strong>bimanual robot</strong> ({checkpointDim}-dim state,{" "}
+                  {checkpointArms} arms), but <strong>{robot?.name}</strong> is a
+                  single-arm robot — a single follower can't drive it. Pick a
+                  single-arm checkpoint, or select a matching robot on the
+                  Landing page.
+                </AlertDescription>
+              </Alert>
+            ) : null}
           </div>
 
           <div className="space-y-4">

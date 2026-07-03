@@ -305,6 +305,13 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
             f"--robot.id={follower_id}",
             f"--task={request.task}",
             f"--duration={request.duration_s}",
+            # Pin the teardown behaviour the stop dialog promises ("eases the
+            # follower back to its start pose, then goes limp"). lerobot's
+            # RolloutConfig.return_to_initial_position defaults to True today,
+            # but relying on that default means an upstream flip would silently
+            # break the promise — the arm would stay wherever the policy left
+            # it. Set it explicitly so the contract is ours, not upstream's.
+            "--return_to_initial_position=true",
         ]
         if request.cameras:
             cmd.append(f"--robot.cameras={_format_cameras_arg(request.cameras)}")
