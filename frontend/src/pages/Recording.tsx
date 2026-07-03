@@ -102,6 +102,12 @@ const Recording = () => {
   const warningFiredForPhaseRef = useRef<{ phase: Phase | null; episode: number | null; tick: number }>({ phase: null, episode: null, tick: 0 });
   // Guards against React StrictMode double-invocation of the start effect.
   const startInitiatedRef = useRef(false);
+  // Stop the session exactly once, however the user leaves. Set true when a
+  // session ends normally (poll navigates to /upload), fails to start, or is
+  // stopped via the on-page Stop button — so the page-leave safety net below
+  // (back button / unmount / pagehide) never fires a spurious second stop on a
+  // completed or never-started session.
+  const stoppedRef = useRef(false);
   // The arm-identity guard runs inside the backend's recording worker (after
   // the start response), so its warn-but-allow findings arrive via the status
   // poll. Show them once, not on every 1s tick.
@@ -118,6 +124,9 @@ const Recording = () => {
   // Redirect if no config provided
   useEffect(() => {
     if (!recordingConfig) {
+      // No session was ever started here — nothing to stop, so mark the safety
+      // net as already-handled before bouncing home.
+      stoppedRef.current = true;
       toast({
         title: "No Configuration",
         description: "Please start recording from the main page.",
@@ -204,6 +213,11 @@ const Recording = () => {
         }
 
         if (!status.recording_active && status.session_ended) {
+          // The session finished on its own (or a stop we issued completed and
+          // the backend returned to rest). This is a normal exit — mark the
+          // safety net as handled so the imminent unmount doesn't POST a
+          // spurious /stop-recording against a session that's already gone.
+          stoppedRef.current = true;
           const datasetInfo = {
             dataset_repo_id:
               status.dataset_repo_id || recordingConfig.dataset_repo_id,
@@ -235,6 +249,70 @@ const Recording = () => {
       .padStart(2, "0")}`;
   };
 
+  // Idempotent stop for page-leave paths (back button, in-app navigation via
+  // unmount). Distinct from the on-page Stop button, which keeps its confirm
+  // dialog — leaving the page IS the decision, so the safety net skips the
+  // dialog. Runs at most once (stoppedRef), so a completed/never-started
+  // session, or an already-issued stop, won't POST a spurious second stop.
+  const stopRecordingForLeave = useCallback(async () => {
+    if (stoppedRef.current) return;
+    stoppedRef.current = true;
+    try {
+      const res = await fetchWithHeaders(`${baseUrl}/stop-recording`, {
+        method: "POST",
+      });
+      const data = await res.json().catch(() => null);
+      if (data?.success) {
+        // The stop response carries only a session_ending flag; the incomplete
+        // in-progress episode (if any) is discarded, previously saved episodes
+        // stay saved, and the arm returns to rest before going limp.
+        toast({
+          title: "Recording stopped",
+          description:
+            data.message ??
+            "The in-progress episode was discarded; saved episodes are kept.",
+        });
+      }
+    } catch {
+      /* best-effort — the page is going away regardless */
+    }
+  }, [baseUrl, fetchWithHeaders, toast]);
+
+  // Cover every page-leave path so a headless recording session can't keep the
+  // arm torqued after the user is gone. (Unlike teleop, the active recording
+  // screen has no dedicated back button — the only in-page exits are the Stop
+  // confirm flow and the browser's own back/close — so the back-button layer
+  // collapses into the unmount cleanup here.)
+  //   - any in-app navigation unmounts this component → stop via cleanup;
+  //   - a browser-level leave (URL change, reload, tab close) never runs React
+  //     cleanup, so `pagehide` fires a keepalive stop that survives the unload
+  //     and stashes a flag the next page can read. It uses a bare fetch (no JSON
+  //     Content-Type) so the request stays a CORS "simple request" and isn't
+  //     dropped to a preflight mid-unload.
+  // Normal completion and start-failure paths set stoppedRef first, so those
+  // exits fall through here without issuing a spurious stop.
+  useEffect(() => {
+    const handlePageHide = () => {
+      if (stoppedRef.current) return;
+      stoppedRef.current = true;
+      try {
+        sessionStorage.setItem("lelab:recording-stopped", "1");
+      } catch {
+        /* sessionStorage may be unavailable; the stop below still runs */
+      }
+      fetch(`${baseUrl}/stop-recording`, {
+        method: "POST",
+        keepalive: true,
+      }).catch(() => {});
+    };
+    window.addEventListener("pagehide", handlePageHide);
+
+    return () => {
+      window.removeEventListener("pagehide", handlePageHide);
+      stopRecordingForLeave();
+    };
+  }, [baseUrl, stopRecordingForLeave]);
+
   const startRecordingSession = async () => {
     try {
       const response = await fetchWithHeaders(`${baseUrl}/start-recording`, {
@@ -251,6 +329,10 @@ const Recording = () => {
           description: `Started recording ${recordingConfig.num_episodes} episodes`,
         });
       } else {
+        // The backend rejected the start (e.g. 409 already-active, or a config
+        // error) — no session is ours to stop, so keep the safety net from
+        // firing a stop that would kill an unrelated in-flight session.
+        stoppedRef.current = true;
         toast({
           title: "Error Starting Recording",
           description: data.message || "Failed to start recording session.",
@@ -259,6 +341,8 @@ const Recording = () => {
         navigate("/");
       }
     } catch (error) {
+      // Never reached the backend — nothing started, nothing to stop.
+      stoppedRef.current = true;
       toast({
         title: "Connection Error",
         description: "Could not connect to the backend server.",
@@ -369,16 +453,18 @@ const Recording = () => {
     await handleStopRecording();
   }, [handleStopRecording]);
 
+  // Re-record is no longer keyboard-driven (the ArrowLeft binding was removed —
+  // a back-gesture keystroke shouldn't discard the in-progress episode), so it's
+  // reached only via the on-screen dropdown item and doesn't need to sit in the
+  // stable keydown-handler ref.
   const handlersRef = useRef({
     handleExitEarly,
-    handleRerecordEpisode,
     requestStopRecording,
     showStopConfirm,
   });
   useEffect(() => {
     handlersRef.current = {
       handleExitEarly,
-      handleRerecordEpisode,
       requestStopRecording,
       showStopConfirm,
     };
@@ -397,9 +483,6 @@ const Recording = () => {
       if (e.key === " " || e.code === "Space" || e.key === "ArrowRight") {
         e.preventDefault();
         handlersRef.current.handleExitEarly();
-      } else if (e.key === "ArrowLeft") {
-        e.preventDefault();
-        handlersRef.current.handleRerecordEpisode();
       } else if (e.key === "Escape") {
         if (handlersRef.current.showStopConfirm) return;
         handlersRef.current.requestStopRecording();
