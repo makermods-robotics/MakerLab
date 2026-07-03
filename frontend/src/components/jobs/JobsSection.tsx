@@ -364,7 +364,7 @@ const JobsSection: React.FC = () => {
     <section className="grid grid-cols-1 lg:grid-cols-2 gap-x-8 gap-y-10 items-start">
       {/* Jobs column: local runs, cloud runs, and inactive/untracked leftovers.
           The search box lives here (it primarily filters job text) but keeps
-          filtering the imported-models column too, so behavior is unchanged. */}
+          filtering the models column too, so behavior is unchanged. */}
       <div className="space-y-6">
         <div className="flex items-center justify-between gap-3">
           <h2 className="text-lg font-semibold text-white">Jobs</h2>
@@ -432,11 +432,7 @@ const JobsSection: React.FC = () => {
         <Collapsible defaultOpen>
           <CollapsibleTrigger className="group flex items-center gap-1.5 text-sm font-semibold uppercase tracking-wide text-slate-400 hover:text-white transition-colors">
             <ChevronRight className="w-3.5 h-3.5 transition-transform group-data-[state=open]:rotate-90" />
-            Online jobs (
-            {trackedCloudActive.length +
-              untrackedHubActive.length +
-              untrackedHubModels.length}
-            )
+            Online jobs ({trackedCloudActive.length + untrackedHubActive.length})
           </CollapsibleTrigger>
           <CollapsibleContent className="pt-3">
             {hubError ? (
@@ -454,12 +450,11 @@ const JobsSection: React.FC = () => {
                     Your Hugging Face token is missing the{" "}
                     <code className="text-amber-200">job.read</code> permission,
                     so cloud jobs can't be listed. Uploaded models still appear
-                    below.
+                    under Models.
                   </p>
                 ) : null}
                 {trackedCloudActive.length === 0 &&
-                untrackedHubActive.length === 0 &&
-                untrackedHubModels.length === 0 ? (
+                untrackedHubActive.length === 0 ? (
                   hubAuthenticated && !hubJobsPermission ? null : (
                     <p className="text-sm text-slate-500">
                       {query
@@ -484,13 +479,6 @@ const JobsSection: React.FC = () => {
                         key={job.id}
                         job={job}
                         onDismiss={handleDismissHubJob}
-                      />
-                    ))}
-                    {untrackedHubModels.map((model) => (
-                      <HubModelCard
-                        key={model.repo_id}
-                        model={model}
-                        onDeleted={refresh}
                       />
                     ))}
                   </div>
@@ -542,12 +530,17 @@ const JobsSection: React.FC = () => {
         ) : null}
       </div>
 
-      {/* Imported models column. Owns the Import button; rendered even when
-          empty so the entry point is always visible. */}
+      {/* Models column: imported models plus uploaded hub repos no job tracks
+          (a model artifact, not a run — so it doesn't sit under Online jobs).
+          Owns the Import button; rendered even when empty so the entry point
+          is always visible. */}
       <div className="space-y-6">
         <div className="flex items-center justify-between gap-3">
           <h2 className="text-lg font-semibold text-white">
-            Imported models{importedJobs.length > 0 ? ` (${importedJobs.length})` : ""}
+            Models
+            {importedJobs.length + untrackedHubModels.length > 0
+              ? ` (${importedJobs.length + untrackedHubModels.length})`
+              : ""}
           </h2>
           <Button
             variant="outline"
@@ -559,11 +552,11 @@ const JobsSection: React.FC = () => {
             Import model
           </Button>
         </div>
-        {importedJobs.length === 0 ? (
+        {importedJobs.length === 0 && untrackedHubModels.length === 0 ? (
           <p className="text-sm text-slate-500">
             {query
-              ? "No imported models match your search."
-              : "No imported models. Use Import model to add one from the Hub or a local folder."}
+              ? "No models match your search."
+              : "No models yet. Use Import model to add one from the Hub or a local folder."}
           </p>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-1 gap-4">
@@ -575,6 +568,13 @@ const JobsSection: React.FC = () => {
                 onDelete={handleDelete}
                 onPlay={handlePlay}
                 onRenamed={refresh}
+              />
+            ))}
+            {untrackedHubModels.map((model) => (
+              <HubModelCard
+                key={model.repo_id}
+                model={model}
+                onDeleted={refresh}
               />
             ))}
           </div>
