@@ -39,10 +39,9 @@ from .motor_power import apply_motor_power, clear_goal_velocity
 from .rest_pose import capture_rest_pose
 from .teleoperate import _device_buses, _return_followers_to_rest, force_disable_torque
 from .utils.config import (
-    FOLLOWER_CONFIG_PATH,
-    LEADER_CONFIG_PATH,
-    bimanual_base,
+    bimanual_base_id,
     setup_calibration_files,
+    stage_bimanual_calibrations,
     validate_dataset_repo_id,
     with_lelab_tag,
 )
@@ -121,6 +120,10 @@ class RecordingRequest(BaseModel):
     right_follower_port: str = ""
     right_leader_config: str = ""
     right_follower_config: str = ""
+    # Robot record name — used only as the BiSO staging base id (bimanual). It
+    # decides the on-disk staging dir, not which calibration drives which arm.
+    # Blank/invalid falls back to DEFAULT_BIMANUAL_BASE.
+    robot_name: str = ""
     dataset_repo_id: str
     single_task: str
     num_episodes: int = 5
@@ -220,24 +223,31 @@ def create_record_config(request: RecordingRequest) -> RecordConfig:
 
     if request.mode == "bimanual":
         # Build a lerobot BiSO leader+follower pair. lerobot loads each sub-arm's
-        # calibration as "<base>_left/right.json" from the side's dir, so set the
-        # BiSO id to that base + the side's calibration_dir and let it auto-load
-        # (otherwise the sub-arms have no calibration and connect() would try to
-        # interactively recalibrate — which hangs the record thread). Cameras go
-        # on the left follower arm (exposed prefixed "left_*").
-        setup_calibration_files(request.leader_config, request.follower_config)
-        setup_calibration_files(request.right_leader_config, request.right_follower_config)
-        follower_base = bimanual_base(request.follower_config, request.right_follower_config, "follower")
-        leader_base = bimanual_base(request.leader_config, request.right_leader_config, "leader")
+        # calibration as "<base>_left/right.json" from a single calibration_dir,
+        # with no way to point left/right at differently named library files. So
+        # stage the four arbitrarily-named library calibrations into per-device
+        # dirs as "<base>_left/right.json" and point BiSO at those (otherwise the
+        # sub-arms have no calibration and connect() would try to interactively
+        # recalibrate — which hangs the record thread). Cameras go on the left
+        # follower arm (exposed prefixed "left_*"). The staging copy fails fast
+        # with a clear per-slot error if any library file is missing.
+        base = bimanual_base_id(request.robot_name)
+        leader_staging, follower_staging, _ = stage_bimanual_calibrations(
+            base,
+            request.leader_config,
+            request.right_leader_config,
+            request.follower_config,
+            request.right_follower_config,
+        )
         robot_config = BiSOFollowerConfig(
-            id=follower_base,
-            calibration_dir=Path(FOLLOWER_CONFIG_PATH),
+            id=base,
+            calibration_dir=Path(follower_staging),
             left_arm_config=SO101FollowerConfig(port=request.follower_port, cameras=camera_configs),
             right_arm_config=SO101FollowerConfig(port=request.right_follower_port),
         )
         teleop_config = BiSOLeaderConfig(
-            id=leader_base,
-            calibration_dir=Path(LEADER_CONFIG_PATH),
+            id=base,
+            calibration_dir=Path(leader_staging),
             left_arm_config=SO101LeaderConfig(port=request.leader_port),
             right_arm_config=SO101LeaderConfig(port=request.right_leader_port),
         )
@@ -423,11 +433,25 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                     )
                     time.sleep(2.0)
 
+                # Bimanual: the sub-arm ids are BiSO staging aliases, so give the
+                # identity guard the real library stems (in arm-iteration order:
+                # left follower, right follower, left leader, right leader).
+                identity_config_names = (
+                    [
+                        request.follower_config,
+                        request.right_follower_config,
+                        request.leader_config,
+                        request.right_leader_config,
+                    ]
+                    if request.mode == "bimanual"
+                    else None
+                )
                 dataset = record_with_web_events(
                     record_config,
                     recording_events,
                     skip_identity_check=request.skip_identity_check,
                     motor_power=request.motor_power,
+                    identity_config_names=identity_config_names,
                 )
                 logger.info(f"Recording completed successfully. Dataset has {dataset.num_episodes} episodes")
                 last_recording_info = {
@@ -946,10 +970,19 @@ def handle_upload_status() -> dict[str, Any]:
 
 
 def record_with_web_events(
-    cfg: RecordConfig, web_events: dict, skip_identity_check: bool = False, motor_power: int = 100
+    cfg: RecordConfig,
+    web_events: dict,
+    skip_identity_check: bool = False,
+    motor_power: int = 100,
+    identity_config_names: list[str] | None = None,
 ) -> LeRobotDataset:
     """
     Implement recording with phase tracking - exactly mirrors original record() function behavior
+
+    `identity_config_names` (bimanual only) are the real library calibration stems
+    — [left_follower, right_follower, left_leader, right_leader] — so the arm
+    identity guard compares against the library instead of the BiSO staging alias
+    ids ("<base>_left"/"<base>_right"). None for single-arm (id is the real stem).
     """
     import time
 
@@ -1052,7 +1085,9 @@ def record_with_web_events(
     # error path surface the message via the recording status.
     try:
         identity_warnings = verify_devices(
-            ((robot, "follower"), (teleop, "leader")), skip=skip_identity_check
+            ((robot, "follower"), (teleop, "leader")),
+            skip=skip_identity_check,
+            config_names=identity_config_names,
         )
     except ArmIdentityError:
         robot.disconnect()

@@ -288,6 +288,9 @@ const Landing = () => {
       right_follower_port: robot.right_follower_port,
       right_leader_config: robot.right_leader_config,
       right_follower_config: robot.right_follower_config,
+      // Robot name → BiSO staging base id (bimanual). Names the per-session
+      // staging dir; does not affect which calibration drives which arm.
+      robot_name: robot.name,
       // Follower torque limit for the session (10-100% of full power).
       motor_power: robot.motor_power ?? 100,
       dataset_repo_id: datasetRepoId,

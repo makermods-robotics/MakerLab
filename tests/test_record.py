@@ -181,24 +181,36 @@ def test_create_record_config_pins_dshow_on_windows(monkeypatch: pytest.MonkeyPa
 
 
 def test_create_record_config_builds_biso_for_bimanual(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A bimanual request produces a lerobot BiSO leader+follower pair config."""
+    """A bimanual request stages the four arbitrarily-named library configs and
+    builds a BiSO pair pointed at the per-device staging dirs."""
     import lelab.record as record
     from lerobot.robots.bi_so_follower import BiSOFollowerConfig
     from lerobot.teleoperators.bi_so_leader import BiSOLeaderConfig
 
-    monkeypatch.setattr(record, "setup_calibration_files", lambda leader, follower: (leader, follower))
+    staged: dict = {}
 
-    # Configs follow lerobot's "<base>_left"/"<base>_right" convention.
+    def _fake_stage(base, leader_left, leader_right, follower_left, follower_right):
+        staged.update(
+            base=base,
+            leader=(leader_left, leader_right),
+            follower=(follower_left, follower_right),
+        )
+        return (f"/staging/{base}/leader", f"/staging/{base}/follower", base)
+
+    monkeypatch.setattr(record, "stage_bimanual_calibrations", _fake_stage)
+
+    # Config names are ARBITRARY — no "<base>_left/right" convention required.
     request = record.RecordingRequest(
         leader_port="/dev/ll",
         follower_port="/dev/lf",
-        leader_config="mybot_left",
-        follower_config="mybot_left",
+        leader_config="alice",
+        follower_config="bob",
         mode="bimanual",
         right_leader_port="/dev/rl",
         right_follower_port="/dev/rf",
-        right_leader_config="mybot_right",
-        right_follower_config="mybot_right",
+        right_leader_config="carol",
+        right_follower_config="dave",
+        robot_name="mybot",
         dataset_repo_id="user/dataset",
         single_task="pick up the cube",
     )
@@ -206,10 +218,16 @@ def test_create_record_config_builds_biso_for_bimanual(monkeypatch: pytest.Monke
     config = record.create_record_config(request)
     assert isinstance(config.robot, BiSOFollowerConfig)
     assert isinstance(config.teleop, BiSOLeaderConfig)
-    # BiSO id is the convention base so lerobot auto-loads "<base>_left/right.json".
+    # BiSO id + calibration_dir come from the staging helper (base = robot name).
     assert config.robot.id == "mybot"
     assert config.teleop.id == "mybot"
+    assert str(config.robot.calibration_dir) == "/staging/mybot/follower"
+    assert str(config.teleop.calibration_dir) == "/staging/mybot/leader"
     assert config.robot.right_arm_config.port == "/dev/rf"
+    # Helper received the four library stems, grouped per device.
+    assert staged["base"] == "mybot"
+    assert staged["leader"] == ("alice", "carol")
+    assert staged["follower"] == ("bob", "dave")
 
 
 def test_build_camera_configs_uses_default_backend_when_unset() -> None:

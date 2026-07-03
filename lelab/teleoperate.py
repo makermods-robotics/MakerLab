@@ -30,10 +30,9 @@ from .arm_identity import verify_devices
 from .motor_power import apply_motor_power, clear_goal_velocity, torque_limit_from_percent
 from .rest_pose import capture_rest_pose, return_to_rest_pose
 from .utils.config import (
-    FOLLOWER_CONFIG_PATH,
-    LEADER_CONFIG_PATH,
-    bimanual_base,
+    bimanual_base_id,
     setup_calibration_files,
+    stage_bimanual_calibrations,
 )
 from .utils.devices import _force_close_device_resources
 
@@ -79,6 +78,7 @@ def _motor_fraction(motor_name: str, value: float, cal) -> float | None:
     if full_range_deg <= 0:
         return None
     return 0.5 + value / full_range_deg
+
 
 # Global variables for teleoperation state
 teleoperation_active = False
@@ -255,6 +255,10 @@ class TeleoperateRequest(BaseModel):
     right_follower_port: str = ""
     right_leader_config: str = ""
     right_follower_config: str = ""
+    # Robot record name — used only as the BiSO staging base id (bimanual). It
+    # decides the on-disk staging dir, not which calibration drives which arm.
+    # Blank/invalid falls back to DEFAULT_BIMANUAL_BASE.
+    robot_name: str = ""
     # Escape hatch for the arm-identity guard (see lelab/arm_identity.py):
     # when true, start even if the connected arms don't match their calibrations.
     skip_identity_check: bool = False
@@ -416,29 +420,36 @@ def _connect_bimanual(request: TeleoperateRequest):
 
     Each side is a lerobot BiSO* device wrapping two SO101 arms (left = the
     primary leader/follower pair, right = the right_* pair). lerobot loads each
-    sub-arm's calibration as "<base>_left/right.json" from the side's dir, so we
-    set the BiSO id to that base and let lerobot load it. Returns
+    sub-arm's calibration as "<base>_left/right.json" from a single dir, with no
+    way to point left/right at differently named library files, so we stage the
+    four arbitrarily-named library calibrations into per-device dirs under that
+    convention and point BiSO at those. Returns
     (robot, teleop_device, identity_warnings) connected, or raises after
-    disconnecting any device.
+    disconnecting any device. The staging copy fails fast with a clear per-slot
+    error if any library file is missing (before connect() drops into
+    interactive recalibration, which would hang this thread).
     """
-    # Validate the four files exist and follow lerobot's "<base>_left/right" naming.
-    setup_calibration_files(request.leader_config, request.follower_config)
-    setup_calibration_files(request.right_leader_config, request.right_follower_config)
-    follower_base = bimanual_base(request.follower_config, request.right_follower_config, "follower")
-    leader_base = bimanual_base(request.leader_config, request.right_leader_config, "leader")
+    base = bimanual_base_id(request.robot_name)
+    leader_staging, follower_staging, _ = stage_bimanual_calibrations(
+        base,
+        request.leader_config,
+        request.right_leader_config,
+        request.follower_config,
+        request.right_follower_config,
+    )
 
     robot = BiSOFollower(
         BiSOFollowerConfig(
-            id=follower_base,
-            calibration_dir=Path(FOLLOWER_CONFIG_PATH),
+            id=base,
+            calibration_dir=Path(follower_staging),
             left_arm_config=SO101FollowerConfig(port=request.follower_port),
             right_arm_config=SO101FollowerConfig(port=request.right_follower_port),
         )
     )
     teleop_device = BiSOLeader(
         BiSOLeaderConfig(
-            id=leader_base,
-            calibration_dir=Path(LEADER_CONFIG_PATH),
+            id=base,
+            calibration_dir=Path(leader_staging),
             left_arm_config=SO101LeaderConfig(port=request.leader_port),
             right_arm_config=SO101LeaderConfig(port=request.right_leader_port),
         )
@@ -461,9 +472,19 @@ def _connect_bimanual(request: TeleoperateRequest):
                 ) from e
 
         # Arm-identity guard: all four arms, read-only, BEFORE write_calibration
-        # below can stamp a wrong file into a swapped arm's EEPROM.
+        # below can stamp a wrong file into a swapped arm's EEPROM. The sub-arm
+        # ids are BiSO staging aliases, so pass the real library stems (in
+        # arm-iteration order: left follower, right follower, left leader, right
+        # leader) for the identity comparison.
         identity_warnings = verify_devices(
-            ((robot, "follower"), (teleop_device, "leader")), skip=request.skip_identity_check
+            ((robot, "follower"), (teleop_device, "leader")),
+            skip=request.skip_identity_check,
+            config_names=[
+                request.follower_config,
+                request.right_follower_config,
+                request.leader_config,
+                request.right_leader_config,
+            ],
         )
 
         # Each sub-arm auto-loaded its calibration in __init__ (id=<base>_side);

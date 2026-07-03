@@ -129,25 +129,24 @@ const Calibration = () => {
   ) as keyof RobotRecord;
 
   const assignedConfig = robot ? (robot[configField] as string) : "";
-  // Bimanual MUST follow lerobot's "<base>_left"/"<base>_right" convention, so
-  // the name is forced to "<robot>_<arm>" regardless of any assigned config.
-  // Single-arm recalibration defaults to the in-use config (or the robot name).
-  const defaultConfigName = isBimanual
-    ? `${robotName}_${arm}`
-    : ((assignedConfig?.trim() ? assignedConfig : robotName) ?? "");
+  // Calibration names are arbitrary in every mode — bimanual no longer forces
+  // "<robot>_<arm>" (lerobot's "<base>_left/right" convention is satisfied by a
+  // per-session staging copy on the backend, not by the on-disk name). Default
+  // to the in-use config for this slot, else a per-arm suggestion so a fresh
+  // bimanual robot doesn't propose the same name for all four slots.
+  const defaultConfigName = assignedConfig?.trim()
+    ? assignedConfig
+    : ((isBimanual ? `${robotName}_${arm}` : robotName) ?? "");
 
-  // Editable "save as" name (single-arm only) so one robot can own multiple
-  // named calibrations instead of overwriting. Blank falls back to the default;
-  // bimanual stays locked to the lerobot naming convention. The field re-syncs
-  // to the default whenever the target side changes (device/arm switch, robot
-  // load, or a just-saved calibration reassigning the robot).
+  // Editable "save as" name (all modes) so one robot can own multiple named
+  // calibrations instead of overwriting. Blank falls back to the default. The
+  // field re-syncs to the default whenever the target side changes (device/arm
+  // switch, robot load, or a just-saved calibration reassigning the robot).
   const [configNameInput, setConfigNameInput] = useState("");
   useEffect(() => {
     setConfigNameInput(defaultConfigName);
   }, [defaultConfigName]);
-  const calibrationConfigName = isBimanual
-    ? defaultConfigName
-    : configNameInput.trim() || defaultConfigName;
+  const calibrationConfigName = configNameInput.trim() || defaultConfigName;
 
   // Bumped when a calibration completes so the per-side CalibrationLibrary
   // dropdowns re-fetch and surface any newly-named file.
@@ -1264,34 +1263,32 @@ const Calibration = () => {
                 )}
               </div>
 
-              {!isBimanual && (
-                <div className="space-y-2">
-                  <Label
-                    htmlFor="configName"
-                    className="text-sm font-medium text-slate-300"
-                  >
-                    Calibration name
-                  </Label>
-                  <Input
-                    id="configName"
-                    value={configNameInput}
-                    onChange={(e) => setConfigNameInput(e.target.value)}
-                    placeholder={defaultConfigName}
-                    disabled={
-                      calibrationStatus.calibration_active || autoCal.active
-                    }
-                    className="bg-slate-700 border-slate-600 text-white rounded-md"
-                  />
-                  <p className="text-xs text-slate-500">
-                    Saves as{" "}
-                    <span className="font-mono text-slate-400">
-                      {calibrationConfigName || "…"}
-                    </span>
-                    . Change it to keep the current calibration and save a new
-                    one instead of overwriting.
-                  </p>
-                </div>
-              )}
+              <div className="space-y-2">
+                <Label
+                  htmlFor="configName"
+                  className="text-sm font-medium text-slate-300"
+                >
+                  Calibration name
+                </Label>
+                <Input
+                  id="configName"
+                  value={configNameInput}
+                  onChange={(e) => setConfigNameInput(e.target.value)}
+                  placeholder={defaultConfigName}
+                  disabled={
+                    calibrationStatus.calibration_active || autoCal.active
+                  }
+                  className="bg-slate-700 border-slate-600 text-white rounded-md"
+                />
+                <p className="text-xs text-slate-500">
+                  Saves as{" "}
+                  <span className="font-mono text-slate-400">
+                    {calibrationConfigName || "…"}
+                  </span>
+                  . Change it to keep the current calibration and save a new one
+                  instead of overwriting.
+                </p>
+              </div>
 
               <Separator className="bg-slate-700" />
 
@@ -1557,111 +1554,86 @@ const Calibration = () => {
                   <div className="text-sm font-medium text-slate-300">
                     Robot calibration
                   </div>
-                  {isBimanual
-                    ? // Bimanual configs are fixed by lerobot's convention
-                      // ("<robot>_left"/"<robot>_right"), so there's no config
-                      // picker — each arm just shows its convention name + whether
-                      // it's been calibrated to it.
-                      (
-                        [
-                          {
-                            label: "Left Leader (Teleoperator)",
-                            cfgField: "leader_config",
-                            side: "left",
-                          },
-                          {
-                            label: "Left Follower (Robot)",
-                            cfgField: "follower_config",
-                            side: "left",
-                          },
-                          {
-                            label: "Right Leader (Teleoperator)",
-                            cfgField: "right_leader_config",
-                            side: "right",
-                          },
-                          {
-                            label: "Right Follower (Robot)",
-                            cfgField: "right_follower_config",
-                            side: "right",
-                          },
-                        ] as const
-                      ).map((row) => {
-                        const expected = `${robotName}_${row.side}`;
-                        const current = (robot[row.cfgField] as string) || "";
-                        const compliant = current === expected;
-                        return (
-                          <div key={row.label}>
-                            <div className="flex items-center gap-2 text-sm">
-                              {compliant ? (
-                                <CheckCircle className="w-4 h-4 text-green-400" />
-                              ) : (
-                                <Circle className="w-4 h-4 text-slate-500" />
-                              )}
-                              <span
-                                className={
-                                  compliant
-                                    ? "text-slate-200"
-                                    : "text-slate-400"
-                                }
-                              >
-                                {row.label}
-                              </span>
-                              <span className="ml-auto font-mono text-xs text-slate-500">
-                                {expected}
-                              </span>
-                            </div>
-                            {!compliant && (
-                              <div className="ml-6 text-xs text-amber-400">
-                                {current
-                                  ? `Currently "${current}" — recalibrate this arm to use ${expected}.`
-                                  : "Not calibrated yet — calibrate this arm."}
-                              </div>
-                            )}
-                          </div>
-                        );
-                      })
-                    : (
-                        [
-                          {
-                            label: "Leader (Teleoperator)",
-                            device: "teleop",
-                            cfgField: "leader_config",
-                          },
-                          {
-                            label: "Follower (Robot)",
-                            device: "robot",
-                            cfgField: "follower_config",
-                          },
-                        ] as const
-                      ).map((row) => {
-                        const cfg = (robot[row.cfgField] as string) || "";
-                        return (
-                          <div key={row.label}>
-                            <div className="flex items-center gap-2 text-sm">
-                              {cfg ? (
-                                <CheckCircle className="w-4 h-4 text-green-400" />
-                              ) : (
-                                <Circle className="w-4 h-4 text-slate-500" />
-                              )}
-                              <span
-                                className={
-                                  cfg ? "text-slate-200" : "text-slate-400"
-                                }
-                              >
-                                {row.label}
-                              </span>
-                            </div>
-                            <CalibrationLibrary
-                              device={row.device}
-                              assignedConfig={cfg}
-                              configField={row.cfgField}
-                              robotName={robotName}
-                              onAssigned={fetchRobot}
-                              reloadToken={calibReloadToken}
-                            />
-                          </div>
-                        );
-                      })}
+                  {(isBimanual
+                    ? // Bimanual: each of the four slots gets the same free-naming
+                      // picker as single mode — names are arbitrary now, and the
+                      // SLOT (not the name) decides which arm the file drives.
+                      ([
+                        {
+                          label: "Left Leader (Teleoperator)",
+                          device: "teleop",
+                          cfgField: "leader_config",
+                        },
+                        {
+                          label: "Left Follower (Robot)",
+                          device: "robot",
+                          cfgField: "follower_config",
+                        },
+                        {
+                          label: "Right Leader (Teleoperator)",
+                          device: "teleop",
+                          cfgField: "right_leader_config",
+                        },
+                        {
+                          label: "Right Follower (Robot)",
+                          device: "robot",
+                          cfgField: "right_follower_config",
+                        },
+                      ] as const)
+                    : ([
+                        {
+                          label: "Leader (Teleoperator)",
+                          device: "teleop",
+                          cfgField: "leader_config",
+                        },
+                        {
+                          label: "Follower (Robot)",
+                          device: "robot",
+                          cfgField: "follower_config",
+                        },
+                      ] as const)
+                  ).map((row) => {
+                    const cfg = (robot[row.cfgField] as string) || "";
+                    // The same config may drive both same-side slots only by
+                    // mistake (one physical arm on two arms), so exclude the
+                    // counterpart slot's config from this picker in bimanual mode.
+                    const counterpartField =
+                      row.cfgField === "leader_config"
+                        ? "right_leader_config"
+                        : row.cfgField === "right_leader_config"
+                          ? "leader_config"
+                          : row.cfgField === "follower_config"
+                            ? "right_follower_config"
+                            : "follower_config";
+                    const excludeConfig = isBimanual
+                      ? (robot[counterpartField] as string) || undefined
+                      : undefined;
+                    return (
+                      <div key={row.label}>
+                        <div className="flex items-center gap-2 text-sm">
+                          {cfg ? (
+                            <CheckCircle className="w-4 h-4 text-green-400" />
+                          ) : (
+                            <Circle className="w-4 h-4 text-slate-500" />
+                          )}
+                          <span
+                            className={cfg ? "text-slate-200" : "text-slate-400"}
+                          >
+                            {row.label}
+                          </span>
+                        </div>
+                        <CalibrationLibrary
+                          device={row.device}
+                          assignedConfig={cfg}
+                          configField={row.cfgField}
+                          excludeConfig={excludeConfig}
+                          robotName={robotName}
+                          onAssigned={fetchRobot}
+                          reloadToken={calibReloadToken}
+                        />
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </CardContent>

@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -630,6 +631,81 @@ def test_setup_calibration_files_copies_configs(
 # directory, so the function only validates that the file exists in LEADER_CONFIG_PATH /
 # FOLLOWER_CONFIG_PATH; it never writes into CALIBRATION_BASE_PATH_TELEOP or
 # CALIBRATION_BASE_PATH_ROBOTS. The plan's assertion about those paths was incorrect.
+
+
+def test_stage_bimanual_calibrations_copies_four_files(tmp_lerobot_home: Path) -> None:
+    """The four arbitrarily-named library files are copied into per-device
+    staging dirs as '<base>_left/right.json', returning the dirs + base."""
+    from lelab.utils import config as cfg
+
+    # Arbitrary library names — no "<base>_left/right" convention.
+    for name, content in (("alice", "AL"), ("carol", "AR")):
+        (Path(cfg.LEADER_CONFIG_PATH) / f"{name}.json").write_text(content)
+    for name, content in (("bob", "FL"), ("dave", "FR")):
+        (Path(cfg.FOLLOWER_CONFIG_PATH) / f"{name}.json").write_text(content)
+
+    leader_dir, follower_dir, base = cfg.stage_bimanual_calibrations("mybot", "alice", "carol", "bob", "dave")
+    assert base == "mybot"
+    assert leader_dir == os.path.join(cfg.LELAB_BISO_STAGING_PATH, "mybot", "leader")
+    assert follower_dir == os.path.join(cfg.LELAB_BISO_STAGING_PATH, "mybot", "follower")
+    # Files landed under the convention names with the right contents.
+    assert (Path(leader_dir) / "mybot_left.json").read_text() == "AL"
+    assert (Path(leader_dir) / "mybot_right.json").read_text() == "AR"
+    assert (Path(follower_dir) / "mybot_left.json").read_text() == "FL"
+    assert (Path(follower_dir) / "mybot_right.json").read_text() == "FR"
+
+
+def test_stage_bimanual_calibrations_overwrites_stale_alias(tmp_lerobot_home: Path) -> None:
+    """A recalibrated library file must refresh its staging alias — the copy is
+    unconditional, so a second call overwrites the previous staged content."""
+    from lelab.utils import config as cfg
+
+    (Path(cfg.LEADER_CONFIG_PATH) / "L.json").write_text("v1")
+    (Path(cfg.LEADER_CONFIG_PATH) / "R.json").write_text("R")
+    (Path(cfg.FOLLOWER_CONFIG_PATH) / "FL.json").write_text("FL")
+    (Path(cfg.FOLLOWER_CONFIG_PATH) / "FR.json").write_text("FR")
+
+    leader_dir, _, _ = cfg.stage_bimanual_calibrations("bot", "L", "R", "FL", "FR")
+    assert (Path(leader_dir) / "bot_left.json").read_text() == "v1"
+
+    # Recalibrate the left leader library file, then restage.
+    (Path(cfg.LEADER_CONFIG_PATH) / "L.json").write_text("v2")
+    cfg.stage_bimanual_calibrations("bot", "L", "R", "FL", "FR")
+    assert (Path(leader_dir) / "bot_left.json").read_text() == "v2"
+
+
+def test_stage_bimanual_calibrations_missing_file_raises(tmp_lerobot_home: Path) -> None:
+    """A missing library file fails fast with a clear per-slot error naming the
+    slot and file, before lerobot's connect() can hang on recalibration."""
+    from lelab.utils import config as cfg
+
+    # Only three of the four files exist; the right follower is missing.
+    (Path(cfg.LEADER_CONFIG_PATH) / "L.json").write_text("L")
+    (Path(cfg.LEADER_CONFIG_PATH) / "R.json").write_text("R")
+    (Path(cfg.FOLLOWER_CONFIG_PATH) / "FL.json").write_text("FL")
+
+    with pytest.raises(FileNotFoundError, match="right follower.*FR.json.*not found"):
+        cfg.stage_bimanual_calibrations("bot", "L", "R", "FL", "FR")
+
+
+def test_stage_bimanual_calibrations_blank_slot_raises(tmp_lerobot_home: Path) -> None:
+    """A blank config (arm unassigned) fails with the standard legible message."""
+    from lelab.utils import config as cfg
+
+    with pytest.raises(FileNotFoundError, match="left leader arm has no calibration assigned"):
+        cfg.stage_bimanual_calibrations("bot", "", "R", "FL", "FR")
+
+
+def test_bimanual_base_id_uses_valid_name_else_default() -> None:
+    from lelab.utils.config import DEFAULT_BIMANUAL_BASE, bimanual_base_id
+
+    assert bimanual_base_id("mybot") == "mybot"
+    assert bimanual_base_id("  spaced  ") == "spaced"  # stripped, still valid
+    # Blank or unsafe names fall back to the fixed default.
+    assert bimanual_base_id("") == DEFAULT_BIMANUAL_BASE
+    assert bimanual_base_id(None) == DEFAULT_BIMANUAL_BASE
+    assert bimanual_base_id("bad/name") == DEFAULT_BIMANUAL_BASE
+    assert bimanual_base_id("../escape") == DEFAULT_BIMANUAL_BASE
 
 
 def test_with_lelab_tag_appends_to_existing_tags() -> None:

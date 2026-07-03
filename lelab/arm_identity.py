@@ -45,7 +45,7 @@ Decision table, per arm (first matching row wins):
 import json
 import logging
 import os
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -337,6 +337,7 @@ def verify_devices(
     skip: bool = False,
     extra_slots: Iterable[ArmSlot] = (),
     library: dict[tuple[str, str], dict[str, Any]] | None = None,
+    config_names: Sequence[str] | None = None,
 ) -> list[str]:
     """Run the identity guard over (device, side) pairs whose buses are connected.
 
@@ -345,6 +346,13 @@ def verify_devices(
     other arm's assigned slot (row 2 of the decision table); `extra_slots`
     adds counterpart slots for arms NOT present in this session (e.g. the
     robot's leader config during a follower-only inference start).
+
+    By default each arm's assigned config name is read from its device `id`.
+    For a bimanual BiSO session the sub-arm ids are the staging aliases
+    ("<base>_left"/"<base>_right"), not the library stems the identity library
+    is keyed by, so pass `config_names` — the real library stems in the same
+    order the arms are iterated (each (device, side) pair yields left then right
+    sub-arm, single-arm devices yield one) — to compare against the library.
 
     Raises ArmIdentityError on a hard mismatch (message covers every failing
     arm); returns the warn-but-allow messages otherwise (also logged). `skip`
@@ -368,7 +376,16 @@ def verify_devices(
     if library is None:
         library = load_calibration_library()
 
-    slots = [ArmSlot(label, side, str(getattr(arm, "id", "") or "unknown")) for arm, label, side in arms]
+    if config_names is not None and len(config_names) != len(arms):
+        raise ValueError(f"config_names has {len(config_names)} entries but {len(arms)} arms were connected")
+    slots = [
+        ArmSlot(
+            label,
+            side,
+            (config_names[i] if config_names is not None else str(getattr(arm, "id", "") or "unknown")),
+        )
+        for i, (arm, label, side) in enumerate(arms)
+    ]
     all_slots = slots + list(extra_slots)
 
     refusals: list[str] = []

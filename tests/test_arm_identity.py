@@ -533,6 +533,31 @@ def test_verify_devices_returns_warnings_for_allowed_starts() -> None:
     assert len(warnings) == 1 and "Could not verify" in warnings[0]
 
 
+def test_verify_devices_config_names_override_staging_alias_ids() -> None:
+    """Bimanual staging gives sub-arms alias ids ("<base>_left"), but the library
+    is keyed by real stems. Passing config_names lets the guard compare against
+    the library and PASS (Row 1) instead of spuriously warning (Row 3)."""
+    # Device id is the staging alias; the servos carry the real "leader_a"
+    # fingerprint present in LIBRARY under its real stem.
+    device = _GuardDevice(_leader_arm_bus(), LEADER_CAL, "biman_left")
+
+    # Without the override, id "biman_left" isn't in the library -> Row 3 warning
+    # ("carries calibration 'leader_a', not the assigned 'biman_left'").
+    warnings = verify_devices(((device, "leader"),), library=LIBRARY)
+    assert len(warnings) == 1
+    assert "'leader_a'" in warnings[0] and "'biman_left'" in warnings[0]
+
+    # With config_names=["leader_a"], Row 1 matches -> clean pass, no warning.
+    device2 = _GuardDevice(_leader_arm_bus(), LEADER_CAL, "biman_left")
+    assert verify_devices(((device2, "leader"),), library=LIBRARY, config_names=["leader_a"]) == []
+
+
+def test_verify_devices_config_names_length_mismatch_raises() -> None:
+    device = _GuardDevice(_leader_arm_bus(), LEADER_CAL, "biman_left")
+    with pytest.raises(ValueError, match="config_names has 2 entries but 1 arms"):
+        verify_devices(((device, "leader"),), library=LIBRARY, config_names=["a", "b"])
+
+
 # ---------------------------------------------------------------------------
 # Handler-level: teleoperation start
 # ---------------------------------------------------------------------------

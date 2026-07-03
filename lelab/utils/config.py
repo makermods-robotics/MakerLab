@@ -45,6 +45,22 @@ FOLLOWER_CONFIG_FILE = os.path.join(CONFIG_STORAGE_PATH, "follower_config.txt")
 # Robot config records (per-robot JSON metadata)
 ROBOTS_PATH = os.path.expanduser("~/.cache/huggingface/lerobot/robots")
 
+# Staging root for bimanual (BiSO) sessions. lerobot's BiSO devices take ONE
+# calibration_dir + ONE base id and load each sub-arm as "<base>_left.json" /
+# "<base>_right.json" — there is no way to point left/right at differently named
+# library files. To free bimanual calibration from that naming constraint, we
+# alias: the user-facing library keeps arbitrary names, and at session start we
+# COPY the four selected library files into per-device staging dirs under this
+# root as "<base>_left.json"/"<base>_right.json" for lerobot to load. The copy is
+# unconditional every session (see stage_bimanual_calibrations) so a recalibrated
+# library file always refreshes its stale staging alias.
+LELAB_BISO_STAGING_PATH = os.path.expanduser("~/.cache/huggingface/lerobot/lelab_biso")
+
+# Fallback base id when a bimanual start request carries no robot name (older
+# frontends). Filesystem-safe and stable; a single unnamed bimanual robot reuses
+# the same staging dir harmlessly since the copy is unconditional.
+DEFAULT_BIMANUAL_BASE = "bimanual"
+
 # Hub-job ids the user dismissed from the jobs UI (JSON list of strings). The
 # HF Jobs API has no delete — a finished job stays in list_jobs() indefinitely
 # — so hiding a dead run from the untracked list must be persisted locally.
@@ -617,24 +633,73 @@ _SINGLE_PORT_FIELDS = ("leader_port", "follower_port")
 _BIMANUAL_PORT_FIELDS = ("right_leader_port", "right_follower_port")
 
 
-def bimanual_base(left_config: str, right_config: str, side: str) -> str:
-    """
-    Derive the lerobot BiSO base id from a pair of config names.
+def _stage_one_side(
+    library_dir: str, staging_dir: str, base: str, left_stem: str, right_stem: str, side: str
+):
+    """Copy one device's two library calibrations into its staging dir as
+    "<base>_left.json"/"<base>_right.json". Overwrites unconditionally so a
+    recalibrated library file always refreshes the staging alias. Raises a
+    clear, user-facing FileNotFoundError naming the slot and file when a
+    referenced library file is missing (before lerobot's connect() can fall into
+    interactive recalibration, which hangs the headless thread)."""
+    os.makedirs(staging_dir, exist_ok=True)
+    for arm, stem in (("left", left_stem), ("right", right_stem)):
+        slot = f"{arm} {side}"
+        _require_assigned_config(stem, slot)
+        stem = stem[: -len(".json")] if stem.endswith(".json") else stem
+        src = os.path.join(library_dir, f"{stem}.json")
+        if not os.path.exists(src):
+            raise FileNotFoundError(
+                f"The {slot} arm's calibration file '{stem}.json' was not found in "
+                f"{library_dir}. Calibrate that arm (or assign a saved calibration) "
+                "before starting."
+            )
+        dst = os.path.join(staging_dir, f"{base}_{arm}.json")
+        shutil.copy2(src, dst)
+        logger.info(f"Staged {slot} calibration {src} -> {dst}")
 
-    lerobot names a bimanual robot's two arm calibration files "<base>_left.json"
-    and "<base>_right.json" from a single base id. LeLab stores the two names
-    separately, so they must follow that convention. Returns the base, or raises
-    a clear RuntimeError naming the offending side.
+
+def bimanual_base_id(robot_name: str | None) -> str:
+    """Filesystem-safe, stable BiSO staging base id from a robot record name.
+
+    The robot name (already validated by is_valid_robot_name when set via the
+    record API) is ideal — one staging dir per robot. Blank or unsafe names fall
+    back to DEFAULT_BIMANUAL_BASE so a start request can never produce an unsafe
+    path or hang; the copy is unconditional so reuse of the fallback dir is safe.
     """
-    left = left_config[: -len(".json")] if left_config.endswith(".json") else left_config
-    right = right_config[: -len(".json")] if right_config.endswith(".json") else right_config
-    if left.endswith("_left") and right == f"{left[: -len('_left')]}_right":
-        return left[: -len("_left")]
-    raise RuntimeError(
-        f"Bimanual {side} calibrations must be named '<base>_left' and '<base>_right' "
-        f"to match lerobot's convention, but got '{left}' and '{right}'. Recalibrate "
-        f"those arms (the default names already follow this)."
-    )
+    name = (robot_name or "").strip()
+    if name and is_valid_robot_name(name):
+        return name
+    return DEFAULT_BIMANUAL_BASE
+
+
+def stage_bimanual_calibrations(
+    base: str,
+    leader_left: str,
+    leader_right: str,
+    follower_left: str,
+    follower_right: str,
+) -> tuple[str, str, str]:
+    """Stage the four arbitrarily-named library calibrations for a BiSO session.
+
+    lerobot's BiSO devices load each sub-arm's calibration as "<base>_left.json"
+    /"<base>_right.json" from a single calibration_dir, so LeLab's arbitrary
+    library names can't be pointed at left/right directly. This copies the four
+    selected library files into per-device staging dirs under
+    LELAB_BISO_STAGING_PATH/<base>/leader/ and .../follower/, named to match the
+    convention, and returns the two staging dirs + the base id for building
+    BiSO*Config(id=base, calibration_dir=<staging dir>). The copy OVERWRITES
+    unconditionally every call so a recalibrated library file refreshes its stale
+    staging alias. Any missing library file fails fast with a clear per-slot
+    error BEFORE lerobot's connect() (an absent calibration makes lerobot fall
+    into interactive recalibration, which hangs the headless thread).
+    """
+    base_dir = os.path.join(LELAB_BISO_STAGING_PATH, base)
+    leader_staging = os.path.join(base_dir, "leader")
+    follower_staging = os.path.join(base_dir, "follower")
+    _stage_one_side(LEADER_CONFIG_PATH, leader_staging, base, leader_left, leader_right, "leader")
+    _stage_one_side(FOLLOWER_CONFIG_PATH, follower_staging, base, follower_left, follower_right, "follower")
+    return leader_staging, follower_staging, base
 
 
 def port_slot_conflict(record: dict) -> str | None:
