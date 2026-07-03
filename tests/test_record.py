@@ -517,6 +517,8 @@ def _run_record_session(
 
     monkeypatch.setattr("lerobot.scripts.lerobot_record.record_loop", _fake_record_loop, raising=False)
 
+    dataset_calls: list[str] = []
+
     class _FakeDataset:
         num_episodes = 1
         num_frames = 1
@@ -529,10 +531,10 @@ def _run_record_session(
             return _FakeDataset()
 
         def save_episode(self) -> None:
-            pass
+            dataset_calls.append("save_episode")
 
         def clear_episode_buffer(self) -> None:
-            pass
+            dataset_calls.append("clear_episode_buffer")
 
     monkeypatch.setattr("lerobot.datasets.LeRobotDataset", _FakeDataset, raising=False)
 
@@ -565,7 +567,7 @@ def _run_record_session(
         record.record_with_web_events(cfg, web_events)
     except Exception as e:  # the error-path test expects this
         error = e
-    return return_calls, robot, error
+    return return_calls, robot, error, dataset_calls
 
 
 def test_record_normal_end_returns_then_releases(monkeypatch: pytest.MonkeyPatch, tmp_lerobot_home) -> None:
@@ -577,7 +579,7 @@ def test_record_normal_end_returns_then_releases(monkeypatch: pytest.MonkeyPatch
     bus = _RecReturnBus(positions=dict.fromkeys(_RecReturnBus._MOTORS, 1500))
     robot = _RecRobot(bus)
 
-    return_calls, robot, error = _run_record_session(monkeypatch, robot)
+    return_calls, robot, error, _dataset_calls = _run_record_session(monkeypatch, robot)
 
     assert error is None
     assert len(return_calls) == 1  # the return ran exactly once
@@ -603,7 +605,7 @@ def test_record_captures_pose_per_follower_excluding_gripper(
     }
     robot = _RecRobot(_RecReturnBus(positions=positions))
 
-    return_calls, _robot, error = _run_record_session(monkeypatch, robot)
+    return_calls, _robot, error, _dataset_calls = _run_record_session(monkeypatch, robot)
 
     assert error is None
     (rest_poses, _abort) = return_calls[0]
@@ -622,7 +624,9 @@ def test_record_double_stop_skips_the_return(monkeypatch: pytest.MonkeyPatch, tm
     monkeypatch.setattr(record, "setup_calibration_files", lambda leader, follower: ("leader", "follower"))
     robot = _RecRobot(_RecReturnBus())
 
-    return_calls, robot, error = _run_record_session(monkeypatch, robot, preset_release_now=True)
+    return_calls, robot, error, _dataset_calls = _run_record_session(
+        monkeypatch, robot, preset_release_now=True
+    )
 
     assert error is None
     assert return_calls == []  # release-now skipped the return
@@ -639,11 +643,56 @@ def test_record_error_path_skips_return_and_releases(
     monkeypatch.setattr(record, "setup_calibration_files", lambda leader, follower: ("leader", "follower"))
     robot = _RecRobot(_RecReturnBus())
 
-    return_calls, robot, error = _run_record_session(monkeypatch, robot, raise_in_loop=True)
+    return_calls, robot, error, _dataset_calls = _run_record_session(monkeypatch, robot, raise_in_loop=True)
 
     assert isinstance(error, RuntimeError)
     assert return_calls == []  # error path never returns to rest
     assert robot.disconnected is True
+
+
+def test_stop_during_recording_phase_discards_episode_no_reset(
+    monkeypatch: pytest.MonkeyPatch, tmp_lerobot_home
+) -> None:
+    """Stop pressed mid-episode (stop_recording set, but NOT _exit_early_triggered
+    — exactly what handle_stop_recording produces) must discard the in-progress
+    episode (clear_episode_buffer, never save_episode) and end the session
+    immediately, with no reset detour, then return to rest and disconnect once."""
+    import lelab.record as record
+
+    monkeypatch.setattr(record, "setup_calibration_files", lambda leader, follower: ("leader", "follower"))
+    robot = _RecRobot(_RecReturnBus())
+
+    # No _exit_early_triggered: the pre-fix classification would have called this
+    # a timeout, flipped rerecord on, and run a reset phase before honoring stop.
+    return_calls, robot, error, dataset_calls = _run_record_session(
+        monkeypatch, robot, stop_events={"stop_recording": True}
+    )
+
+    assert error is None
+    assert dataset_calls == ["clear_episode_buffer"]  # discarded, never saved
+    assert record.current_phase == "completed"  # not "resetting" — no reset detour
+    assert len(return_calls) == 1  # rest-pose return ran once
+    assert robot.disconnected is True
+
+
+def test_stop_wins_over_skip_when_both_set_in_same_episode(
+    monkeypatch: pytest.MonkeyPatch, tmp_lerobot_home
+) -> None:
+    """When stop_recording AND _exit_early_triggered land in the same episode,
+    stop wins: the short-circuit is checked FIRST, so the episode is discarded,
+    not saved. (Stop is a deliberate 'end now, drop this take' action.)"""
+    import lelab.record as record
+
+    monkeypatch.setattr(record, "setup_calibration_files", lambda leader, follower: ("leader", "follower"))
+    robot = _RecRobot(_RecReturnBus())
+
+    return_calls, robot, error, dataset_calls = _run_record_session(
+        monkeypatch, robot, stop_events={"stop_recording": True, "_exit_early_triggered": True}
+    )
+
+    assert error is None
+    assert dataset_calls == ["clear_episode_buffer"]  # stop precedence: discard, not save
+    assert record.current_phase == "completed"
 
 
 # ---------------------------------------------------------------------------

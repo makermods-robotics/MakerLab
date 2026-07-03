@@ -1193,6 +1193,28 @@ def record_with_web_events(
 
             logger.info(f"Recording phase completed - events state: {web_events}")
 
+            # Stop pressed mid-episode: discard the in-progress (incomplete)
+            # episode and end the session immediately — no save, no reset phase,
+            # no re-record. Checked BEFORE the exit-early/timeout classification
+            # below, because handle_stop_recording sets exit_early (so record_loop
+            # returns early) but deliberately does NOT set _exit_early_triggered.
+            # Without this short-circuit the early return would be misclassified
+            # as a timeout, flip rerecord_episode on, and drag the user through a
+            # full reset phase before honoring the stop. Previously saved episodes
+            # stay saved; the empty-dataset discard path handles the case where
+            # this was episode 1 and nothing was ever saved.
+            if web_events["stop_recording"]:
+                logger.info(
+                    "🛑 STOP RECORDING requested during recording phase - "
+                    "discarding incomplete episode and ending session"
+                )
+                print(
+                    "🛑 STATUS CHANGE: Stopped by user during recording - "
+                    "incomplete episode discarded, ending session"
+                )
+                dataset.clear_episode_buffer()
+                break
+
             # Check if exit_early was triggered (use our tracking flag)
             recording_interrupted_by_exit_early = web_events.get("_exit_early_triggered", False)
             if recording_interrupted_by_exit_early:
