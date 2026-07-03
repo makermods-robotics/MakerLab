@@ -239,6 +239,54 @@ def test_localize_rejects_local_pretrained_path_but_allows_hub_id() -> None:
     assert hub.policy_pretrained_path == "user/some-model"
 
 
+# -- in-container installer ladder (the image's uv venv ships no pip) --
+
+
+def test_install_plan_prefers_uv() -> None:
+    """The lerobot-gpu image's venv is uv-created (no pip module), so uv on
+    PATH must win, with --python pinning the install into this interpreter."""
+    from lelab.runners.hf_cloud import _install_plan
+
+    label, cmds = _install_plan("lerobot @ url", "/venv/bin/python", "/usr/local/bin/uv", True, True)
+    assert label == "uv"
+    assert cmds == [
+        [
+            "/usr/local/bin/uv",
+            "pip",
+            "install",
+            "--python",
+            "/venv/bin/python",
+            "--no-cache",
+            "lerobot @ url",
+        ]
+    ]
+
+
+def test_install_plan_falls_back_to_pip_without_uv() -> None:
+    from lelab.runners.hf_cloud import _install_plan
+
+    label, cmds = _install_plan("spec", "/py", None, True, True)
+    assert label == "pip"
+    assert cmds == [["/py", "-m", "pip", "install", "--no-cache-dir", "spec"]]
+
+
+def test_install_plan_bootstraps_pip_via_ensurepip_as_last_resort() -> None:
+    from lelab.runners.hf_cloud import _install_plan
+
+    label, cmds = _install_plan("spec", "/py", None, False, True)
+    assert label == "ensurepip+pip"
+    assert cmds == [
+        ["/py", "-m", "ensurepip", "--upgrade"],
+        ["/py", "-m", "pip", "install", "--no-cache-dir", "spec"],
+    ]
+
+
+def test_install_plan_reports_no_installer() -> None:
+    from lelab.runners.hf_cloud import _install_plan
+
+    assert _install_plan("spec", "/py", None, False, False) == (None, [])
+
+
 # -- wrapper sanity --
 
 
@@ -251,4 +299,18 @@ def test_wrapper_source_compiles_and_launches_an_argv_list() -> None:
     compile(WRAPPER_SOURCE, "<hf-jobs-wrapper>", "exec")  # syntactically valid
     assert "subprocess.Popen(list(trainer_argv)" in WRAPPER_SOURCE
     assert "shlex.join(trainer_argv)" in WRAPPER_SOURCE
-    assert re.search(r"shlex", WRAPPER_SOURCE.splitlines()[1])  # imported up top
+    assert re.search(r"^import .*\bshlex\b", WRAPPER_SOURCE, re.MULTILINE)  # imported up top
+
+
+def test_wrapper_source_inlines_the_tested_install_plan() -> None:
+    """The wrapper's installer choice is _install_plan's source inlined
+    verbatim, so the in-container code is exactly what the unit tests above
+    exercised — uv first (shutil.which), pip / ensurepip as fallbacks."""
+    import inspect
+
+    from lelab.runners.hf_cloud import WRAPPER_SOURCE, _install_plan
+
+    assert inspect.getsource(_install_plan) in WRAPPER_SOURCE
+    assert "__INSTALL_PLAN_SOURCE__" not in WRAPPER_SOURCE  # placeholder replaced
+    assert 'shutil.which("uv")' in WRAPPER_SOURCE
+    assert "no uv, pip, or ensurepip" in WRAPPER_SOURCE  # clear terminal message

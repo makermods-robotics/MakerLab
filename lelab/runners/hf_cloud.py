@@ -25,6 +25,7 @@ local lerobot run.
 from __future__ import annotations
 
 import contextlib
+import inspect
 import logging
 import netrc
 import os
@@ -124,6 +125,34 @@ def cloud_lerobot_spec(policy_type: str) -> str:
     return f"{name}{req.specifier}"
 
 
+def _install_plan(spec, python, uv_path, has_pip, has_ensurepip):
+    """Pick how to install `spec` into `python`'s environment.
+
+    Returns (label, commands): an installer name for logging plus the argv
+    lists to run in order, or (None, []) when the environment has none.
+
+    uv first: the lerobot-gpu image's venv is created with `uv venv`, which
+    ships NO pip module — a real job died on `python -m pip` with "No module
+    named pip". `--python` pins the install into this interpreter's env,
+    mirroring _build_install_cmd in lelab/utils/system.py. pip stays as the
+    fallback for future image changes; ensurepip is the last resort.
+
+    Pure stdlib and self-contained by design: its source is inlined verbatim
+    into WRAPPER_SOURCE (via inspect.getsource) so the in-container wrapper
+    and the unit tests exercise the same implementation.
+    """
+    if uv_path:
+        return "uv", [[uv_path, "pip", "install", "--python", python, "--no-cache", spec]]
+    if has_pip:
+        return "pip", [[python, "-m", "pip", "install", "--no-cache-dir", spec]]
+    if has_ensurepip:
+        return "ensurepip+pip", [
+            [python, "-m", "ensurepip", "--upgrade"],
+            [python, "-m", "pip", "install", "--no-cache-dir", spec],
+        ]
+    return None, []
+
+
 def _cloud_device(flavor: str) -> str:
     """HF Jobs flavors are NVIDIA GPU boxes except the cpu-* tiers."""
     return "cpu" if flavor.startswith("cpu") else "cuda"
@@ -170,11 +199,16 @@ _CONTAINER_OUTPUT_DIR = "/tmp/lelab/train"  # nosec B108 — fixed path inside t
 #
 # Sent verbatim as the value of `python -c '...'`. Wrapper-side arguments
 # (the pinned lerobot spec) come before `--`; anything after `--` is
-# forwarded to the trainer.
-WRAPPER_SOURCE = r'''
-import os, re, shlex, sys, threading, subprocess
+# forwarded to the trainer. The __INSTALL_PLAN_SOURCE__ placeholder is
+# replaced with _install_plan's own source below, so the wrapper's installer
+# choice is the exact function the unit tests exercise.
+_WRAPPER_TEMPLATE = r'''
+import importlib.util
+import os, re, shlex, shutil, sys, threading, subprocess
 from pathlib import Path
 from huggingface_hub import HfApi
+
+__INSTALL_PLAN_SOURCE__
 
 argv = sys.argv[1:]
 if "--" not in argv:
@@ -207,13 +241,22 @@ if not output_dir or not repo_id:
 # surfaces drift apart (a real run died on argparse rc=2 over --eval_freq).
 lerobot_spec = wrapper_args[0] if wrapper_args else None
 if lerobot_spec:
-    print(f"[wrapper] installing pinned lerobot: {lerobot_spec}", flush=True)
-    install_rc = subprocess.run(
-        [sys.executable, "-m", "pip", "install", "--no-cache-dir", lerobot_spec]
-    ).returncode
-    if install_rc != 0:
-        print(f"[wrapper] pinned lerobot install failed rc={install_rc}", flush=True)
-        sys.exit(install_rc)
+    install_label, install_cmds = _install_plan(
+        lerobot_spec,
+        sys.executable,
+        shutil.which("uv"),
+        importlib.util.find_spec("pip") is not None,
+        importlib.util.find_spec("ensurepip") is not None,
+    )
+    if install_label is None:
+        print("[wrapper] cannot install pinned lerobot: no uv, pip, or ensurepip in image", flush=True)
+        sys.exit(1)
+    print(f"[wrapper] installing pinned lerobot via {install_label}: {lerobot_spec}", flush=True)
+    for install_cmd in install_cmds:
+        install_rc = subprocess.run(install_cmd).returncode
+        if install_rc != 0:
+            print(f"[wrapper] pinned lerobot install failed rc={install_rc}: {shlex.join(install_cmd)}", flush=True)
+            sys.exit(install_rc)
 
 api = HfApi()
 # lerobot only calls push_to_hub at the end of training, so the repo doesn't
@@ -288,6 +331,8 @@ finally:
 print(f"[wrapper] trainer exited with rc={rc}", flush=True)
 sys.exit(rc)
 '''
+
+WRAPPER_SOURCE = _WRAPPER_TEMPLATE.replace("__INSTALL_PLAN_SOURCE__", inspect.getsource(_install_plan))
 
 # HF Jobs' platform default timeout has killed legitimate runs that pushed
 # the model successfully but were still uploading auxiliary files. 2h covers
