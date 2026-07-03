@@ -466,6 +466,7 @@ def _run_record_session(
     stop_events: dict | None = None,
     raise_in_loop: bool = False,
     preset_release_now: bool = False,
+    repo_id: str = "tester/ds",
 ):
     """Drive record_with_web_events with every lerobot dependency mocked so no
     real hardware, dataset, or record_loop runs. Returns the spy call log for
@@ -504,9 +505,6 @@ def _run_record_session(
         "lerobot.utils.feature_utils.hw_to_dataset_features", lambda *a, **k: {}, raising=False
     )
     monkeypatch.setattr("lerobot.utils.utils.log_say", lambda *a, **k: None, raising=False)
-    monkeypatch.setattr(
-        "lerobot.common.control_utils.sanity_check_dataset_name", lambda *a, **k: None, raising=False
-    )
 
     def _fake_record_loop(*args, **kwargs):
         if raise_in_loop:
@@ -552,7 +550,7 @@ def _run_record_session(
             follower_port="COM_FOLLOWER",
             leader_config="leader",
             follower_config="follower",
-            dataset_repo_id="tester/ds",
+            dataset_repo_id=repo_id,
             single_task="pick",
             num_episodes=1,
             video=False,
@@ -568,6 +566,34 @@ def _run_record_session(
     except Exception as e:  # the error-path test expects this
         error = e
     return return_calls, robot, error, dataset_calls
+
+
+def test_record_accepts_bare_repo_id(monkeypatch: pytest.MonkeyPatch, tmp_lerobot_home) -> None:
+    """A bare dataset name (no HF login → no `user/` namespace) records fine —
+    lerobot's sanity_check_dataset_name would crash on it, so we don't call it."""
+    import lelab.record as record
+
+    monkeypatch.setattr(record, "setup_calibration_files", lambda leader, follower: ("leader", "follower"))
+    bus = _RecReturnBus(positions=dict.fromkeys(_RecReturnBus._MOTORS, 1500))
+    robot = _RecRobot(bus)
+
+    _, robot, error, _ = _run_record_session(monkeypatch, robot, repo_id="bare_local_name")
+
+    assert error is None
+
+
+def test_record_refuses_eval_prefixed_repo_id(monkeypatch: pytest.MonkeyPatch, tmp_lerobot_home) -> None:
+    """eval_ names are reserved for policy-evaluation recordings (rollout flow),
+    with or without a namespace."""
+    import lelab.record as record
+
+    monkeypatch.setattr(record, "setup_calibration_files", lambda leader, follower: ("leader", "follower"))
+    for repo_id in ("eval_ds", "tester/eval_ds"):
+        bus = _RecReturnBus(positions=dict.fromkeys(_RecReturnBus._MOTORS, 1500))
+        robot = _RecRobot(bus)
+        _, robot, error, _ = _run_record_session(monkeypatch, robot, repo_id=repo_id)
+        assert isinstance(error, ValueError), repo_id
+        assert "eval_" in str(error)
 
 
 def test_record_normal_end_returns_then_releases(monkeypatch: pytest.MonkeyPatch, tmp_lerobot_home) -> None:

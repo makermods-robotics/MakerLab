@@ -987,7 +987,6 @@ def record_with_web_events(
     import time
 
     from lerobot.common.control_utils import (
-        sanity_check_dataset_name,
         sanity_check_dataset_robot_compatibility,
     )
     from lerobot.datasets import LeRobotDataset
@@ -1027,7 +1026,15 @@ def record_with_web_events(
         )
         sanity_check_dataset_robot_compatibility(dataset, robot, cfg.dataset.fps, dataset_features)
     else:
-        sanity_check_dataset_name(cfg.dataset.repo_id, None)
+        # lerobot's sanity_check_dataset_name requires a namespaced "user/name"
+        # id and crashes on the bare names we allow for local recording without
+        # an HF login. Inline its only rule that applies here (policy is None):
+        # an eval_ prefix is reserved for policy-evaluation recordings.
+        if cfg.dataset.repo_id.rsplit("/", 1)[-1].startswith("eval_"):
+            raise ValueError(
+                f"Dataset name '{cfg.dataset.repo_id}' begins with 'eval_', which is reserved "
+                "for policy-evaluation datasets recorded through the rollout flow."
+            )
         dataset = LeRobotDataset.create(
             cfg.dataset.repo_id,
             cfg.dataset.fps,
