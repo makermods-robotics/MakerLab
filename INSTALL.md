@@ -73,16 +73,16 @@ instead of hanging when huggingface.co is unreachable; teleop, recording,
 calibration, and inference from local checkpoints are fully functional
 without it ever being reachable.
 
-## The performance & restricted-network bag of tricks
+## Troubleshooting: problem → solution
 
-Everything below was used in anger. Symptoms first, so you can grep your way
-here.
+Everything below was hit in practice. Find your symptom, apply the fix.
 
-### Network layer 1: the LAN itself
+### LAN & wifi
 
-**WiFi power save** — symptom: LAN pings swinging 12–232 ms, scp at dial-up
-speed, jittery UI, despite strong signal. The radio naps between beacons and
-packets queue at the AP. Robot servers should never nap:
+**Problem:** LAN pings swing 12–232 ms, scp crawls, the UI feels jittery —
+despite strong wifi signal.
+**Solution:** disable wifi power save (the radio naps between beacons and
+packets queue at the AP; robot servers should never nap):
 
 ```bash
 sudo iw dev <iface> set power_save off                      # instant, until reboot
@@ -90,98 +90,111 @@ echo -e "[connection]\nwifi.powersave = 2" | \
   sudo tee /etc/NetworkManager/conf.d/wifi-powersave.conf   # permanent (2 = disable)
 ```
 
-Check link quality while you're there: `iw dev <iface> link` — signal
-should be better than −60 dBm, and a TX bitrate far below RX suggests a
-congested band (prefer the 5 GHz SSID over 2.4 GHz).
+**Problem:** wifi is still slow/jittery after that.
+**Solution:** check the link — `iw dev <iface> link`. Signal should be
+better than −60 dBm; a TX bitrate far below RX means a congested band —
+move to the 5 GHz SSID instead of 2.4 GHz, or run a cable.
 
-### Network layer 2: reaching the internet
+**Problem:** `station.local` doesn't resolve (often when a VPN captures DNS
+on macOS).
+**Solution:** find the IP with `arp -a | grep <mac-prefix>` or the router's
+client list; prefer raw IPs in scripts.
 
-**IPv6 blackhole** — symptom: `Failed to connect ... port 443 after ~130s`
-while the network "works". The router advertises IPv6 it can't route; AAAA
-gets tried first and eats ~65 s × 2. Diagnose in 10 seconds
-(`curl -4` works, `curl -6` hangs), fix system-wide:
+### Reaching the internet
+
+**Problem:** `Failed to connect ... port 443 after ~130s` while the network
+otherwise "works".
+**Solution:** the router advertises IPv6 it can't route; the AAAA record is
+tried first and eats ~65 s × 2. Confirm with `curl -4 <url>` (works) vs
+`curl -6 <url>` (hangs), then prefer IPv4 system-wide — harmless on healthy
+networks, safe to bake into provisioning:
 
 ```bash
 echo "precedence ::ffff:0:0/96 100" | sudo tee -a /etc/gai.conf
 ```
 
-Harmless on healthy networks — safe to bake into provisioning.
-
-**Mid-transfer resets on large fetches** — symptom:
-`RPC failed; curl 16 Error in the HTTP2 framing layer` partway through a big
-clone. HTTP/1.1 is far more tolerant of hostile middleboxes:
+**Problem:** `RPC failed; curl 16 Error in the HTTP2 framing layer` partway
+through a big clone/fetch.
+**Solution:** drop git to HTTP/1.1 — far more tolerant of hostile
+middleboxes:
 
 ```bash
 git config --global http.version HTTP/1.1
 ```
 
-**Throttled-path triage** — before fighting a slow transfer, measure it:
+**Problem:** a transfer is slow and you don't know which layer to blame.
+**Solution:** measure before fighting:
 
 ```bash
 curl -4 -o /dev/null -sw 'connect: %{time_connect}s TLS: %{time_appconnect}s speed: %{speed_download} B/s\n' <url>
 ```
 
-Healthy connect/TLS with speed in single-digit KB/s means the *path* is
-throttled — no client-side flag fixes that; use a mirror, a proxy, or the
-LAN tricks below.
+Healthy connect/TLS + single-digit KB/s speed = the *path* is throttled; no
+client flag fixes that. Use a mirror, a proxy, or LAN seeding (below).
 
-**PyPI mirror** — turns minutes-per-package into seconds on slow
-international links (TUNA is a full mirror):
+**Problem:** pip/uv installs take minutes per package.
+**Solution:** use a domestic full PyPI mirror (TUNA). Set it in the shell
+that launches the server too — lelab's in-app policy installer inherits it:
 
 ```bash
 export PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 export UV_DEFAULT_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple
 ```
 
-Set them in the shell that launches the server too — lelab's in-app policy
-installer inherits them (it auto-detects uv-venvs and installs with
-`uv pip install --python <venv>`).
+**Problem:** huggingface.co is unreachable (downloads hang, `hf auth login`
+fails).
+**Solution:** three tools, by job — `HF_ENDPOINT=https://hf-mirror.com` for
+model/dataset *downloads*; `HF_HUB_OFFLINE=1` on the robot server so every
+Hub call fails fast instead of hanging (all hardware flows work offline);
+LAN-seed the caches (below) for weights you already have elsewhere. Uploads
+need a real tunnel.
 
-**Hugging Face when huggingface.co is unreachable** —
-`HF_ENDPOINT=https://hf-mirror.com` covers model/dataset *downloads*;
-uploads need a real tunnel. For robot work, prefer `HF_HUB_OFFLINE=1` plus
-locally-seeded caches (below).
-
-**Routing one machine through a VPN/proxy** — git, pip, uv, and `hf` all
-honor the standard variables; exclude the LAN so robot traffic never
-detours:
+**Problem:** one machine needs to route through a VPN/proxy.
+**Solution:** git, pip, uv, and `hf` all honor the standard variables;
+exclude the LAN so robot traffic never detours:
 
 ```bash
 export https_proxy=http://<proxy-host>:<port> http_proxy=http://<proxy-host>:<port>
 export no_proxy=localhost,127.0.0.1,192.168.0.0/16
 ```
 
-**The big pinned dependency** — `lerobot` is a ~250 MB-history git pin. If
-even HTTP/1.1 can't survive it, shallow-fetch exactly the pinned commit (SHA
-from `pyproject.toml`) and install around the URL — see
-[JETSON_SETUP.md](JETSON_SETUP.md#network-gotchas) for the full recipe.
+**Problem:** installing this repo dies inside the `lerobot` dependency (a
+~250 MB-history git pin) even with HTTP/1.1.
+**Solution:** shallow-fetch exactly the pinned commit (SHA from
+`pyproject.toml`) and install around the URL — full recipe in
+[JETSON_SETUP.md](JETSON_SETUP.md#network-gotchas).
 
-### Skip the internet entirely: LAN seeding
+### Skip the internet: LAN seeding
 
-A second machine that already has the bits beats any mirror. All of these
-are plain directory copies — lerobot/lelab discover content by scanning, no
-registration steps except where noted.
+A second machine that already has the bits beats any mirror. These are plain
+directory copies — lerobot/lelab discover content by scanning; no
+registration step except where noted.
 
-**Code (git bundle)** — deploy commits without GitHub in the loop:
+**Problem:** the station can't pull code from GitHub (blocked/throttled).
+**Solution:** ship commits as a git bundle — same SHAs as origin, so a later
+real `git pull` reconciles cleanly:
 
 ```bash
 # machine with the commits:
 git bundle create /tmp/update.bundle <last-common-sha>..main
 scp /tmp/update.bundle user@station:/tmp/
 # station:
-git pull /tmp/update.bundle main        # same SHAs as origin; reconciles cleanly later
+git pull /tmp/update.bundle main
 ```
 
-**Datasets** — straight into the LeRobot cache, appears in the UI
-immediately (no trailing slash on the source path):
+**Problem:** a dataset exists on machine A, needed on machine B.
+**Solution:** rsync into the LeRobot cache (no trailing slash on the
+source); it appears in the UI immediately:
 
 ```bash
 rsync -a --progress ~/.cache/huggingface/lerobot/<ns>/<dataset> \
   user@station:~/.cache/huggingface/lerobot/<ns>/
 ```
 
-**Policy checkpoints** — copy anywhere stable, then register (a flat dir
-with `config.json` counts as one checkpoint):
+**Problem:** a trained policy checkpoint needs to run on the station.
+**Solution:** copy it somewhere stable, then register it (a flat dir with
+`config.json` counts as one checkpoint). Don't move the directory afterwards
+— the import records the absolute path:
 
 ```bash
 rsync -a --progress <checkpoint-dir>/ user@station:~/models/<name>/
@@ -189,38 +202,39 @@ curl -X POST http://station:8000/jobs/import -H 'Content-Type: application/json'
   -d '{"source": "/home/<user>/models/<name>", "name": "<display name>"}'
 ```
 
-Don't move the directory afterwards — the import records the absolute path.
-
-**Hub model caches** (e.g. SmolVLA's VLM backbone) — copy the `models--*`
-dirs; `HF_HUB_OFFLINE=1` loads happily from a seeded cache:
+**Problem:** a policy needs Hub weights (e.g. SmolVLA's VLM backbone) and
+the station can't reach the Hub.
+**Solution:** seed the hub cache from a machine that has it;
+`HF_HUB_OFFLINE=1` loads happily from a seeded cache:
 
 ```bash
 rsync -a --progress ~/.cache/huggingface/hub/models--<org>--<model> \
   user@station:~/.cache/huggingface/hub/
 ```
 
-**Calibrations** — plain JSON; copy
+**Problem:** recalibrating arms that were already calibrated on another
+machine.
+**Solution:** don't — calibrations are plain JSON; copy
 `~/.cache/huggingface/lerobot/calibration/` between machines that drive the
 same physical arms.
 
-### Serving & access tricks
+### Serving & access
 
-**SSH tunnel = free secure context** — browser cameras (getUserMedia) are
-blocked on plain-HTTP non-localhost origins, but localhost is exempt:
+**Problem:** browser cameras (getUserMedia) are blocked on
+`http://<station-ip>:8000`.
+**Solution:** localhost is exempt from the secure-context rule — tunnel and
+browse `http://localhost:8000`:
 
 ```bash
-ssh -L 8000:127.0.0.1:8000 user@station   # then browse http://localhost:8000
+ssh -L 8000:127.0.0.1:8000 user@station
 ```
 
-Cameras plugged into the *server* don't need this — they stream via the
-backend MJPEG previews (`/camera-preview/{index}`) and OpenCV capture.
+Cameras plugged into the *server* don't need this at all — they stream via
+the backend MJPEG previews (`/camera-preview/{index}`) and OpenCV capture.
 
-**mDNS may lie to you** — `station.local` resolution can break (VPN DNS
-capture on macOS, notably). `arp -a | grep <mac-prefix>` or the router's
-client list finds the IP; prefer IPs in scripts.
-
-**Emergency stops from anywhere on the LAN** — if a browser tab dies
-mid-session, the robot keeps going; recovery is one request:
+**Problem:** the browser tab died mid-session and the robot is still going,
+torque on.
+**Solution:** the stop endpoints work from any machine on the LAN:
 
 ```bash
 curl -X POST http://station:8000/stop-recording   # or /stop-teleoperation
