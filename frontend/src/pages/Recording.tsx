@@ -9,10 +9,8 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { useToast } from "@/hooks/use-toast";
 import {
-  ArrowLeft,
   MoreHorizontal,
   RotateCcw,
-  Square,
   SkipForward,
   Play,
   Volume2,
@@ -474,14 +472,13 @@ const Recording = () => {
   return (
     <div className="min-h-screen bg-black text-white p-8">
       <div className="max-w-2xl mx-auto">
-        <div className="mb-8">
+        <div className="mb-8 flex">
           <Button
-            onClick={() => navigate("/")}
-            variant="outline"
-            className="border-gray-500 hover:border-gray-200 text-gray-700 hover:text-gray-900 dark:text-gray-300 dark:hover:text-white"
+            onClick={requestStopRecording}
+            disabled={!backendStatus.available_controls.stop_recording}
+            className="ml-auto bg-red-500 hover:bg-red-600 text-white flex-shrink-0"
           >
-            <ArrowLeft className="w-4 h-4 mr-2" />
-            Back to Home
+            Stop
           </Button>
         </div>
 
@@ -525,14 +522,6 @@ const Recording = () => {
                 >
                   <RotateCcw className="w-4 h-4 mr-2" />
                   Re-record episode
-                </DropdownMenuItem>
-                <DropdownMenuItem
-                  onClick={requestStopRecording}
-                  disabled={!backendStatus.available_controls.stop_recording}
-                  className="text-red-400 focus:bg-gray-800 focus:text-red-300"
-                >
-                  <Square className="w-4 h-4 mr-2" />
-                  Stop recording
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
