@@ -48,6 +48,16 @@ incompatible — pick a lane:
   Check which generation you're on with `head -1 /etc/nv_tegra_release`
   (R36 = JetPack 6, R38/R39 = JetPack 7).
 
+  **Flashing 7.2 needs no host PC**: JetPack 7.2 ships a bootable **Jetson
+  ISO** — write it to a ≥16 GB USB stick (balenaEtcher; SD-card images are
+  discontinued in 7.2), boot the Jetson from the stick, install onto the
+  NVMe. Works on the reference devkits (Orin AGX/NX/Nano Super) as long as
+  the installed firmware is JetPack-6 generation (BSP ≥ r35.5) — check with
+  `head -1 /etc/nv_tegra_release` before starting, and update QSPI firmware
+  from your current JetPack first if it's older. It's a full disk wipe:
+  evacuate `~/.cache/huggingface/lerobot/` (calibrations + datasets),
+  imported checkpoints, and `~/.bashrc` beforehand.
+
 **Install order matters for GPU torch:** install the Jetson/CUDA torch wheel
 into the venv *before* `uv pip install -e .`, or dependency resolution pulls
 generic CPU torch over it. Verify with
