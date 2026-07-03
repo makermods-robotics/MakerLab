@@ -222,5 +222,16 @@ def main():
         _run_prod(lan=args.lan)
 
 
+def station():
+    """Entry point for headless robot stations: `lelab --lan --offline`.
+
+    Installed as `lelab-station` (see pyproject.toml) so the posture is a
+    first-class command — and what deploy/lelab-station.service runs at boot.
+    Extra CLI args still pass through.
+    """
+    sys.argv = [sys.argv[0], "--lan", "--offline", *sys.argv[1:]]
+    main()
+
+
 if __name__ == "__main__":
     main()

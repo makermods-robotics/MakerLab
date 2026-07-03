@@ -62,9 +62,24 @@ uv venv --python 3.12                       # JetPack 6 ships 3.10; uv fetches 3
 uv pip install -e .                         # GPU inference? read JETSON_SETUP.md FIRST
 
 # run headless — --lan binds 0.0.0.0, --offline sets HF_HUB_OFFLINE=1:
-.venv/bin/lelab --lan --offline
+.venv/bin/lelab --lan --offline          # or: .venv/bin/lelab-station
 # browse from any LAN machine: http://<jetson-ip>:8000
 ```
+
+**Boot-to-robot (recommended for a permanent station):** install the
+systemd unit so the server starts at power-on and restarts on crashes — no
+shell, no typing:
+
+```bash
+sudo cp deploy/lelab-station.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now lelab-station
+journalctl -u lelab-station -f           # the server log
+```
+
+The unit runs `lelab-station` (the offline posture) as user `makermods` —
+edit the paths/user in the file if yours differ, and see the comments in
+[deploy/lelab-station.service](deploy/lelab-station.service) for the
+online-posture variant and day-to-day systemctl commands.
 
 The `usermod` only takes effect on a fresh login, and the server inherits its
 groups from the shell that launched it — log out, back in, *then* start the
