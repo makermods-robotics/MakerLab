@@ -24,6 +24,16 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import {
   ArrowLeft,
   Settings,
   Activity,
@@ -185,6 +195,17 @@ const Calibration = () => {
   const [wiggling, setWiggling] = useState(false);
   // Touch-to-identify: watching every port for a hand-moved shoulder-pan swing.
   const [detecting, setDetecting] = useState(false);
+  // A successful Detect stages its result here and opens a confirmation dialog
+  // instead of assigning immediately. Holds the detected port, the message the
+  // backend returned, the slot it will be assigned to, and — in the reassign
+  // case — which slot's field it will be moved away from (null otherwise).
+  const [detectedPortPrompt, setDetectedPortPrompt] = useState<{
+    port: string;
+    message: string;
+    targetLabel: string;
+    releasedField: keyof RobotRecord | null;
+    releasedLabel: string | null;
+  } | null>(null);
   const [autoCalPromptOpen, setAutoCalPromptOpen] = useState(false);
   const [autoCal, setAutoCal] = useState<{
     active: boolean;
@@ -395,13 +416,14 @@ const Calibration = () => {
   // The inverse of Wiggle: instead of driving a motor, the backend watches
   // every detected port (read-only) while the user swings the arm's base by
   // hand, then reports which port saw the motion. On success the detected
-  // port is assigned to the CURRENT device/arm slot.
+  // port is STAGED for confirmation (see handleConfirmDetectedPort) — nothing
+  // is selected or persisted until the user confirms in the dialog.
   //
   // Detect is physical ground truth — the user just swung THIS arm on THIS
   // port — so if the record currently assigns the detected port to a DIFFERENT
-  // slot, that slot's entry is stale (typical after a cable swap). Rather than
-  // dead-ending on the backend's duplicate-port 409, we reassign: clear the
-  // stale slot and set the current slot in a single upsert (the backend's
+  // slot, that slot's entry is stale (typical after a cable swap). We surface
+  // that in the confirmation dialog and, on confirm, reassign: clear the stale
+  // slot and set the current slot in a single upsert (the backend's
   // port-conflict guard evaluates the prospective merged record, so
   // clearing+assigning together passes), then announce the release.
   const handleDetect = async () => {
@@ -423,29 +445,17 @@ const Calibration = () => {
             )
           : undefined;
 
-        setPort(data.port);
-
-        if (conflictingField) {
-          // Reassign in one request: clear the stale slot, set the current one.
-          const releasedLabel = portFieldLabel(conflictingField);
-          const nextRobot = await persistPorts({
-            [conflictingField]: "",
-            [portField]: data.port,
-          });
-          if (nextRobot) {
-            toast({
-              title: "Arm identified — port moved",
-              description: `${data.message} This port was assigned to the ${releasedLabel}; moved it here. The ${releasedLabel} now needs a port.`,
-            });
-          }
-          // persistPorts surfaces its own error toast on failure.
-        } else {
-          persistPort(data.port);
-          toast({
-            title: "Arm identified",
-            description: `${data.message} Port assigned to this arm.`,
-          });
-        }
+        // Stage the result and open the confirmation dialog. No assignment or
+        // persist happens here — that's deferred to handleConfirmDetectedPort.
+        setDetectedPortPrompt({
+          port: data.port,
+          message: data.message,
+          targetLabel: portFieldLabel(portField),
+          releasedField: conflictingField ?? null,
+          releasedLabel: conflictingField
+            ? portFieldLabel(conflictingField)
+            : null,
+        });
       } else {
         toast({
           title: "No arm detected",
@@ -461,6 +471,38 @@ const Calibration = () => {
       });
     } finally {
       setDetecting(false);
+    }
+  };
+
+  // Apply a staged Detect result once the user confirms. Runs the assign /
+  // reassign persist logic that handleDetect used to do inline; Cancel simply
+  // closes the dialog (setDetectedPortPrompt(null)) and leaves everything as-is.
+  const handleConfirmDetectedPort = async () => {
+    const prompt = detectedPortPrompt;
+    if (!prompt) return;
+    setDetectedPortPrompt(null);
+
+    setPort(prompt.port);
+
+    if (prompt.releasedField) {
+      // Reassign in one request: clear the stale slot, set the current one.
+      const nextRobot = await persistPorts({
+        [prompt.releasedField]: "",
+        [portField]: prompt.port,
+      });
+      if (nextRobot) {
+        toast({
+          title: "Arm identified — port moved",
+          description: `${prompt.message} This port was assigned to the ${prompt.releasedLabel}; moved it here. The ${prompt.releasedLabel} now needs a port.`,
+        });
+      }
+      // persistPorts surfaces its own error toast on failure.
+    } else {
+      persistPort(prompt.port);
+      toast({
+        title: "Arm identified",
+        description: `${prompt.message} Port assigned to this arm.`,
+      });
     }
   };
 
@@ -1463,6 +1505,52 @@ const Calibration = () => {
                   </DialogFooter>
                 </DialogContent>
               </Dialog>
+
+              <AlertDialog
+                open={detectedPortPrompt !== null}
+                onOpenChange={(open) => {
+                  if (!open) setDetectedPortPrompt(null);
+                }}
+              >
+                <AlertDialogContent className="bg-slate-900 border-slate-800 text-white">
+                  <AlertDialogHeader>
+                    <AlertDialogTitle>
+                      Assign detected port?
+                    </AlertDialogTitle>
+                    <AlertDialogDescription className="text-slate-400">
+                      Detected{" "}
+                      <span className="font-mono text-slate-200">
+                        {detectedPortPrompt?.port}
+                      </span>{" "}
+                      — assign it to the{" "}
+                      <strong>{detectedPortPrompt?.targetLabel}</strong>?
+                      {detectedPortPrompt?.releasedLabel && (
+                        <>
+                          {" "}
+                          This port is currently assigned to the{" "}
+                          <strong>{detectedPortPrompt.releasedLabel}</strong>;
+                          confirming moves it here and leaves the{" "}
+                          <strong>{detectedPortPrompt.releasedLabel}</strong>{" "}
+                          without a port.
+                        </>
+                      )}
+                    </AlertDialogDescription>
+                  </AlertDialogHeader>
+                  <AlertDialogFooter className="flex gap-2 justify-end">
+                    <AlertDialogCancel className="border-slate-600 text-slate-700 dark:text-slate-300">
+                      Cancel
+                    </AlertDialogCancel>
+                    <AlertDialogAction
+                      className="bg-emerald-600 hover:bg-emerald-700 text-white"
+                      onClick={handleConfirmDetectedPort}
+                    >
+                      {detectedPortPrompt?.releasedLabel
+                        ? "Move & assign"
+                        : "Assign port"}
+                    </AlertDialogAction>
+                  </AlertDialogFooter>
+                </AlertDialogContent>
+              </AlertDialog>
 
               {robot && (
                 <div className="space-y-2 pt-2">
