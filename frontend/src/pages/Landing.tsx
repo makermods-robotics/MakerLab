@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import { ChevronsUpDown, GitMerge } from "lucide-react";
+import { ChevronsUpDown, GitMerge, Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
 import LandingTopBar from "@/components/landing/LandingTopBar";
@@ -8,6 +8,7 @@ import Footer from "@/components/Footer";
 import RobotConfigManager from "@/components/landing/RobotConfigManager";
 import RecordingModal from "@/components/landing/RecordingModal";
 import DatasetPicker from "@/components/landing/DatasetPicker";
+import CreateDatasetDialog from "@/components/landing/CreateDatasetDialog";
 import DatasetInfoCard from "@/components/landing/DatasetInfoCard";
 import MergeDatasetsDialog from "@/components/landing/MergeDatasetsDialog";
 import JobsSection from "@/components/jobs/JobsSection";
@@ -64,6 +65,7 @@ const Landing = () => {
     refresh: refreshDatasets,
   } = useDatasets();
   const [showMergeDialog, setShowMergeDialog] = useState(false);
+  const [showCreateDatasetDialog, setShowCreateDatasetDialog] = useState(false);
   const [pendingDeleteDataset, setPendingDeleteDataset] =
     useState<DatasetItem | null>(null);
   const { selectedDataset, setSelectedDataset } = useSelectedDataset();
@@ -338,30 +340,43 @@ const Landing = () => {
               <h3 className="font-semibold text-lg text-center h-10 flex items-center justify-center">
                 Dataset
               </h3>
-              <DatasetPicker
-                datasets={datasets}
-                loading={datasetsLoading}
-                onPickExisting={handlePickExisting}
-                onOpenCustom={handleOpenCustom}
-                onCreateNew={handleCreateDataset}
-                onDelete={handleDeleteDataset}
-                onUploaded={() => refreshDatasets()}
-              >
+              <div className="flex items-center gap-2">
+                <div className="flex-1 min-w-0">
+                  <DatasetPicker
+                    datasets={datasets}
+                    loading={datasetsLoading}
+                    onPickExisting={handlePickExisting}
+                    onOpenCustom={handleOpenCustom}
+                    onCreateNew={handleCreateDataset}
+                    onDelete={handleDeleteDataset}
+                    onUploaded={() => refreshDatasets()}
+                  >
+                    <Button
+                      variant="outline"
+                      role="combobox"
+                      className="w-full justify-between bg-gray-800 border-gray-600 text-white hover:bg-gray-700"
+                    >
+                      <span
+                        className={`truncate ${selectedDataset ? "text-white" : "text-gray-300"}`}
+                      >
+                        {datasetsLoading
+                          ? "Loading datasets…"
+                          : (selectedDataset ?? "Select or create a dataset…")}
+                      </span>
+                      <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                    </Button>
+                  </DatasetPicker>
+                </div>
                 <Button
                   variant="outline"
-                  role="combobox"
-                  className="w-full justify-between bg-gray-800 border-gray-600 text-white hover:bg-gray-700"
+                  size="sm"
+                  onClick={() => setShowCreateDatasetDialog(true)}
+                  className="h-8 shrink-0 border-gray-600 bg-gray-800 text-white hover:bg-gray-700 hover:text-white"
                 >
-                  <span
-                    className={`truncate ${selectedDataset ? "text-white" : "text-gray-300"}`}
-                  >
-                    {datasetsLoading
-                      ? "Loading datasets…"
-                      : (selectedDataset ?? "Select or create a dataset…")}
-                  </span>
-                  <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                  <Plus className="w-3.5 h-3.5 mr-1.5" />
+                  New dataset
                 </Button>
-              </DatasetPicker>
+              </div>
               {selectedDataset && (
                 <DatasetInfoCard
                   repoId={selectedDataset}
@@ -438,6 +453,13 @@ const Landing = () => {
         onOpenChange={setShowMergeDialog}
         datasets={datasets}
         onMerged={refreshDatasets}
+      />
+
+      <CreateDatasetDialog
+        open={showCreateDatasetDialog}
+        onOpenChange={setShowCreateDatasetDialog}
+        existingRepoIds={datasets.map((d) => d.repo_id)}
+        onCreateNew={handleCreateDataset}
       />
 
       <AlertDialog

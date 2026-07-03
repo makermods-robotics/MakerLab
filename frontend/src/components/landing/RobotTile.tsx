@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Pencil, Settings, Trash2 } from "lucide-react";
+import { Pencil, Plus, Settings, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -18,6 +18,7 @@ import {
 import { RobotRecord, RobotMode } from "@/hooks/useRobots";
 import { cn } from "@/lib/utils";
 import RobotSelector from "./RobotSelector";
+import CreateRobotDialog from "./CreateRobotDialog";
 
 interface RobotTileProps {
   robot: RobotRecord | null;
@@ -57,6 +58,7 @@ const RobotTile: React.FC<RobotTileProps> = ({
   const [renameOpen, setRenameOpen] = useState(false);
   const [renameValue, setRenameValue] = useState("");
   const [renaming, setRenaming] = useState(false);
+  const [createOpen, setCreateOpen] = useState(false);
 
   const openRename = () => {
     if (!robot) return;
@@ -131,10 +133,19 @@ const RobotTile: React.FC<RobotTileProps> = ({
             availableNames={availableNames}
             defaultMode={modeFilter}
             onSelect={onSelect}
-            onCreateNew={onCreateNew}
             isLoading={isLoading}
           />
         </div>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => setCreateOpen(true)}
+          disabled={isLoading}
+          className="h-8 shrink-0 border-gray-600 bg-gray-900 text-white hover:bg-gray-700 hover:text-white"
+        >
+          <Plus className="w-3.5 h-3.5 mr-1.5" />
+          New robot
+        </Button>
         {status && (
           <p
             className={`text-xs truncate shrink-0 ${
@@ -214,6 +225,14 @@ const RobotTile: React.FC<RobotTileProps> = ({
           )}
         </Tooltip>
       )}
+
+      <CreateRobotDialog
+        open={createOpen}
+        onOpenChange={setCreateOpen}
+        availableNames={availableNames}
+        defaultMode={modeFilter}
+        onCreateNew={onCreateNew}
+      />
 
       {robot && (
         <Dialog open={renameOpen} onOpenChange={setRenameOpen}>

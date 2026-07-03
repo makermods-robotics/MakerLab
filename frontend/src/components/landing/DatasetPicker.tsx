@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Plus, ExternalLink, Trash2, Upload as UploadIcon } from "lucide-react";
+import { ExternalLink, Trash2, Upload as UploadIcon } from "lucide-react";
 import {
   Popover,
   PopoverContent,
@@ -155,21 +155,6 @@ const DatasetPicker: React.FC<DatasetPickerProps> = ({
   const canCreate = trimmed.length > 0 && isName && !matchesExisting;
   const canOpenCustom = isRepoId && !matchesExisting;
 
-  const createDisabled = matchesExisting || (trimmed !== "" && !canCreate);
-  const createLabel = matchesExisting
-    ? "Already exists"
-    : trimmed === ""
-      ? "Create new dataset…"
-      : canCreate
-        ? `Create "${trimmed}"`
-        : (nameError ?? "Invalid name");
-
-  const handleFooterCreate = () => {
-    if (createDisabled) return;
-    onCreateNew(trimmed);
-    reset();
-  };
-
   // Strict partition by Hub status (user-decided): Local = not yet on the
   // Hub; Hugging Face = on the Hub, whether or not a local copy also exists
   // ("both" rows keep a "local copy" badge and their local-copy trash).
@@ -305,15 +290,6 @@ const DatasetPicker: React.FC<DatasetPickerProps> = ({
               </CommandGroup>
             )}
           </CommandList>
-          <button
-            type="button"
-            onClick={handleFooterCreate}
-            disabled={createDisabled}
-            className="flex w-full items-center gap-2 border-t border-gray-700 px-3 py-2 text-sm text-white hover:bg-gray-700 disabled:cursor-not-allowed disabled:text-gray-500 disabled:hover:bg-transparent"
-          >
-            <Plus className="h-4 w-4" />
-            {createLabel}
-          </button>
         </Command>
       </PopoverContent>
     </Popover>
