@@ -194,16 +194,25 @@ const Calibration = () => {
   const [wiggling, setWiggling] = useState(false);
   // Touch-to-identify: watching every port for a hand-moved shoulder-pan swing.
   const [detecting, setDetecting] = useState(false);
-  // A successful Detect stages its result here and opens a confirmation dialog
-  // instead of assigning immediately. Holds the detected port, the message the
-  // backend returned, the slot it will be assigned to, and — in the reassign
-  // case — which slot's field it will be moved away from (null otherwise).
-  const [detectedPortPrompt, setDetectedPortPrompt] = useState<{
+  // Picking a port that's in use by another arm (via the dropdown OR Detect)
+  // stages the assignment here and opens a confirmation dialog instead of
+  // applying immediately. Two shapes, distinguished by `source`:
+  //  - When the OTHER slot holds this port and THIS slot already had a port,
+  //    confirming SWAPS: the other slot receives this slot's old port, so no
+  //    slot ends up empty. `swapPort` carries the old port for the message and
+  //    the patch.
+  //  - When this slot had no port, the swap degenerates to a take-with-warning:
+  //    the other slot is left empty. `swapPort` is null in that case.
+  // `releasedField`/`releasedLabel` are null when the port isn't in use at all
+  // (plain Detect assign) — then confirming is just a straight assignment.
+  const [portAssignPrompt, setPortAssignPrompt] = useState<{
+    source: "detect" | "manual";
     port: string;
     message: string;
     targetLabel: string;
     releasedField: keyof RobotRecord | null;
     releasedLabel: string | null;
+    swapPort: string | null;
   } | null>(null);
   const [autoCalPromptOpen, setAutoCalPromptOpen] = useState(false);
   const [autoCal, setAutoCal] = useState<{
@@ -421,10 +430,13 @@ const Calibration = () => {
   // Detect is physical ground truth — the user just swung THIS arm on THIS
   // port — so if the record currently assigns the detected port to a DIFFERENT
   // slot, that slot's entry is stale (typical after a cable swap). We surface
-  // that in the confirmation dialog and, on confirm, reassign: clear the stale
-  // slot and set the current slot in a single upsert (the backend's
-  // port-conflict guard evaluates the prospective merged record, so
-  // clearing+assigning together passes), then announce the release.
+  // that in the confirmation dialog and, on confirm, SWAP: the other slot
+  // receives this slot's previous port (if any) while this slot takes the
+  // detected port, in a single upsert (the backend's port-conflict guard
+  // evaluates the prospective merged record, so a two-slot swap passes). If
+  // this slot had no port the swap degenerates to a take-with-warning that
+  // leaves the other slot empty. Confirm/messaging happen in
+  // handleConfirmPortAssign.
   const handleDetect = async () => {
     setDetecting(true);
     try {
@@ -443,10 +455,14 @@ const Calibration = () => {
               (f) => f !== portField && (robot[f] as string) === data.port,
             )
           : undefined;
+        // The port THIS slot currently holds — handed to the other slot on a
+        // swap. Null/empty means the swap degenerates to a take-with-warning.
+        const currentPort = robot ? (robot[portField] as string) || "" : "";
 
         // Stage the result and open the confirmation dialog. No assignment or
-        // persist happens here — that's deferred to handleConfirmDetectedPort.
-        setDetectedPortPrompt({
+        // persist happens here — that's deferred to handleConfirmPortAssign.
+        setPortAssignPrompt({
+          source: "detect",
           port: data.port,
           message: data.message,
           targetLabel: portFieldLabel(portField),
@@ -454,6 +470,7 @@ const Calibration = () => {
           releasedLabel: conflictingField
             ? portFieldLabel(conflictingField)
             : null,
+          swapPort: conflictingField && currentPort ? currentPort : null,
         });
       } else {
         toast({
@@ -473,36 +490,77 @@ const Calibration = () => {
     }
   };
 
-  // Apply a staged Detect result once the user confirms. Runs the assign /
-  // reassign persist logic that handleDetect used to do inline; Cancel simply
-  // closes the dialog (setDetectedPortPrompt(null)) and leaves everything as-is.
-  const handleConfirmDetectedPort = async () => {
-    const prompt = detectedPortPrompt;
+  // Apply a staged port assignment (from Detect or the manual dropdown) once
+  // the user confirms. Cancel simply closes the dialog (setPortAssignPrompt(null))
+  // and leaves everything as-is. Three cases:
+  //  - releasedField + swapPort: SWAP — this slot takes the port, the other slot
+  //    takes this slot's old port. One upsert; the backend's port-conflict guard
+  //    evaluates the merged record, so a two-slot swap of distinct ports passes.
+  //  - releasedField, no swapPort: take-with-warning — this slot had no port, so
+  //    the other slot is left empty.
+  //  - neither: straight assign (port wasn't in use anywhere).
+  const handleConfirmPortAssign = async () => {
+    const prompt = portAssignPrompt;
     if (!prompt) return;
-    setDetectedPortPrompt(null);
+    setPortAssignPrompt(null);
 
     setPort(prompt.port);
+    const detected = prompt.source === "detect";
 
     if (prompt.releasedField) {
-      // Reassign in one request: clear the stale slot, set the current one.
       const nextRobot = await persistPorts({
-        [prompt.releasedField]: "",
+        [prompt.releasedField]: prompt.swapPort ?? "",
         [portField]: prompt.port,
       });
       if (nextRobot) {
-        toast({
-          title: "Arm identified — port moved",
-          description: `${prompt.message} This port was assigned to the ${prompt.releasedLabel}; moved it here. The ${prompt.releasedLabel} now needs a port.`,
-        });
+        if (prompt.swapPort) {
+          toast({
+            title: detected ? "Arm identified — ports swapped" : "Ports swapped",
+            description: `${detected ? `${prompt.message} ` : ""}${prompt.port} is now this arm's; the ${prompt.releasedLabel} took ${prompt.swapPort}.`,
+          });
+        } else {
+          toast({
+            title: detected ? "Arm identified — port moved" : "Port moved",
+            description: `${detected ? `${prompt.message} ` : ""}${prompt.port} was assigned to the ${prompt.releasedLabel}; moved it here. The ${prompt.releasedLabel} now needs a port.`,
+          });
+        }
       }
       // persistPorts surfaces its own error toast on failure.
     } else {
       persistPort(prompt.port);
       toast({
-        title: "Arm identified",
-        description: `${prompt.message} Port assigned to this arm.`,
+        title: detected ? "Arm identified" : "Port assigned",
+        description: detected
+          ? `${prompt.message} Port assigned to this arm.`
+          : `${prompt.port} assigned to this arm.`,
       });
     }
+  };
+
+  // Manual dropdown pick. In-use ports are now selectable (no longer greyed
+  // out): picking one that another slot holds stages a swap/take confirmation
+  // (same dialog as Detect). Picking a free port assigns immediately.
+  const handleSelectPort = (nextPort: string) => {
+    const conflictingField = robot
+      ? portFields.find(
+          (f) => f !== portField && (robot[f] as string) === nextPort,
+        )
+      : undefined;
+    if (conflictingField) {
+      const currentPort = robot ? (robot[portField] as string) || "" : "";
+      setPortAssignPrompt({
+        source: "manual",
+        port: nextPort,
+        message: "",
+        targetLabel: portFieldLabel(portField),
+        releasedField: conflictingField,
+        releasedLabel: portFieldLabel(conflictingField),
+        swapPort: currentPort || null,
+      });
+      return;
+    }
+    setPort(nextPort);
+    persistPort(nextPort);
   };
 
   // Resume the auto-cal panel if a run is in progress (e.g. page reload).
@@ -1122,13 +1180,7 @@ const Calibration = () => {
                   Port *
                 </Label>
                 <div className="flex flex-wrap gap-2">
-                  <Select
-                    value={port}
-                    onValueChange={(v) => {
-                      setPort(v);
-                      persistPort(v);
-                    }}
-                  >
+                  <Select value={port} onValueChange={handleSelectPort}>
                     <SelectTrigger
                       id="port"
                       className="bg-slate-700 border-slate-600 text-white rounded-md flex-1 min-w-[200px]"
@@ -1143,14 +1195,12 @@ const Calibration = () => {
                     </SelectTrigger>
                     <SelectContent className="bg-slate-800 border-slate-700 text-white">
                       {availablePorts.map((p) => {
+                        // In-use ports stay selectable: picking one prompts a
+                        // swap (this slot's current port goes to the other arm)
+                        // or, if this slot is empty, a take-with-warning.
                         const usedByOtherArm = otherArmPorts.includes(p);
                         return (
-                          <SelectItem
-                            key={p}
-                            value={p}
-                            disabled={usedByOtherArm}
-                            className="text-white"
-                          >
+                          <SelectItem key={p} value={p} className="text-white">
                             <span className="flex items-center gap-2">
                               {p}
                               {usedByOtherArm && (
@@ -1504,33 +1554,56 @@ const Calibration = () => {
               </Dialog>
 
               <AlertDialog
-                open={detectedPortPrompt !== null}
+                open={portAssignPrompt !== null}
                 onOpenChange={(open) => {
-                  if (!open) setDetectedPortPrompt(null);
+                  if (!open) setPortAssignPrompt(null);
                 }}
               >
                 <AlertDialogContent className="bg-slate-900 border-slate-800 text-white">
                   <AlertDialogHeader>
                     <AlertDialogTitle>
-                      Assign detected port?
+                      {portAssignPrompt?.swapPort
+                        ? "Swap ports?"
+                        : portAssignPrompt?.source === "detect"
+                          ? "Assign detected port?"
+                          : "Assign port?"}
                     </AlertDialogTitle>
                     <AlertDialogDescription className="text-slate-400">
-                      Detected{" "}
+                      {portAssignPrompt?.source === "detect"
+                        ? "Detected "
+                        : "Assign "}
                       <span className="font-mono text-slate-200">
-                        {detectedPortPrompt?.port}
+                        {portAssignPrompt?.port}
                       </span>{" "}
-                      — assign it to the{" "}
-                      <strong>{detectedPortPrompt?.targetLabel}</strong>?
-                      {detectedPortPrompt?.releasedLabel && (
-                        <>
-                          {" "}
-                          This port is currently assigned to the{" "}
-                          <strong>{detectedPortPrompt.releasedLabel}</strong>;
-                          confirming moves it here and leaves the{" "}
-                          <strong>{detectedPortPrompt.releasedLabel}</strong>{" "}
-                          without a port.
-                        </>
-                      )}
+                      {portAssignPrompt?.source === "detect"
+                        ? "— assign it to the "
+                        : "to the "}
+                      <strong>{portAssignPrompt?.targetLabel}</strong>?
+                      {portAssignPrompt?.releasedLabel &&
+                        (portAssignPrompt.swapPort ? (
+                          <>
+                            {" "}
+                            It's currently assigned to the{" "}
+                            <strong>{portAssignPrompt.releasedLabel}</strong>;
+                            confirming swaps them — the{" "}
+                            <strong>{portAssignPrompt.releasedLabel}</strong>{" "}
+                            takes this arm's current port{" "}
+                            <span className="font-mono text-slate-200">
+                              {portAssignPrompt.swapPort}
+                            </span>{" "}
+                            in exchange, so neither arm is left without a port.
+                          </>
+                        ) : (
+                          <>
+                            {" "}
+                            It's currently assigned to the{" "}
+                            <strong>{portAssignPrompt.releasedLabel}</strong>;
+                            this arm has no port to swap back, so confirming
+                            moves it here and leaves the{" "}
+                            <strong>{portAssignPrompt.releasedLabel}</strong>{" "}
+                            without a port.
+                          </>
+                        ))}
                     </AlertDialogDescription>
                   </AlertDialogHeader>
                   <AlertDialogFooter className="flex gap-2 justify-end">
@@ -1539,11 +1612,13 @@ const Calibration = () => {
                     </AlertDialogCancel>
                     <AlertDialogAction
                       className="bg-emerald-600 hover:bg-emerald-700 text-white"
-                      onClick={handleConfirmDetectedPort}
+                      onClick={handleConfirmPortAssign}
                     >
-                      {detectedPortPrompt?.releasedLabel
-                        ? "Move & assign"
-                        : "Assign port"}
+                      {portAssignPrompt?.swapPort
+                        ? "Swap ports"
+                        : portAssignPrompt?.releasedLabel
+                          ? "Move & assign"
+                          : "Assign port"}
                     </AlertDialogAction>
                   </AlertDialogFooter>
                 </AlertDialogContent>
@@ -1608,6 +1683,12 @@ const Calibration = () => {
                     const excludeConfig = isBimanual
                       ? (robot[counterpartField] as string) || undefined
                       : undefined;
+                    // The counterpart slot's config field, so the library can
+                    // SWAP assignments when the user picks its in-use config
+                    // (this slot takes it; the counterpart takes this slot's).
+                    const excludeConfigField = isBimanual
+                      ? counterpartField
+                      : undefined;
                     return (
                       <div key={row.label}>
                         <div className="flex items-center gap-2 text-sm">
@@ -1627,6 +1708,7 @@ const Calibration = () => {
                           assignedConfig={cfg}
                           configField={row.cfgField}
                           excludeConfig={excludeConfig}
+                          excludeConfigField={excludeConfigField}
                           robotName={robotName}
                           onAssigned={fetchRobot}
                           reloadToken={calibReloadToken}
