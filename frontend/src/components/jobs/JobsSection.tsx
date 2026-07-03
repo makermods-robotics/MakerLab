@@ -472,7 +472,11 @@ const JobsSection: React.FC = () => {
                       <HubJobCard key={job.id} job={job} />
                     ))}
                     {untrackedHubModels.map((model) => (
-                      <HubModelCard key={model.repo_id} model={model} />
+                      <HubModelCard
+                        key={model.repo_id}
+                        model={model}
+                        onDeleted={refresh}
+                      />
                     ))}
                   </div>
                 )}

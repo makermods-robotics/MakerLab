@@ -595,3 +595,83 @@ def test_rename_job_route_maps_value_error_to_400(client, monkeypatch) -> None:
     resp = client.post("/jobs/act_ds_x/rename", json={"new_name": "   "})
     assert resp.status_code == 400
     assert "empty" in resp.json()["detail"]
+
+
+# --- DELETE /jobs/hub/models/{repo_id} -------------------------------------
+#
+# Deleting an orphaned hub MODEL repo. Uses a mocked shared HfApi so no real
+# Hub call is made. The endpoint is scoped to the caller's own namespace and
+# treats a missing repo (delete_repo missing_ok=True) as idempotent success.
+
+
+def _patch_hub_delete(monkeypatch, *, username, api):
+    """Point the endpoint at a fake whoami (namespace) and a fake HfApi."""
+    monkeypatch.setattr(
+        server_mod,
+        "cached_whoami",
+        lambda: {"name": username} if username else None,
+    )
+    monkeypatch.setattr(server_mod, "shared_hf_api", lambda: api)
+
+
+def test_delete_hub_model_success(client: TestClient, monkeypatch) -> None:
+    api = MagicMock()
+    _patch_hub_delete(monkeypatch, username="makermods", api=api)
+
+    resp = client.delete("/jobs/hub/models/makermods/smolvla_orphan_2026")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "success"
+    assert body["repo_id"] == "makermods/smolvla_orphan_2026"
+    api.delete_repo.assert_called_once_with(
+        "makermods/smolvla_orphan_2026", repo_type="model", missing_ok=True
+    )
+
+
+def test_delete_hub_model_missing_repo_is_idempotent_success(client: TestClient, monkeypatch) -> None:
+    # missing_ok=True means the Hub 404 never surfaces — delete_repo just
+    # returns. The endpoint therefore reports success for an already-gone repo.
+    api = MagicMock()
+    api.delete_repo.return_value = None
+    _patch_hub_delete(monkeypatch, username="makermods", api=api)
+
+    resp = client.delete("/jobs/hub/models/makermods/already_gone")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "success"
+
+
+def test_delete_hub_model_permission_error_is_friendly(client: TestClient, monkeypatch) -> None:
+    import requests
+    from huggingface_hub.errors import HfHubHTTPError
+
+    response = requests.Response()
+    response.status_code = 403
+    api = MagicMock()
+    api.delete_repo.side_effect = HfHubHTTPError("forbidden", response=response)
+    _patch_hub_delete(monkeypatch, username="makermods", api=api)
+
+    resp = client.delete("/jobs/hub/models/makermods/no_write_scope")
+    assert resp.status_code == 403
+    detail = resp.json()["detail"]
+    assert "write access" in detail
+
+
+def test_delete_hub_model_refuses_foreign_namespace(client: TestClient, monkeypatch) -> None:
+    # The caller is "makermods" but tries to delete a repo under "someoneelse".
+    # Refused up front — the Hub is never called.
+    api = MagicMock()
+    _patch_hub_delete(monkeypatch, username="makermods", api=api)
+
+    resp = client.delete("/jobs/hub/models/someoneelse/their_model")
+    assert resp.status_code == 403
+    assert "namespace" in resp.json()["detail"]
+    api.delete_repo.assert_not_called()
+
+
+def test_delete_hub_model_unauthenticated_is_401(client: TestClient, monkeypatch) -> None:
+    api = MagicMock()
+    _patch_hub_delete(monkeypatch, username=None, api=api)
+
+    resp = client.delete("/jobs/hub/models/makermods/whatever")
+    assert resp.status_code == 401
+    api.delete_repo.assert_not_called()

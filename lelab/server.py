@@ -33,6 +33,7 @@ from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconn
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from huggingface_hub.errors import HfHubHTTPError
 from pydantic import BaseModel
 from starlette.datastructures import Headers
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -839,6 +840,67 @@ def list_hub_jobs():
         ],
         "models": models,
     }
+
+
+@app.delete("/jobs/hub/models/{repo_id:path}")
+def delete_hub_model(repo_id: str):
+    """Permanently delete a model repo from the Hugging Face Hub.
+
+    Scoped to model repos under the authenticated user's own namespace — used
+    to clean up orphaned repos (e.g. an empty repo left behind by a crashed
+    cloud run). This destroys weights on the Hub; it is not a local-record
+    deletion.
+
+    Semantics:
+    - A missing repo (404 from the Hub) is treated as already-gone success,
+      mirroring the idempotent robot-delete convention.
+    - Repos NOT under the caller's own username are refused up front with a
+      clear message (the Hub would 403 anyway; fail fast).
+    - Auth/permission failures (401/403) surface the friendly "token needs
+      write access" message.
+
+    The `/jobs/hub` listing is not cached backend-side — it re-queries the Hub
+    on every call — so the frontend just needs to re-fetch after this returns.
+    """
+    info = cached_whoami()
+    username = info.get("name") if info else None
+    if not username:
+        raise HTTPException(
+            status_code=401,
+            detail="Not authenticated. Add a Hugging Face token with write access first.",
+        )
+
+    # Only allow deleting repos the caller owns (namespace == their username).
+    # An org-owned repo (username/... mismatch) is refused rather than 403ing.
+    namespace = repo_id.split("/", 1)[0] if "/" in repo_id else ""
+    if namespace != username:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"Refusing to delete {repo_id!r}: it is not under your namespace "
+                f"({username!r}). You can only delete your own model repos."
+            ),
+        )
+
+    api = shared_hf_api()
+    try:
+        # missing_ok=True: a repo that's already gone (404) is a no-op success,
+        # so re-issuing the delete is idempotent.
+        api.delete_repo(repo_id, repo_type="model", missing_ok=True)
+    except HfHubHTTPError as exc:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        if status in (401, 403):
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "Your Hugging Face token can't delete this repo. It needs "
+                    "write access to your namespace — re-log in with a write token."
+                ),
+            ) from exc
+        logger.warning("delete_repo(%s) failed: %s", repo_id, exc)
+        raise HTTPException(status_code=502, detail=f"Hub delete failed: {exc}") from exc
+
+    return {"status": "success", "repo_id": repo_id}
 
 
 @app.get("/jobs/{job_id}")

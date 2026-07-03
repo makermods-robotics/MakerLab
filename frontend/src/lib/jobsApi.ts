@@ -325,6 +325,24 @@ const EMPTY_HUB: HubJobsResponse = {
   models: [],
 };
 
+/**
+ * Permanently delete a model repo from the Hugging Face Hub. Scoped to the
+ * caller's own namespace on the backend. A repo already gone (404) resolves
+ * as success (idempotent), matching the backend semantics.
+ */
+export async function deleteHubModel(
+  baseUrl: string,
+  fetcher: Fetcher,
+  repoId: string,
+): Promise<void> {
+  await apiRequest<void>(
+    baseUrl,
+    fetcher,
+    `/jobs/hub/models/${repoId}`,
+    { method: "DELETE", action: "Delete hub model" },
+  );
+}
+
 export async function listHubJobs(
   baseUrl: string,
   fetcher: Fetcher,
