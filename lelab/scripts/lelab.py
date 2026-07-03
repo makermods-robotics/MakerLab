@@ -42,20 +42,49 @@ logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 FRONTEND_PATH = PROJECT_ROOT / "frontend"
 FRONTEND_DIST = FRONTEND_PATH / "dist"
+FRONTEND_PACKAGE_JSON = FRONTEND_PATH / "package.json"
 BACKEND_PORT = 8000
 FRONTEND_DEV_PORT = 8080
 ENTRY_POINT_NAMES = ("lelab", "lelab-station", "makerlabs")
+# `uv tool install` lays down a symlink in ~/.local/bin that resolves into
+# this tree (verified empirically: ~/.local/bin/<exe> ->
+# ~/.local/share/uv/tools/<tool>/bin/<exe>). We use containment under this
+# dir to recognise a uv-managed entry and refuse to clobber it.
+UV_TOOLS_DIR = Path.home() / ".local" / "share" / "uv" / "tools"
 
 
-def _ensure_path_symlinks(source_dir: Path | None = None, bin_dir: Path | None = None) -> None:
+def _is_uv_tool_link(link: Path, uv_tools_dir: Path = UV_TOOLS_DIR) -> bool:
+    """True if `link` is a symlink whose target lives under uv's tools dir.
+
+    That is the fingerprint of a `uv tool install` executable — a separate,
+    self-contained flavor we must never silently overwrite with a venv link.
+    """
+    if not link.is_symlink():
+        return False
+    try:
+        target = link.resolve()
+        uv_root = uv_tools_dir.resolve()
+    except OSError:
+        return False
+    return target == uv_root or uv_root in target.parents
+
+
+def _ensure_path_symlinks(
+    source_dir: Path | None = None,
+    bin_dir: Path | None = None,
+    uv_tools_dir: Path = UV_TOOLS_DIR,
+) -> None:
     """Self-install the entry points onto PATH (idempotent, best-effort).
 
     pip has no post-install hook, so the first run by full path does the
     INSTALL.md symlink step itself: each venv entry point gets a symlink in
     ~/.local/bin. Correct links are left alone; stale symlinks (an old
     clone's venv) are repointed; anything that is NOT a symlink is never
-    clobbered. Failures only log — PATH convenience must never block a
-    server start. Set LELAB_NO_PATH_LINK=1 to opt out.
+    clobbered. A name already owned by a `uv tool install` (its symlink
+    resolves under uv's tools dir) is left alone too — both flavors are
+    present, and we tell the user how to pick one rather than fight it.
+    Failures only log — PATH convenience must never block a server start.
+    Set LELAB_NO_PATH_LINK=1 to opt out.
     """
     if os.name != "posix" or os.environ.get("LELAB_NO_PATH_LINK"):
         return
@@ -68,6 +97,17 @@ def _ensure_path_symlinks(source_dir: Path | None = None, bin_dir: Path | None =
             if not source.is_file():
                 continue  # partial env (entry point not installed here)
             link = bin_dir / name
+            if _is_uv_tool_link(link, uv_tools_dir):
+                logger.info(
+                    "`%s` on your PATH is a `uv tool install` (%s), not a venv "
+                    "symlink — leaving it. Both install flavors are present; pick "
+                    "one: `uv tool uninstall %s` to prefer this checkout, or set "
+                    "LELAB_NO_PATH_LINK=1 to keep the tool install and silence this.",
+                    name,
+                    link,
+                    name,
+                )
+                continue
             if link.is_symlink():
                 if link.resolve() == source.resolve():
                     continue
@@ -154,8 +194,18 @@ def _run_prod(lan: bool = False):
 
 def _run_dev():
     """Vite dev server (HMR) + uvicorn --reload."""
-    if not FRONTEND_PATH.exists():
-        logger.error(f"❌ Frontend not found at {FRONTEND_PATH}")
+    # --dev needs the frontend *source* (Vite config, package.json), which
+    # only exists in a git checkout. A non-editable `uv tool install`
+    # resolves PROJECT_ROOT into site-packages, where the shipped wheel has
+    # only frontend/dist — no package.json — so `npm run dev` would fail with
+    # a confusing path/npm error. Fail fast with a pointer to the fix instead.
+    if not FRONTEND_PACKAGE_JSON.is_file():
+        logger.error("❌ Dev mode needs the git checkout — %s not found.", FRONTEND_PACKAGE_JSON)
+        logger.error(
+            "   You're likely running a `uv tool install` copy (frontend source "
+            "isn't shipped in the wheel). Clone the repo and run `lelab --dev` "
+            "from there — see INSTALL.md."
+        )
         sys.exit(1)
 
     logger.info("📦 Installing frontend deps...")

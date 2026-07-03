@@ -29,6 +29,44 @@ speed-ups.
   source ~/.bashrc   # or restart the shell: ~/.local/bin joins PATH at login
   ```
 
+## Choose your install
+
+Two supported flavors — pick by whether you want to **run** LeLab or **hack on**
+it. They can even coexist on one machine (see the precedence note below).
+
+- **Tool install** — `uv tool install <local-path-or-git-url>`. One command,
+  no clone, a global `lelab`/`lelab-station`/`makerlabs` on your PATH. The
+  built frontend ships inside the wheel (`frontend/dist`), so a tool install is
+  a fully runnable app — nothing to build. This is the way to just *use*
+  LeLab. Trade-offs:
+  - It builds a **second full environment** (torch + lerobot duplicated in
+    `~/.local/share/uv/tools/`). On a Jetson wanting CUDA torch this fights the
+    GPU-torch install ordering — those stations should prefer the from-source
+    setup and follow [JETSON_SETUP.md](JETSON_SETUP.md).
+  - It is **non-editable**: the code is a snapshot, frozen at install time. It
+    does **not** track the repo — upgrade explicitly (see below).
+  - `--dev` (Vite HMR) is unavailable: the frontend *source* and
+    `package.json` aren't in the wheel, only the built `dist/`. Running
+    `lelab --dev` from a tool install fails fast and tells you to use a
+    checkout.
+
+  ```bash
+  # from a local clone (dependable — no network, works on throttled links):
+  uv tool install /path/to/MakerLab
+  # or straight from git (needs github reachable; unreliable behind the GFW):
+  uv tool install "git+https://github.com/makermods-robotics/MakerLab"
+
+  lelab                 # global command, runs from any directory
+  # upgrade to newer code — re-pull the source, then:
+  uv tool install --reinstall /path/to/MakerLab
+  ```
+
+- **From-source setup** — clone + editable venv (`uv pip install -e .`). This
+  is what you do to **develop** LeLab: edits to `lelab/` take effect on the
+  next run, and `lelab --dev` gives you Vite HMR + `uvicorn --reload`. On first
+  launch the entry points self-install onto your PATH (see below). This is the
+  flow the platform sections document next.
+
 ## macOS
 
 ```bash
@@ -40,10 +78,14 @@ uv pip install -e .
 .venv/bin/lelab --dev    # dev: Vite HMR on :8080 + uvicorn --reload
 ```
 
-**Always invoke through `.venv/bin/...`.** A `lelab` on the bare PATH may be
-a stale `uv tool` snapshot from months ago; explicit venv paths cannot lie.
-When a fix "isn't working", first check what's actually serving :8000
-(`lsof -i :8000`).
+**When hacking on LeLab, invoke through `.venv/bin/...`.** A bare `lelab` on
+your PATH may resolve to a [tool install](#choose-your-install) — a frozen
+snapshot that won't reflect your edits — rather than this checkout's venv;
+explicit venv paths cannot lie. If a fix "isn't working", check where the
+command actually points (`which lelab`, then `readlink` it: a target under
+`~/.local/share/uv/tools/` is the tool install) and what's serving :8000
+(`lsof -i :8000`). To hand PATH back to the checkout, `uv tool uninstall
+lelab` and re-run `.venv/bin/lelab` once to re-link.
 
 macOS ships `openrsync`, not GNU rsync — use `--progress`, not
 `--info=progress2`, and `ssh <host> "mkdir -p <dir>"` before rsyncing into a
@@ -97,12 +139,14 @@ ln -sf ~/MakerLab/.venv/bin/lelab ~/MakerLab/.venv/bin/lelab-station \
        ~/MakerLab/.venv/bin/makerlabs ~/.local/bin/
 ```
 
-`uv tool install --editable .` achieves the same PATH effect but builds a
-second full environment (torch + lerobot duplicated, and it fights the
-GPU-torch install ordering) — and a NON-editable `uv tool install` snapshots
-the code, silently going stale as the repo moves. If a bare `lelab` ever
-behaves like an old version, check `which lelab` for a forgotten tool
-install (`uv tool uninstall lelab`) shadowing the symlink.
+**Coexisting with a tool install.** A `uv tool install` (see [Choose your
+install](#choose-your-install)) puts its *own* symlinks in the same
+`~/.local/bin`, resolving into `~/.local/share/uv/tools/`. The self-link step
+recognises those and **leaves them alone** — it will not overwrite a tool
+install with a venv link. If both flavors are present for the same name, the
+one already on your PATH wins and the launcher logs which it is; pick
+deliberately with `uv tool uninstall lelab` (to prefer this checkout) or
+`LELAB_NO_PATH_LINK=1` (to keep the tool install and silence the self-link).
 
 The `usermod` only takes effect on a fresh login, and the server inherits its
 groups from the shell that launched it — log out, back in, *then* start the

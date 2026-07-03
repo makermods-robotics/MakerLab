@@ -181,3 +181,69 @@ def test_ensure_path_symlinks_env_opt_out(tmp_path, monkeypatch: pytest.MonkeyPa
     _ensure_path_symlinks(source_dir=source_dir, bin_dir=bin_dir)
 
     assert not bin_dir.exists()
+
+
+def _fake_uv_tool_link(tmp_path, name: str):
+    """Simulate a `uv tool install` executable: a symlink in the fake bin dir
+    that resolves into a fake uv tools dir (mirrors what uv creates —
+    ~/.local/bin/<exe> -> ~/.local/share/uv/tools/<tool>/bin/<exe>). Returns
+    the (bin_dir, uv_tools_dir) pair."""
+    uv_tools_dir = tmp_path / "uv-tools"
+    tool_bin = uv_tools_dir / name / "bin"
+    tool_bin.mkdir(parents=True)
+    (tool_bin / name).write_text("#!/bin/sh\n")  # the uv-managed executable
+
+    bin_dir = tmp_path / "local-bin"
+    bin_dir.mkdir()
+    (bin_dir / name).symlink_to(tool_bin / name)
+    return bin_dir, uv_tools_dir
+
+
+def test_is_uv_tool_link_recognizes_uv_managed_symlink(tmp_path) -> None:
+    from lelab.scripts.lelab import _is_uv_tool_link
+
+    bin_dir, uv_tools_dir = _fake_uv_tool_link(tmp_path, "lelab")
+
+    assert _is_uv_tool_link(bin_dir / "lelab", uv_tools_dir) is True
+
+
+def test_is_uv_tool_link_false_for_venv_symlink(tmp_path) -> None:
+    from lelab.scripts.lelab import _is_uv_tool_link
+
+    source_dir = _fake_entry_points(tmp_path)
+    bin_dir = tmp_path / "local-bin"
+    bin_dir.mkdir()
+    (bin_dir / "lelab").symlink_to(source_dir / "lelab")
+    uv_tools_dir = tmp_path / "uv-tools"  # nonexistent / unrelated
+
+    assert _is_uv_tool_link(bin_dir / "lelab", uv_tools_dir) is False
+
+
+def test_is_uv_tool_link_false_for_regular_file(tmp_path) -> None:
+    from lelab.scripts.lelab import _is_uv_tool_link
+
+    bin_dir = tmp_path / "local-bin"
+    bin_dir.mkdir()
+    (bin_dir / "lelab").write_text("not a symlink\n")
+    uv_tools_dir = tmp_path / "uv-tools"
+
+    assert _is_uv_tool_link(bin_dir / "lelab", uv_tools_dir) is False
+
+
+def test_ensure_path_symlinks_leaves_uv_tool_entry_untouched(tmp_path) -> None:
+    """A name owned by `uv tool install` must be left exactly as-is — no
+    clobber, no repoint — so the two install flavors don't fight."""
+    from lelab.scripts.lelab import _ensure_path_symlinks
+
+    source_dir = _fake_entry_points(tmp_path)
+    bin_dir, uv_tools_dir = _fake_uv_tool_link(tmp_path, "lelab")
+    uv_target_before = (bin_dir / "lelab").resolve()
+
+    _ensure_path_symlinks(source_dir=source_dir, bin_dir=bin_dir, uv_tools_dir=uv_tools_dir)
+
+    # lelab still points at the uv tool, NOT the venv.
+    assert (bin_dir / "lelab").resolve() == uv_target_before
+    assert (bin_dir / "lelab").resolve() != (source_dir / "lelab").resolve()
+    # The other two names, not uv-owned, are linked to the venv as usual.
+    assert (bin_dir / "makerlabs").resolve() == (source_dir / "makerlabs").resolve()
+    assert (bin_dir / "lelab-station").resolve() == (source_dir / "lelab-station").resolve()
