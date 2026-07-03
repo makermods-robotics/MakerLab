@@ -112,7 +112,7 @@ const RowUploadButton: React.FC<{
       <button
         type="button"
         aria-label={`Upload ${repoId} to Hub`}
-        className="ml-2 shrink-0 text-gray-500 hover:text-blue-400"
+        className="ml-2 shrink-0 text-teal-600 hover:text-teal-500 dark:text-teal-400 dark:hover:text-teal-300"
         // Stop cmdk from treating the click as a selection of the row, but
         // don't preventDefault — the wrapping PopoverTrigger skips its
         // toggle when the child's click event is defaultPrevented.

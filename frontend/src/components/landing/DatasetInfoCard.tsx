@@ -246,7 +246,7 @@ const HubSyncRow: React.FC<{ repoId: string }> = ({ repoId }) => {
         <Button
           size="sm"
           variant="outline"
-          className="h-6 gap-1 border-gray-600 px-2 text-xs text-gray-300 hover:bg-gray-700 hover:text-white"
+          className="h-6 gap-1 border-teal-500/50 px-2 text-xs text-teal-700 dark:text-teal-300 hover:bg-teal-500/10"
         >
           <UploadIcon className="h-3 w-3" />
           Upload to Hub
