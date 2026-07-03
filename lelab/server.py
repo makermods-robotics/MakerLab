@@ -763,6 +763,15 @@ def list_jobs(limit: int = 10):
     return {"jobs": job_registry.list(limit=limit)}
 
 
+# A lelab cloud-training run repo is named "<policy>_<namespace>_<dataset>_<ts>"
+# where the trailing "_YYYY-MM-DD_HH-MM-SS" is stamped by _generate_job_id()
+# (jobs.py). We match on that timestamp suffix rather than the policy prefix so
+# the pattern stays policy-agnostic as new policy types are added. Used to pull
+# lelab's OWN empty/untagged run repos into the /jobs/hub listing without also
+# surfacing a user's unrelated personal models.
+_RUN_REPO_RE = re.compile(r"_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$")
+
+
 @app.get("/jobs/hub")
 def list_hub_jobs():
     """List the user's HF Cloud compute Jobs and their uploaded LeRobot model
@@ -805,21 +814,48 @@ def list_hub_jobs():
 
     seen_models: set[str] = set()
     models: list[dict] = []
+
+    def _add(m) -> None:
+        if m.id in seen_models:
+            return
+        seen_models.add(m.id)
+        models.append(
+            {
+                "repo_id": m.id,
+                "last_modified": m.last_modified.isoformat() if m.last_modified else None,
+                "private": bool(getattr(m, "private", False)),
+            }
+        )
+
     for author in authors:
+        # Two passes, unioned + deduped by _add():
+        #
+        # 1. The `lerobot` library tag — lowercase, which is what LeRobot's
+        #    push_to_hub actually stamps (the old `filter="LeRobot"` was both the
+        #    wrong case AND excluded any repo without a tag, so it returned
+        #    NOTHING here — hiding even a successfully-pushed run).
+        # 2. An UNFILTERED author listing restricted to lelab run-repo names
+        #    (the "_<timestamp>" suffix). This is what pulls in the empty repos
+        #    a crashed cloud run pre-creates but never populates (no commit, no
+        #    tags) — the orphans the untracked-cleanup path exists to delete.
+        #    Restricting to the run-repo naming keeps a user's unrelated personal
+        #    models out of the list; those are theirs, not lelab's to surface.
+        #
+        # expand=["lastModified", ...] is requested because the default listing
+        # returns last_modified=None, which would collapse the sort key.
         try:
-            for m in api.list_models(author=author, filter="LeRobot", limit=200):
-                if m.id in seen_models:
-                    continue
-                seen_models.add(m.id)
-                models.append(
-                    {
-                        "repo_id": m.id,
-                        "last_modified": m.last_modified.isoformat() if m.last_modified else None,
-                        "private": bool(getattr(m, "private", False)),
-                    }
-                )
+            for m in api.list_models(
+                author=author, filter="lerobot", limit=200, expand=["lastModified", "private"]
+            ):
+                _add(m)
         except Exception as exc:
-            logger.warning("list_models(%s) failed: %s", author, exc)
+            logger.warning("list_models(%s, tag=lerobot) failed: %s", author, exc)
+        try:
+            for m in api.list_models(author=author, limit=200, expand=["lastModified", "private"]):
+                if _RUN_REPO_RE.search(m.id.split("/", 1)[-1]):
+                    _add(m)
+        except Exception as exc:
+            logger.warning("list_models(%s, unfiltered) failed: %s", author, exc)
     models.sort(key=lambda m: m["last_modified"] or "", reverse=True)
 
     return {

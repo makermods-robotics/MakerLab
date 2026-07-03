@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import datetime as _dt
 import logging
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -675,3 +676,101 @@ def test_delete_hub_model_unauthenticated_is_401(client: TestClient, monkeypatch
     resp = client.delete("/jobs/hub/models/makermods/whatever")
     assert resp.status_code == 401
     api.delete_repo.assert_not_called()
+
+
+# --- GET /jobs/hub model listing (tagged + untagged run-repo union) --------
+#
+# The listing must surface the user's own empty/untagged run repos (orphans a
+# crashed cloud run pre-creates) alongside the tagged ones, so the untracked
+# cleanup path can reach them. It does this with two list_models() passes per
+# author: filter="lerobot" (the real tag) PLUS an unfiltered author listing
+# restricted to lelab's "_<timestamp>" run-repo naming.
+
+
+class _FakeModel:
+    def __init__(self, repo_id, last_modified=None, private=False):
+        self.id = repo_id
+        self.last_modified = last_modified
+        self.private = private
+
+
+def _hub_api_with_models(*, tagged, all_author):
+    """Fake HfApi whose list_models() returns `tagged` when filter='lerobot'
+    is passed and `all_author` otherwise. list_jobs() returns nothing."""
+    api = MagicMock()
+    api.list_jobs.return_value = []
+
+    def _list_models(author=None, filter=None, limit=None, expand=None):
+        return list(tagged if filter == "lerobot" else all_author)
+
+    api.list_models.side_effect = _list_models
+    return api
+
+
+def _patch_hub_list(monkeypatch, *, username, api, orgs=None):
+    info = {"name": username, "orgs": orgs or []}
+    monkeypatch.setattr(server_mod, "cached_whoami", lambda: info)
+    monkeypatch.setattr(server_mod, "shared_hf_api", lambda: api)
+
+
+def test_list_hub_jobs_includes_empty_untagged_run_repos(client: TestClient, monkeypatch) -> None:
+    # The motivating case: an empty repo a crashed run pre-created. It has no
+    # "lerobot" tag, so it appears ONLY in the unfiltered author listing — and
+    # matches the run-repo timestamp suffix, so it must be surfaced.
+    empty = _FakeModel(
+        "makermods/smolvla_makermods_so101_merged_20260701_2026-07-03_09-15-57",
+        last_modified=None,
+    )
+    api = _hub_api_with_models(tagged=[], all_author=[empty])
+    _patch_hub_list(monkeypatch, username="makermods", api=api)
+
+    resp = client.get("/jobs/hub")
+    assert resp.status_code == 200
+    repo_ids = [m["repo_id"] for m in resp.json()["models"]]
+    assert empty.id in repo_ids
+
+
+def test_list_hub_jobs_unions_and_dedups_tagged_and_untagged(client: TestClient, monkeypatch) -> None:
+    tagged = _FakeModel(
+        "makermods/act_makermods_pick_2026-07-03_10-00-00",
+        last_modified=_dt.datetime(2026, 7, 3, 10, 0, tzinfo=_dt.UTC),
+    )
+    empty = _FakeModel(
+        "makermods/smolvla_makermods_so101_merged_20260701_2026-07-03_09-15-57",
+        last_modified=_dt.datetime(2026, 7, 3, 9, 15, tzinfo=_dt.UTC),
+    )
+    # The unfiltered author pass returns BOTH the tagged repo and the empty one;
+    # the tagged pass returns only the tagged one. The union must dedup so the
+    # tagged repo appears exactly once, and sort newest-first.
+    api = _hub_api_with_models(tagged=[tagged], all_author=[tagged, empty])
+    _patch_hub_list(monkeypatch, username="makermods", api=api)
+
+    resp = client.get("/jobs/hub")
+    assert resp.status_code == 200
+    repo_ids = [m["repo_id"] for m in resp.json()["models"]]
+    assert repo_ids == [tagged.id, empty.id]  # deduped, newest first
+    assert repo_ids.count(tagged.id) == 1
+
+
+def test_list_hub_jobs_excludes_foreign_personal_models(client: TestClient, monkeypatch) -> None:
+    # A user's unrelated personal model (no lerobot tag, name doesn't match the
+    # run-repo timestamp convention) must NOT be surfaced — it's theirs, not a
+    # lelab orphan. But a tagged repo is always kept even without the suffix.
+    personal = _FakeModel("makermods/my-cool-llm", last_modified=None)
+    run_repo = _FakeModel(
+        "makermods/smolvla_makermods_so101_merged_20260701_2026-07-03_09-15-57",
+        last_modified=None,
+    )
+    tagged_no_suffix = _FakeModel("makermods/some-tagged-model", last_modified=None)
+    api = _hub_api_with_models(
+        tagged=[tagged_no_suffix],
+        all_author=[personal, run_repo, tagged_no_suffix],
+    )
+    _patch_hub_list(monkeypatch, username="makermods", api=api)
+
+    resp = client.get("/jobs/hub")
+    assert resp.status_code == 200
+    repo_ids = {m["repo_id"] for m in resp.json()["models"]}
+    assert run_repo.id in repo_ids  # run-repo naming → surfaced
+    assert tagged_no_suffix.id in repo_ids  # tagged → surfaced regardless of name
+    assert personal.id not in repo_ids  # foreign personal model → excluded
