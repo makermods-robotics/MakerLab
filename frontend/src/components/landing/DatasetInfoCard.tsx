@@ -3,6 +3,7 @@ import {
   AlertTriangle,
   ChevronDown,
   ExternalLink,
+  Loader2,
   Pencil,
   Upload as UploadIcon,
 } from "lucide-react";
@@ -26,6 +27,7 @@ import { useApi } from "@/contexts/ApiContext";
 import { ApiError } from "@/lib/apiClient";
 import { validateDatasetName } from "@/lib/datasetName";
 import UploadDatasetDialog from "@/components/landing/UploadDatasetDialog";
+import { useDatasetUpload } from "@/hooks/useDatasetUpload";
 import {
   DatasetInfo,
   DatasetTask,
@@ -135,14 +137,60 @@ const TaskList: React.FC<{ tasks: DatasetTask[] }> = ({ tasks }) => {
  *
  * Status is fetched separately/lazily so it never blocks the card render, and
  * degrades to "unknown" (nothing shown) offline/unauthenticated. The upload
- * endpoint is synchronous and datasets are large, so the button shows a
- * spinner while in flight and the rest of the card stays usable; there's no
- * client-side timeout on the request (see uploadDataset).
+ * runs in the background (see useDatasetUpload): while it's in flight this row
+ * shows an "Uploading…" state (which survives navigating away and back), and
+ * on completion it flips to "On Hub" and toasts the Hub URL.
  */
 const HubSyncRow: React.FC<{ repoId: string }> = ({ repoId }) => {
   const { baseUrl, fetchWithHeaders } = useApi();
+  const { toast } = useToast();
   const [status, setStatus] = useState<HubStatusValue>("unknown");
   const [hubUrl, setHubUrl] = useState<string | null>(null);
+
+  const { uploading, start } = useDatasetUpload({
+    repoId,
+    onDone: (url) => {
+      setStatus("on_hub");
+      setHubUrl(url);
+      toast({
+        title: "Uploaded to Hub",
+        description: (
+          <span>
+            {repoId} is now on the Hub.{" "}
+            <a
+              href={url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="underline font-medium"
+            >
+              View dataset
+            </a>
+          </span>
+        ),
+      });
+    },
+    onError: (message, docsUrl) => {
+      toast({
+        title: "Upload failed",
+        description: docsUrl ? (
+          <span>
+            {message}{" "}
+            <a
+              href={docsUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="underline font-medium"
+            >
+              Open setup guide
+            </a>
+          </span>
+        ) : (
+          message
+        ),
+        variant: "destructive",
+      });
+    },
+  });
 
   useEffect(() => {
     const controller = new AbortController();
@@ -159,6 +207,15 @@ const HubSyncRow: React.FC<{ repoId: string }> = ({ repoId }) => {
       });
     return () => controller.abort();
   }, [baseUrl, fetchWithHeaders, repoId]);
+
+  if (uploading) {
+    return (
+      <div className="flex items-center gap-1.5 text-gray-400">
+        <Loader2 className="h-3 w-3 animate-spin" />
+        <span>Uploading to Hub…</span>
+      </div>
+    );
+  }
 
   if (status === "on_hub") {
     return (
@@ -185,13 +242,7 @@ const HubSyncRow: React.FC<{ repoId: string }> = ({ repoId }) => {
       <span className="text-gray-500">
         {status === "local_only" ? "Local only" : "Hub status unknown"}
       </span>
-      <UploadDatasetDialog
-        repoId={repoId}
-        onUploaded={(url) => {
-          setStatus("on_hub");
-          setHubUrl(url);
-        }}
-      >
+      <UploadDatasetDialog repoId={repoId} start={start}>
         <Button
           size="sm"
           variant="outline"

@@ -13,9 +13,12 @@ import {
   CommandItem,
   CommandList,
 } from "@/components/ui/command";
+import { Loader2 } from "lucide-react";
 import UploadDatasetDialog from "@/components/landing/UploadDatasetDialog";
 import { DatasetItem } from "@/lib/replayApi";
 import { validateDatasetName } from "@/lib/datasetName";
+import { useToast } from "@/hooks/use-toast";
+import { useDatasetUpload } from "@/hooks/useDatasetUpload";
 
 interface DatasetPickerProps {
   datasets: DatasetItem[];
@@ -31,6 +34,101 @@ interface DatasetPickerProps {
 }
 
 const REPO_ID_RE = /^[\w.-]+\/[\w.-]+$/;
+
+/**
+ * Per-row "Upload to Hub" control. Owns the background-upload hook for one
+ * dataset so the row shows a live "Uploading…" spinner (which survives closing
+ * the picker / navigating away and reopening) and toasts on completion, at
+ * which point it asks the parent to refresh the list (flips local -> both).
+ */
+const RowUploadButton: React.FC<{
+  repoId: string;
+  onUploaded?: () => void;
+}> = ({ repoId, onUploaded }) => {
+  const { toast } = useToast();
+  const { uploading, start } = useDatasetUpload({
+    repoId,
+    onDone: (url) => {
+      onUploaded?.();
+      toast({
+        title: "Uploaded to Hub",
+        description: (
+          <span>
+            {repoId} is now on the Hub.{" "}
+            <a
+              href={url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="underline font-medium"
+            >
+              View dataset
+            </a>
+          </span>
+        ),
+      });
+    },
+    onError: (message, docsUrl) => {
+      toast({
+        title: "Upload failed",
+        description: docsUrl ? (
+          <span>
+            {message}{" "}
+            <a
+              href={docsUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="underline font-medium"
+            >
+              Open setup guide
+            </a>
+          </span>
+        ) : (
+          message
+        ),
+        variant: "destructive",
+      });
+    },
+  });
+
+  if (uploading) {
+    return (
+      <span
+        className="ml-2 flex shrink-0 items-center gap-1 text-xs text-gray-400"
+        // Don't let a click on the status count as selecting the row.
+        onMouseDown={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+        }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <Loader2 className="h-3 w-3 animate-spin" />
+        Uploading…
+      </span>
+    );
+  }
+
+  return (
+    <UploadDatasetDialog repoId={repoId} start={start}>
+      <button
+        type="button"
+        aria-label={`Upload ${repoId} to Hub`}
+        className="ml-2 shrink-0 text-gray-500 hover:text-blue-400"
+        // Stop cmdk from treating the click as a selection of the row, but
+        // don't preventDefault — the wrapping PopoverTrigger skips its
+        // toggle when the child's click event is defaultPrevented.
+        onMouseDown={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+        }}
+        onClick={(e) => {
+          e.stopPropagation();
+        }}
+      >
+        <UploadIcon className="h-3.5 w-3.5" />
+      </button>
+    </UploadDatasetDialog>
+  );
+};
 
 const DatasetPicker: React.FC<DatasetPickerProps> = ({
   datasets,
@@ -117,30 +215,10 @@ const DatasetPicker: React.FC<DatasetPickerProps> = ({
       )}
       {d.private && <span className="text-xs text-amber-400">private</span>}
       {/* Upload to Hub — local rows only (a "both" row is already on the Hub).
-          Opens the same confirm popover the info card uses. */}
+          Opens the same confirm popover the info card uses; the row shows a
+          live "Uploading…" state while the background push runs. */}
       {d.source === "local" && (
-        <UploadDatasetDialog
-          repoId={d.repo_id}
-          onUploaded={() => onUploaded?.(d)}
-        >
-          <button
-            type="button"
-            aria-label={`Upload ${d.repo_id} to Hub`}
-            className="ml-2 shrink-0 text-gray-500 hover:text-blue-400"
-            // Stop cmdk from treating the click as a selection of the row, but
-            // don't preventDefault — the wrapping PopoverTrigger skips its
-            // toggle when the child's click event is defaultPrevented.
-            onMouseDown={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-            }}
-            onClick={(e) => {
-              e.stopPropagation();
-            }}
-          >
-            <UploadIcon className="h-3.5 w-3.5" />
-          </button>
-        </UploadDatasetDialog>
+        <RowUploadButton repoId={d.repo_id} onUploaded={() => onUploaded?.(d)} />
       )}
       {onDelete && (d.source === "local" || d.source === "both") && (
         <button

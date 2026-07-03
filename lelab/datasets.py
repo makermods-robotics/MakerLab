@@ -328,12 +328,14 @@ def _dataset_in_use(repo_id: str) -> str | None:
     """If `repo_id`'s directory is in use by a running operation, return a
     legible reason to refuse a rename; else None.
 
-    Checks the three ways a dataset dir can be actively read/written:
+    Checks the four ways a dataset dir can be actively read/written:
       * recording — the active session's (timestamp-stamped) repo id, OR the
         base name the user typed (recording stamps ``name`` → ``name_<ts>``,
         so a rename of the base while a session writes ``name_<ts>`` would
         pull the directory out from under it);
       * merge — the output dataset currently being aggregated;
+      * upload — the dataset currently being pushed to the Hub (renaming or
+        deleting the directory mid-push would corrupt the upload);
       * local training — any running local job whose config trains on it.
 
     Read-only imports; each module owns its own state. Kept deliberately
@@ -348,6 +350,11 @@ def _dataset_in_use(repo_id: str) -> str | None:
         # so match either the stamped id or a rename of the still-writing base.
         if active_id and (active_id == repo_id or active_id.startswith(f"{repo_id}_")):
             return "A recording session is writing to this dataset. Stop it before renaming."
+
+    # Upload: record.py owns an UploadManager singleton (state + repo_id). Same
+    # lazy import (datasets<->record cycle) as recording above.
+    if _record.upload_manager.state == "running" and _record.upload_manager.repo_id == repo_id:
+        return "This dataset is being uploaded to the Hub right now. Wait for it to finish."
 
     # Merge: merge.py exposes a MergeManager singleton with state + output id.
     from . import merge as _merge

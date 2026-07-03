@@ -702,6 +702,13 @@ def handle_delete_dataset(request: DatasetInfoRequest) -> dict[str, Any]:
     if target == root or root not in target.parents:
         return {"success": False, "message": "Invalid dataset path"}
 
+    # Don't yank the directory out from under an in-flight push to the Hub.
+    if upload_manager.state == "running" and upload_manager.repo_id == repo_id:
+        return {
+            "success": False,
+            "message": "This dataset is being uploaded to the Hub right now. Wait for it to finish.",
+        }
+
     if not target.exists():
         return {"success": False, "message": f"Dataset not found on disk: {repo_id}"}
 
@@ -788,55 +795,146 @@ def _discard_empty_dataset(repo_id: str, resume: bool) -> bool:
     return True
 
 
-def handle_upload_dataset(request: UploadRequest) -> dict[str, Any]:
-    """Handle dataset upload to HuggingFace Hub"""
-    try:
-        # Import LeRobotDataset to load and upload the dataset
+def _upload_auth_error(exc: Exception) -> dict[str, str] | None:
+    """If ``exc`` is a Hub auth failure, return the friendly {message, docs_url}
+    the frontend shows for it; else None. Kept separate so the sync worker and
+    any future caller map the 401 identically."""
+    err_text = str(exc).lower()
+    looks_like_auth = any(
+        m in err_text
+        for m in ("401", "you must be authenticated", "authentication required", "huggingfacehub_token")
+    )
+    if looks_like_auth:
+        return {
+            "message": (
+                "You're not logged into the Hugging Face Hub. Run `hf auth login` in your "
+                "terminal, then retry."
+            ),
+            "docs_url": "https://huggingface.co/docs/huggingface_hub/en/quick-start#authentication",
+        }
+    return None
+
+
+class UploadManager:
+    """Runs one dataset upload at a time in a background thread.
+
+    ``push_to_hub`` copies 100+ MB of video/parquet over the network and takes
+    minutes, so we run it off the request thread (same start/poll shape as
+    MergeManager) rather than block the browser on a multi-minute HTTP request
+    that a navigation-away would abort mid-push. One upload at a time: a second
+    concurrent start for any repo is refused (409-mapped by the route). The
+    per-repo status lets the info card / picker row poll "is *my* dataset
+    uploading?" and survive navigation.
+    """
+
+    def __init__(self) -> None:
+        self.state: str = "idle"  # "idle" | "running" | "done" | "error"
+        self.repo_id: str | None = None
+        self.message: str | None = None
+        self.dataset_url: str | None = None
+        self.docs_url: str | None = None
+        self._thread: threading.Thread | None = None
+        self._lock = threading.Lock()
+
+    def start(self, request: UploadRequest) -> dict[str, Any]:
+        repo_id = request.dataset_repo_id
+        with self._lock:
+            if self.state == "running":
+                return {
+                    "started": False,
+                    "repo_id": self.repo_id,
+                    "message": f"An upload is already running for {self.repo_id}",
+                }
+            # Refuse a dataset another operation is actively writing — pushing a
+            # half-written directory would ship a corrupt dataset. Reuses the
+            # rename busy-guard (recording / merge / local training); lazy import
+            # to avoid the datasets<->record cycle documented in _dataset_in_use.
+            from .datasets import _dataset_in_use
+
+            in_use = _dataset_in_use(repo_id)
+            if in_use is not None:
+                return {"started": False, "repo_id": repo_id, "message": in_use}
+            self.state = "running"
+            self.repo_id = repo_id
+            self.message = f"Uploading {repo_id} to the Hub…"
+            self.dataset_url = None
+            self.docs_url = None
+
+        self._thread = threading.Thread(
+            target=self._worker, args=(request,), name="upload-worker", daemon=True
+        )
+        self._thread.start()
+        return {"started": True, "repo_id": repo_id, "message": "Upload started"}
+
+    def get_status(self) -> dict[str, Any]:
+        with self._lock:
+            status = {
+                "state": self.state,
+                "repo_id": self.repo_id,
+                "message": self.message,
+                "dataset_url": self.dataset_url,
+            }
+            if self.docs_url is not None:
+                status["docs_url"] = self.docs_url
+            return status
+
+    def _worker(self, request: UploadRequest) -> None:
         from lerobot.datasets import LeRobotDataset
 
-        logger.info(f"Loading dataset {request.dataset_repo_id} for upload")
+        repo_id = request.dataset_repo_id
+        try:
+            logger.info(f"Loading dataset {repo_id} for upload")
+            dataset = LeRobotDataset(repo_id)
+            logger.info(f"Dataset loaded with {dataset.num_episodes} episodes")
 
-        # Load the dataset from local storage
-        dataset = LeRobotDataset(request.dataset_repo_id)
+            tags = with_lelab_tag(request.tags)
+            logger.info(f"Uploading to HuggingFace Hub with tags: {tags}, private: {request.private}")
+            dataset.push_to_hub(tags=tags, private=request.private)
+            logger.info(f"Dataset {repo_id} uploaded successfully to HuggingFace Hub")
 
-        logger.info(f"Dataset loaded with {dataset.num_episodes} episodes")
-        tags = with_lelab_tag(request.tags)
-        logger.info(f"Uploading to HuggingFace Hub with tags: {tags}, private: {request.private}")
+            # The dataset now exists on the Hub; drop any cached "local_only"
+            # answer so the info card's next hub-status check flips to "On Hub".
+            invalidate_hub_status(repo_id)
 
-        # Upload dataset to HuggingFace Hub
-        dataset.push_to_hub(tags=tags, private=request.private)
+            with self._lock:
+                self.state = "done"
+                self.message = f"Dataset {repo_id} uploaded successfully to the Hugging Face Hub"
+                self.dataset_url = f"https://huggingface.co/datasets/{repo_id}"
+                self.docs_url = None
+        except Exception as e:
+            logger.error(f"Error uploading dataset {repo_id}: {e}")
+            import traceback
 
-        logger.info(f"Dataset {request.dataset_repo_id} uploaded successfully to HuggingFace Hub")
+            logger.error(f"Full traceback: {traceback.format_exc()}")
+            auth = _upload_auth_error(e)
+            with self._lock:
+                self.state = "error"
+                self.dataset_url = None
+                if auth is not None:
+                    self.message = auth["message"]
+                    self.docs_url = auth["docs_url"]
+                else:
+                    self.message = f"Failed to upload dataset: {e}"
+                    self.docs_url = None
 
-        # The dataset now exists on the Hub; drop any cached "local_only" answer
-        # so the info card's next hub-status check flips to "On Hub".
-        invalidate_hub_status(request.dataset_repo_id)
 
-        return {
-            "success": True,
-            "message": f"Dataset {request.dataset_repo_id} uploaded successfully to HuggingFace Hub",
-            "dataset_url": f"https://huggingface.co/datasets/{request.dataset_repo_id}",
-            "num_episodes": dataset.num_episodes,
-        }
+upload_manager = UploadManager()
 
-    except Exception as e:
-        logger.error(f"Error uploading dataset {request.dataset_repo_id}: {e}")
-        import traceback
 
-        logger.error(f"Full traceback: {traceback.format_exc()}")
+def handle_upload_dataset(request: UploadRequest) -> dict[str, Any]:
+    """Start a background upload of a local dataset to the Hub.
 
-        err_text = str(e).lower()
-        looks_like_auth = any(
-            m in err_text
-            for m in ("401", "you must be authenticated", "authentication required", "huggingfacehub_token")
-        )
-        if looks_like_auth:
-            return {
-                "success": False,
-                "message": "You're not logged into the Hugging Face Hub. Run `hf auth login` in your terminal, then retry.",
-                "docs_url": "https://huggingface.co/docs/huggingface_hub/en/quick-start#authentication",
-            }
-        return {"success": False, "message": f"Failed to upload dataset: {str(e)}"}
+    Returns immediately with ``{started, repo_id, message}`` — the actual push
+    runs in a worker thread; poll /upload-status for progress. ``started`` is
+    False when an upload is already running or the dataset is busy being
+    written (recording / merge / training)."""
+    return upload_manager.start(request)
+
+
+def handle_upload_status() -> dict[str, Any]:
+    """Current upload state (idle | running | done | error) + repo_id, message,
+    and dataset_url once done."""
+    return upload_manager.get_status()
 
 
 def record_with_web_events(

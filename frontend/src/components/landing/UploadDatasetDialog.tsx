@@ -10,105 +10,60 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { useToast } from "@/hooks/use-toast";
-import { useApi } from "@/contexts/ApiContext";
-import { ApiError } from "@/lib/apiClient";
-import { uploadDataset } from "@/lib/replayApi";
 
 /**
  * Confirm-and-upload popover for pushing a locally-cached dataset to the Hub.
  * Private-by-default toggle (with the camera-footage note) + optional
- * comma-separated tags -> POST /upload-dataset. The upload endpoint is
- * synchronous and datasets are large, so the button shows a spinner while in
- * flight; there's no client-side timeout (see uploadDataset).
+ * comma-separated tags. The upload runs in the background (see UploadManager /
+ * useDatasetUpload): this dialog only kicks it off and closes — the caller's
+ * card/row then shows the polled "Uploading…" state and fires the success /
+ * error toast on completion. A refused start (409: already running, or the
+ * dataset is busy being written) surfaces here as a destructive toast.
  *
  * Shared by DatasetInfoCard's HubSyncRow and the DatasetPicker rows so both
- * offer the identical dialog. The caller supplies the trigger element and an
- * `onUploaded` callback (fired with the Hub URL) so it can refresh its own hub
- * state — e.g. flip a "local only" row to "on Hub".
+ * offer the identical dialog. The caller owns the upload hook and passes down
+ * `start` (which returns an error message, or null on a clean start).
  */
 const UploadDatasetDialog: React.FC<{
   repoId: string;
+  /** Kicks off the background upload. Resolves to null on a clean start, or an
+   * error message when the start was refused / unreachable. */
+  start: (tags: string[], isPrivate: boolean) => Promise<string | null>;
   /** Popover trigger element (a button/icon). */
   children: React.ReactNode;
-  /** Fired after a successful upload with the resolved Hub dataset URL. */
-  onUploaded?: (url: string) => void;
   align?: "start" | "center" | "end";
-}> = ({ repoId, children, onUploaded, align = "end" }) => {
-  const { baseUrl, fetchWithHeaders } = useApi();
+}> = ({ repoId, start, children, align = "end" }) => {
   const { toast } = useToast();
   const [popoverOpen, setPopoverOpen] = useState(false);
   const [isPrivate, setIsPrivate] = useState(true);
   const [tagsInput, setTagsInput] = useState("");
-  const [uploading, setUploading] = useState(false);
+  const [starting, setStarting] = useState(false);
 
   const handleUpload = async () => {
-    setUploading(true);
+    setStarting(true);
     try {
       const tags = tagsInput
         .split(",")
         .map((t) => t.trim())
         .filter((t) => t.length > 0);
-      const result = await uploadDataset(
-        baseUrl,
-        fetchWithHeaders,
-        repoId,
-        tags,
-        isPrivate,
-      );
-      if (result.success) {
-        const url =
-          result.dataset_url ?? `https://huggingface.co/datasets/${repoId}`;
-        setPopoverOpen(false);
-        onUploaded?.(url);
-        toast({
-          title: "Uploaded to Hub",
-          description: (
-            <span>
-              {repoId} is now on the Hub.{" "}
-              <a
-                href={url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="underline font-medium"
-              >
-                View dataset
-              </a>
-            </span>
-          ),
-        });
-      } else {
-        const fallback = "Failed to upload dataset to the Hub.";
+      const error = await start(tags, isPrivate);
+      if (error) {
         toast({
           title: "Upload failed",
-          description: result.docs_url ? (
-            <span>
-              {result.message || fallback}{" "}
-              <a
-                href={result.docs_url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="underline font-medium"
-              >
-                Open setup guide
-              </a>
-            </span>
-          ) : (
-            result.message || fallback
-          ),
+          description: error,
           variant: "destructive",
         });
+        return;
       }
-    } catch (e) {
+      // Clean start: close the popover. The caller's row shows the live
+      // "Uploading…" state and toasts on completion.
+      setPopoverOpen(false);
       toast({
-        title: "Upload failed",
-        description:
-          e instanceof ApiError && e.detail
-            ? e.detail
-            : "Could not reach the backend to upload.",
-        variant: "destructive",
+        title: "Upload started",
+        description: `${repoId} is uploading to the Hub in the background.`,
       });
     } finally {
-      setUploading(false);
+      setStarting(false);
     }
   };
 
@@ -155,13 +110,13 @@ const UploadDatasetDialog: React.FC<{
           <Button
             size="sm"
             onClick={handleUpload}
-            disabled={uploading}
+            disabled={starting}
             className="h-7 w-full gap-1 bg-blue-500 text-xs text-white hover:bg-blue-600"
           >
-            {uploading ? (
+            {starting ? (
               <>
                 <Loader2 className="h-3 w-3 animate-spin" />
-                Uploading…
+                Starting…
               </>
             ) : (
               <>

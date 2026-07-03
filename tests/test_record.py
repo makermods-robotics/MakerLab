@@ -393,3 +393,167 @@ def test_record_start_clears_stale_release_state_from_previous_double_stop(
     assert not stale.is_set()
     assert record.releasing is False
     assert record.recording_active is False
+
+
+# ---------------------------------------------------------------------------
+# UploadManager — background dataset upload (start → running → done | error).
+# The push runs in a worker thread; tests mock LeRobotDataset so no real Hub
+# call happens, then join the thread before asserting on the final state.
+# ---------------------------------------------------------------------------
+
+
+def _fake_dataset(num_episodes: int = 3, push=None):
+    from unittest.mock import MagicMock
+
+    ds = MagicMock(name="LeRobotDataset")
+    ds.num_episodes = num_episodes
+    if push is not None:
+        ds.push_to_hub = push
+    return ds
+
+
+def _join_upload(mgr, timeout: float = 5.0) -> None:
+    thread = mgr._thread
+    if thread is not None:
+        thread.join(timeout=timeout)
+
+
+def test_upload_manager_start_runs_and_completes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A start pushes in a worker thread and lands in state "done" with the
+    dataset_url, invalidating the cached hub status."""
+    from lelab.record import UploadManager, UploadRequest
+
+    ds = _fake_dataset()
+    monkeypatch.setattr("lerobot.datasets.LeRobotDataset", lambda repo_id: ds)
+    invalidated: list[str] = []
+    monkeypatch.setattr("lelab.record.invalidate_hub_status", invalidated.append)
+
+    mgr = UploadManager()
+    # Nothing else is writing this dataset — _dataset_in_use must return None.
+    monkeypatch.setattr("lelab.datasets._dataset_in_use", lambda repo_id: None)
+
+    result = mgr.start(UploadRequest(dataset_repo_id="tester/ds", tags=["x"], private=True))
+    assert result == {"started": True, "repo_id": "tester/ds", "message": "Upload started"}
+
+    _join_upload(mgr)
+    status = mgr.get_status()
+    assert status["state"] == "done"
+    assert status["repo_id"] == "tester/ds"
+    assert status["dataset_url"] == "https://huggingface.co/datasets/tester/ds"
+    assert invalidated == ["tester/ds"]
+    # push_to_hub got the lelab-tagged tags + private flag.
+    ds.push_to_hub.assert_called_once()
+    kwargs = ds.push_to_hub.call_args.kwargs
+    assert kwargs["private"] is True
+    assert "x" in kwargs["tags"]
+
+
+def test_upload_manager_error_maps_auth_friendly(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 401 during push lands in state "error" with the friendly login message
+    and the docs_url, not a raw traceback string."""
+    from lelab.record import UploadManager, UploadRequest
+
+    def _raise_401(**kwargs):
+        raise RuntimeError("401 Client Error: you must be authenticated")
+
+    ds = _fake_dataset(push=_raise_401)
+    monkeypatch.setattr("lerobot.datasets.LeRobotDataset", lambda repo_id: ds)
+    monkeypatch.setattr("lelab.datasets._dataset_in_use", lambda repo_id: None)
+
+    mgr = UploadManager()
+    mgr.start(UploadRequest(dataset_repo_id="tester/ds"))
+    _join_upload(mgr)
+
+    status = mgr.get_status()
+    assert status["state"] == "error"
+    assert "hf auth login" in status["message"]
+    assert status["docs_url"].startswith("https://huggingface.co/docs")
+
+
+def test_upload_manager_error_generic_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A non-auth failure surfaces its message without a docs_url."""
+    from lelab.record import UploadManager, UploadRequest
+
+    def _boom(**kwargs):
+        raise RuntimeError("disk exploded")
+
+    ds = _fake_dataset(push=_boom)
+    monkeypatch.setattr("lerobot.datasets.LeRobotDataset", lambda repo_id: ds)
+    monkeypatch.setattr("lelab.datasets._dataset_in_use", lambda repo_id: None)
+
+    mgr = UploadManager()
+    mgr.start(UploadRequest(dataset_repo_id="tester/ds"))
+    _join_upload(mgr)
+
+    status = mgr.get_status()
+    assert status["state"] == "error"
+    assert "disk exploded" in status["message"]
+    assert "docs_url" not in status
+
+
+def test_upload_manager_rejects_concurrent_start(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A second start while one is running is refused (409-mapped by the route),
+    naming the repo already uploading; the running upload is untouched."""
+    from lelab.record import UploadManager, UploadRequest
+
+    mgr = UploadManager()
+    monkeypatch.setattr("lelab.datasets._dataset_in_use", lambda repo_id: None)
+    # Pretend an upload is already running for another repo (don't spawn one).
+    mgr.state = "running"
+    mgr.repo_id = "tester/first"
+
+    result = mgr.start(UploadRequest(dataset_repo_id="tester/second"))
+    assert result["started"] is False
+    assert "already running" in result["message"]
+    assert "tester/first" in result["message"]
+    # State unchanged — the second start didn't clobber the running upload.
+    assert mgr.repo_id == "tester/first"
+
+
+def test_upload_manager_refuses_busy_dataset(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A start is refused when the dataset is being written by another op —
+    _dataset_in_use returns a reason, and no worker thread is spawned."""
+    from lelab.record import UploadManager, UploadRequest
+
+    monkeypatch.setattr(
+        "lelab.datasets._dataset_in_use",
+        lambda repo_id: "A recording session is writing to this dataset. Stop it before renaming.",
+    )
+    mgr = UploadManager()
+    result = mgr.start(UploadRequest(dataset_repo_id="tester/ds"))
+    assert result["started"] is False
+    assert "recording session" in result["message"]
+    assert mgr.state == "idle"
+    assert mgr._thread is None
+
+
+def test_upload_status_idle_shape() -> None:
+    from lelab.record import UploadManager
+
+    status = UploadManager().get_status()
+    assert status["state"] == "idle"
+    assert status["repo_id"] is None
+    assert status["dataset_url"] is None
+    assert "docs_url" not in status
+
+
+def test_delete_dataset_refused_mid_upload(tmp_lerobot_home, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Deleting a dataset that's being pushed to the Hub is refused, and the
+    directory is left on disk."""
+    import json
+
+    import lelab.record as record
+    from lelab.record import DatasetInfoRequest, handle_delete_dataset
+
+    repo_id = "tester/uploading"
+    meta = tmp_lerobot_home / repo_id / "meta"
+    meta.mkdir(parents=True)
+    (meta / "info.json").write_text(json.dumps({"total_episodes": 2}))
+
+    monkeypatch.setattr(record.upload_manager, "state", "running")
+    monkeypatch.setattr(record.upload_manager, "repo_id", repo_id)
+
+    result = handle_delete_dataset(DatasetInfoRequest(dataset_repo_id=repo_id))
+    assert result["success"] is False
+    assert "uploaded" in result["message"].lower()
+    assert (tmp_lerobot_home / repo_id).exists()

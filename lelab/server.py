@@ -72,6 +72,7 @@ from .record import (
     handle_start_recording,
     handle_stop_recording,
     handle_upload_dataset,
+    handle_upload_status,
 )
 from .rollout import (
     InferenceRequest,
@@ -663,8 +664,21 @@ def recording_rerecord_episode():
 
 @app.post("/upload-dataset")
 def upload_dataset(request: UploadRequest):
-    """Upload dataset to HuggingFace Hub"""
-    return handle_upload_dataset(request)
+    """Start a background upload of a local dataset to the Hub.
+
+    Returns immediately with {started, repo_id, message}; poll /upload-status
+    for progress. 409 when an upload is already running (frontend maps it to a
+    "an upload is already running" toast)."""
+    result = handle_upload_dataset(request)
+    if not result.get("started"):
+        raise HTTPException(status_code=409, detail=result.get("message", "Upload could not be started"))
+    return result
+
+
+@app.get("/upload-status")
+def upload_status():
+    """Current upload state + repo_id, message, and dataset_url once done."""
+    return handle_upload_status()
 
 
 @app.post("/dataset-info")

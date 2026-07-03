@@ -78,18 +78,23 @@ export async function getDatasetHubStatus(
   );
 }
 
-export interface UploadResult {
-  success: boolean;
-  message?: string;
-  dataset_url?: string;
-  docs_url?: string;
-  num_episodes?: number;
+export type UploadState = "idle" | "running" | "done" | "error";
+
+/** Live status of the single background upload. `dataset_url` is set once
+ * done; `docs_url` accompanies a friendly auth error. `repo_id` says which
+ * dataset the upload is for (so a card knows whether it's *its* upload). */
+export interface UploadStatus {
+  state: UploadState;
+  repo_id: string | null;
+  message: string | null;
+  dataset_url?: string | null;
+  docs_url?: string | null;
 }
 
-/** Push a locally-cached dataset to the Hub. Synchronous + slow (datasets are
- * 100+ MB): callers must show an in-flight state and not impose a short client
- * timeout. Returns the endpoint's friendly {success, message, docs_url} shape
- * rather than throwing on a handled auth failure. */
+/** Kick off a background push of a locally-cached dataset to the Hub. Returns
+ * immediately with {started, repo_id}; poll getDatasetUploadStatus for
+ * progress. Throws ApiError (409) when an upload is already running or the
+ * dataset is busy being written — the message is in `.detail`. */
 export async function uploadDataset(
   baseUrl: string,
   fetcher: Fetcher,
@@ -97,11 +102,24 @@ export async function uploadDataset(
   tags: string[],
   isPrivate: boolean,
   signal?: AbortSignal,
-): Promise<UploadResult> {
-  return apiRequest<UploadResult>(baseUrl, fetcher, "/upload-dataset", {
+): Promise<{ started: boolean; repo_id: string; message: string }> {
+  return apiRequest(baseUrl, fetcher, "/upload-dataset", {
     method: "POST",
     body: { dataset_repo_id: repoId, tags, private: isPrivate },
     action: "Upload dataset",
+    signal,
+  });
+}
+
+/** Current state of the single background upload (survives navigation — the
+ * card polls this on mount to re-attach to an in-flight upload). */
+export async function getDatasetUploadStatus(
+  baseUrl: string,
+  fetcher: Fetcher,
+  signal?: AbortSignal,
+): Promise<UploadStatus> {
+  return apiRequest<UploadStatus>(baseUrl, fetcher, "/upload-status", {
+    action: "Upload status",
     signal,
   });
 }

@@ -565,6 +565,23 @@ def test_rename_busy_guard_merge(tmp_lerobot_home: Path) -> None:
     assert exc.value.status == 409
 
 
+def test_rename_busy_guard_upload(tmp_lerobot_home: Path) -> None:
+    """A rename is refused (409) while the dataset is being pushed to the Hub."""
+    from lelab import record as rec
+    from lelab.datasets import DatasetRenameError, rename_local_dataset
+
+    _make_dataset(tmp_lerobot_home, "makermods/uploading", episodes=1)
+
+    with (
+        patch.object(rec.upload_manager, "state", "running"),
+        patch.object(rec.upload_manager, "repo_id", "makermods/uploading"),
+        pytest.raises(DatasetRenameError) as exc,
+    ):
+        rename_local_dataset("makermods/uploading", "renamed")
+    assert exc.value.status == 409
+    assert (tmp_lerobot_home / "makermods" / "uploading").exists()
+
+
 def test_rename_busy_guard_local_training(tmp_lerobot_home: Path) -> None:
     """A rename is refused while a running local job trains on the id."""
     from lelab.datasets import DatasetRenameError, rename_local_dataset
