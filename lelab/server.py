@@ -97,6 +97,7 @@ from .utils import config
 from .utils.config import (
     FOLLOWER_CONFIG_PATH,
     LEADER_CONFIG_PATH,
+    add_dismissed_hub_job,
     clear_config_references,
     config_slot_conflict,
     delete_robot_record,
@@ -104,12 +105,14 @@ from .utils.config import (
     find_available_ports,
     find_robot_port,
     get_default_robot_port,
+    get_dismissed_hub_jobs,
     get_robot_record,
     get_saved_robot_port,
     is_robot_record_clean,
     is_valid_robot_name,
     list_robot_records,
     port_slot_conflict,
+    prune_dismissed_hub_jobs,
     rename_calibration_config,
     rename_robot_record,
     save_imported_calibration,
@@ -785,6 +788,16 @@ def list_jobs(limit: int = 10):
 # surfacing a user's unrelated personal models.
 _RUN_REPO_RE = re.compile(r"_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$")
 
+# Hub job stages still doing work. Mirrors HUB_ACTIVE_STAGES in the frontend
+# (jobsApi.ts); a dismissed id in one of these stages is NOT hidden from the
+# listing, so a live run can never be dismissed out of sight.
+_HUB_ACTIVE_STAGES = {"RUNNING", "QUEUED", "SCHEDULING"}
+
+
+def _hub_job_stage(ji) -> str:
+    """Uppercased status stage of a huggingface_hub JobInfo ('' when absent)."""
+    return (ji.status.stage or "").upper() if ji.status else ""
+
 
 @app.get("/jobs/hub")
 def list_hub_jobs():
@@ -810,6 +823,7 @@ def list_hub_jobs():
             authors.append(o["name"])
 
     jobs_permission = True
+    jobs_listed = True
     try:
         # list_jobs() returns a lazy pagination generator — materialize it here
         # so any HTTP error (e.g. 403 when the token lacks the job.read scope)
@@ -819,12 +833,24 @@ def list_hub_jobs():
     except Exception as exc:
         logger.warning("list_jobs failed: %s", exc)
         jobs = []
+        jobs_listed = False
         # A 401/403 means the token is valid but lacks the job.read scope —
         # surface that to the frontend so it can show a hint instead of a
         # silently-empty list. Other failures are treated as transient.
         status = getattr(getattr(exc, "response", None), "status_code", None)
         if status in (401, 403):
             jobs_permission = False
+
+    # Drop jobs the user dismissed from the UI — but only in a terminal stage:
+    # an id whose job is still active stays visible, so a live run can't be
+    # dismissed out of sight. Ids that have fallen out of the Hub listing are
+    # pruned so the file doesn't grow forever; skipped when list_jobs() failed,
+    # otherwise a transient outage would forget every dismissal.
+    dismissed = get_dismissed_hub_jobs()
+    if jobs_listed:
+        prune_dismissed_hub_jobs({ji.id for ji in jobs})
+    if dismissed:
+        jobs = [ji for ji in jobs if ji.id not in dismissed or _hub_job_stage(ji) in _HUB_ACTIVE_STAGES]
 
     seen_models: set[str] = set()
     models: list[dict] = []
@@ -951,6 +977,22 @@ def delete_hub_model(repo_id: str):
         raise HTTPException(status_code=502, detail=f"Hub delete failed: {exc}") from exc
 
     return {"status": "success", "repo_id": repo_id}
+
+
+@app.post("/jobs/hub/jobs/{job_id}/dismiss")
+def dismiss_hub_job(job_id: str):
+    """Hide a Hub job from the /jobs/hub listing.
+
+    The HF Jobs API has no delete — a finished job stays in list_jobs()
+    indefinitely — so "removing" a dead untracked job from the UI is a local,
+    persisted hide (utils/config.DISMISSED_HUB_JOBS_FILE), not a Hub mutation.
+    The listing keeps showing a dismissed id while its stage is still active
+    (RUNNING/QUEUED/SCHEDULING); it disappears once the job reaches a terminal
+    stage. Ids that later drop out of the Hub listing are pruned automatically.
+    """
+    if not add_dismissed_hub_job(job_id):
+        raise HTTPException(status_code=400, detail="Job id can't be empty.")
+    return {"status": "success", "job_id": job_id.strip()}
 
 
 @app.get("/jobs/{job_id}")
@@ -1110,11 +1152,17 @@ def stop_job(job_id: str):
 @app.delete("/jobs/{job_id}", status_code=204)
 def delete_job(job_id: str):
     try:
+        record = job_registry.get(job_id)
         job_registry.delete(job_id)
     except JobNotFoundError as exc:
         raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found") from exc
     except JobNotRunningError as exc:
         raise HTTPException(status_code=409, detail=f"Job {job_id!r} is running; stop it first") from exc
+    # Deleting a tracked cloud run removes the local record, but its Hub job
+    # would resurface in /jobs/hub as an untracked card on the next poll (the
+    # HF Jobs API has no delete). Mark it dismissed so the removal sticks.
+    if record.hf_job_id:
+        add_dismissed_hub_job(record.hf_job_id)
 
 
 @app.get("/jobs/runners/hardware")

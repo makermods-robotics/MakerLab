@@ -18,6 +18,7 @@ from __future__ import annotations
 import datetime as _dt
 import logging
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -774,3 +775,127 @@ def test_list_hub_jobs_excludes_foreign_personal_models(client: TestClient, monk
     assert run_repo.id in repo_ids  # run-repo naming → surfaced
     assert tagged_no_suffix.id in repo_ids  # tagged → surfaced regardless of name
     assert personal.id not in repo_ids  # foreign personal model → excluded
+
+
+# --- POST /jobs/hub/jobs/{job_id}/dismiss + listing filter ------------------
+#
+# The HF Jobs API has no delete — a finished job stays in list_jobs()
+# indefinitely — so removing a dead untracked job from the UI is a local,
+# persisted dismissal (utils/config.DISMISSED_HUB_JOBS_FILE). The /jobs/hub
+# listing drops dismissed ids, but only in a terminal stage: a live run can
+# never be dismissed out of sight.
+
+
+class _FakeHubJob:
+    def __init__(self, job_id, stage):
+        self.id = job_id
+        self.created_at = None
+        self.docker_image = "huggingface/lerobot-gpu:latest"
+        self.space_id = None
+        self.flavor = "a100-large"
+        self.status = SimpleNamespace(stage=stage, message=None)
+        self.owner = None
+        self.url = f"https://huggingface.co/jobs/{job_id}"
+
+
+def _hub_api_with_jobs(jobs):
+    """Fake HfApi whose list_jobs() returns `jobs`. list_models() returns
+    nothing (models are irrelevant to the dismissal tests)."""
+    api = MagicMock()
+    api.list_jobs.return_value = list(jobs)
+    api.list_models.return_value = []
+    return api
+
+
+def test_dismiss_hub_job_persists_and_hides_terminal_job(
+    client: TestClient, monkeypatch, tmp_lerobot_home: Path
+) -> None:
+    dead = _FakeHubJob("job-dead", "ERROR")
+    other = _FakeHubJob("job-other", "COMPLETED")
+    _patch_hub_list(monkeypatch, username="makermods", api=_hub_api_with_jobs([dead, other]))
+
+    resp = client.post("/jobs/hub/jobs/job-dead/dismiss")
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "success", "job_id": "job-dead"}
+    assert cfg.get_dismissed_hub_jobs() == {"job-dead"}
+
+    resp = client.get("/jobs/hub")
+    assert resp.status_code == 200
+    job_ids = [j["id"] for j in resp.json()["jobs"]]
+    assert job_ids == ["job-other"]  # dismissed terminal job hidden, rest kept
+
+
+def test_dismissed_hub_job_in_active_stage_stays_listed(
+    client: TestClient, monkeypatch, tmp_lerobot_home: Path
+) -> None:
+    # Dismissing an id whose job is still RUNNING must not hide it — the
+    # listing keeps it until the job reaches a terminal stage.
+    live = _FakeHubJob("job-live", "RUNNING")
+    _patch_hub_list(monkeypatch, username="makermods", api=_hub_api_with_jobs([live]))
+    cfg.add_dismissed_hub_job("job-live")
+
+    resp = client.get("/jobs/hub")
+    assert resp.status_code == 200
+    assert [j["id"] for j in resp.json()["jobs"]] == ["job-live"]
+
+
+def test_list_hub_jobs_prunes_dismissed_ids_gone_from_listing(
+    client: TestClient, monkeypatch, tmp_lerobot_home: Path
+) -> None:
+    kept = _FakeHubJob("job-kept", "FAILED")
+    _patch_hub_list(monkeypatch, username="makermods", api=_hub_api_with_jobs([kept]))
+    cfg.add_dismissed_hub_job("job-kept")
+    cfg.add_dismissed_hub_job("job-expired")  # no longer in the Hub listing
+
+    resp = client.get("/jobs/hub")
+    assert resp.status_code == 200
+    assert resp.json()["jobs"] == []
+    assert cfg.get_dismissed_hub_jobs() == {"job-kept"}
+
+
+def test_list_hub_jobs_keeps_dismissals_when_listing_fails(
+    client: TestClient, monkeypatch, tmp_lerobot_home: Path
+) -> None:
+    # A transient list_jobs() failure returns an empty jobs list; pruning
+    # against it would forget every dismissal, so it must be skipped.
+    api = _hub_api_with_jobs([])
+    api.list_jobs.side_effect = RuntimeError("hub outage")
+    _patch_hub_list(monkeypatch, username="makermods", api=api)
+    cfg.add_dismissed_hub_job("job-dead")
+
+    resp = client.get("/jobs/hub")
+    assert resp.status_code == 200
+    assert resp.json()["jobs"] == []
+    assert cfg.get_dismissed_hub_jobs() == {"job-dead"}
+
+
+def test_dismiss_hub_job_rejects_blank_id(client: TestClient, monkeypatch, tmp_lerobot_home: Path) -> None:
+    resp = client.post("/jobs/hub/jobs/%20/dismiss")
+    assert resp.status_code == 400
+    assert cfg.get_dismissed_hub_jobs() == set()
+
+
+def test_delete_job_dismisses_its_hub_job_id(client: TestClient, monkeypatch, tmp_lerobot_home: Path) -> None:
+    # Deleting a tracked cloud run must also dismiss its hf_job_id, otherwise
+    # the Hub job resurfaces as an untracked card on the next /jobs/hub poll.
+    record = MagicMock()
+    record.hf_job_id = "hub-job-123"
+    monkeypatch.setattr(server_mod.job_registry, "get", lambda job_id: record)
+    monkeypatch.setattr(server_mod.job_registry, "delete", lambda job_id: None)
+
+    resp = client.delete("/jobs/some-cloud-run")
+    assert resp.status_code == 204
+    assert cfg.get_dismissed_hub_jobs() == {"hub-job-123"}
+
+
+def test_delete_local_job_records_no_dismissal(
+    client: TestClient, monkeypatch, tmp_lerobot_home: Path
+) -> None:
+    record = MagicMock()
+    record.hf_job_id = None
+    monkeypatch.setattr(server_mod.job_registry, "get", lambda job_id: record)
+    monkeypatch.setattr(server_mod.job_registry, "delete", lambda job_id: None)
+
+    resp = client.delete("/jobs/some-local-run")
+    assert resp.status_code == 204
+    assert cfg.get_dismissed_hub_jobs() == set()

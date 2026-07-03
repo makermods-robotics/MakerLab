@@ -304,6 +304,14 @@ export interface HubJob {
   url: string;
 }
 
+// Hub stages still doing work. Anything outside this set (COMPLETED, FAILED,
+// CANCELED, …) is a terminal leftover — demoted to UNTRACKED and dismissible.
+// Mirrors _HUB_ACTIVE_STAGES on the backend.
+export const HUB_ACTIVE_STAGES = new Set(["RUNNING", "QUEUED", "SCHEDULING"]);
+
+export const isHubJobActive = (job: HubJob): boolean =>
+  HUB_ACTIVE_STAGES.has((job.status?.stage ?? "").toUpperCase());
+
 export interface HubModel {
   repo_id: string;
   last_modified: string | null;
@@ -340,6 +348,24 @@ export async function deleteHubModel(
     fetcher,
     `/jobs/hub/models/${repoId}`,
     { method: "DELETE", action: "Delete hub model" },
+  );
+}
+
+/**
+ * Hide a Hub job from the /jobs/hub listing. A local, persisted dismissal on
+ * the backend — the HF Jobs API has no delete, so the job record on the Hub
+ * itself is untouched.
+ */
+export async function dismissHubJob(
+  baseUrl: string,
+  fetcher: Fetcher,
+  jobId: string,
+): Promise<void> {
+  await apiRequest<void>(
+    baseUrl,
+    fetcher,
+    `/jobs/hub/jobs/${encodeURIComponent(jobId)}/dismiss`,
+    { method: "POST", action: "Dismiss hub job" },
   );
 }
 

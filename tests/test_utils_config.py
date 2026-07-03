@@ -302,7 +302,9 @@ def test_validate_calibration_data_accepts_well_formed() -> None:
         {},  # empty
         {"m": {"id": 1}},  # missing fields
         {"m": "not-an-object"},  # motor not a dict
-        {"m": {"id": True, "drive_mode": 0, "homing_offset": 0, "range_min": 0, "range_max": 1}},  # bool not int
+        {
+            "m": {"id": True, "drive_mode": 0, "homing_offset": 0, "range_min": 0, "range_max": 1}
+        },  # bool not int
     ],
 )
 def test_validate_calibration_data_rejects_malformed(data) -> None:
@@ -501,10 +503,14 @@ def test_bimanual_record_clean_requires_all_four_calibrations(tmp_lerobot_home: 
     record = {
         "name": "bi",
         "mode": "bimanual",
-        "leader_port": "/dev/ll", "follower_port": "/dev/lf",
-        "leader_config": "LL", "follower_config": "LF",
-        "right_leader_port": "/dev/rl", "right_follower_port": "/dev/rf",
-        "right_leader_config": "RL", "right_follower_config": "RF",
+        "leader_port": "/dev/ll",
+        "follower_port": "/dev/lf",
+        "leader_config": "LL",
+        "follower_config": "LF",
+        "right_leader_port": "/dev/rl",
+        "right_follower_port": "/dev/rf",
+        "right_leader_config": "RL",
+        "right_follower_config": "RF",
     }
     # Only the left pair's files exist -> not clean.
     (Path(cfg.LEADER_CONFIG_PATH) / "LL.json").write_text("{}")
@@ -522,8 +528,10 @@ def test_config_slot_conflict_detects_same_side_duplicate() -> None:
 
     base = {
         "mode": "bimanual",
-        "leader_config": "L1", "follower_config": "F1",
-        "right_leader_config": "L2", "right_follower_config": "F2",
+        "leader_config": "L1",
+        "follower_config": "F1",
+        "right_leader_config": "L2",
+        "right_follower_config": "F2",
     }
     assert cfg.config_slot_conflict(base) is None
     assert cfg.config_slot_conflict({**base, "right_leader_config": "L1"}) == "leader"
@@ -534,14 +542,21 @@ def test_port_slot_conflict_detects_shared_port() -> None:
     from lelab.utils import config as cfg
 
     # Single: leader and follower must differ.
-    assert cfg.port_slot_conflict({"mode": "single", "leader_port": "/dev/a", "follower_port": "/dev/b"}) is None
-    assert cfg.port_slot_conflict({"mode": "single", "leader_port": "/dev/a", "follower_port": "/dev/a"}) == "/dev/a"
+    assert (
+        cfg.port_slot_conflict({"mode": "single", "leader_port": "/dev/a", "follower_port": "/dev/b"}) is None
+    )
+    assert (
+        cfg.port_slot_conflict({"mode": "single", "leader_port": "/dev/a", "follower_port": "/dev/a"})
+        == "/dev/a"
+    )
 
     # Bimanual: all four must differ, across sides.
     base = {
         "mode": "bimanual",
-        "leader_port": "/dev/a", "follower_port": "/dev/b",
-        "right_leader_port": "/dev/c", "right_follower_port": "/dev/d",
+        "leader_port": "/dev/a",
+        "follower_port": "/dev/b",
+        "right_leader_port": "/dev/c",
+        "right_follower_port": "/dev/d",
     }
     assert cfg.port_slot_conflict(base) is None
     assert cfg.port_slot_conflict({**base, "right_follower_port": "/dev/a"}) == "/dev/a"
@@ -553,11 +568,17 @@ def test_config_slot_conflict_ignores_single_mode_and_cross_side() -> None:
     from lelab.utils import config as cfg
 
     # Single mode never conflicts (one slot per side).
-    assert cfg.config_slot_conflict({"mode": "single", "leader_config": "X", "right_leader_config": "X"}) is None
+    assert (
+        cfg.config_slot_conflict({"mode": "single", "leader_config": "X", "right_leader_config": "X"}) is None
+    )
     # Same name across sides is fine — different directories.
-    assert cfg.config_slot_conflict({"mode": "bimanual", "leader_config": "X", "follower_config": "X"}) is None
+    assert (
+        cfg.config_slot_conflict({"mode": "bimanual", "leader_config": "X", "follower_config": "X"}) is None
+    )
     # Empty slots don't count as a conflict.
-    assert cfg.config_slot_conflict({"mode": "bimanual", "leader_config": "", "right_leader_config": ""}) is None
+    assert (
+        cfg.config_slot_conflict({"mode": "bimanual", "leader_config": "", "right_leader_config": ""}) is None
+    )
 
 
 def test_is_robot_record_clean_with_stem_configs(tmp_lerobot_home: Path) -> None:
@@ -691,3 +712,45 @@ def test_setup_calibration_files_rejects_unassigned_arm(tmp_lerobot_home: Path) 
         cfg.setup_calibration_files("whatever.json", "  ")
     with pytest.raises(FileNotFoundError, match="follower arm has no calibration assigned"):
         cfg.setup_follower_calibration_file("")
+
+
+# --- Dismissed hub jobs -----------------------------------------------------
+
+
+def test_dismissed_hub_jobs_round_trips(tmp_lerobot_home: Path) -> None:
+    assert cfg.get_dismissed_hub_jobs() == set()
+    assert cfg.add_dismissed_hub_job("job-b") is True
+    assert cfg.add_dismissed_hub_job("job-a") is True
+    assert cfg.get_dismissed_hub_jobs() == {"job-a", "job-b"}
+    # Idempotent: re-dismissing is a no-op success.
+    assert cfg.add_dismissed_hub_job("job-a") is True
+    assert cfg.get_dismissed_hub_jobs() == {"job-a", "job-b"}
+
+
+def test_add_dismissed_hub_job_rejects_blank_id(tmp_lerobot_home: Path) -> None:
+    assert cfg.add_dismissed_hub_job("") is False
+    assert cfg.add_dismissed_hub_job("   ") is False
+    assert cfg.get_dismissed_hub_jobs() == set()
+
+
+def test_get_dismissed_hub_jobs_tolerates_corrupt_file(tmp_lerobot_home: Path) -> None:
+    """Dismissal is cosmetic — a corrupted file must yield the empty set, not
+    an exception that would block the hub listing."""
+    path = Path(cfg.DISMISSED_HUB_JOBS_FILE)
+    path.write_text("not json{")
+    assert cfg.get_dismissed_hub_jobs() == set()
+    # Wrong shape (dict instead of list) and non-string entries are dropped too.
+    path.write_text(json.dumps({"job-a": True}))
+    assert cfg.get_dismissed_hub_jobs() == set()
+    path.write_text(json.dumps(["job-a", 3, None, "  "]))
+    assert cfg.get_dismissed_hub_jobs() == {"job-a"}
+
+
+def test_prune_dismissed_hub_jobs_drops_ids_gone_from_listing(tmp_lerobot_home: Path) -> None:
+    cfg.add_dismissed_hub_job("job-live")
+    cfg.add_dismissed_hub_job("job-expired")
+    cfg.prune_dismissed_hub_jobs({"job-live", "job-other"})
+    assert cfg.get_dismissed_hub_jobs() == {"job-live"}
+    # Pruning against a listing that contains everything is a no-op.
+    cfg.prune_dismissed_hub_jobs({"job-live"})
+    assert cfg.get_dismissed_hub_jobs() == {"job-live"}

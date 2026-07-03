@@ -1,12 +1,13 @@
 import React from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { HubJob } from "@/lib/jobsApi";
+import { HubJob, isHubJobActive } from "@/lib/jobsApi";
 import {
   ExternalLink,
   AlertTriangle,
   CheckCircle2,
   Loader2,
+  X,
   XCircle,
   Clock,
   HelpCircle,
@@ -14,6 +15,10 @@ import {
 
 interface Props {
   job: HubJob;
+  // Hide this job from the list (persisted backend-side; the Hub record is
+  // untouched). The X is only offered on terminal stages — an active run
+  // can't be dismissed out of sight.
+  onDismiss?: (id: string) => void;
 }
 
 function relativeTime(iso: string | null): string {
@@ -45,7 +50,7 @@ const stagePresentation: Record<string, StagePresentation> = {
   CANCELLED: { label: "Cancelled", color: "text-amber-400", Icon: AlertTriangle },
 };
 
-const HubJobCard: React.FC<Props> = ({ job }) => {
+const HubJobCard: React.FC<Props> = ({ job, onDismiss }) => {
   const stage = job.status?.stage?.toUpperCase() ?? "";
   const present: StagePresentation = stagePresentation[stage] ?? {
     label: stage || "Unknown",
@@ -67,22 +72,44 @@ const HubJobCard: React.FC<Props> = ({ job }) => {
             <Icon className={`w-3.5 h-3.5 ${present.spin ? "animate-spin" : ""}`} />
             {present.label}
           </div>
-          <Button
-            variant="ghost"
-            size="icon"
-            asChild
-            className="h-7 w-7 text-slate-400 hover:text-white"
-            aria-label="View on Hub"
-          >
-            <a
-              href={job.url}
-              target="_blank"
-              rel="noopener noreferrer"
-              onClick={(e) => e.stopPropagation()}
+          <div className="flex items-center gap-0.5">
+            <Button
+              variant="ghost"
+              size="icon"
+              asChild
+              className="h-7 w-7 text-slate-400 hover:text-white"
+              aria-label="View on Hub"
             >
-              <ExternalLink className="w-3.5 h-3.5" />
-            </a>
-          </Button>
+              <a
+                href={job.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <ExternalLink className="w-3.5 h-3.5" />
+              </a>
+            </Button>
+            {onDismiss && !isHubJobActive(job) ? (
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (
+                    window.confirm(
+                      "Remove this job from the list? The job record on Hugging Face is unaffected.",
+                    )
+                  )
+                    onDismiss(job.id);
+                }}
+                className="h-7 w-7 text-slate-400 hover:text-white"
+                aria-label="Remove job from list"
+                title="Remove from list"
+              >
+                <X className="w-3.5 h-3.5" />
+              </Button>
+            ) : null}
+          </div>
         </div>
         <div>
           <div className="text-white font-semibold truncate" title={title}>

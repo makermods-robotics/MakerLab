@@ -10,7 +10,9 @@ import {
   JobProgressSnapshot,
   JobRecord,
   deleteJob,
+  dismissHubJob,
   getJob,
+  isHubJobActive,
   listHubJobs,
   listJobs,
   stopJob,
@@ -30,15 +32,8 @@ import { ChevronRight, Download, RefreshCw, Search } from "lucide-react";
 
 const LIMIT = 10;
 
-// Hub stages still doing work. Anything outside this set (COMPLETED, FAILED,
-// CANCELED, …) gets demoted to UNTRACKED.
-const HUB_ACTIVE_STAGES = new Set(["RUNNING", "QUEUED", "SCHEDULING"]);
-
 const isJobActive = (j: JobRecord) =>
   j.state === "running" || j.checkpoint_count > 0;
-
-const isHubJobActive = (h: HubJob) =>
-  HUB_ACTIVE_STAGES.has((h.status?.stage ?? "").toUpperCase());
 
 const JobsSection: React.FC = () => {
   const { baseUrl, fetchWithHeaders } = useApi();
@@ -205,6 +200,22 @@ const JobsSection: React.FC = () => {
     } catch (e) {
       toast({
         title: "Delete failed",
+        description: e instanceof Error ? e.message : String(e),
+        variant: "destructive",
+      });
+    }
+  };
+
+  // Untracked hub jobs aren't deletable on the Hub (the Jobs API has no
+  // delete), so "remove" is a persisted backend-side dismissal.
+  const handleDismissHubJob = async (id: string) => {
+    try {
+      await dismissHubJob(baseUrl, fetchWithHeaders, id);
+      toast({ title: "Job removed from list" });
+      refresh();
+    } catch (e) {
+      toast({
+        title: "Remove failed",
         description: e instanceof Error ? e.message : String(e),
         variant: "destructive",
       });
@@ -469,7 +480,11 @@ const JobsSection: React.FC = () => {
                       />
                     ))}
                     {untrackedHubActive.map((job) => (
-                      <HubJobCard key={job.id} job={job} />
+                      <HubJobCard
+                        key={job.id}
+                        job={job}
+                        onDismiss={handleDismissHubJob}
+                      />
                     ))}
                     {untrackedHubModels.map((model) => (
                       <HubModelCard
@@ -515,7 +530,11 @@ const JobsSection: React.FC = () => {
                   />
                 ))}
                 {untrackedHubInactive.map((job) => (
-                  <HubJobCard key={job.id} job={job} />
+                  <HubJobCard
+                    key={job.id}
+                    job={job}
+                    onDismiss={handleDismissHubJob}
+                  />
                 ))}
               </div>
             </CollapsibleContent>

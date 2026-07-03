@@ -71,6 +71,7 @@ def tmp_lerobot_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(cfg, "CONFIG_STORAGE_PATH", str(saved_dir))
     monkeypatch.setattr(cfg, "LEADER_CONFIG_FILE", str(saved_dir / "leader_config.txt"))
     monkeypatch.setattr(cfg, "FOLLOWER_CONFIG_FILE", str(saved_dir / "follower_config.txt"))
+    monkeypatch.setattr(cfg, "DISMISSED_HUB_JOBS_FILE", str(cache / "dismissed_hub_jobs.json"))
 
     return cache
 

@@ -45,6 +45,11 @@ FOLLOWER_CONFIG_FILE = os.path.join(CONFIG_STORAGE_PATH, "follower_config.txt")
 # Robot config records (per-robot JSON metadata)
 ROBOTS_PATH = os.path.expanduser("~/.cache/huggingface/lerobot/robots")
 
+# Hub-job ids the user dismissed from the jobs UI (JSON list of strings). The
+# HF Jobs API has no delete — a finished job stays in list_jobs() indefinitely
+# — so hiding a dead run from the untracked list must be persisted locally.
+DISMISSED_HUB_JOBS_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/dismissed_hub_jobs.json")
+
 # Tag stamped on every dataset pushed to the Hub from LeLab, so we can later
 # query the Hub for LeLab-produced datasets and compute usage metrics.
 LELAB_TAG = "LeLab"
@@ -640,9 +645,7 @@ def port_slot_conflict(record: dict) -> str | None:
     leader vs follower in single mode, and all four in bimanual mode. Empty ports
     are ignored (not yet set).
     """
-    fields = _SINGLE_PORT_FIELDS + (
-        _BIMANUAL_PORT_FIELDS if record.get("mode") == "bimanual" else ()
-    )
+    fields = _SINGLE_PORT_FIELDS + (_BIMANUAL_PORT_FIELDS if record.get("mode") == "bimanual" else ())
     seen: set[str] = set()
     for field in fields:
         port = record.get(field, "")
@@ -652,6 +655,59 @@ def port_slot_conflict(record: dict) -> str | None:
             return port
         seen.add(port)
     return None
+
+
+# ---------------------------------------------------------------------------
+# Dismissed hub jobs
+# ---------------------------------------------------------------------------
+
+
+def get_dismissed_hub_jobs() -> set[str]:
+    """Return the set of hub-job ids the user dismissed from the jobs UI.
+
+    A missing or corrupted file yields the empty set — dismissal is cosmetic,
+    so it must never block the hub listing.
+    """
+    if not os.path.exists(DISMISSED_HUB_JOBS_FILE):
+        return set()
+    try:
+        with open(DISMISSED_HUB_JOBS_FILE) as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        logger.error(f"Failed to read dismissed hub jobs: {e}")
+        return set()
+    if not isinstance(data, list):
+        return set()
+    return {j for j in data if isinstance(j, str) and j.strip()}
+
+
+def add_dismissed_hub_job(job_id: str) -> bool:
+    """Persist a hub-job id as dismissed. Returns False for a blank id.
+
+    Idempotent — re-dismissing an already-dismissed id is a no-op success.
+    """
+    job_id = (job_id or "").strip()
+    if not job_id:
+        return False
+    dismissed = get_dismissed_hub_jobs()
+    if job_id not in dismissed:
+        dismissed.add(job_id)
+        _atomic_write_text(DISMISSED_HUB_JOBS_FILE, json.dumps(sorted(dismissed), indent=2))
+        logger.info(f"Dismissed hub job {job_id}")
+    return True
+
+
+def prune_dismissed_hub_jobs(live_job_ids: set[str]) -> None:
+    """Drop dismissed ids that no longer appear in the Hub listing, so the file
+    only tracks ids that still need hiding.
+
+    Call only with a listing that actually succeeded — pruning against a failed
+    (empty) fetch would forget every dismissal.
+    """
+    dismissed = get_dismissed_hub_jobs()
+    kept = dismissed & live_job_ids
+    if kept != dismissed:
+        _atomic_write_text(DISMISSED_HUB_JOBS_FILE, json.dumps(sorted(kept), indent=2))
 
 
 # ---------------------------------------------------------------------------

@@ -264,6 +264,15 @@ const JobCard: React.FC<Props> = ({
         )
       )
         onDelete(job.id);
+    } else if (job.runner === "hf_cloud") {
+      // Cloud runs live on the Hub: deleting the record only removes it (and
+      // its local logs) from this list — uploaded model repos are untouched.
+      if (
+        window.confirm(
+          "Remove this cloud run from the list? Model repos on the Hub are not deleted.",
+        )
+      )
+        onDelete(job.id);
     } else if (
       window.confirm("Delete this run? This wipes the output directory.")
     ) {
@@ -425,7 +434,12 @@ const JobCard: React.FC<Props> = ({
                   <ExternalLink className="w-3.5 h-3.5" />
                 </a>
               </Button>
-            ) : (
+            ) : null}
+            {/* A running cloud run is steered from its Hub page (the link
+                above), so it gets no local action button. Everything else —
+                including a FINISHED cloud run — gets stop/delete, so dead
+                cloud runs are removable instead of link-only. */}
+            {!(job.runner === "hf_cloud" && job.hf_job_url && isRunning) ? (
               <Button
                 variant="ghost"
                 size="icon"
@@ -439,7 +453,7 @@ const JobCard: React.FC<Props> = ({
                   <X className="w-3.5 h-3.5" />
                 )}
               </Button>
-            )}
+            ) : null}
           </div>
         </div>
         <div>
