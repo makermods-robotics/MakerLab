@@ -314,10 +314,9 @@ const Landing = () => {
     >
       <LandingTopBar />
 
-      <div
-        className="sticky z-20 bg-black/95 backdrop-blur supports-[backdrop-filter]:bg-black/70 border-b border-gray-800"
-        style={{ top: "var(--lelab-topbar-h)" }}
-      >
+      {/* Scrolls with the page (user preference) — only the slim top bar stays
+          sticky; the card row previously pinned itself below it. */}
+      <div className="bg-black border-b border-gray-800">
         <div className="mx-auto max-w-7xl px-4 py-4 grid gap-4 grid-cols-1 lg:grid-cols-[1.2fr_2fr]">
           <RobotConfigManager
             records={records}
