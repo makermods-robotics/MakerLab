@@ -39,6 +39,8 @@ lelab = "lelab.scripts.lelab:main"
 # Headless robot-station posture as an installed command: --lan --offline
 # defaults, extra args pass through. What the systemd unit runs.
 lelab-station = "lelab.scripts.lelab:station"
+# House name for the same thing — `makerlabs` at any prompt starts the station.
+makerlabs = "lelab.scripts.lelab:station"
 
 [tool.setuptools.packages.find]
 where = ["."]

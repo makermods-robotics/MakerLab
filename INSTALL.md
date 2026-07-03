@@ -81,6 +81,24 @@ edit the paths/user in the file if yours differ, and see the comments in
 [deploy/lelab-station.service](deploy/lelab-station.service) for the
 online-posture variant and day-to-day systemctl commands.
 
+**Global commands without `.venv/bin/` prefixes:** the entry points
+(`lelab`, `lelab-station`, and the house alias `makerlabs`) live in the
+venv. To type them from any directory, symlink them onto your PATH — global
+command, no duplicated environment, always as fresh as the venv:
+
+```bash
+mkdir -p ~/.local/bin
+ln -sf ~/MakerLab/.venv/bin/lelab ~/MakerLab/.venv/bin/lelab-station \
+       ~/MakerLab/.venv/bin/makerlabs ~/.local/bin/
+```
+
+`uv tool install --editable .` achieves the same PATH effect but builds a
+second full environment (torch + lerobot duplicated, and it fights the
+GPU-torch install ordering) — and a NON-editable `uv tool install` snapshots
+the code, silently going stale as the repo moves. If a bare `lelab` ever
+behaves like an old version, check `which lelab` for a forgotten tool
+install (`uv tool uninstall lelab`) shadowing the symlink.
+
 The `usermod` only takes effect on a fresh login, and the server inherits its
 groups from the shell that launched it — log out, back in, *then* start the
 server. `HF_HUB_OFFLINE=1` makes every Hub-touching code path fail fast
