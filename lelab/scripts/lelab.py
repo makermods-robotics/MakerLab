@@ -44,6 +44,55 @@ FRONTEND_PATH = PROJECT_ROOT / "frontend"
 FRONTEND_DIST = FRONTEND_PATH / "dist"
 BACKEND_PORT = 8000
 FRONTEND_DEV_PORT = 8080
+ENTRY_POINT_NAMES = ("lelab", "lelab-station", "makerlabs")
+
+
+def _ensure_path_symlinks(source_dir: Path | None = None, bin_dir: Path | None = None) -> None:
+    """Self-install the entry points onto PATH (idempotent, best-effort).
+
+    pip has no post-install hook, so the first run by full path does the
+    INSTALL.md symlink step itself: each venv entry point gets a symlink in
+    ~/.local/bin. Correct links are left alone; stale symlinks (an old
+    clone's venv) are repointed; anything that is NOT a symlink is never
+    clobbered. Failures only log — PATH convenience must never block a
+    server start. Set LELAB_NO_PATH_LINK=1 to opt out.
+    """
+    if os.name != "posix" or os.environ.get("LELAB_NO_PATH_LINK"):
+        return
+    try:
+        source_dir = source_dir or Path(sys.executable).parent
+        bin_dir = bin_dir or Path.home() / ".local" / "bin"
+        created: list[str] = []
+        for name in ENTRY_POINT_NAMES:
+            source = source_dir / name
+            if not source.is_file():
+                continue  # partial env (entry point not installed here)
+            link = bin_dir / name
+            if link.is_symlink():
+                if link.resolve() == source.resolve():
+                    continue
+                link.unlink()  # stale: points into an old venv/clone
+            elif link.exists():
+                logger.warning(
+                    "Not shadowing %s — it exists and is not a symlink; remove it "
+                    "manually if `%s` should run this venv's copy.",
+                    link,
+                    name,
+                )
+                continue
+            bin_dir.mkdir(parents=True, exist_ok=True)
+            link.symlink_to(source)
+            created.append(name)
+        if created:
+            logger.info(
+                "🔗 Linked %s into %s — new shells can run them from any directory",
+                ", ".join(created),
+                bin_dir,
+            )
+            if str(bin_dir) not in os.environ.get("PATH", "").split(os.pathsep):
+                logger.warning("%s is not on your PATH — add it in your shell profile", bin_dir)
+    except Exception as exc:
+        logger.debug("PATH symlink self-install skipped: %s", exc)
 
 
 def _wait_for_port(port: int, timeout: int = 30) -> bool:
@@ -207,6 +256,8 @@ def main():
         help="Set HF_HUB_OFFLINE=1: every Hub call fails fast (all hardware flows work offline)",
     )
     args = parser.parse_args()
+
+    _ensure_path_symlinks()
 
     if args.offline:
         # Must land in the environment before lelab.server (and its

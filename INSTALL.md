@@ -83,8 +83,13 @@ online-posture variant and day-to-day systemctl commands.
 
 **Global commands without `.venv/bin/` prefixes:** the entry points
 (`lelab`, `lelab-station`, and the house alias `makerlabs`) live in the
-venv. To type them from any directory, symlink them onto your PATH — global
-command, no duplicated environment, always as fresh as the venv:
+venv, and **self-install onto your PATH on first launch**: any run by full
+path (e.g. `.venv/bin/makerlabs`) symlinks all three into `~/.local/bin` —
+global command, no duplicated environment, always as fresh as the venv.
+From then on, bare `makerlabs` works from any directory. The step is
+idempotent, repoints stale links from old clones, never clobbers a
+non-symlink, and can be disabled with `LELAB_NO_PATH_LINK=1`. The manual
+equivalent, if you prefer to do it yourself:
 
 ```bash
 mkdir -p ~/.local/bin
