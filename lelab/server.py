@@ -71,7 +71,6 @@ from .record import (
     UploadRequest,
     handle_delete_dataset,
     handle_exit_early,
-    handle_get_dataset_info,
     handle_recording_status,
     handle_rerecord_episode,
     handle_start_recording,
@@ -725,12 +724,6 @@ def upload_dataset(request: UploadRequest):
 def upload_status():
     """Current upload state + repo_id, message, and dataset_url once done."""
     return handle_upload_status()
-
-
-@app.post("/dataset-info")
-def get_dataset_info(request: DatasetInfoRequest):
-    """Get information about a saved dataset"""
-    return handle_get_dataset_info(request)
 
 
 @app.post("/delete-dataset")

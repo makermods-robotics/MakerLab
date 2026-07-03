@@ -60,9 +60,6 @@ current_episode = 1  # Track current episode number
 saved_episodes = 0  # Track how many episodes have been saved
 current_phase = "preparing"  # Track current phase: "preparing", "recording", "resetting", "completed"
 phase_start_time = None  # Track when current phase started
-last_recording_info: dict[str, Any] | None = (
-    None  # Snapshot of the most recently completed dataset (for /dataset-info)
-)
 # True when the most recent session saved zero episodes and its (freshly
 # created) dataset directory was discarded. Surfaced in the session-end status
 # so the frontend can tell the user nothing was kept (see Upload.tsx).
@@ -315,7 +312,6 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
         saved_episodes, \
         current_phase, \
         phase_start_time, \
-        last_recording_info, \
         last_session_discarded_empty, \
         identity_warnings
 
@@ -378,7 +374,6 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
         saved_episodes = 0
         current_phase = "preparing"
         phase_start_time = None
-        last_recording_info = None
         last_session_discarded_empty = False
         identity_warnings = []
 
@@ -417,7 +412,6 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                 phase_start_time, \
                 current_episode, \
                 saved_episodes, \
-                last_recording_info, \
                 last_session_discarded_empty
             recording_start_time = time.time()
             current_episode = 1
@@ -461,22 +455,11 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                     identity_config_names=identity_config_names,
                 )
                 logger.info(f"Recording completed successfully. Dataset has {dataset.num_episodes} episodes")
-                last_recording_info = {
-                    "success": True,
-                    "dataset_repo_id": request.dataset_repo_id,
-                    "num_episodes": dataset.num_episodes,
-                    "single_task": request.single_task,
-                    "fps": dataset.fps,
-                    "features": list(dataset.features.keys()),
-                    "total_frames": dataset.num_frames,
-                    "robot_type": getattr(dataset.meta, "robot_type", "Unknown robot"),
-                }
-            except Exception as e:
+            except Exception:
                 logger.exception("Recording session failed")
                 current_phase = "error"
                 if recording_start_time:
                     session_end_elapsed_seconds = int(time.time() - recording_start_time)
-                last_recording_info = {"success": False, "error": str(e)}
             finally:
                 if current_phase != "error":
                     current_phase = "completed"
@@ -674,61 +657,8 @@ def handle_recording_status() -> dict[str, Any]:
     return status
 
 
-def handle_get_dataset_info(request: DatasetInfoRequest) -> dict[str, Any]:
-    """Return dataset metadata — from the most recent session if it matches,
-    otherwise by loading the local LeRobot cache copy."""
-    if last_recording_info and last_recording_info.get("dataset_repo_id") == request.dataset_repo_id:
-        return last_recording_info
-
-    try:
-        from lerobot.datasets import LeRobotDataset
-
-        dataset = LeRobotDataset(request.dataset_repo_id)
-        # lerobot's metadata has no `single_task` attr — the real task strings
-        # live in meta.tasks (index = task string, col = task_index). Pair each
-        # with how many episodes use it (the per-episode `tasks` column), so a
-        # merged dataset shows its distinct tasks and their episode counts.
-        tasks_df = getattr(dataset.meta, "tasks", None)
-        ordered = (
-            list(tasks_df.sort_values("task_index").index)
-            if tasks_df is not None and len(tasks_df) > 0
-            else []
-        )
-        counts: dict[str, int] = {}
-        episodes = getattr(dataset.meta, "episodes", None)
-        # meta.episodes is a HF datasets.Dataset (column_names), but tolerate a
-        # pandas DataFrame (columns) too.
-        cols = getattr(episodes, "column_names", None)
-        if cols is None:
-            cols = list(getattr(episodes, "columns", []))
-        if episodes is not None and "tasks" in cols:
-            for arr in episodes["tasks"]:
-                items = arr.tolist() if hasattr(arr, "tolist") else list(arr or [])
-                for task in set(items):
-                    counts[task] = counts.get(task, 0) + 1
-        tasks = [{"task": t, "num_episodes": counts.get(t, 0)} for t in ordered]
-        return {
-            "success": True,
-            "dataset_repo_id": request.dataset_repo_id,
-            "num_episodes": dataset.num_episodes,
-            "tasks": tasks,
-            "single_task": ordered[0] if len(ordered) == 1 else "Unknown task",
-            "fps": dataset.fps,
-            "features": list(dataset.features.keys()),
-            "total_frames": dataset.num_frames,
-            "robot_type": getattr(dataset.meta, "robot_type", "Unknown robot"),
-        }
-    except Exception as e:
-        logger.warning(f"Could not load local dataset {request.dataset_repo_id}: {e}")
-        return {
-            "success": False,
-            "message": f"Dataset {request.dataset_repo_id} not found locally",
-        }
-
-
 def handle_delete_dataset(request: DatasetInfoRequest) -> dict[str, Any]:
     """Remove a recorded dataset's directory from local disk."""
-    global last_recording_info
     from pathlib import Path
 
     from lerobot.utils.constants import HF_LEROBOT_HOME
@@ -757,9 +687,6 @@ def handle_delete_dataset(request: DatasetInfoRequest) -> dict[str, Any]:
         logger.error(f"Failed to delete dataset {repo_id}: {e}")
         return {"success": False, "message": f"Failed to delete dataset: {e}"}
 
-    if last_recording_info and last_recording_info.get("dataset_repo_id") == repo_id:
-        last_recording_info = None
-
     logger.info(f"Deleted dataset directory {target}")
     return {"success": True, "message": f"Deleted {repo_id}"}
 
@@ -787,8 +714,6 @@ def _discard_empty_dataset(repo_id: str, resume: bool) -> bool:
     during session-end cleanup and must never mask an original error or block
     the hardware release. Returns True iff the directory was removed.
     """
-    global last_recording_info
-
     if resume:
         # Append-into-existing: the dataset predates this session. Never delete.
         return False
@@ -824,10 +749,8 @@ def _discard_empty_dataset(repo_id: str, resume: bool) -> bool:
         logger.warning(f"Failed to remove empty dataset {repo_id}: {e}")
         return False
 
-    # Drop any state pinned to the now-gone dataset, and invalidate a cached
-    # Hub-existence probe (cheap correctness — the repo no longer exists here).
-    if last_recording_info and last_recording_info.get("dataset_repo_id") == repo_id:
-        last_recording_info = None
+    # Invalidate the cached Hub-existence probe (cheap correctness — the
+    # repo no longer exists here).
     invalidate_hub_status(repo_id)
 
     logger.info(f"Removed empty dataset {repo_id} — no episodes were saved.")

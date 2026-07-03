@@ -216,9 +216,8 @@ def _read_task_strings(meta_dir: Path) -> list[str]:
 def _count_task_episodes(meta_dir: Path) -> dict[str, int]:
     """Episodes per task string, from the per-episode ``tasks`` column.
 
-    Same mapping the recording picker uses (see ``handle_get_dataset_info`` in
-    record.py): each episode lists the task strings it uses, and an episode
-    counts once per distinct task. Read directly from the metadata files —
+    Each episode lists the task strings it uses, and an episode counts once
+    per distinct task. Read directly from the metadata files —
     v3.0 keeps episode rows in ``meta/episodes/chunk-*/file-*.parquet`` (only
     the ``tasks`` column is loaded, not the wide per-episode stats), v2.x in
     ``meta/episodes.jsonl`` — so the endpoint stays a cheap file read instead
@@ -295,7 +294,6 @@ def get_local_dataset_info(repo_id: str) -> dict[str, Any] | None:
     features = info.get("features") or {}
     cameras = [key[len(CAMERA_FEATURE_PREFIX) :] for key in features if key.startswith(CAMERA_FEATURE_PREFIX)]
 
-    # Same {task, num_episodes} shape as record.py's handle_get_dataset_info.
     task_counts = _count_task_episodes(path / "meta")
     tasks = [
         {"task": task, "num_episodes": task_counts.get(task, 0)} for task in _read_task_strings(path / "meta")
