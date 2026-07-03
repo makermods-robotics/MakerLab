@@ -10,7 +10,7 @@ import {
 } from "@/components/ui/select";
 import { Input } from "@/components/ui/input";
 import { NumberInput } from "@/components/ui/number-input";
-import { Camera, Plus, X, VideoOff, RefreshCw, ChevronRight } from "lucide-react";
+import { Camera, Plus, Trash2, VideoOff, RefreshCw, ChevronRight } from "lucide-react";
 import {
   Collapsible,
   CollapsibleContent,
@@ -403,8 +403,9 @@ const CameraPreview: React.FC<CameraPreviewProps> = ({
             size="sm"
             variant="ghost"
             className="text-red-400 hover:text-red-300 hover:bg-red-900/20 p-1"
+            aria-label="Remove camera"
           >
-            <X className="w-4 h-4" />
+            <Trash2 className="w-4 h-4" />
           </Button>
         </div>
 

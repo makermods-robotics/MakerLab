@@ -7,7 +7,7 @@ import {
   AlertTriangle,
   CheckCircle2,
   Loader2,
-  X,
+  Trash2,
   XCircle,
   Clock,
   HelpCircle,
@@ -16,8 +16,8 @@ import {
 interface Props {
   job: HubJob;
   // Hide this job from the list (persisted backend-side; the Hub record is
-  // untouched). The X is only offered on terminal stages — an active run
-  // can't be dismissed out of sight.
+  // untouched). The trash button is only offered on terminal stages — an
+  // active run can't be dismissed out of sight.
   onDismiss?: (id: string) => void;
 }
 
@@ -102,11 +102,11 @@ const HubJobCard: React.FC<Props> = ({ job, onDismiss }) => {
                   )
                     onDismiss(job.id);
                 }}
-                className="h-7 w-7 text-slate-400 hover:text-white"
+                className="h-7 w-7 text-slate-400 hover:text-red-400"
                 aria-label="Remove job from list"
                 title="Remove from list"
               >
-                <X className="w-3.5 h-3.5" />
+                <Trash2 className="w-3.5 h-3.5" />
               </Button>
             ) : null}
           </div>

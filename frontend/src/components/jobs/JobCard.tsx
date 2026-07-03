@@ -14,7 +14,7 @@ import {
 import { JobRecord, jobDisplayName, renameJob } from "@/lib/jobsApi";
 import {
   Square,
-  X,
+  Trash2,
   AlertTriangle,
   CheckCircle2,
   Loader2,
@@ -444,13 +444,15 @@ const JobCard: React.FC<Props> = ({
                 variant="ghost"
                 size="icon"
                 onClick={handleAction}
-                className="h-7 w-7 text-slate-400 hover:text-white"
+                className={`h-7 w-7 text-slate-400 ${
+                  isRunning ? "hover:text-white" : "hover:text-red-400"
+                }`}
                 aria-label={isRunning ? "Stop job" : "Delete job"}
               >
                 {isRunning ? (
                   <Square className="w-3.5 h-3.5" />
                 ) : (
-                  <X className="w-3.5 h-3.5" />
+                  <Trash2 className="w-3.5 h-3.5" />
                 )}
               </Button>
             ) : null}
