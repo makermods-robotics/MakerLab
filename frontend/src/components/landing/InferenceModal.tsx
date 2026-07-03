@@ -33,30 +33,51 @@ import { startInference } from "@/lib/inferenceApi";
 import CheckpointDropdown from "@/components/jobs/CheckpointDropdown";
 import { useAvailableCameras } from "@/hooks/useAvailableCameras";
 import { useCameraStream } from "@/hooks/useCameraStream";
+import BackendCameraStream from "@/components/BackendCameraStream";
 
-const CameraThumbnail: React.FC<{ deviceId: string; paused: boolean }> = ({
-  deviceId,
-  paused,
-}) => {
+const CameraThumbnail: React.FC<{
+  deviceId: string;
+  /** cv2 index on the server — MJPEG fallback when there's no deviceId match
+   * (headless deployment: the cameras are plugged into the server). */
+  cameraIndex?: number;
+  paused: boolean;
+}> = ({ deviceId, cameraIndex, paused }) => {
   const { videoRef, hasError } = useCameraStream(deviceId, paused);
-  if (paused || hasError || !deviceId) {
+  const [mjpegError, setMjpegError] = useState(false);
+  // A new index is a new stream — forget the previous one's failure.
+  useEffect(() => setMjpegError(false), [cameraIndex]);
+
+  const showVideo = !paused && deviceId && !hasError;
+  const showMjpeg =
+    !paused && !deviceId && cameraIndex !== undefined && !mjpegError;
+
+  if (showVideo) {
     return (
-      <div className="w-32 h-24 bg-gray-800 rounded border border-gray-700 flex flex-col items-center justify-center">
-        <VideoOff className="w-5 h-5 text-gray-500 mb-1" />
-        <span className="text-[10px] text-gray-500">
-          {paused ? "Released" : "No preview"}
-        </span>
-      </div>
+      <video
+        ref={videoRef}
+        autoPlay
+        muted
+        playsInline
+        className="w-32 h-24 object-cover rounded border border-gray-700 bg-black"
+      />
+    );
+  }
+  if (showMjpeg) {
+    return (
+      <BackendCameraStream
+        cameraIndex={cameraIndex}
+        onError={() => setMjpegError(true)}
+        className="w-32 h-24 object-cover rounded border border-gray-700 bg-black"
+      />
     );
   }
   return (
-    <video
-      ref={videoRef}
-      autoPlay
-      muted
-      playsInline
-      className="w-32 h-24 object-cover rounded border border-gray-700 bg-black"
-    />
+    <div className="w-32 h-24 bg-gray-800 rounded border border-gray-700 flex flex-col items-center justify-center">
+      <VideoOff className="w-5 h-5 text-gray-500 mb-1" />
+      <span className="text-[10px] text-gray-500">
+        {paused ? "Released" : "No preview"}
+      </span>
+    </div>
   );
 };
 
@@ -451,7 +472,11 @@ const InferenceModal: React.FC<Props> = ({
                           )}
                         </SelectContent>
                       </Select>
-                      <CameraThumbnail deviceId={bound?.deviceId ?? ""} paused={submitting} />
+                      <CameraThumbnail
+                        deviceId={bound?.deviceId ?? ""}
+                        cameraIndex={value ?? undefined}
+                        paused={submitting}
+                      />
                     </div>
                   );
                 })}
