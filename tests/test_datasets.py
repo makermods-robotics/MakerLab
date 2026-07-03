@@ -22,6 +22,7 @@ from unittest.mock import MagicMock, patch
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 from fastapi.testclient import TestClient
 
 
@@ -419,3 +420,182 @@ def test_hub_status_endpoint(client: TestClient) -> None:
     assert body["repo_id"] == "alice/pick"
     assert body["status"] == "on_hub"
     assert body["url"] == "https://huggingface.co/datasets/alice/pick"
+
+
+# --- Rename -----------------------------------------------------------------
+
+
+def test_rename_local_dataset_moves_directory(tmp_lerobot_home: Path) -> None:
+    """Happy path: the directory moves, only the name segment changes, and the
+    returned repo id carries the fixed namespace prefix."""
+    from lelab.datasets import rename_local_dataset
+
+    _make_dataset(tmp_lerobot_home, "makermods/old_name", episodes=3)
+
+    new_id = rename_local_dataset("makermods/old_name", "new_name")
+
+    assert new_id == "makermods/new_name"
+    assert not (tmp_lerobot_home / "makermods" / "old_name").exists()
+    assert (tmp_lerobot_home / "makermods" / "new_name" / "meta" / "info.json").is_file()
+
+
+def test_rename_endpoint_old_id_404s_new_id_resolves(client: TestClient, tmp_lerobot_home: Path) -> None:
+    """End-to-end through the route: after a rename the old id 404s on
+    /datasets/info and the new id resolves."""
+    _write_info(
+        tmp_lerobot_home,
+        "makermods/pick",
+        {"total_episodes": 3, "total_frames": 900, "fps": 30, "features": {}},
+    )
+
+    resp = client.post(
+        "/datasets/rename",
+        json={"repo_id": "makermods/pick", "new_name": "place"},
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {"success": True, "repo_id": "makermods/place"}
+
+    old = client.get("/datasets/info", params={"repo_id": "makermods/pick"})
+    assert old.status_code == 404
+    new = client.get("/datasets/info", params={"repo_id": "makermods/place"})
+    assert new.status_code == 200
+    assert new.json()["total_episodes"] == 3
+
+
+def test_rename_bare_dataset_keeps_no_namespace(tmp_lerobot_home: Path) -> None:
+    """A dataset with no namespace renames to a bare name (no prefix invented)."""
+    from lelab.datasets import rename_local_dataset
+
+    _make_dataset(tmp_lerobot_home, "solo", episodes=1)
+    assert rename_local_dataset("solo", "solo2") == "solo2"
+    assert (tmp_lerobot_home / "solo2" / "meta" / "info.json").is_file()
+
+
+def test_rename_same_name_is_noop(tmp_lerobot_home: Path) -> None:
+    from lelab.datasets import rename_local_dataset
+
+    _make_dataset(tmp_lerobot_home, "makermods/keep", episodes=1)
+    assert rename_local_dataset("makermods/keep", "keep") == "makermods/keep"
+
+
+def test_rename_rejects_invalid_name(tmp_lerobot_home: Path) -> None:
+    """new_name is validated with the same rules as recording — a slash is a
+    name segment, not a namespace, so it's rejected."""
+    from lelab.datasets import DatasetRenameError, rename_local_dataset
+
+    _make_dataset(tmp_lerobot_home, "makermods/src", episodes=1)
+
+    for bad in ["with/slash", "..", " leading", ""]:
+        with pytest.raises(DatasetRenameError) as exc:
+            rename_local_dataset("makermods/src", bad)
+        assert exc.value.status == 400
+    # The source was never moved by a rejected rename.
+    assert (tmp_lerobot_home / "makermods" / "src").exists()
+
+
+def test_rename_missing_source_404s(tmp_lerobot_home: Path) -> None:
+    from lelab.datasets import DatasetRenameError, rename_local_dataset
+
+    with pytest.raises(DatasetRenameError) as exc:
+        rename_local_dataset("makermods/ghost", "new")
+    assert exc.value.status == 404
+
+
+def test_rename_target_exists_409s(tmp_lerobot_home: Path) -> None:
+    from lelab.datasets import DatasetRenameError, rename_local_dataset
+
+    _make_dataset(tmp_lerobot_home, "makermods/src", episodes=1)
+    _make_dataset(tmp_lerobot_home, "makermods/taken", episodes=1)
+
+    with pytest.raises(DatasetRenameError) as exc:
+        rename_local_dataset("makermods/src", "taken")
+    assert exc.value.status == 409
+    # Neither directory was touched.
+    assert (tmp_lerobot_home / "makermods" / "src").exists()
+    assert (tmp_lerobot_home / "makermods" / "taken").exists()
+
+
+def test_rename_rejects_path_traversal(tmp_lerobot_home: Path) -> None:
+    """A source id escaping the cache root is refused before any move."""
+    from lelab.datasets import DatasetRenameError, rename_local_dataset
+
+    outside = tmp_lerobot_home.parent / "outside"
+    (outside / "meta").mkdir(parents=True)
+    (outside / "meta" / "info.json").write_text(json.dumps({"total_episodes": 1}))
+
+    for bad in ["../outside", "..", "."]:
+        with pytest.raises(DatasetRenameError):
+            rename_local_dataset(bad, "new")
+
+
+def test_rename_busy_guard_recording(tmp_lerobot_home: Path) -> None:
+    """A rename is refused (409) while a recording session writes to the id —
+    matching either the stamped id or a rename of the still-writing base."""
+    from lelab import record as rec
+    from lelab.datasets import DatasetRenameError, rename_local_dataset
+
+    _make_dataset(tmp_lerobot_home, "makermods/live", episodes=1)
+
+    fake_cfg = MagicMock()
+    # Recording stamps a timestamp: name -> name_<ts>.
+    fake_cfg.dataset_repo_id = "makermods/live_20260101"
+    with (
+        patch.object(rec, "recording_active", True),
+        patch.object(rec, "recording_config", fake_cfg),
+        pytest.raises(DatasetRenameError) as exc,
+    ):
+        rename_local_dataset("makermods/live", "renamed")
+    assert exc.value.status == 409
+    assert (tmp_lerobot_home / "makermods" / "live").exists()
+
+
+def test_rename_busy_guard_merge(tmp_lerobot_home: Path) -> None:
+    """A rename is refused while a merge is producing the target id."""
+    from lelab import merge
+    from lelab.datasets import DatasetRenameError, rename_local_dataset
+
+    _make_dataset(tmp_lerobot_home, "makermods/out", episodes=1)
+
+    with (
+        patch.object(merge.merge_manager, "state", "running"),
+        patch.object(merge.merge_manager, "output_repo_id", "makermods/out"),
+        pytest.raises(DatasetRenameError) as exc,
+    ):
+        rename_local_dataset("makermods/out", "renamed")
+    assert exc.value.status == 409
+
+
+def test_rename_busy_guard_local_training(tmp_lerobot_home: Path) -> None:
+    """A rename is refused while a running local job trains on the id."""
+    from lelab.datasets import DatasetRenameError, rename_local_dataset
+
+    _make_dataset(tmp_lerobot_home, "makermods/train_ds", episodes=1)
+
+    # _dataset_in_use imports job_registry from .jobs lazily (datasets<->record
+    # cycle), so patch it at its source module.
+    from lelab import jobs
+
+    job = MagicMock()
+    job.state = "running"
+    job.runner = "local"
+    job.config.dataset_repo_id = "makermods/train_ds"
+    with (
+        patch.object(jobs.job_registry, "list", return_value=[job]),
+        pytest.raises(DatasetRenameError) as exc,
+    ):
+        rename_local_dataset("makermods/train_ds", "renamed")
+    assert exc.value.status == 409
+
+
+def test_rename_invalidates_hub_status_for_both_ids(tmp_lerobot_home: Path) -> None:
+    """The cached Hub-existence answer is dropped for BOTH the old and new id,
+    so the info card re-checks each after the move."""
+    from lelab import datasets as ds
+
+    _make_dataset(tmp_lerobot_home, "makermods/before", episodes=1)
+
+    with patch("lelab.datasets.invalidate_hub_status") as inval:
+        ds.rename_local_dataset("makermods/before", "after")
+
+    called = {c.args[0] for c in inval.call_args_list}
+    assert called == {"makermods/before", "makermods/after"}

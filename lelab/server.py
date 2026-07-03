@@ -560,6 +560,26 @@ def datasets_hub_status(repo_id: str):
     return dataset_browser.get_hub_status(repo_id)
 
 
+class DatasetRenameBody(BaseModel):
+    repo_id: str
+    new_name: str
+
+
+@app.post("/datasets/rename")
+def datasets_rename(body: DatasetRenameBody):
+    """Rename a locally-cached dataset by moving its directory.
+
+    `new_name` is the NAME PART ONLY — the namespace prefix stays fixed, so
+    `ns/old` renamed to `new` becomes `ns/new`. Refuses (409) if the dataset is
+    being recorded, merged, or trained on locally. Returns the new repo_id.
+    """
+    try:
+        new_repo_id = dataset_browser.rename_local_dataset(body.repo_id, body.new_name)
+    except dataset_browser.DatasetRenameError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.message) from exc
+    return {"success": True, "repo_id": new_repo_id}
+
+
 @app.post("/datasets/merge")
 def datasets_merge(request: MergeRequest):
     """Aggregate 2+ datasets into a new local dataset in the background."""

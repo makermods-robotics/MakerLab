@@ -118,6 +118,25 @@ export async function deleteDataset(
   });
 }
 
+/**
+ * Rename a locally-cached dataset by moving its directory. `newName` is the
+ * NAME PART ONLY — the namespace prefix stays fixed (so `ns/old` -> `ns/new`).
+ * Returns the new repo_id. Throws ApiError on a rejected rename (invalid name,
+ * target exists, dataset in use), with the backend's message in `.detail`.
+ */
+export async function renameDataset(
+  baseUrl: string,
+  fetcher: Fetcher,
+  repoId: string,
+  newName: string,
+): Promise<{ success: boolean; repo_id: string }> {
+  return apiRequest(baseUrl, fetcher, "/datasets/rename", {
+    method: "POST",
+    body: { repo_id: repoId, new_name: newName },
+    action: "Rename dataset",
+  });
+}
+
 export type MergeState = "idle" | "running" | "done" | "error";
 
 export interface MergeStatus {

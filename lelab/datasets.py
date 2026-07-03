@@ -23,6 +23,7 @@ from typing import Any
 import pyarrow.parquet as pq
 from huggingface_hub.errors import HfHubHTTPError
 
+from .utils.config import validate_dataset_name
 from .utils.hf_auth import cached_whoami, shared_hf_api
 
 logger = logging.getLogger(__name__)
@@ -310,6 +311,121 @@ def get_local_dataset_info(repo_id: str) -> dict[str, Any] | None:
         "tasks": tasks,
         "size_bytes": _dir_size_bytes(path),
     }
+
+
+class DatasetRenameError(Exception):
+    """Raised by rename_local_dataset when the rename can't proceed. `status`
+    is the HTTP status the route should return (400 invalid, 404 not found,
+    409 conflict/busy); `message` is the user-facing reason."""
+
+    def __init__(self, status: int, message: str) -> None:
+        super().__init__(message)
+        self.status = status
+        self.message = message
+
+
+def _dataset_in_use(repo_id: str) -> str | None:
+    """If `repo_id`'s directory is in use by a running operation, return a
+    legible reason to refuse a rename; else None.
+
+    Checks the three ways a dataset dir can be actively read/written:
+      * recording — the active session's (timestamp-stamped) repo id, OR the
+        base name the user typed (recording stamps ``name`` → ``name_<ts>``,
+        so a rename of the base while a session writes ``name_<ts>`` would
+        pull the directory out from under it);
+      * merge — the output dataset currently being aggregated;
+      * local training — any running local job whose config trains on it.
+
+    Read-only imports; each module owns its own state. Kept deliberately
+    simple: a false "in use" is safer than yanking a directory mid-write.
+    """
+    # Recording: record.py owns recording_active + recording_config.
+    from . import record as _record
+
+    if _record.recording_active and _record.recording_config is not None:
+        active_id = getattr(_record.recording_config, "dataset_repo_id", None)
+        # The session stamps a timestamp onto the base name (name -> name_<ts>),
+        # so match either the stamped id or a rename of the still-writing base.
+        if active_id and (active_id == repo_id or active_id.startswith(f"{repo_id}_")):
+            return "A recording session is writing to this dataset. Stop it before renaming."
+
+    # Merge: merge.py exposes a MergeManager singleton with state + output id.
+    from . import merge as _merge
+
+    mgr = _merge.merge_manager
+    if mgr.state == "running" and mgr.output_repo_id == repo_id:
+        return "A merge is producing this dataset right now. Wait for it to finish before renaming."
+
+    # Local training: a running local job whose config trains on this dataset.
+    from .jobs import job_registry
+
+    for record in job_registry.list(limit=200):
+        if (
+            record.state == "running"
+            and record.runner == "local"
+            and record.config.dataset_repo_id == repo_id
+        ):
+            return "A local training run is using this dataset. Stop it before renaming."
+
+    return None
+
+
+def rename_local_dataset(repo_id: str, new_name: str) -> str:
+    """Rename a locally-cached dataset by moving its directory.
+
+    A dataset's repo id *is* its path under the cache root, so a rename is a
+    directory move. `new_name` is the NAME PART ONLY — the namespace prefix is
+    fixed, so ``ns/old`` renamed to ``new`` becomes ``ns/new`` and a bare
+    ``old`` becomes ``new``. Returns the new repo id.
+
+    Raises DatasetRenameError (with an HTTP status + message) on: a bad
+    new_name, a source that isn't a local dataset, a target that already
+    exists, or the dataset being actively used (recording / merge / local
+    training). Invalidates the cached Hub-existence answer for BOTH ids so the
+    info card re-checks after the move.
+    """
+    ok, reason = validate_dataset_name(new_name)
+    if not ok:
+        raise DatasetRenameError(400, reason)
+
+    root = _lerobot_cache_root().resolve()
+    try:
+        src = (root / repo_id).resolve()
+    except OSError:
+        raise DatasetRenameError(400, "Invalid dataset path") from None
+    # Reject path traversal: the source must stay strictly inside the cache.
+    if src == root or root not in src.parents:
+        raise DatasetRenameError(400, "Invalid dataset path")
+    if not _is_dataset_dir(src):
+        raise DatasetRenameError(404, f"Dataset '{repo_id}' not found in the local cache")
+
+    # The namespace prefix is fixed — swap only the final path segment.
+    namespace = repo_id.rsplit("/", 1)[0] if "/" in repo_id else None
+    new_repo_id = f"{namespace}/{new_name}" if namespace else new_name
+    if new_repo_id == repo_id:
+        return repo_id  # no-op
+
+    dst = src.parent / new_name
+    if dst.exists():
+        raise DatasetRenameError(409, f"A dataset named '{new_repo_id}' already exists.")
+
+    in_use = _dataset_in_use(repo_id)
+    if in_use is not None:
+        raise DatasetRenameError(409, in_use)
+
+    try:
+        os.rename(src, dst)
+    except OSError as exc:
+        logger.error("Failed to rename dataset %s -> %s: %s", repo_id, new_repo_id, exc)
+        raise DatasetRenameError(500, f"Failed to rename dataset: {exc}") from exc
+
+    # The old id no longer exists and the new id now does — drop both cached
+    # Hub-existence answers so the next hub-status check re-queries.
+    invalidate_hub_status(repo_id)
+    invalidate_hub_status(new_repo_id)
+
+    logger.info("Renamed dataset directory %s -> %s", src, dst)
+    return new_repo_id
 
 
 def list_user_datasets() -> list[dict[str, Any]]:

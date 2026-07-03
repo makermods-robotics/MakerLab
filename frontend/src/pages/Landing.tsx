@@ -359,7 +359,18 @@ const Landing = () => {
                   <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
                 </Button>
               </DatasetPicker>
-              {selectedDataset && <DatasetInfoCard repoId={selectedDataset} />}
+              {selectedDataset && (
+                <DatasetInfoCard
+                  repoId={selectedDataset}
+                  onRenamed={(newRepoId) => {
+                    // The renamed dir has a new repo id: repoint the selection
+                    // (so the card + training read the new id) and refresh the
+                    // picker list so both reflect it without a manual reload.
+                    setSelectedDataset(newRepoId);
+                    refreshDatasets();
+                  }}
+                />
+              )}
               <button
                 type="button"
                 onClick={() => setShowMergeDialog(true)}
