@@ -204,14 +204,14 @@ const DatasetPicker: React.FC<DatasetPickerProps> = ({
                   : "No datasets yet. Type a name to create one."}
               </CommandEmpty>
             )}
-            {localDatasets.length > 0 && (
-              <CommandGroup heading="Local">
-                {localDatasets.map(renderItem)}
-              </CommandGroup>
-            )}
             {hubDatasets.length > 0 && (
               <CommandGroup heading="Hugging Face">
                 {hubDatasets.map(renderItem)}
+              </CommandGroup>
+            )}
+            {localDatasets.length > 0 && (
+              <CommandGroup heading="Local">
+                {localDatasets.map(renderItem)}
               </CommandGroup>
             )}
             {canOpenCustom && (
