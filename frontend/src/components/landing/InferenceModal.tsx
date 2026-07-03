@@ -189,6 +189,11 @@ const InferenceModal: React.FC<Props> = ({
       ? checkpoints.find((c) => c.step === selectedStep)?.ref ?? null
       : null;
 
+  // `lerobot-rollout` drives a single follower — there's no bimanual rollout
+  // strategy. A bimanual record can't run inference; the modal surfaces this
+  // rather than silently running the policy on just the left-arm follower.
+  const isBimanual = robot?.mode === "bimanual";
+
   const expectedCameraNames = policyConfig
     ? Object.keys(policyConfig.image_features)
     : [];
@@ -199,13 +204,14 @@ const InferenceModal: React.FC<Props> = ({
   const canStart =
     !!robot &&
     robot.is_clean &&
+    !isBimanual &&
     selectedRef != null &&
     !!policyConfig &&
     allCamerasBound &&
     !submitting;
 
   const handleStart = async () => {
-    if (!robot || selectedRef == null || !policyConfig) return;
+    if (!robot || isBimanual || selectedRef == null || !policyConfig) return;
     // Setting submitting=true makes every CameraPreview drop its
     // browser stream — required so the rollout subprocess can open the
     // same camera index via OpenCV without colliding on the device.
@@ -300,6 +306,15 @@ const InferenceModal: React.FC<Props> = ({
                 <AlertDescription>
                   <strong>{robot.name}</strong> is missing a calibration.
                   Configure it before running inference.
+                </AlertDescription>
+              </Alert>
+            ) : isBimanual ? (
+              <Alert className="bg-amber-900/40 border-amber-700 text-amber-100">
+                <AlertTriangle className="h-4 w-4" />
+                <AlertDescription>
+                  <strong>{robot.name}</strong> is a bimanual robot. Inference
+                  runs a single follower only — select a single-arm robot on the
+                  Landing page to run this policy.
                 </AlertDescription>
               </Alert>
             ) : (
