@@ -183,12 +183,17 @@ def test_create_record_config_builds_biso_for_bimanual(monkeypatch: pytest.Monke
 
     # Configs follow lerobot's "<base>_left"/"<base>_right" convention.
     request = record.RecordingRequest(
-        leader_port="/dev/ll", follower_port="/dev/lf",
-        leader_config="mybot_left", follower_config="mybot_left",
+        leader_port="/dev/ll",
+        follower_port="/dev/lf",
+        leader_config="mybot_left",
+        follower_config="mybot_left",
         mode="bimanual",
-        right_leader_port="/dev/rl", right_follower_port="/dev/rf",
-        right_leader_config="mybot_right", right_follower_config="mybot_right",
-        dataset_repo_id="user/dataset", single_task="pick up the cube",
+        right_leader_port="/dev/rl",
+        right_follower_port="/dev/rf",
+        right_leader_config="mybot_right",
+        right_follower_config="mybot_right",
+        dataset_repo_id="user/dataset",
+        single_task="pick up the cube",
     )
 
     config = record.create_record_config(request)
@@ -249,6 +254,99 @@ def test_build_camera_configs_skips_non_opencv_type() -> None:
     configs = _build_camera_configs(cameras, Cv2Backends.ANY)
 
     assert configs == {}
+
+
+def _make_dataset_dir(cache, repo_id: str, total_episodes: int):
+    """Create a minimal on-disk LeRobot dataset dir (meta/info.json) under the
+    tmp cache root, plus a fake video file so 'removed' is observable."""
+    import json
+    from pathlib import Path
+
+    target = Path(cache) / repo_id
+    (target / "meta").mkdir(parents=True, exist_ok=True)
+    (target / "meta" / "info.json").write_text(json.dumps({"total_episodes": total_episodes}))
+    (target / "videos").mkdir(parents=True, exist_ok=True)
+    (target / "videos" / "ep.mp4").write_bytes(b"\x00" * 1024)
+    return target
+
+
+def test_discard_empty_dataset_removes_zero_episode_dir(tmp_lerobot_home) -> None:
+    """A non-resume session that saved zero episodes has its directory removed."""
+    import lelab.record as record
+
+    target = _make_dataset_dir(tmp_lerobot_home, "tester/big_20260703_120000", total_episodes=0)
+    assert target.exists()
+
+    removed = record._discard_empty_dataset("tester/big_20260703_120000", resume=False)
+
+    assert removed is True
+    assert not target.exists()
+
+
+def test_discard_empty_dataset_keeps_nonempty_dir(tmp_lerobot_home) -> None:
+    """A directory that recorded >=1 episode is never removed."""
+    import lelab.record as record
+
+    target = _make_dataset_dir(tmp_lerobot_home, "tester/good_20260703_120000", total_episodes=3)
+
+    removed = record._discard_empty_dataset("tester/good_20260703_120000", resume=False)
+
+    assert removed is False
+    assert target.exists()
+
+
+def test_discard_empty_dataset_never_touches_resume_session(tmp_lerobot_home) -> None:
+    """A resume/append session writes into a pre-existing dataset — even at zero
+    NEW episodes on disk, the directory must never be removed."""
+    import lelab.record as record
+
+    target = _make_dataset_dir(tmp_lerobot_home, "tester/preexisting", total_episodes=0)
+
+    removed = record._discard_empty_dataset("tester/preexisting", resume=True)
+
+    assert removed is False
+    assert target.exists()
+
+
+def test_discard_empty_dataset_rejects_path_traversal(tmp_lerobot_home) -> None:
+    """A repo_id escaping the cache root is refused (no deletion outside cache)."""
+    import lelab.record as record
+
+    removed = record._discard_empty_dataset("../../etc", resume=False)
+    assert removed is False
+
+
+def test_discard_empty_dataset_invalidates_hub_status(tmp_lerobot_home) -> None:
+    """Removing an empty dataset drops any cached Hub-existence probe for it."""
+    import lelab.datasets as datasets
+    import lelab.record as record
+
+    _make_dataset_dir(tmp_lerobot_home, "tester/probed_20260703", total_episodes=0)
+    # Seed a cached probe answer for the repo id.
+    with datasets._HUB_STATUS_LOCK:
+        datasets._HUB_STATUS_CACHE["tester/probed_20260703"] = "local_only"
+
+    assert record._discard_empty_dataset("tester/probed_20260703", resume=False) is True
+
+    with datasets._HUB_STATUS_LOCK:
+        assert "tester/probed_20260703" not in datasets._HUB_STATUS_CACHE
+
+
+def test_recording_status_reports_discarded_empty_at_session_end(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the ended session discarded its empty dataset, the status payload
+    tells the frontend honestly that nothing was kept."""
+    import lelab.record as record
+
+    monkeypatch.setattr(record, "recording_active", False)
+    monkeypatch.setattr(record, "current_phase", "completed")
+    monkeypatch.setattr(record, "last_session_discarded_empty", True)
+
+    status = record.handle_recording_status()
+
+    assert status["session_ended"] is True
+    assert status["discarded_empty"] is True
 
 
 def test_record_start_clears_stale_release_state_from_previous_double_stop(

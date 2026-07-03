@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 import logging
 import shutil
 import threading
@@ -33,7 +34,7 @@ from lerobot.teleoperators.bi_so_leader import BiSOLeaderConfig
 from lerobot.teleoperators.so_leader import SO101LeaderConfig
 
 from .arm_identity import ArmIdentityError, verify_devices
-from .datasets import invalidate_hub_status
+from .datasets import _lerobot_cache_root, invalidate_hub_status
 from .motor_power import apply_motor_power, clear_goal_velocity
 from .teleoperate import force_disable_torque, hold_torque_release_grace
 from .utils.config import (
@@ -61,6 +62,10 @@ phase_start_time = None  # Track when current phase started
 last_recording_info: dict[str, Any] | None = (
     None  # Snapshot of the most recently completed dataset (for /dataset-info)
 )
+# True when the most recent session saved zero episodes and its (freshly
+# created) dataset directory was discarded. Surfaced in the session-end status
+# so the frontend can tell the user nothing was kept (see Upload.tsx).
+last_session_discarded_empty = False
 # Warn-but-allow arm-identity findings from the current session's guard (see
 # lelab/arm_identity.py). The guard runs inside the recording worker (after the
 # start response has already been sent), so the messages are surfaced through
@@ -296,6 +301,7 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
         current_phase, \
         phase_start_time, \
         last_recording_info, \
+        last_session_discarded_empty, \
         identity_warnings
 
     from . import rollout as _rollout, teleoperate as _teleoperate
@@ -358,6 +364,7 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
         current_phase = "preparing"
         phase_start_time = None
         last_recording_info = None
+        last_session_discarded_empty = False
         identity_warnings = []
 
     try:
@@ -389,7 +396,8 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                 phase_start_time, \
                 current_episode, \
                 saved_episodes, \
-                last_recording_info
+                last_recording_info, \
+                last_session_discarded_empty
             recording_start_time = time.time()
             current_episode = 1
             saved_episodes = 0
@@ -439,6 +447,21 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                     current_phase = "completed"
                 if recording_start_time:
                     session_end_elapsed_seconds = int(time.time() - recording_start_time)
+
+                # Discard a dataset this session created but never wrote an
+                # episode into (interrupted/failed session, or every take
+                # re-recorded away). Ordered here — after record_with_web_events
+                # has returned/raised, which released torque and disconnected in
+                # its own finally — so cleanup never blocks the hardware release.
+                # Best-effort: _discard_empty_dataset swallows its own errors and
+                # never re-raises, so the original error path is preserved.
+                # Guarded on the in-memory counter AND, inside the helper, the
+                # on-disk episode count; resume sessions are never touched.
+                if saved_episodes == 0:
+                    last_session_discarded_empty = _discard_empty_dataset(
+                        request.dataset_repo_id, request.resume
+                    )
+
                 recording_active = False
                 recording_start_time = None
                 phase_start_time = None
@@ -573,6 +596,13 @@ def handle_recording_status() -> dict[str, Any]:
     if recording_config:
         status["dataset_repo_id"] = recording_config.dataset_repo_id
 
+    # When the session has ended, tell the frontend honestly whether anything
+    # was kept. A session that saved zero episodes had its (freshly created)
+    # dataset directory discarded — the post-recording page shows a "nothing was
+    # saved" variant and does NOT link the (now-gone) repo id.
+    if session_ended:
+        status["discarded_empty"] = last_session_discarded_empty
+
     # Warn-but-allow arm-identity findings (the guard runs in the worker, after
     # the start response) — the frontend shows these as a non-blocking toast.
     if identity_warnings:
@@ -686,6 +716,76 @@ def handle_delete_dataset(request: DatasetInfoRequest) -> dict[str, Any]:
 
     logger.info(f"Deleted dataset directory {target}")
     return {"success": True, "message": f"Deleted {repo_id}"}
+
+
+def _discard_empty_dataset(repo_id: str, resume: bool) -> bool:
+    """Remove the directory of a session that saved zero episodes.
+
+    Interrupted/failed recording sessions used to leave 0-episode datasets on
+    disk — hundreds of MB of video, invisible in the picker (empties are
+    hidden) yet still consuming space. When a session ends having saved no
+    episodes, delete the directory THIS session created.
+
+    Guards (all must hold before anything is removed):
+      * ``resume`` is False — a resume/append session writes into a
+        pre-existing dataset, so we must NEVER delete it even at zero *new*
+        episodes. Only non-resume sessions stamp a fresh timestamped directory
+        (see handle_start_recording), so only those are ours to discard.
+      * The directory reports zero episodes — confirmed against ``meta/info.json``'s
+        ``total_episodes`` (the same signal the picker uses), not just the
+        in-memory counter.
+      * The path stays strictly inside the LeRobot cache root (traversal guard,
+        mirroring handle_delete_dataset).
+
+    Best-effort: any failure is logged as a warning and swallowed — this runs
+    during session-end cleanup and must never mask an original error or block
+    the hardware release. Returns True iff the directory was removed.
+    """
+    global last_recording_info
+
+    if resume:
+        # Append-into-existing: the dataset predates this session. Never delete.
+        return False
+    if not repo_id:
+        return False
+
+    root = _lerobot_cache_root().resolve()
+    try:
+        target = (root / repo_id).resolve()
+    except OSError:
+        return False
+
+    # Reject path traversal: target must stay strictly inside the cache root.
+    if target == root or root not in target.parents:
+        return False
+    if not target.is_dir():
+        return False
+
+    # Confirm zero episodes against the on-disk metadata, not just the counter.
+    info_path = target / "meta" / "info.json"
+    try:
+        info = json.loads(info_path.read_text())
+    except (OSError, ValueError):
+        # No readable info.json — the dataset was never created far enough to
+        # hold episodes. Treat as empty and clean it up.
+        info = {}
+    if info.get("total_episodes"):
+        return False
+
+    try:
+        shutil.rmtree(target)
+    except Exception as e:
+        logger.warning(f"Failed to remove empty dataset {repo_id}: {e}")
+        return False
+
+    # Drop any state pinned to the now-gone dataset, and invalidate a cached
+    # Hub-existence probe (cheap correctness — the repo no longer exists here).
+    if last_recording_info and last_recording_info.get("dataset_repo_id") == repo_id:
+        last_recording_info = None
+    invalidate_hub_status(repo_id)
+
+    logger.info(f"Removed empty dataset {repo_id} — no episodes were saved.")
+    return True
 
 
 def handle_upload_dataset(request: UploadRequest) -> dict[str, Any]:
@@ -880,7 +980,9 @@ def record_with_web_events(
         if wrote:
             logger.info(f"{label.capitalize()} calibration applied successfully")
         else:
-            logger.warning(f"{label.capitalize()} bus or calibration not available - calibration may not be applied")
+            logger.warning(
+                f"{label.capitalize()} bus or calibration not available - calibration may not be applied"
+            )
 
     _write_calibration(robot, "robot")
     _write_calibration(teleop, "teleop")

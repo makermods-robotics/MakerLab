@@ -67,6 +67,10 @@ interface BackendStatus {
   session_elapsed_seconds?: number;
   session_ended?: boolean;
   dataset_repo_id?: string;
+  // True when the session saved zero episodes and its dataset directory was
+  // discarded (see record.py). The post-recording page shows a "nothing was
+  // saved" variant when this is set.
+  discarded_empty?: boolean;
   available_controls: {
     stop_recording: boolean;
     exit_early: boolean;
@@ -207,6 +211,9 @@ const Recording = () => {
             num_episodes: recordingConfig.num_episodes,
             saved_episodes: status.saved_episodes || 0,
             session_elapsed_seconds: status.session_elapsed_seconds || 0,
+            // The backend discards a session that saved zero episodes; when it
+            // did, the post-recording page shows a "nothing was saved" variant.
+            discarded_empty: status.discarded_empty || false,
           };
           navigate("/upload", { state: { datasetInfo } });
         }
