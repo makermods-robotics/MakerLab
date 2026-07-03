@@ -234,7 +234,9 @@ logger.info(f"LeRobot path: {LEROBOT_PATH}")
 
 class ConnectionManager:
     def __init__(self):
-        self.active_connections: list[WebSocket] = []
+        # Each websocket is bound to the asyncio loop that accepted it; sends
+        # from the broadcast worker thread must be marshaled onto that loop.
+        self.active_connections: dict[WebSocket, asyncio.AbstractEventLoop] = {}
         self.broadcast_queue = queue.Queue()
         self.broadcast_thread = None
         self.is_running = False
@@ -245,7 +247,7 @@ class ConnectionManager:
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
         with self._connections_lock:
-            self.active_connections.append(websocket)
+            self.active_connections[websocket] = asyncio.get_running_loop()
             count = len(self.active_connections)
         logger.info(f"WebSocket connected. Total connections: {count}")
 
@@ -253,9 +255,14 @@ class ConnectionManager:
             self.start_broadcast_thread()
 
     def disconnect(self, websocket: WebSocket):
+        """Remove a connection and stop the worker if none remain.
+
+        Only called from request-handler context (the endpoint's cleanup and
+        server shutdown), never from the broadcast worker — the worker uses
+        _drop_connection so it can't end up joining its own thread.
+        """
         with self._connections_lock:
-            if websocket in self.active_connections:
-                self.active_connections.remove(websocket)
+            if self.active_connections.pop(websocket, None) is not None:
                 count = len(self.active_connections)
                 logger.info(f"WebSocket disconnected. Total connections: {count}")
             else:
@@ -263,6 +270,17 @@ class ConnectionManager:
 
         if count == 0 and self.is_running:
             self.stop_broadcast_thread()
+
+    def _drop_connection(self, websocket: WebSocket):
+        """Forget a connection whose send failed, without stopping the worker.
+
+        The endpoint's receive loop notices the disconnect independently and
+        its cleanup calls disconnect(), which is where thread stop happens.
+        """
+        with self._connections_lock:
+            if self.active_connections.pop(websocket, None) is not None:
+                count = len(self.active_connections)
+                logger.info(f"Dropped unreachable WebSocket. Total connections: {count}")
 
     def start_broadcast_thread(self):
         """Start the background thread for broadcasting data"""
@@ -275,57 +293,71 @@ class ConnectionManager:
         logger.info("📡 Broadcast thread started")
 
     def stop_broadcast_thread(self):
-        """Stop the background thread"""
+        """Signal the worker thread to stop. Never joins.
+
+        Joining here is unsafe in both directions: from the uvicorn event
+        loop it can stall the loop while the worker waits on a send it
+        scheduled onto that same loop, and from the worker itself it would
+        be a self-join. The daemon worker notices the cleared flag (or a
+        newer thread replacing it) within its 0.1 s queue timeout and exits.
+        """
         self.is_running = False
-        if self.broadcast_thread:
-            self.broadcast_thread.join(timeout=1.0)
-            logger.info("📡 Broadcast thread stopped")
+        self.broadcast_thread = None
+        logger.info("📡 Broadcast thread stop requested")
 
     def _broadcast_worker(self):
         """Background worker thread for broadcasting WebSocket data"""
-        import asyncio
+        me = threading.current_thread()
+        # The identity check makes a rapid stop→start cycle safe: if a new
+        # worker has been started, this one exits even though is_running is
+        # True again.
+        while self.is_running and self.broadcast_thread is me:
+            try:
+                # Get data from queue with timeout
+                data = self.broadcast_queue.get(timeout=0.1)
+                if data is None:  # Poison pill to stop
+                    break
 
-        # Create a new event loop for this thread
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+                self._send_to_all_connections(data)
 
-        try:
-            while self.is_running:
-                try:
-                    # Get data from queue with timeout
-                    data = self.broadcast_queue.get(timeout=0.1)
-                    if data is None:  # Poison pill to stop
-                        break
+            except queue.Empty:
+                continue
+            except Exception as e:
+                logger.error(f"Error in broadcast worker: {e}")
 
-                    # Broadcast to all connections
-                    if self.active_connections:
-                        loop.run_until_complete(self._send_to_all_connections(data))
+        logger.info("📡 Broadcast thread stopped")
 
-                except queue.Empty:
-                    continue
-                except Exception as e:
-                    logger.error(f"Error in broadcast worker: {e}")
+    def _send_to_all_connections(self, data: dict[str, Any]):
+        """Send data to all active connections, each on its own event loop.
 
-        finally:
-            loop.close()
-
-    async def _send_to_all_connections(self, data: dict[str, Any]):
-        """Send data to all active WebSocket connections"""
+        Runs on the broadcast worker thread: every send is submitted to the
+        loop that accepted the websocket via run_coroutine_threadsafe (a
+        websocket's ASGI channel is not usable from any other loop). All
+        sends are submitted before any is waited on so one slow client
+        doesn't delay the others.
+        """
         with self._connections_lock:
-            connections = list(self.active_connections)
+            connections = list(self.active_connections.items())
         if not connections:
             return
 
-        disconnected = []
-        for connection in connections:
+        pending = []
+        for connection, loop in connections:
             try:
-                await connection.send_json(data)
+                future = asyncio.run_coroutine_threadsafe(connection.send_json(data), loop)
+            except Exception as e:  # loop closed or shutting down
+                logger.error(f"Error scheduling send to WebSocket: {e}")
+                self._drop_connection(connection)
+            else:
+                pending.append((connection, future))
+
+        for connection, future in pending:
+            try:
+                future.result(timeout=1.0)
             except Exception as e:
                 logger.error(f"Error sending data to WebSocket: {e}")
-                disconnected.append(connection)
-
-        for connection in disconnected:
-            self.disconnect(connection)
+                future.cancel()
+                self._drop_connection(connection)
 
     def broadcast_joint_data_sync(self, data: dict[str, Any]):
         """Thread-safe method to queue data for broadcasting"""
