@@ -143,26 +143,174 @@ export UV_DEFAULT_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple
 
 **Problem:** huggingface.co is unreachable (downloads hang, `hf auth login`
 fails).
-**Solution:** three tools, by job — `HF_ENDPOINT=https://hf-mirror.com` for
-model/dataset *downloads*; `HF_HUB_OFFLINE=1` on the robot server so every
-Hub call fails fast instead of hanging (all hardware flows work offline);
-LAN-seed the caches (below) for weights you already have elsewhere. Uploads
-need a real tunnel.
-
-**Problem:** one machine needs to route through a VPN/proxy.
-**Solution:** git, pip, uv, and `hf` all honor the standard variables;
-exclude the LAN so robot traffic never detours:
+**Solution:** split the work by what actually needs huggingface.co. The
+tunnel (below) is only for writes and auth — `hf auth login`/`whoami`,
+dataset/model uploads, HF Jobs, git pushes. Public bulk *downloads* should
+bypass the tunnel via a read-only mirror: faster and it saves proxy quota.
 
 ```bash
-export https_proxy=http://<proxy-host>:<port> http_proxy=http://<proxy-host>:<port>
+export HF_ENDPOINT=https://hf-mirror.com   # downloads only; mirrors can't write
+```
+
+Three knobs, by job, and they override in this order:
+
+- `HF_HUB_OFFLINE=1` beats everything — every Hub call fails fast instead of
+  hanging (all hardware flows work offline). An explicit download needs a
+  shell with this *unset* and the mirror/proxy set.
+- `HF_ENDPOINT=https://hf-mirror.com` — downloads. No mirror supports writes.
+- proxy vars (below) — the one path for uploads/auth/Jobs/pushes.
+
+LAN-seed the caches (below) for weights you already have on another box.
+
+**Problem:** you can't tell whether a Hub failure is your app or a dead proxy
+relay.
+**Solution:** don't mix postures on the robot station — pick one per session
+and restart between them.
+
+- *Hardware session* (teleop/record/replay/inference): `HF_HUB_OFFLINE=1`,
+  **no** proxy vars. Deterministic — a dying relay node can never masquerade
+  as an app bug.
+- *Upload/Hub session*: proxy vars set, `HF_HUB_OFFLINE` unset.
+
+**Problem:** the `hf` CLI feels sluggish over the tunnel.
+**Solution:** expected — every API call rides the relay's round-trip, and
+sequential-call tools (the `hf` CLI) feel it most. Pick a low-latency node
+(the client's latency test) for interactive work; leave bulk downloads on the
+mirror, off the tunnel.
+
+**Problem:** ping succeeds but HTTPS to the same host dies, so you conclude
+the network is fine.
+**Solution:** ping is not a connectivity test on filtered networks. Blocking
+is TLS/SNI-based — ICMP passes while HTTPS is dropped mid-handshake. Test the
+actual protocol, not reachability:
+
+```bash
+curl -4 -sS --max-time 10 https://huggingface.co   # -sS surfaces the error; -s hides it
+```
+
+And beware the wrong-domain trap: `huggingface.com` is a *different*,
+unblocked domain from `huggingface.co` — a working curl to `.com` proves
+nothing about `.co`.
+
+**Problem:** one machine needs to route through a restricted network via a
+proxy client.
+**Solution:** git, pip, uv, and `hf` all honor the standard variables. You do
+**not** need the client's TUN / virtual-NIC mode (which requires a privileged
+service) — its local mixed port is enough for dev tooling. Find the real port
+(a Clash-family default is 7897, older builds 7890; the 9090 control API is
+*not* it):
+
+```bash
+ss -tlnp | grep -iE 'clash|mihomo'   # read the mixed/http listener port
+```
+
+The GUI's "system proxy" toggle only affects GUI apps — a terminal **always**
+needs explicit env vars. Exclude the LAN so robot traffic never detours into
+the tunnel:
+
+```bash
+export https_proxy=http://127.0.0.1:<port> http_proxy=http://127.0.0.1:<port>
 export no_proxy=localhost,127.0.0.1,192.168.0.0/16
 ```
+
+Prove routing actually reaches the exit before trusting it — the returned
+country code should be the exit's, not yours:
+
+```bash
+curl -4 -sS --max-time 10 https://ipinfo.io/country
+```
+
+**Problem:** the proxy replies `CONNECT ... 200` but the request then dies
+with `SSL routines::unexpected eof while reading`.
+**Solution:** the local proxy is fine; its upstream relay node is dead. In
+the client, run the latency test over all nodes and switch to a live one. If
+*every* node gives the identical error, node-switching isn't touching the
+request — check two things:
+
+- **Routing mode** — in Rule mode the domain may be sent DIRECT (never
+  through any node). Retest in Global mode.
+- **System clock** — `date`. TLS-based proxy protocols fail identically on
+  clock skew.
+
+**Problem:** a server you started earlier ignores the proxy/`HF_*` vars you
+just exported.
+**Solution:** a process only ever sees the environment it was *born* with —
+exporting vars in your shell can't reach an already-running server. Verify
+what it actually has, then restart it from an equipped shell:
+
+```bash
+cat /proc/<pid>/environ | tr '\0' '\n' | grep -iE 'proxy|HF_'
+```
+
+`~/.bashrc` covers new interactive logins automatically, but **not**
+one-shot `ssh host 'cmd'` (Ubuntu's bashrc exits early for non-interactive
+shells) and **not** systemd services (put env in the unit file).
 
 **Problem:** installing this repo dies inside the `lerobot` dependency (a
 ~250 MB-history git pin) even with HTTP/1.1.
 **Solution:** shallow-fetch exactly the pinned commit (SHA from
 `pyproject.toml`) and install around the URL — full recipe in
 [JETSON_SETUP.md](JETSON_SETUP.md#network-gotchas).
+
+### Always-on proxy on a headless box
+
+GUI autostart works but ties the tunnel to a logged-in desktop session — no
+good on a headless robot station. The robust recipe runs the proxy *core*
+(mihomo) as a systemd service: no desktop, survives reboots, auto-picks a
+live node.
+
+> Recipe, not battle-tested end-to-end in our session — verify on your box.
+> Only one process may own the mixed port, so **stop the GUI client first**.
+
+Config (`~/.config/mihomo/config.yaml`) — subscription via `proxy-providers`,
+a `url-test` group that auto-selects the fastest node, and LAN/CN kept off the
+tunnel:
+
+```yaml
+mixed-port: 7897
+bind-address: 127.0.0.1          # local only; not exposed to the LAN
+mode: rule
+proxy-providers:
+  sub:
+    type: http
+    url: "<your-subscription-url>"
+    interval: 3600
+    path: ./providers/sub.yaml
+proxy-groups:
+  - name: auto
+    type: url-test
+    use: [sub]
+    url: http://www.gstatic.com/generate_204
+    interval: 300
+rules:
+  - GEOIP,CN,DIRECT
+  - MATCH,auto
+```
+
+Unit (`/etc/systemd/system/mihomo.service`):
+
+```ini
+[Unit]
+Description=mihomo proxy core
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/mihomo -d /home/<user>/.config/mihomo
+Restart=always
+User=<user>
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl enable --now mihomo
+curl -4 -sS --max-time 10 https://ipinfo.io/country   # confirm the exit
+```
+
+Remember services don't read `~/.bashrc` — consumers still need the
+`https_proxy`/`http_proxy` env vars pointing at `127.0.0.1:7897`.
 
 ### Skip the internet: LAN seeding
 
