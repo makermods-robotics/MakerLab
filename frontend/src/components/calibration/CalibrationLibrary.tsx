@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { Download, Pencil } from "lucide-react";
+import { Download, Pencil, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -61,9 +61,10 @@ interface CalibrationLibraryProps {
 
 /**
  * Per-side calibration "library" as a dropdown: pick a saved config, then
- * Download or Rename it, or Import a new one. Deleting a calibration lives on
- * other surfaces (the backend DELETE endpoint is unchanged) — this picker only
- * assigns/reassigns.
+ * Download, Rename, or Delete it, or Import a new one. Delete acts on the
+ * selected config (not per dropdown entry, which would clash with
+ * swap-on-select); deleting an in-use config unassigns it server-side and the
+ * affected arm returns to "needs calibration".
  */
 const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
   device,
@@ -80,6 +81,7 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
 
   const [configs, setConfigs] = useState<ConfigEntry[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<string | null>(null);
   const [assigning, setAssigning] = useState(false);
   const [renameOpen, setRenameOpen] = useState(false);
   const [renameValue, setRenameValue] = useState("");
@@ -159,6 +161,49 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
     },
     [baseUrl, fetchWithHeaders, device, toast],
   );
+
+  const confirmDelete = useCallback(async () => {
+    const name = pendingDelete;
+    if (!name) return;
+    setPendingDelete(null);
+    try {
+      const res = await fetchWithHeaders(
+        `${baseUrl}/calibration-configs/${device}/${encodeURIComponent(name)}`,
+        { method: "DELETE" },
+      );
+      const data = await res.json().catch(() => ({}));
+      if (data.success) {
+        // Robots that referenced the deleted config were unassigned
+        // server-side; those arms are back to "needs calibration".
+        const unassigned = (data.unassigned ?? []) as { robot: string }[];
+        toast({
+          title: "Config deleted",
+          description: unassigned.length
+            ? `Removed "${name}". ${unassigned
+                .map((u) => u.robot)
+                .join(", ")} now needs calibration before use.`
+            : `Removed "${name}".`,
+        });
+        setConfigs((prev) => prev.filter((c) => c.name !== name));
+        if (unassigned.length) {
+          // Refetch the robot so the arm's status flips to uncalibrated.
+          await onAssigned?.();
+        }
+      } else {
+        toast({
+          title: "Delete failed",
+          description: data.message,
+          variant: "destructive",
+        });
+      }
+    } catch (e) {
+      toast({
+        title: "Delete failed",
+        description: String(e),
+        variant: "destructive",
+      });
+    }
+  }, [baseUrl, fetchWithHeaders, device, pendingDelete, toast, onAssigned]);
 
   const assignToRobot = useCallback(async () => {
     if (!selected || !robotName) return;
@@ -361,6 +406,17 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
         >
           <Pencil className="w-4 h-4" />
         </Button>
+        <Button
+          size="icon"
+          variant="ghost"
+          className="h-8 w-8 text-slate-300 hover:text-red-400"
+          disabled={!selected}
+          onClick={() => selected && setPendingDelete(selected)}
+          aria-label="Delete selected config"
+          title="Delete"
+        >
+          <Trash2 className="w-4 h-4" />
+        </Button>
         <ImportCalibrationButton
           device={device}
           onImported={async (name) => {
@@ -430,6 +486,37 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
               onClick={renameConfig}
             >
               {renaming ? "Renaming…" : "Rename"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={pendingDelete !== null}
+        onOpenChange={(o) => !o && setPendingDelete(null)}
+      >
+        <DialogContent className="bg-slate-900 border-slate-800 text-white">
+          <DialogHeader>
+            <DialogTitle>Delete config "{pendingDelete}"?</DialogTitle>
+            <DialogDescription className="text-slate-400">
+              This permanently deletes the calibration file — you'd have to
+              recalibrate the arm to recreate it. Any robot using it will need
+              calibration before its next use.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="flex gap-2 justify-end">
+            <Button
+              variant="outline"
+              className="border-slate-600 text-slate-700 dark:text-slate-300"
+              onClick={() => setPendingDelete(null)}
+            >
+              Cancel
+            </Button>
+            <Button
+              className="bg-red-600 hover:bg-red-700 text-white"
+              onClick={confirmDelete}
+            >
+              Delete
             </Button>
           </DialogFooter>
         </DialogContent>
