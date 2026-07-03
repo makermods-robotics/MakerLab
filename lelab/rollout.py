@@ -40,9 +40,21 @@ from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
 
 from .arm_identity import ArmIdentityError, ArmSlot, verify_devices
 from .motor_power import apply_motor_power, clear_goal_velocity
-from .utils.config import list_robot_records, setup_follower_calibration_file
+from .utils.config import (
+    bimanual_base_id,
+    list_robot_records,
+    setup_follower_calibration_file,
+    stage_bimanual_calibrations,
+)
 
 logger = logging.getLogger(__name__)
+
+# Flat proprioceptive state width of a single SO-101 follower arm (one dim per
+# joint). A bimanual checkpoint trains on two arms → twice this. The frontend
+# forwards the checkpoint's state_dim (from /policy-config) so the server can
+# reject an arm-count mismatch BEFORE spawning the rollout subprocess, instead
+# of letting the shape mismatch crash deep inside it.
+_SINGLE_ARM_STATE_DIM = 6
 
 
 class InferenceRequest(BaseModel):
@@ -52,6 +64,21 @@ class InferenceRequest(BaseModel):
     task: str = ""
     cameras: dict[str, dict[str, Any]] = {}
     duration_s: int = 60
+    # Bimanual: the follower_port/follower_config above is the LEFT arm; these
+    # add the RIGHT arm. Inference has no leader arms — only the two followers
+    # are driven — so there is no right_leader_* here (cf. record/teleop).
+    mode: str = "single"
+    right_follower_port: str = ""
+    right_follower_config: str = ""
+    # Robot record name — used only as the BiSO staging base id (bimanual). It
+    # decides the on-disk staging dir, not which calibration drives which arm.
+    # Blank/invalid falls back to DEFAULT_BIMANUAL_BASE.
+    robot_name: str = ""
+    # Flat state width of the selected checkpoint (6 = single SO-101 arm, 12 =
+    # bimanual), forwarded from /policy-config so the server can reject an
+    # arm-count mismatch pre-spawn. None when the checkpoint omits the feature —
+    # the guard then defers to the rollout subprocess's own shape check.
+    checkpoint_state_dim: int | None = None
     # Escape hatch for the arm-identity guard (see lelab/arm_identity.py):
     # when true, run even if the connected arm doesn't match its calibration.
     skip_identity_check: bool = False
@@ -149,6 +176,46 @@ def _resolve_policy_path(policy_ref: str) -> str:
     raise ValueError(f"Unrecognised policy ref: {policy_ref!r}")
 
 
+def _arm_count_mismatch(mode: str, checkpoint_state_dim: int | None) -> str | None:
+    """Explain a checkpoint/robot arm-count mismatch, or None when they agree.
+
+    An SO-101 follower has 6 state dims; a bimanual robot drives two arms (12
+    dims). A checkpoint trained on one arm-count crashes on the other deep in
+    the rollout subprocess (a raw shape mismatch, no explanation). Reject it
+    up front with a legible message when the checkpoint exposes enough to tell.
+
+    `checkpoint_state_dim` is None when the checkpoint omits observation.state
+    (e.g. a vision-only policy) — then we can't tell cheaply, so return None and
+    let the subprocess's own shape check speak (reported in the modal via the
+    existing post-mortem path). A dim that's neither 6 nor a clean multiple is
+    also left to the subprocess rather than guessed at here.
+    """
+    if checkpoint_state_dim is None:
+        return None
+    robot_is_bimanual = mode == "bimanual"
+    # The checkpoint is bimanual iff its state is (a multiple of) two arms wide.
+    if checkpoint_state_dim <= _SINGLE_ARM_STATE_DIM:
+        checkpoint_is_bimanual = False
+    elif checkpoint_state_dim % _SINGLE_ARM_STATE_DIM == 0:
+        checkpoint_is_bimanual = checkpoint_state_dim // _SINGLE_ARM_STATE_DIM >= 2
+    else:
+        # An odd width we don't recognise — don't block on a guess.
+        return None
+    if robot_is_bimanual == checkpoint_is_bimanual:
+        return None
+    if checkpoint_is_bimanual:
+        return (
+            f"This checkpoint was trained on a bimanual robot "
+            f"({checkpoint_state_dim}-dim state, 2 arms), but the selected robot is "
+            "single-arm. Select a bimanual robot to run this policy."
+        )
+    return (
+        f"This checkpoint was trained on a single-arm robot "
+        f"({checkpoint_state_dim}-dim state), but the selected robot is bimanual. "
+        "Select a single-arm robot to run this policy."
+    )
+
+
 def _counterpart_leader_slots(follower_id: str) -> list[ArmSlot]:
     """Leader config(s) paired with this follower config in saved robot records.
 
@@ -172,8 +239,8 @@ def _counterpart_leader_slots(follower_id: str) -> list[ArmSlot]:
     return slots
 
 
-def _preflight_arm_identity(port: str, follower_id: str) -> list[str]:
-    """Read-only identity check of the follower arm before the rollout
+def _preflight_arm_identity(port: str, follower_id: str, config_name: str | None = None) -> list[str]:
+    """Read-only identity check of ONE follower arm before the rollout
     subprocess starts.
 
     The subprocess itself can't be guarded (its stdin is pre-seeded with a
@@ -181,11 +248,22 @@ def _preflight_arm_identity(port: str, follower_id: str) -> list[str]:
     and stamps the file into EEPROM on mismatch), so the check happens here:
     connect the bare bus, verify, and release the port for the subprocess to
     reopen. Raises ArmIdentityError on a hard mismatch; returns the
-    warn-but-allow messages otherwise."""
+    warn-but-allow messages otherwise.
+
+    `follower_id` names the calibration the arm loads and is what identifies the
+    slot by default. For a bimanual staging alias id ("<base>_left"), pass the
+    real library stem as `config_name` so the guard compares against the library
+    entry rather than the alias (mirrors verify_devices' config_names in
+    record/teleop). Bimanual runs each follower bus through this separately —
+    each opens and releases its own port — so the two are never open at once."""
     robot = SO101Follower(SO101FollowerConfig(port=port, id=follower_id))
     robot.bus.connect()
     try:
-        return verify_devices(((robot, "follower"),), extra_slots=_counterpart_leader_slots(follower_id))
+        return verify_devices(
+            ((robot, "follower"),),
+            extra_slots=_counterpart_leader_slots(config_name or follower_id),
+            config_names=[config_name] if config_name is not None else None,
+        )
     finally:
         # Reads only: torque was never enabled, so skip the torque-disable
         # write and just close the port.
@@ -241,6 +319,67 @@ def _format_cameras_arg(cameras: dict[str, dict[str, Any]]) -> str:
     return "{" + ", ".join(parts) + "}"
 
 
+def _build_rollout_cmd(request: InferenceRequest, policy_path: str, robot_args: list[str]) -> list[str]:
+    """Assemble the full `lerobot-rollout` argv from the robot-specific args.
+
+    `robot_args` is the `--robot.*` block built per mode (single vs bimanual);
+    everything else — strategy, policy, task, duration, and the teardown pin —
+    is identical across modes and lives here so both paths stay in sync."""
+    cmd = [
+        sys.executable,
+        "-m",
+        "lerobot.scripts.lerobot_rollout",
+        "--strategy.type=base",
+        f"--policy.path={policy_path}",
+        f"--policy.device={_detect_device()}",
+        *robot_args,
+        f"--task={request.task}",
+        f"--duration={request.duration_s}",
+        # Pin the teardown behaviour the stop dialog promises ("eases the
+        # follower back to its start pose, then goes limp"). lerobot's
+        # RolloutConfig.return_to_initial_position defaults to True today,
+        # but relying on that default means an upstream flip would silently
+        # break the promise — the arm would stay wherever the policy left
+        # it. Set it explicitly so the contract is ours, not upstream's.
+        "--return_to_initial_position=true",
+    ]
+    return cmd
+
+
+def _single_robot_args(request: InferenceRequest, follower_id: str) -> list[str]:
+    """`--robot.*` args for a single SO-101 follower."""
+    args = [
+        "--robot.type=so101_follower",
+        f"--robot.port={request.follower_port}",
+        f"--robot.id={follower_id}",
+    ]
+    if request.cameras:
+        args.append(f"--robot.cameras={_format_cameras_arg(request.cameras)}")
+    return args
+
+
+def _bimanual_robot_args(request: InferenceRequest, base: str, follower_staging: str) -> list[str]:
+    """`--robot.*` args for a bimanual BiSO follower.
+
+    lerobot's BiSOFollowerConfig wraps two SOFollowerConfig sub-arms
+    (left_arm_config / right_arm_config) sharing ONE calibration_dir + base id,
+    loading each sub-arm's calibration as "<base>_left.json"/"<base>_right.json".
+    `follower_staging` is the per-session dir the two library calibrations were
+    staged into under that convention (see stage_bimanual_calibrations). Cameras
+    go on the LEFT arm (BiSO re-exposes them prefixed "left_*"); the right arm is
+    camera-free, matching the record/teleop bimanual shape."""
+    args = [
+        "--robot.type=bi_so_follower",
+        f"--robot.id={base}",
+        f"--robot.calibration_dir={follower_staging}",
+        f"--robot.left_arm_config.port={request.follower_port}",
+        f"--robot.right_arm_config.port={request.right_follower_port}",
+    ]
+    if request.cameras:
+        args.append(f"--robot.left_arm_config.cameras={_format_cameras_arg(request.cameras)}")
+    return args
+
+
 def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
     """Start a one-shot rollout subprocess. Returns a dict — the route
     layer turns it into a JSON response or HTTPException as appropriate."""
@@ -272,49 +411,84 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
         # Claim the slot now so a concurrent caller losing the race sees us.
         inference_active = True
 
+    # Arm-count guard: reject a single-arm checkpoint on a bimanual robot (and
+    # vice versa) BEFORE opening any port or spawning the subprocess, where the
+    # shape mismatch would otherwise crash unexplained. Best-effort — defers to
+    # the subprocess when the checkpoint doesn't expose observation.state.
+    mismatch = _arm_count_mismatch(request.mode, request.checkpoint_state_dim)
+    if mismatch is not None:
+        with _state_lock:
+            inference_active = False
+        return {"success": False, "status_code": 409, "message": mismatch}
+
+    is_bimanual = request.mode == "bimanual"
     try:
-        # `setup_follower_calibration_file` returns the basename without the
-        # .json extension. We need that stripped form for `--robot.id`,
-        # because lerobot appends `.json` itself when constructing
-        # `calibration_dir / f"{id}.json"`.
-        follower_id = setup_follower_calibration_file(request.follower_config)
+        if is_bimanual:
+            # BiSO loads each sub-arm's calibration as "<base>_left/right.json"
+            # from one dir, with no way to point left/right at differently named
+            # library files. Stage the two arbitrarily-named follower library
+            # calibrations into that convention and point BiSO at the staging
+            # dir. Inference has NO leader arms, so only the follower side is
+            # staged — pass the follower calibrations for BOTH the leader and
+            # follower slots of stage_bimanual_calibrations (it stages a leader
+            # dir too, which we ignore here). The copy fails fast with a clear
+            # per-slot error if a library file is missing.
+            base = bimanual_base_id(request.robot_name)
+            _leader_staging, follower_staging, _ = stage_bimanual_calibrations(
+                base,
+                request.follower_config,
+                request.right_follower_config,
+                request.follower_config,
+                request.right_follower_config,
+            )
+            # Sub-arm ids are the BiSO staging aliases ("<base>_left/right"), so
+            # the identity guard compares against the real library stems.
+            left_id, right_id = f"{base}_left", f"{base}_right"
 
-        # Arm-identity guard: refuse before the subprocess can move (or stamp
-        # the wrong calibration into) an arm that doesn't match its file.
-        identity_warnings: list[str] = []
-        if request.skip_identity_check:
-            logger.warning("Arm identity check SKIPPED by request (skip_identity_check=true)")
+            identity_warnings = []
+            if request.skip_identity_check:
+                logger.warning("Arm identity check SKIPPED by request (skip_identity_check=true)")
+            else:
+                # Each bus opens/verifies/releases sequentially — never both at
+                # once — mirroring the single-arm preflight.
+                identity_warnings += _preflight_arm_identity(
+                    request.follower_port, left_id, config_name=request.follower_config
+                )
+                identity_warnings += _preflight_arm_identity(
+                    request.right_follower_port, right_id, config_name=request.right_follower_config
+                )
+            # Motor power on both buses, sequentially (each opens its own port).
+            identity_warnings += _preflight_motor_power(request.follower_port, left_id, request.motor_power)
+            identity_warnings += _preflight_motor_power(
+                request.right_follower_port, right_id, request.motor_power
+            )
+
+            robot_args = _bimanual_robot_args(request, base, follower_staging)
         else:
-            identity_warnings = _preflight_arm_identity(request.follower_port, follower_id)
+            # `setup_follower_calibration_file` returns the basename without the
+            # .json extension. We need that stripped form for `--robot.id`,
+            # because lerobot appends `.json` itself when constructing
+            # `calibration_dir / f"{id}.json"`.
+            follower_id = setup_follower_calibration_file(request.follower_config)
 
-        # Always written (even at 100%) so a gentler previous session can't
-        # linger when the arm was never power-cycled.
-        identity_warnings += _preflight_motor_power(request.follower_port, follower_id, request.motor_power)
+            # Arm-identity guard: refuse before the subprocess can move (or stamp
+            # the wrong calibration into) an arm that doesn't match its file.
+            identity_warnings = []
+            if request.skip_identity_check:
+                logger.warning("Arm identity check SKIPPED by request (skip_identity_check=true)")
+            else:
+                identity_warnings = _preflight_arm_identity(request.follower_port, follower_id)
+
+            # Always written (even at 100%) so a gentler previous session can't
+            # linger when the arm was never power-cycled.
+            identity_warnings += _preflight_motor_power(
+                request.follower_port, follower_id, request.motor_power
+            )
+
+            robot_args = _single_robot_args(request, follower_id)
 
         policy_path = _resolve_policy_path(request.policy_ref)
-
-        cmd = [
-            sys.executable,
-            "-m",
-            "lerobot.scripts.lerobot_rollout",
-            "--strategy.type=base",
-            f"--policy.path={policy_path}",
-            f"--policy.device={_detect_device()}",
-            "--robot.type=so101_follower",
-            f"--robot.port={request.follower_port}",
-            f"--robot.id={follower_id}",
-            f"--task={request.task}",
-            f"--duration={request.duration_s}",
-            # Pin the teardown behaviour the stop dialog promises ("eases the
-            # follower back to its start pose, then goes limp"). lerobot's
-            # RolloutConfig.return_to_initial_position defaults to True today,
-            # but relying on that default means an upstream flip would silently
-            # break the promise — the arm would stay wherever the policy left
-            # it. Set it explicitly so the contract is ours, not upstream's.
-            "--return_to_initial_position=true",
-        ]
-        if request.cameras:
-            cmd.append(f"--robot.cameras={_format_cameras_arg(request.cameras)}")
+        cmd = _build_rollout_cmd(request, policy_path, robot_args)
 
         log_dir = Path.home() / ".cache" / "huggingface" / "lerobot" / "inference_logs"
         log_dir.mkdir(parents=True, exist_ok=True)
@@ -323,12 +497,16 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
 
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
-        # Feed a single newline into stdin so SOFollower.calibrate()'s
+        # Feed a newline into stdin PER follower arm so SOFollower.calibrate()'s
         # `input("Press ENTER to use the calibration file ...")` returns "" and
         # writes the existing calibration to the motors instead of hanging
-        # forever waiting for an interactive operator. Subsequent input()
-        # calls in the recalibration path get EOF and raise — which is fine,
-        # because we never want to enter that path from the UI.
+        # forever waiting for an interactive operator. A BiSO follower connects
+        # its two sub-arms sequentially (left then right), each of which can fire
+        # that prompt once — so seed two newlines for bimanual, one for single.
+        # Any prompt that doesn't fire just leaves an unread newline (harmless);
+        # subsequent input() calls in the recalibration path get EOF and raise —
+        # fine, because we never want to enter that path from the UI.
+        stdin_seed = b"\n\n" if is_bimanual else b"\n"
         proc = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
@@ -338,7 +516,7 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
         )
         try:
             assert proc.stdin is not None
-            proc.stdin.write(b"\n")
+            proc.stdin.write(stdin_seed)
             proc.stdin.flush()
             proc.stdin.close()
         except Exception as exc:

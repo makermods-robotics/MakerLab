@@ -206,30 +206,37 @@ const InferenceModal: React.FC<Props> = ({
       ? checkpoints.find((c) => c.step === selectedStep)?.ref ?? null
       : null;
 
-  // `lerobot-rollout` drives a single follower — there's no bimanual rollout
-  // strategy. A bimanual record can't run inference; the modal surfaces this
-  // rather than silently running the policy on just the left-arm follower.
+  // `lerobot-rollout` drives any Robot generically, including `bi_so_follower`,
+  // so a bimanual record now runs inference on BOTH followers — the server
+  // stages the two follower calibrations and builds a `bi_so_follower` command.
+  // We no longer block bimanual robots here.
   const isBimanual = robot?.mode === "bimanual";
 
-  // The other mismatch axis: the CHECKPOINT was trained on a bimanual robot but
-  // the selected robot is single-arm. A bimanual-trained SO-101 checkpoint
-  // carries a 12-dim state/action (two 6-DOF arms) and left_/right_-prefixed
-  // camera names; a single follower can't supply a 12-dim observation, so the
-  // rollout would crash on a shape mismatch deep in the subprocess. Detect it
-  // here from the checkpoint's state dim (fall back to action dim) and explain
-  // it before Start, instead of letting the subprocess fail opaquely.
+  // Arm-count mismatch between the CHECKPOINT and the selected ROBOT. A
+  // bimanual-trained SO-101 checkpoint carries a 12-dim state/action (two 6-DOF
+  // arms) and left_/right_-prefixed camera names; a single-arm checkpoint is
+  // 6-dim. Running a policy on the wrong arm count crashes on a shape mismatch
+  // deep in the rollout subprocess. Detect it here from the checkpoint's state
+  // dim (fall back to action dim) and explain it before Start. This is the
+  // client mirror of the server's `_arm_count_mismatch` 409 guard — we forward
+  // `checkpoint_state_dim` so the server enforces the same rule authoritatively.
   const SO101_DOF = 6;
   const checkpointDim = policyConfig?.state_dim ?? policyConfig?.action_dim ?? null;
   const checkpointArms =
     checkpointDim != null && checkpointDim % SO101_DOF === 0
       ? checkpointDim / SO101_DOF
       : null;
-  // Only flag single-arm robot + bimanual checkpoint here. The reverse
-  // (bimanual robot) is already blocked above by `isBimanual`, and inference
-  // always drives exactly one follower.
   const checkpointIsBimanual = checkpointArms != null && checkpointArms >= 2;
+  // Flag both directions: a bimanual checkpoint on a single-arm robot, AND a
+  // single-arm checkpoint on a bimanual robot. Only assert a mismatch when the
+  // checkpoint exposes a recognisable arm count (checkpointArms != null) — a
+  // vision-only checkpoint with no state dim can't be judged here, so we let
+  // the server's post-mortem shape check speak instead of guessing.
   const robotCheckpointArmMismatch =
-    !!robot && !isBimanual && !!policyConfig && checkpointIsBimanual;
+    !!robot &&
+    !!policyConfig &&
+    checkpointArms != null &&
+    checkpointIsBimanual !== isBimanual;
 
   const expectedCameraNames = policyConfig
     ? Object.keys(policyConfig.image_features)
@@ -241,7 +248,6 @@ const InferenceModal: React.FC<Props> = ({
   const canStart =
     !!robot &&
     robot.is_clean &&
-    !isBimanual &&
     !robotCheckpointArmMismatch &&
     selectedRef != null &&
     !!policyConfig &&
@@ -251,7 +257,6 @@ const InferenceModal: React.FC<Props> = ({
   const handleStart = async () => {
     if (
       !robot ||
-      isBimanual ||
       robotCheckpointArmMismatch ||
       selectedRef == null ||
       !policyConfig
@@ -286,6 +291,18 @@ const InferenceModal: React.FC<Props> = ({
         duration_s: durationS,
         // Follower torque limit for the session (10-100% of full power).
         motor_power: robot.motor_power ?? 100,
+        // Bimanual: forward the mode + right-arm follower so the server builds a
+        // `bi_so_follower` command staging both follower calibrations. In single
+        // mode the right_* fields are inert (mode defaults to "single"
+        // server-side). robot_name is the BiSO staging base id.
+        mode: robot.mode,
+        right_follower_port: robot.right_follower_port,
+        right_follower_config: robot.right_follower_config,
+        robot_name: robot.name,
+        // Forward the checkpoint's flat state width so the server enforces the
+        // same arm-count guard authoritatively (null when the checkpoint omits
+        // observation.state — the server then defers to its shape check).
+        checkpoint_state_dim: policyConfig.state_dim ?? undefined,
       });
       // A success can carry a warn-but-allow arm-identity finding — surface
       // it instead of silently dropping it.
@@ -353,20 +370,12 @@ const InferenceModal: React.FC<Props> = ({
                   Configure it before running inference.
                 </AlertDescription>
               </Alert>
-            ) : isBimanual ? (
-              <Alert className="bg-amber-900/40 border-amber-700 text-amber-100">
-                <AlertTriangle className="h-4 w-4" />
-                <AlertDescription>
-                  <strong>{robot.name}</strong> is a bimanual robot. Inference
-                  runs a single follower only — select a single-arm robot on the
-                  Landing page to run this policy.
-                </AlertDescription>
-              </Alert>
             ) : (
               <div className="flex items-center gap-2 text-sm">
                 <CheckCircle className="w-4 h-4 text-green-400" />
                 <span className="text-slate-200">
                   Running on <strong>{robot.name}</strong>
+                  {isBimanual ? " (bimanual — both followers)" : ""}
                 </span>
               </div>
             )}
@@ -394,12 +403,23 @@ const InferenceModal: React.FC<Props> = ({
               <Alert className="bg-amber-900/40 border-amber-700 text-amber-100">
                 <AlertTriangle className="h-4 w-4" />
                 <AlertDescription>
-                  This checkpoint was trained on a{" "}
-                  <strong>bimanual robot</strong> ({checkpointDim}-dim state,{" "}
-                  {checkpointArms} arms), but <strong>{robot?.name}</strong> is a
-                  single-arm robot — a single follower can't drive it. Pick a
-                  single-arm checkpoint, or select a matching robot on the
-                  Landing page.
+                  {checkpointIsBimanual ? (
+                    <>
+                      This checkpoint was trained on a{" "}
+                      <strong>bimanual robot</strong> ({checkpointDim}-dim state,{" "}
+                      {checkpointArms} arms), but <strong>{robot?.name}</strong>{" "}
+                      is a single-arm robot. Pick a single-arm checkpoint, or
+                      select a bimanual robot on the Landing page.
+                    </>
+                  ) : (
+                    <>
+                      This checkpoint was trained on a{" "}
+                      <strong>single-arm robot</strong> ({checkpointDim}-dim
+                      state), but <strong>{robot?.name}</strong> is a bimanual
+                      robot. Pick a bimanual checkpoint, or select a single-arm
+                      robot on the Landing page.
+                    </>
+                  )}
                 </AlertDescription>
               </Alert>
             ) : null}
