@@ -343,6 +343,7 @@ const Landing = () => {
                 onOpenCustom={handleOpenCustom}
                 onCreateNew={handleCreateDataset}
                 onDelete={handleDeleteDataset}
+                onUploaded={() => refreshDatasets()}
               >
                 <Button
                   variant="outline"

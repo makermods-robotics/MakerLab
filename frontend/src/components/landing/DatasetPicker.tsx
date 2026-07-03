@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Plus, ExternalLink, Trash2 } from "lucide-react";
+import { Plus, ExternalLink, Trash2, Upload as UploadIcon } from "lucide-react";
 import {
   Popover,
   PopoverContent,
@@ -13,6 +13,7 @@ import {
   CommandItem,
   CommandList,
 } from "@/components/ui/command";
+import UploadDatasetDialog from "@/components/landing/UploadDatasetDialog";
 import { DatasetItem } from "@/lib/replayApi";
 import { validateDatasetName } from "@/lib/datasetName";
 
@@ -23,6 +24,9 @@ interface DatasetPickerProps {
   onCreateNew: (name: string) => void;
   onOpenCustom: (repoId: string) => void;
   onDelete?: (item: DatasetItem) => void;
+  /** Called after a row's Hub upload succeeds so the parent can refresh the
+   * list (flips the row's source local -> both, showing the "on Hub" badge). */
+  onUploaded?: (item: DatasetItem) => void;
   children: React.ReactNode;
 }
 
@@ -35,6 +39,7 @@ const DatasetPicker: React.FC<DatasetPickerProps> = ({
   onCreateNew,
   onOpenCustom,
   onDelete,
+  onUploaded,
   children,
 }) => {
   const [open, setOpen] = useState(false);
@@ -106,6 +111,32 @@ const DatasetPicker: React.FC<DatasetPickerProps> = ({
         <span className="text-xs text-gray-400 mr-2">on Hub</span>
       )}
       {d.private && <span className="text-xs text-amber-400">private</span>}
+      {/* Upload to Hub — local rows only (a "both" row is already on the Hub).
+          Opens the same confirm popover the info card uses. */}
+      {d.source === "local" && (
+        <UploadDatasetDialog
+          repoId={d.repo_id}
+          onUploaded={() => onUploaded?.(d)}
+        >
+          <button
+            type="button"
+            aria-label={`Upload ${d.repo_id} to Hub`}
+            className="ml-2 shrink-0 text-gray-500 hover:text-blue-400"
+            // Stop cmdk from treating the click as a selection of the row, but
+            // don't preventDefault — the wrapping PopoverTrigger skips its
+            // toggle when the child's click event is defaultPrevented.
+            onMouseDown={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+            }}
+            onClick={(e) => {
+              e.stopPropagation();
+            }}
+          >
+            <UploadIcon className="h-3.5 w-3.5" />
+          </button>
+        </UploadDatasetDialog>
+      )}
       {onDelete && (d.source === "local" || d.source === "both") && (
         <button
           type="button"

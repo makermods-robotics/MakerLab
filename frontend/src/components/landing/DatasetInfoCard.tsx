@@ -3,7 +3,6 @@ import {
   AlertTriangle,
   ChevronDown,
   ExternalLink,
-  Loader2,
   Pencil,
   Upload as UploadIcon,
 } from "lucide-react";
@@ -13,7 +12,6 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -23,16 +21,11 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from "@/components/ui/popover";
 import { useToast } from "@/hooks/use-toast";
 import { useApi } from "@/contexts/ApiContext";
 import { ApiError } from "@/lib/apiClient";
 import { validateDatasetName } from "@/lib/datasetName";
+import UploadDatasetDialog from "@/components/landing/UploadDatasetDialog";
 import {
   DatasetInfo,
   DatasetTask,
@@ -40,7 +33,6 @@ import {
   getDatasetHubStatus,
   getDatasetInfo,
   renameDataset,
-  uploadDataset,
 } from "@/lib/replayApi";
 
 /** 16723 -> "16.7k", 950 -> "950" */
@@ -149,13 +141,8 @@ const TaskList: React.FC<{ tasks: DatasetTask[] }> = ({ tasks }) => {
  */
 const HubSyncRow: React.FC<{ repoId: string }> = ({ repoId }) => {
   const { baseUrl, fetchWithHeaders } = useApi();
-  const { toast } = useToast();
   const [status, setStatus] = useState<HubStatusValue>("unknown");
   const [hubUrl, setHubUrl] = useState<string | null>(null);
-  const [popoverOpen, setPopoverOpen] = useState(false);
-  const [isPrivate, setIsPrivate] = useState(true);
-  const [tagsInput, setTagsInput] = useState("");
-  const [uploading, setUploading] = useState(false);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -172,79 +159,6 @@ const HubSyncRow: React.FC<{ repoId: string }> = ({ repoId }) => {
       });
     return () => controller.abort();
   }, [baseUrl, fetchWithHeaders, repoId]);
-
-  const handleUpload = async () => {
-    setUploading(true);
-    try {
-      const tags = tagsInput
-        .split(",")
-        .map((t) => t.trim())
-        .filter((t) => t.length > 0);
-      const result = await uploadDataset(
-        baseUrl,
-        fetchWithHeaders,
-        repoId,
-        tags,
-        isPrivate,
-      );
-      if (result.success) {
-        const url =
-          result.dataset_url ??
-          `https://huggingface.co/datasets/${repoId}`;
-        setStatus("on_hub");
-        setHubUrl(url);
-        setPopoverOpen(false);
-        toast({
-          title: "Uploaded to Hub",
-          description: (
-            <span>
-              {repoId} is now on the Hub.{" "}
-              <a
-                href={url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="underline font-medium"
-              >
-                View dataset
-              </a>
-            </span>
-          ),
-        });
-      } else {
-        const fallback = "Failed to upload dataset to the Hub.";
-        toast({
-          title: "Upload failed",
-          description: result.docs_url ? (
-            <span>
-              {result.message || fallback}{" "}
-              <a
-                href={result.docs_url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="underline font-medium"
-              >
-                Open setup guide
-              </a>
-            </span>
-          ) : (
-            result.message || fallback
-          ),
-          variant: "destructive",
-        });
-      }
-    } catch (e) {
-      toast({
-        title: "Upload failed",
-        description:
-          e instanceof ApiError && e.detail
-            ? e.detail
-            : "Could not reach the backend to upload.",
-        variant: "destructive",
-      });
-    } finally {
-      setUploading(false);
-    }
-  };
 
   if (status === "on_hub") {
     return (
@@ -271,85 +185,22 @@ const HubSyncRow: React.FC<{ repoId: string }> = ({ repoId }) => {
       <span className="text-gray-500">
         {status === "local_only" ? "Local only" : "Hub status unknown"}
       </span>
-      <Popover open={popoverOpen} onOpenChange={setPopoverOpen}>
-        <PopoverTrigger asChild>
-          <Button
-            size="sm"
-            variant="outline"
-            disabled={uploading}
-            className="h-6 gap-1 border-gray-600 px-2 text-xs text-gray-300 hover:bg-gray-700 hover:text-white"
-          >
-            {uploading ? (
-              <>
-                <Loader2 className="h-3 w-3 animate-spin" />
-                Uploading…
-              </>
-            ) : (
-              <>
-                <UploadIcon className="h-3 w-3" />
-                Upload to Hub
-              </>
-            )}
-          </Button>
-        </PopoverTrigger>
-        <PopoverContent
-          align="end"
-          className="w-72 border-gray-700 bg-gray-900 text-xs text-gray-200"
+      <UploadDatasetDialog
+        repoId={repoId}
+        onUploaded={(url) => {
+          setStatus("on_hub");
+          setHubUrl(url);
+        }}
+      >
+        <Button
+          size="sm"
+          variant="outline"
+          className="h-6 gap-1 border-gray-600 px-2 text-xs text-gray-300 hover:bg-gray-700 hover:text-white"
         >
-          <div className="space-y-3">
-            <div className="flex items-start gap-2">
-              <Checkbox
-                id="hub-upload-private"
-                checked={isPrivate}
-                onCheckedChange={(c) => setIsPrivate(c as boolean)}
-                className="mt-0.5"
-              />
-              <Label
-                htmlFor="hub-upload-private"
-                className="cursor-pointer font-normal leading-snug text-gray-300"
-              >
-                Private dataset
-                <span className="mt-0.5 block text-gray-500">
-                  Recordings include your camera footage.
-                </span>
-              </Label>
-            </div>
-            <div className="space-y-1">
-              <Label
-                htmlFor="hub-upload-tags"
-                className="font-normal text-gray-400"
-              >
-                Tags (optional, comma-separated)
-              </Label>
-              <Input
-                id="hub-upload-tags"
-                value={tagsInput}
-                onChange={(e) => setTagsInput(e.target.value)}
-                placeholder="robotics, manipulation"
-                className="h-7 border-gray-600 bg-gray-800 text-xs text-white"
-              />
-            </div>
-            <Button
-              size="sm"
-              onClick={handleUpload}
-              disabled={uploading}
-              className="h-7 w-full gap-1 bg-blue-500 text-xs text-white hover:bg-blue-600"
-            >
-              {uploading ? (
-                <>
-                  <Loader2 className="h-3 w-3 animate-spin" />
-                  Uploading…
-                </>
-              ) : (
-                <>
-                  <UploadIcon className="h-3 w-3" />
-                  Upload to Hub
-                </>
-              )}
-            </Button>
-          </div>
-        </PopoverContent>
-      </Popover>
+          <UploadIcon className="h-3 w-3" />
+          Upload to Hub
+        </Button>
+      </UploadDatasetDialog>
     </div>
   );
 };
