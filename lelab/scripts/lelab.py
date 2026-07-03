@@ -314,6 +314,10 @@ def main():
         # huggingface_hub import) loads — uvicorn imports the app lazily, so
         # setting it here covers both prod and the dev subprocess (env copy).
         os.environ["HF_HUB_OFFLINE"] = "1"
+        logger.info(
+            "HF_HUB_OFFLINE=1 (--offline): Hub features disabled (login/whoami/"
+            "dataset push will fail fast), hardware flows unaffected."
+        )
 
     if args.dev:
         if args.lan:

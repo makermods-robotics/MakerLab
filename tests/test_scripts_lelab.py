@@ -230,6 +230,57 @@ def test_is_uv_tool_link_false_for_regular_file(tmp_path) -> None:
     assert _is_uv_tool_link(bin_dir / "lelab", uv_tools_dir) is False
 
 
+def test_station_injects_lan_and_offline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`station()` prepends `--lan --offline` and defers to `main` — without
+    starting a server (main is stubbed). Guards the systemd unit's posture."""
+    from lelab.scripts import lelab as launcher
+
+    captured: dict[str, list[str]] = {}
+
+    def fake_main() -> None:
+        captured["argv"] = list(launcher.sys.argv)
+
+    monkeypatch.setattr(launcher, "main", fake_main)
+    monkeypatch.setattr(launcher.sys, "argv", ["lelab-station"])
+
+    launcher.station()
+
+    assert captured["argv"] == ["lelab-station", "--lan", "--offline"]
+
+
+def test_station_passes_extra_args_through(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ad-hoc flags after the injected posture still reach `main`."""
+    from lelab.scripts import lelab as launcher
+
+    captured: dict[str, list[str]] = {}
+    monkeypatch.setattr(launcher, "main", lambda: captured.setdefault("argv", list(launcher.sys.argv)))
+    monkeypatch.setattr(launcher.sys, "argv", ["lelab-station", "--dev"])
+
+    launcher.station()
+
+    assert captured["argv"] == ["lelab-station", "--lan", "--offline", "--dev"]
+
+
+def test_makerlabs_entry_point_targets_main() -> None:
+    """`makerlabs` is plain LeLab (== `lelab`), NOT the station posture.
+
+    Reads the declared console_scripts so we never invoke the entry point
+    (which would start a server). `lelab`/`makerlabs` -> `main`;
+    `lelab-station` -> `station`.
+    """
+    from importlib.metadata import entry_points
+
+    scripts = {
+        ep.name: ep.value
+        for ep in entry_points(group="console_scripts")
+        if ep.name.startswith("lelab") or ep.name == "makerlabs"
+    }
+
+    assert scripts["makerlabs"] == "lelab.scripts.lelab:main"
+    assert scripts["makerlabs"] == scripts["lelab"]
+    assert scripts["lelab-station"] == "lelab.scripts.lelab:station"
+
+
 def test_ensure_path_symlinks_leaves_uv_tool_entry_untouched(tmp_path) -> None:
     """A name owned by `uv tool install` must be left exactly as-is — no
     clobber, no repoint — so the two install flavors don't fight."""

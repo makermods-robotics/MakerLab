@@ -35,7 +35,7 @@ Two supported flavors — pick by whether you want to **run** LeLab or **hack on
 it. They can even coexist on one machine (see the precedence note below).
 
 - **Tool install** — `uv tool install <local-path-or-git-url>`. One command,
-  no clone, a global `lelab`/`lelab-station`/`makerlabs` on your PATH. The
+  no clone, a global `lelab`/`makerlabs`/`lelab-station` on your PATH. The
   built frontend ships inside the wheel (`frontend/dist`), so a tool install is
   a fully runnable app — nothing to build. This is the way to just *use*
   LeLab. Trade-offs:
@@ -123,12 +123,14 @@ edit the paths/user in the file if yours differ, and see the comments in
 [deploy/lelab-station.service](deploy/lelab-station.service) for the
 online-posture variant and day-to-day systemctl commands.
 
-**Global commands without `.venv/bin/` prefixes:** the entry points
-(`lelab`, `lelab-station`, and the house alias `makerlabs`) live in the
-venv, and **self-install onto your PATH on first launch**: any run by full
-path (e.g. `.venv/bin/makerlabs`) symlinks all three into `~/.local/bin` —
-global command, no duplicated environment, always as fresh as the venv.
-From then on, bare `makerlabs` works from any directory. The step is
+**Global commands without `.venv/bin/` prefixes:** three entry points live in
+the venv. `lelab` and its house name `makerlabs` are **the same command** —
+run LeLab in the friendly default posture (serve on localhost, open a browser,
+Hub reachable). `lelab-station` is the headless offline station posture
+(`--lan --offline`; see below). They **self-install onto your PATH on first
+launch**: any run by full path (e.g. `.venv/bin/lelab`) symlinks all three
+into `~/.local/bin` — global command, no duplicated environment, always as
+fresh as the venv. From then on, bare `lelab` works from any directory. The step is
 idempotent, repoints stale links from old clones, never clobbers a
 non-symlink, and can be disabled with `LELAB_NO_PATH_LINK=1`. The manual
 equivalent, if you prefer to do it yourself:
