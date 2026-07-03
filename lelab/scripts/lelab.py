@@ -72,22 +72,30 @@ def _open_browser_when_ready():
         return
 
 
-def _run_prod():
-    """Serve built frontend from backend on a single port."""
+def _run_prod(lan: bool = False):
+    """Serve built frontend from backend on a single port.
+
+    `lan` binds 0.0.0.0 for headless stations serving other machines on the
+    network; it also skips the open-a-local-browser step (there is no local
+    browser worth opening in that deployment).
+    """
     if not FRONTEND_DIST.exists():
         logger.error(f"❌ Built frontend not found at {FRONTEND_DIST}")
         logger.error("   Run `npm run build` in frontend/ first, or use `lelab --dev`.")
         sys.exit(1)
 
-    logger.info("🚀 Starting LeLab on http://localhost:%d ...", BACKEND_PORT)
-
-    threading.Thread(target=_open_browser_when_ready, daemon=True).start()
+    host = "0.0.0.0" if lan else "127.0.0.1"  # noqa: S104
+    if lan:
+        logger.info("🚀 Starting LeLab on http://0.0.0.0:%d (LAN) ...", BACKEND_PORT)
+    else:
+        logger.info("🚀 Starting LeLab on http://localhost:%d ...", BACKEND_PORT)
+        threading.Thread(target=_open_browser_when_ready, daemon=True).start()
 
     # Run uvicorn in the main thread so its native SIGINT handler works,
     # and bound graceful shutdown so a stuck WebSocket can't hang Ctrl+C.
     uvicorn.run(
         "lelab.server:app",
-        host="127.0.0.1",
+        host=host,
         port=BACKEND_PORT,
         log_level="info",
         reload=False,
@@ -188,12 +196,30 @@ def main():
         action="store_true",
         help="Dev mode: Vite HMR + uvicorn --reload (requires Node.js)",
     )
+    parser.add_argument(
+        "--lan",
+        action="store_true",
+        help="Headless station mode: bind 0.0.0.0 (serve other machines), don't open a browser",
+    )
+    parser.add_argument(
+        "--offline",
+        action="store_true",
+        help="Set HF_HUB_OFFLINE=1: every Hub call fails fast (all hardware flows work offline)",
+    )
     args = parser.parse_args()
 
+    if args.offline:
+        # Must land in the environment before lelab.server (and its
+        # huggingface_hub import) loads — uvicorn imports the app lazily, so
+        # setting it here covers both prod and the dev subprocess (env copy).
+        os.environ["HF_HUB_OFFLINE"] = "1"
+
     if args.dev:
+        if args.lan:
+            logger.warning("--lan is ignored in --dev mode (Vite serves localhost only)")
         _run_dev()
     else:
-        _run_prod()
+        _run_prod(lan=args.lan)
 
 
 if __name__ == "__main__":

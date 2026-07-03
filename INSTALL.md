@@ -61,8 +61,8 @@ git clone https://github.com/makermods-robotics/MakerLab && cd MakerLab
 uv venv --python 3.12                       # JetPack 6 ships 3.10; uv fetches 3.12
 uv pip install -e .                         # GPU inference? read JETSON_SETUP.md FIRST
 
-# run headless — the `lelab` launcher binds 127.0.0.1 only:
-HF_HUB_OFFLINE=1 .venv/bin/uvicorn lelab.server:app --host 0.0.0.0 --port 8000
+# run headless — --lan binds 0.0.0.0, --offline sets HF_HUB_OFFLINE=1:
+.venv/bin/lelab --lan --offline
 # browse from any LAN machine: http://<jetson-ip>:8000
 ```
 
