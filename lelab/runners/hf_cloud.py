@@ -14,9 +14,12 @@
 
 """HF Jobs runner — runs a training as an HF Jobs job on HuggingFace's GPUs.
 
-Uses huggingface/lerobot-gpu:latest as the runtime image (lerobot pre-installed).
-Tails logs via HfApi.fetch_job_logs and reuses the existing parse_metrics_into
-parser since stdout format is identical to a local lerobot run.
+Uses huggingface/lerobot-gpu:latest as the runtime image; the in-container
+wrapper replaces its bundled lerobot with lelab's exact pyproject pin before
+launching the trainer (the image's "latest" drifts from the CLI surface our
+argv builder targets). Tails logs via HfApi.fetch_job_logs and reuses the
+existing parse_metrics_into parser since stdout format is identical to a
+local lerobot run.
 """
 
 from __future__ import annotations
@@ -25,13 +28,18 @@ import contextlib
 import logging
 import netrc
 import os
+import re
+import shlex
 import threading
 import time
+import tomllib
+from importlib.metadata import requires
 from pathlib import Path
 from queue import Empty, Queue
 
 from huggingface_hub import get_token
 from huggingface_hub.errors import RepositoryNotFoundError
+from packaging.requirements import Requirement
 
 from ..jobs import LogLine, TrainingMetrics, extract_wandb_run_url, parse_metrics_into
 from ..train import TrainingRequest, build_training_command
@@ -41,6 +49,112 @@ from ..utils.hf_auth import cached_whoami, shared_hf_api
 logger = logging.getLogger(__name__)
 
 LEROBOT_IMAGE = "huggingface/lerobot-gpu:latest"
+
+# The :latest image ships whatever lerobot was current when it was built —
+# which drifts from the pin in our pyproject.toml that build_training_command's
+# argv is shaped for (a real job died on `--eval_freq`, renamed upstream).
+# The wrapper therefore pip-installs the exact pin (below) before launching
+# the trainer, so container and host agree on the CLI surface.
+
+# Extras from the pyproject pin that only matter on the host machine (serial
+# motor buses). Dropped from the container install.
+_HOST_ONLY_EXTRAS = frozenset({"feetech"})
+
+# policy_type -> lerobot extra that carries the policy's model dependencies
+# at the pinned ref (e.g. transformers for smolvla). Policies without an
+# entry (act, tdmpc, vqbet, sac) need nothing beyond the core install.
+_POLICY_CLOUD_EXTRAS = {
+    "smolvla": "smolvla",
+    "diffusion": "diffusion",
+    "pi0": "pi",
+    "pi0_fast": "pi",
+    "pi05": "pi",
+}
+
+# "git+https://github.com/<org>/<repo>(.git)@<ref>" — the shape of our pin.
+_GIT_PIN_RE = re.compile(r"^git\+(?P<repo>https://github\.com/[^@#]+?)(?:\.git)?@(?P<ref>[^#]+)$")
+
+
+def _pinned_lerobot_requirement() -> Requirement:
+    """The exact lerobot requirement lelab was installed with (the pyproject pin).
+
+    Primary source is the installed distribution's metadata — generated from
+    pyproject.toml at install time, so there is no second hardcoded copy of the
+    sha and, crucially, it matches the lerobot actually importable on this host
+    (the one build_training_command's argv is shaped for). Falls back to parsing
+    pyproject.toml directly when running from a source tree without installed
+    metadata.
+    """
+    candidates: list[str] = []
+    with contextlib.suppress(Exception):
+        candidates = requires("LeLab") or []
+    if not any("lerobot" in c for c in candidates):
+        pyproject = Path(__file__).resolve().parents[2] / "pyproject.toml"
+        candidates = tomllib.loads(pyproject.read_text())["project"]["dependencies"]
+    for line in candidates:
+        with contextlib.suppress(Exception):
+            parsed = Requirement(line)
+            if parsed.name.lower() == "lerobot":
+                return parsed
+    raise RuntimeError("Could not resolve the lerobot pin from LeLab metadata or pyproject.toml")
+
+
+def cloud_lerobot_spec(policy_type: str) -> str:
+    """Pip requirement the cloud container must install so its lerobot matches
+    the pin that build_training_command targets.
+
+    Derived from the pyproject pin at submission time (never hardcoded), with
+    two container-side adjustments to the extras: host-only extras are dropped,
+    and the trained policy's model-deps extra is added. A GitHub `git+…@ref`
+    pin is rewritten to the equivalent source archive tarball
+    (github.com/<org>/<repo>/archive/<ref>.tar.gz — same tree, but pip can
+    install it without git in the image; lerobot's version is static, no scm).
+    """
+    req = _pinned_lerobot_requirement()
+    extras = {e for e in req.extras if e not in _HOST_ONLY_EXTRAS}
+    policy_extra = _POLICY_CLOUD_EXTRAS.get(policy_type)
+    if policy_extra:
+        extras.add(policy_extra)
+    name = f"lerobot[{','.join(sorted(extras))}]" if extras else "lerobot"
+    if req.url:
+        m = _GIT_PIN_RE.match(req.url)
+        url = f"{m.group('repo')}/archive/{m.group('ref')}.tar.gz" if m else req.url
+        return f"{name} @ {url}"
+    # Future-proofing: a PyPI-version pin flows through as a plain specifier.
+    return f"{name}{req.specifier}"
+
+
+def _cloud_device(flavor: str) -> str:
+    """HF Jobs flavors are NVIDIA GPU boxes except the cpu-* tiers."""
+    return "cpu" if flavor.startswith("cpu") else "cuda"
+
+
+def localize_config_for_cloud(config: TrainingRequest, flavor: str) -> None:
+    """Strip host-machine specifics from the request at the cloud-submission
+    boundary, before build_training_command runs. Mutates in place — the
+    mutated config is what gets persisted on the JobRecord, so the historical
+    record reflects what actually ran. Local runs are untouched.
+
+    Raises ValueError (→ HTTP 400) for host-path inputs that cannot work in
+    the container, so the user gets a clear message instead of a remote crash.
+    """
+    if config.config_path:
+        raise ValueError(
+            "Resuming on a cloud job isn't supported: the source checkpoint's "
+            "train_config.json lives on this machine, not in the container."
+        )
+    if config.policy_pretrained_path and Path(config.policy_pretrained_path).is_absolute():
+        raise ValueError(
+            "Fine-tuning a cloud job from a local checkpoint isn't supported — "
+            "push the source model to the Hub and fine-tune from the Hub copy."
+        )
+    # The container resolves the dataset from the Hub by repo_id; a host-local
+    # dataset root doesn't exist there.
+    config.dataset_root = None
+    # The host's auto-detected device (mps on a Mac) is meaningless on the
+    # remote pod; pin the flavor's real backend instead.
+    config.policy_device = _cloud_device(flavor)
+
 
 # Where the trainer writes checkpoints inside the HF Jobs container. The host
 # path the registry hands us (under ~/.cache/...) doesn't exist on the remote
@@ -54,10 +168,11 @@ _CONTAINER_OUTPUT_DIR = "/tmp/lelab/train"  # nosec B108 — fixed path inside t
 # directories to the Hub model repo, so the lelab UI can list them while
 # training is in progress.
 #
-# Sent verbatim as the value of `python -c '...'`. Anything after `--` in
-# the command argv is forwarded to the trainer.
+# Sent verbatim as the value of `python -c '...'`. Wrapper-side arguments
+# (the pinned lerobot spec) come before `--`; anything after `--` is
+# forwarded to the trainer.
 WRAPPER_SOURCE = r'''
-import os, re, sys, threading, subprocess
+import os, re, shlex, sys, threading, subprocess
 from pathlib import Path
 from huggingface_hub import HfApi
 
@@ -66,6 +181,7 @@ if "--" not in argv:
     print("[wrapper] missing -- separator", flush=True)
     sys.exit(2)
 sep = argv.index("--")
+wrapper_args = argv[:sep]
 trainer_argv = argv[sep + 1:]
 
 
@@ -84,6 +200,20 @@ repo_id = _arg("--policy.repo_id")
 if not output_dir or not repo_id:
     print(f"[wrapper] need --output_dir and --policy.repo_id; got {output_dir} / {repo_id}", flush=True)
     sys.exit(2)
+
+# The image ships whatever lerobot was latest when it was built; the trainer
+# argv is shaped for lelab's pinned lerobot. Install the exact pin (passed by
+# the submitter as the first wrapper arg) before launching, or the argument
+# surfaces drift apart (a real run died on argparse rc=2 over --eval_freq).
+lerobot_spec = wrapper_args[0] if wrapper_args else None
+if lerobot_spec:
+    print(f"[wrapper] installing pinned lerobot: {lerobot_spec}", flush=True)
+    install_rc = subprocess.run(
+        [sys.executable, "-m", "pip", "install", "--no-cache-dir", lerobot_spec]
+    ).returncode
+    if install_rc != 0:
+        print(f"[wrapper] pinned lerobot install failed rc={install_rc}", flush=True)
+        sys.exit(install_rc)
 
 api = HfApi()
 # lerobot only calls push_to_hub at the end of training, so the repo doesn't
@@ -137,7 +267,13 @@ def _watch():
 watch_thread = threading.Thread(target=_watch, name="ckpt-watcher", daemon=True)
 watch_thread.start()
 
-print(f"[wrapper] launching trainer: {' '.join(trainer_argv)}", flush=True)
+# Run the trainer on this same interpreter so it sees the just-installed pin.
+if trainer_argv and trainer_argv[0] == "python":
+    trainer_argv[0] = sys.executable
+
+# trainer_argv is passed to Popen as a LIST (never joined and re-split), so
+# values with spaces stay one argument; shlex.join is only for a faithful log.
+print(f"[wrapper] launching trainer: {shlex.join(trainer_argv)}", flush=True)
 proc = subprocess.Popen(list(trainer_argv), env=os.environ.copy())
 try:
     rc = proc.wait()
@@ -254,6 +390,11 @@ class HfCloudJobRunner:
         if not username:
             raise RuntimeError("Could not resolve HF username from whoami()")
 
+        # Strip host-machine specifics (auto-detected device, local dataset
+        # root, host checkpoint paths) BEFORE the potentially-slow dataset
+        # upload, so invalid requests fail fast with a 400.
+        localize_config_for_cloud(config, self._flavor)
+
         # Open the log file early so dataset-upload progress is recorded
         # before the cloud job is submitted.
         self._log_file_path.parent.mkdir(parents=True, exist_ok=True)
@@ -271,15 +412,23 @@ class HfCloudJobRunner:
         config.policy_repo_id = f"{username}/{job_id}"
 
         trainer_argv = build_training_command(config, _CONTAINER_OUTPUT_DIR)
-        # The wrapper expects `python -c WRAPPER_SOURCE -- <trainer argv>`.
+        # The wrapper expects `python -c WRAPPER_SOURCE <spec> -- <trainer argv>`.
         # `python -c` consumes the first non-option argument as the script,
-        # so we prepend a "--" sentinel of our own.
-        wrapped_command = ["python", "-c", WRAPPER_SOURCE, "--", *trainer_argv]
+        # so we prepend a "--" sentinel of our own; the pinned-lerobot spec
+        # rides before it as a wrapper-side argument.
+        wrapped_command = [
+            "python",
+            "-c",
+            WRAPPER_SOURCE,
+            cloud_lerobot_spec(config.policy_type),
+            "--",
+            *trainer_argv,
+        ]
         logger.info(
             "Submitting HF Cloud job %s on %s (wrapped trainer): %s",
             job_id,
             self._flavor,
-            " ".join(trainer_argv),
+            shlex.join(trainer_argv),
         )
 
         # HF_TOKEN goes via `secrets` (not `env`) so it doesn't show up in
