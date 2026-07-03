@@ -95,6 +95,103 @@ def test_resolve_resume_config_path_rejects_unknown_step(tmp_path) -> None:
         _resolve_resume_config_path(_record(out), 9999)
 
 
+def _cloud_record(repo_id: str | None = "user/act_ds_2026", state: str = "failed"):
+    from lelab.jobs import JobRecord
+    from lelab.train import TrainingRequest
+
+    return JobRecord(
+        id="cloud-1",
+        name="run",
+        state=state,
+        config=TrainingRequest(dataset_repo_id="user/ds", steps=10000),
+        output_dir="",
+        started_at=0.0,
+        runner="hf_cloud",
+        hf_repo_id=repo_id,
+    )
+
+
+class _FakeHubApi:
+    """Minimal HfApi stand-in: returns a fixed repo file listing."""
+
+    def __init__(self, files: list[str]) -> None:
+        self._files = files
+
+    def list_repo_files(self, repo_id, repo_type):
+        return self._files
+
+
+def test_resolve_cloud_resume_returns_repo_and_step_dir(monkeypatch) -> None:
+    from lelab.jobs import _resolve_cloud_resume
+
+    files = [
+        "checkpoints/005000/pretrained_model/config.json",
+        "checkpoints/005000/training_state/training_step.json",
+    ]
+    monkeypatch.setattr("lelab.jobs.shared_hf_api", lambda: _FakeHubApi(files))
+    repo_id, step_dir = _resolve_cloud_resume(_cloud_record(), 5000)
+    assert repo_id == "user/act_ds_2026"
+    assert step_dir == "005000"  # zero-padded dir name preserved
+
+
+def test_resolve_cloud_resume_defaults_to_latest(monkeypatch) -> None:
+    from lelab.jobs import _resolve_cloud_resume
+
+    files = [
+        "checkpoints/001000/pretrained_model/config.json",
+        "checkpoints/001000/training_state/training_step.json",
+        "checkpoints/003000/pretrained_model/config.json",
+        "checkpoints/003000/training_state/training_step.json",
+    ]
+    monkeypatch.setattr("lelab.jobs.shared_hf_api", lambda: _FakeHubApi(files))
+    _repo, step_dir = _resolve_cloud_resume(_cloud_record(), None)  # None ⇒ latest
+    assert step_dir == "003000"
+
+
+def test_resolve_cloud_resume_rejects_no_checkpoints(monkeypatch) -> None:
+    from lelab.jobs import _resolve_cloud_resume
+
+    monkeypatch.setattr("lelab.jobs.shared_hf_api", lambda: _FakeHubApi(["README.md"]))
+    with pytest.raises(ValueError, match="died before its first save"):
+        _resolve_cloud_resume(_cloud_record(), None)
+
+
+def test_resolve_cloud_resume_rejects_missing_training_state(monkeypatch) -> None:
+    from lelab.jobs import _resolve_cloud_resume
+
+    # Weights present but no training_state/ on the Hub ⇒ not resumable.
+    files = ["checkpoints/005000/pretrained_model/config.json"]
+    monkeypatch.setattr("lelab.jobs.shared_hf_api", lambda: _FakeHubApi(files))
+    with pytest.raises(ValueError, match="training_state"):
+        _resolve_cloud_resume(_cloud_record(), 5000)
+
+
+def test_resolve_cloud_resume_rejects_unknown_step(monkeypatch) -> None:
+    from lelab.jobs import _resolve_cloud_resume
+
+    files = [
+        "checkpoints/005000/pretrained_model/config.json",
+        "checkpoints/005000/training_state/training_step.json",
+    ]
+    monkeypatch.setattr("lelab.jobs.shared_hf_api", lambda: _FakeHubApi(files))
+    with pytest.raises(ValueError, match="no checkpoint at step 9999"):
+        _resolve_cloud_resume(_cloud_record(), 9999)
+
+
+def test_resolve_cloud_resume_rejects_non_cloud(tmp_path) -> None:
+    from lelab.jobs import _resolve_cloud_resume
+
+    with pytest.raises(ValueError, match="cloud"):
+        _resolve_cloud_resume(_record(tmp_path, runner="local"), None)
+
+
+def test_resolve_cloud_resume_rejects_missing_repo() -> None:
+    from lelab.jobs import _resolve_cloud_resume
+
+    with pytest.raises(ValueError, match="no output repo"):
+        _resolve_cloud_resume(_cloud_record(repo_id=None), None)
+
+
 def test_extract_wandb_run_url_finds_canonical_url() -> None:
     from lelab.jobs import extract_wandb_run_url
 
@@ -741,3 +838,139 @@ def test_boot_sweep_never_deletes_dirs_with_extra_content(tmp_path) -> None:
         reg.get("B")
     assert (dup_dir / "job.json").exists()  # nothing deleted
     assert (dup_dir / "extra.safetensors").exists()
+
+
+def test_flat_feature_dim_reads_single_arm_and_bimanual_state() -> None:
+    """observation.state / action are 1-D: [6] for one SO-101 arm, [12] for a
+    bimanual (two-arm) checkpoint. The inference modal keys the single-arm vs
+    bimanual mismatch off this."""
+    from lelab.jobs import _flat_feature_dim
+
+    assert _flat_feature_dim({"type": "STATE", "shape": [6]}) == 6
+    assert _flat_feature_dim({"type": "STATE", "shape": [12]}) == 12
+    assert _flat_feature_dim({"type": "ACTION", "shape": (12,)}) == 12
+
+
+def test_flat_feature_dim_returns_none_for_missing_or_non_1d() -> None:
+    from lelab.jobs import _flat_feature_dim
+
+    assert _flat_feature_dim(None) is None
+    assert _flat_feature_dim({}) is None
+    assert _flat_feature_dim({"shape": [3, 480, 640]}) is None  # a VISUAL feature
+    assert _flat_feature_dim({"shape": []}) is None
+    assert _flat_feature_dim({"shape": "nope"}) is None
+
+
+def test_cloud_start_rejects_local_only_dataset(tmp_path) -> None:
+    """A cloud (hf_cloud) run on a dataset that's only local raises
+    DatasetNotOnHubError before any record/runner is created — HF Jobs pods
+    resolve the dataset from the Hub, so a local-only one would fail remotely."""
+    from unittest.mock import patch
+
+    from lelab.jobs import DatasetNotOnHubError, JobRegistry, JobTarget
+    from lelab.train import TrainingRequest
+
+    reg = JobRegistry(tmp_path / "root")
+    cfg = TrainingRequest(dataset_repo_id="user/local_only", policy_type="act")
+    target = JobTarget(runner="hf_cloud", flavor="t4-small")
+
+    with (
+        patch(
+            "lelab.datasets.get_hub_status",
+            return_value={"repo_id": "user/local_only", "status": "local_only", "url": None},
+        ),
+        pytest.raises(DatasetNotOnHubError) as exc,
+    ):
+        reg.start(cfg, target)
+
+    assert exc.value.repo_id == "user/local_only"
+    assert "not on the Hugging Face Hub" in str(exc.value)
+    # Nothing was registered — the guard fires before the record is created.
+    assert reg.list(limit=10) == []
+
+
+def test_cloud_start_allows_hub_dataset(tmp_path) -> None:
+    """When the dataset is on the Hub, the preflight passes and the runner is
+    started (stubbed here — we assert the guard doesn't block, not a real
+    submission)."""
+    from unittest.mock import MagicMock, patch
+
+    from lelab.jobs import JobRegistry, JobTarget
+    from lelab.train import TrainingRequest
+
+    reg = JobRegistry(tmp_path / "root")
+    cfg = TrainingRequest(dataset_repo_id="user/on_hub", policy_type="act")
+    target = JobTarget(runner="hf_cloud", flavor="t4-small")
+
+    fake_runner = MagicMock()
+    fake_runner.hf_job_id.return_value = "job-xyz"
+    fake_runner.hf_job_url.return_value = "https://hf.co/jobs/job-xyz"
+
+    def _fake_runner_factory(*_args, **_kwargs):
+        return fake_runner
+
+    with (
+        patch(
+            "lelab.datasets.get_hub_status",
+            return_value={"repo_id": "user/on_hub", "status": "on_hub", "url": "u"},
+        ),
+        patch("lelab.runners.hf_cloud.HfCloudJobRunner", _fake_runner_factory),
+    ):
+        record = reg.start(cfg, target)
+
+    assert record.runner == "hf_cloud"
+    fake_runner.start.assert_called_once()
+
+
+def test_cloud_start_allows_unknown_status_dataset(tmp_path) -> None:
+    """An "unknown" hub status (offline / transient transport error) does NOT
+    block the run — a network blip must not wrongly refuse a real Hub dataset;
+    the existing _ensure_dataset_on_hub fallback handles a genuinely-missing
+    one. The guard only rejects a definitive "local_only"."""
+    from unittest.mock import MagicMock, patch
+
+    from lelab.jobs import JobRegistry, JobTarget
+    from lelab.train import TrainingRequest
+
+    reg = JobRegistry(tmp_path / "root")
+    cfg = TrainingRequest(dataset_repo_id="user/maybe", policy_type="act")
+    target = JobTarget(runner="hf_cloud", flavor="t4-small")
+
+    fake_runner = MagicMock()
+    fake_runner.hf_job_id.return_value = "job-xyz"
+    fake_runner.hf_job_url.return_value = None
+
+    with (
+        patch(
+            "lelab.datasets.get_hub_status",
+            return_value={"repo_id": "user/maybe", "status": "unknown", "url": None},
+        ),
+        patch("lelab.runners.hf_cloud.HfCloudJobRunner", lambda *a, **k: fake_runner),
+    ):
+        record = reg.start(cfg, target)
+
+    assert record.runner == "hf_cloud"
+
+
+def test_local_start_skips_hub_preflight(tmp_path) -> None:
+    """A local run on a local-only dataset is fine — no Hub involved — so the
+    preflight must not fire (get_hub_status is never consulted)."""
+    from unittest.mock import MagicMock, patch
+
+    from lelab.jobs import JobRegistry, JobTarget
+    from lelab.train import TrainingRequest
+
+    reg = JobRegistry(tmp_path / "root")
+    cfg = TrainingRequest(dataset_repo_id="user/local_only", policy_type="act")
+
+    fake_runner = MagicMock()
+    fake_runner.pid.return_value = 4242
+
+    with (
+        patch("lelab.datasets.get_hub_status") as get_status,
+        patch("lelab.jobs.LocalJobRunner", lambda *a, **k: fake_runner),
+    ):
+        record = reg.start(cfg, JobTarget(runner="local"))
+
+    get_status.assert_not_called()
+    assert record.runner == "local"

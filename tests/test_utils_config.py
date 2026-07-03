@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -302,7 +303,9 @@ def test_validate_calibration_data_accepts_well_formed() -> None:
         {},  # empty
         {"m": {"id": 1}},  # missing fields
         {"m": "not-an-object"},  # motor not a dict
-        {"m": {"id": True, "drive_mode": 0, "homing_offset": 0, "range_min": 0, "range_max": 1}},  # bool not int
+        {
+            "m": {"id": True, "drive_mode": 0, "homing_offset": 0, "range_min": 0, "range_max": 1}
+        },  # bool not int
     ],
 )
 def test_validate_calibration_data_rejects_malformed(data) -> None:
@@ -501,10 +504,14 @@ def test_bimanual_record_clean_requires_all_four_calibrations(tmp_lerobot_home: 
     record = {
         "name": "bi",
         "mode": "bimanual",
-        "leader_port": "/dev/ll", "follower_port": "/dev/lf",
-        "leader_config": "LL", "follower_config": "LF",
-        "right_leader_port": "/dev/rl", "right_follower_port": "/dev/rf",
-        "right_leader_config": "RL", "right_follower_config": "RF",
+        "leader_port": "/dev/ll",
+        "follower_port": "/dev/lf",
+        "leader_config": "LL",
+        "follower_config": "LF",
+        "right_leader_port": "/dev/rl",
+        "right_follower_port": "/dev/rf",
+        "right_leader_config": "RL",
+        "right_follower_config": "RF",
     }
     # Only the left pair's files exist -> not clean.
     (Path(cfg.LEADER_CONFIG_PATH) / "LL.json").write_text("{}")
@@ -522,8 +529,10 @@ def test_config_slot_conflict_detects_same_side_duplicate() -> None:
 
     base = {
         "mode": "bimanual",
-        "leader_config": "L1", "follower_config": "F1",
-        "right_leader_config": "L2", "right_follower_config": "F2",
+        "leader_config": "L1",
+        "follower_config": "F1",
+        "right_leader_config": "L2",
+        "right_follower_config": "F2",
     }
     assert cfg.config_slot_conflict(base) is None
     assert cfg.config_slot_conflict({**base, "right_leader_config": "L1"}) == "leader"
@@ -534,14 +543,21 @@ def test_port_slot_conflict_detects_shared_port() -> None:
     from lelab.utils import config as cfg
 
     # Single: leader and follower must differ.
-    assert cfg.port_slot_conflict({"mode": "single", "leader_port": "/dev/a", "follower_port": "/dev/b"}) is None
-    assert cfg.port_slot_conflict({"mode": "single", "leader_port": "/dev/a", "follower_port": "/dev/a"}) == "/dev/a"
+    assert (
+        cfg.port_slot_conflict({"mode": "single", "leader_port": "/dev/a", "follower_port": "/dev/b"}) is None
+    )
+    assert (
+        cfg.port_slot_conflict({"mode": "single", "leader_port": "/dev/a", "follower_port": "/dev/a"})
+        == "/dev/a"
+    )
 
     # Bimanual: all four must differ, across sides.
     base = {
         "mode": "bimanual",
-        "leader_port": "/dev/a", "follower_port": "/dev/b",
-        "right_leader_port": "/dev/c", "right_follower_port": "/dev/d",
+        "leader_port": "/dev/a",
+        "follower_port": "/dev/b",
+        "right_leader_port": "/dev/c",
+        "right_follower_port": "/dev/d",
     }
     assert cfg.port_slot_conflict(base) is None
     assert cfg.port_slot_conflict({**base, "right_follower_port": "/dev/a"}) == "/dev/a"
@@ -553,11 +569,17 @@ def test_config_slot_conflict_ignores_single_mode_and_cross_side() -> None:
     from lelab.utils import config as cfg
 
     # Single mode never conflicts (one slot per side).
-    assert cfg.config_slot_conflict({"mode": "single", "leader_config": "X", "right_leader_config": "X"}) is None
+    assert (
+        cfg.config_slot_conflict({"mode": "single", "leader_config": "X", "right_leader_config": "X"}) is None
+    )
     # Same name across sides is fine — different directories.
-    assert cfg.config_slot_conflict({"mode": "bimanual", "leader_config": "X", "follower_config": "X"}) is None
+    assert (
+        cfg.config_slot_conflict({"mode": "bimanual", "leader_config": "X", "follower_config": "X"}) is None
+    )
     # Empty slots don't count as a conflict.
-    assert cfg.config_slot_conflict({"mode": "bimanual", "leader_config": "", "right_leader_config": ""}) is None
+    assert (
+        cfg.config_slot_conflict({"mode": "bimanual", "leader_config": "", "right_leader_config": ""}) is None
+    )
 
 
 def test_is_robot_record_clean_with_stem_configs(tmp_lerobot_home: Path) -> None:
@@ -609,6 +631,113 @@ def test_setup_calibration_files_copies_configs(
 # directory, so the function only validates that the file exists in LEADER_CONFIG_PATH /
 # FOLLOWER_CONFIG_PATH; it never writes into CALIBRATION_BASE_PATH_TELEOP or
 # CALIBRATION_BASE_PATH_ROBOTS. The plan's assertion about those paths was incorrect.
+
+
+def test_stage_bimanual_calibrations_copies_four_files(tmp_lerobot_home: Path) -> None:
+    """The four arbitrarily-named library files are copied into per-device
+    staging dirs as '<base>_left/right.json', returning the dirs + base."""
+    from lelab.utils import config as cfg
+
+    # Arbitrary library names — no "<base>_left/right" convention.
+    for name, content in (("alice", "AL"), ("carol", "AR")):
+        (Path(cfg.LEADER_CONFIG_PATH) / f"{name}.json").write_text(content)
+    for name, content in (("bob", "FL"), ("dave", "FR")):
+        (Path(cfg.FOLLOWER_CONFIG_PATH) / f"{name}.json").write_text(content)
+
+    leader_dir, follower_dir, base = cfg.stage_bimanual_calibrations("mybot", "alice", "carol", "bob", "dave")
+    assert base == "mybot"
+    assert leader_dir == os.path.join(cfg.LELAB_BISO_STAGING_PATH, "mybot", "leader")
+    assert follower_dir == os.path.join(cfg.LELAB_BISO_STAGING_PATH, "mybot", "follower")
+    # Files landed under the convention names with the right contents.
+    assert (Path(leader_dir) / "mybot_left.json").read_text() == "AL"
+    assert (Path(leader_dir) / "mybot_right.json").read_text() == "AR"
+    assert (Path(follower_dir) / "mybot_left.json").read_text() == "FL"
+    assert (Path(follower_dir) / "mybot_right.json").read_text() == "FR"
+
+
+def test_stage_bimanual_calibrations_overwrites_stale_alias(tmp_lerobot_home: Path) -> None:
+    """A recalibrated library file must refresh its staging alias — the copy is
+    unconditional, so a second call overwrites the previous staged content."""
+    from lelab.utils import config as cfg
+
+    (Path(cfg.LEADER_CONFIG_PATH) / "L.json").write_text("v1")
+    (Path(cfg.LEADER_CONFIG_PATH) / "R.json").write_text("R")
+    (Path(cfg.FOLLOWER_CONFIG_PATH) / "FL.json").write_text("FL")
+    (Path(cfg.FOLLOWER_CONFIG_PATH) / "FR.json").write_text("FR")
+
+    leader_dir, _, _ = cfg.stage_bimanual_calibrations("bot", "L", "R", "FL", "FR")
+    assert (Path(leader_dir) / "bot_left.json").read_text() == "v1"
+
+    # Recalibrate the left leader library file, then restage.
+    (Path(cfg.LEADER_CONFIG_PATH) / "L.json").write_text("v2")
+    cfg.stage_bimanual_calibrations("bot", "L", "R", "FL", "FR")
+    assert (Path(leader_dir) / "bot_left.json").read_text() == "v2"
+
+
+def test_stage_bimanual_calibrations_missing_file_raises(tmp_lerobot_home: Path) -> None:
+    """A missing library file fails fast with a clear per-slot error naming the
+    slot and file, before lerobot's connect() can hang on recalibration."""
+    from lelab.utils import config as cfg
+
+    # Only three of the four files exist; the right follower is missing.
+    (Path(cfg.LEADER_CONFIG_PATH) / "L.json").write_text("L")
+    (Path(cfg.LEADER_CONFIG_PATH) / "R.json").write_text("R")
+    (Path(cfg.FOLLOWER_CONFIG_PATH) / "FL.json").write_text("FL")
+
+    with pytest.raises(FileNotFoundError, match="right follower.*FR.json.*not found"):
+        cfg.stage_bimanual_calibrations("bot", "L", "R", "FL", "FR")
+
+
+def test_stage_bimanual_calibrations_blank_slot_raises(tmp_lerobot_home: Path) -> None:
+    """A blank config (arm unassigned) fails with the standard legible message."""
+    from lelab.utils import config as cfg
+
+    with pytest.raises(FileNotFoundError, match="left leader arm has no calibration assigned"):
+        cfg.stage_bimanual_calibrations("bot", "", "R", "FL", "FR")
+
+
+def test_stage_bimanual_follower_calibrations_stages_follower_only(tmp_lerobot_home: Path) -> None:
+    """Inference stages the follower side only. Repro of the startup bug: the
+    two follower library files exist under FOLLOWER_CONFIG_PATH but NO leader
+    file shares their names — staging must still succeed and land the follower
+    aliases, rather than failing looking for so_leader/<follower name>.json."""
+    from lelab.utils import config as cfg
+
+    # Real-world repro: follower configs "2"/"4"; leader dir has no 2/4.json.
+    (Path(cfg.FOLLOWER_CONFIG_PATH) / "2.json").write_text("FL")
+    (Path(cfg.FOLLOWER_CONFIG_PATH) / "4.json").write_text("FR")
+
+    follower_dir, base = cfg.stage_bimanual_follower_calibrations("mybot", "2", "4")
+    assert base == "mybot"
+    # Same layout as the full stager's follower dir.
+    assert follower_dir == os.path.join(cfg.LELAB_BISO_STAGING_PATH, "mybot", "follower")
+    assert (Path(follower_dir) / "mybot_left.json").read_text() == "FL"
+    assert (Path(follower_dir) / "mybot_right.json").read_text() == "FR"
+    # No leader staging dir is created — the leader side is never touched.
+    assert not os.path.exists(os.path.join(cfg.LELAB_BISO_STAGING_PATH, "mybot", "leader"))
+
+
+def test_stage_bimanual_follower_calibrations_missing_file_raises(tmp_lerobot_home: Path) -> None:
+    """A missing follower library file fails fast with the clear per-slot error
+    naming 'right follower' and the file, same as the full stager."""
+    from lelab.utils import config as cfg
+
+    (Path(cfg.FOLLOWER_CONFIG_PATH) / "2.json").write_text("FL")
+
+    with pytest.raises(FileNotFoundError, match="right follower.*4.json.*not found"):
+        cfg.stage_bimanual_follower_calibrations("mybot", "2", "4")
+
+
+def test_bimanual_base_id_uses_valid_name_else_default() -> None:
+    from lelab.utils.config import DEFAULT_BIMANUAL_BASE, bimanual_base_id
+
+    assert bimanual_base_id("mybot") == "mybot"
+    assert bimanual_base_id("  spaced  ") == "spaced"  # stripped, still valid
+    # Blank or unsafe names fall back to the fixed default.
+    assert bimanual_base_id("") == DEFAULT_BIMANUAL_BASE
+    assert bimanual_base_id(None) == DEFAULT_BIMANUAL_BASE
+    assert bimanual_base_id("bad/name") == DEFAULT_BIMANUAL_BASE
+    assert bimanual_base_id("../escape") == DEFAULT_BIMANUAL_BASE
 
 
 def test_with_lelab_tag_appends_to_existing_tags() -> None:
@@ -691,3 +820,45 @@ def test_setup_calibration_files_rejects_unassigned_arm(tmp_lerobot_home: Path) 
         cfg.setup_calibration_files("whatever.json", "  ")
     with pytest.raises(FileNotFoundError, match="follower arm has no calibration assigned"):
         cfg.setup_follower_calibration_file("")
+
+
+# --- Dismissed hub jobs -----------------------------------------------------
+
+
+def test_dismissed_hub_jobs_round_trips(tmp_lerobot_home: Path) -> None:
+    assert cfg.get_dismissed_hub_jobs() == set()
+    assert cfg.add_dismissed_hub_job("job-b") is True
+    assert cfg.add_dismissed_hub_job("job-a") is True
+    assert cfg.get_dismissed_hub_jobs() == {"job-a", "job-b"}
+    # Idempotent: re-dismissing is a no-op success.
+    assert cfg.add_dismissed_hub_job("job-a") is True
+    assert cfg.get_dismissed_hub_jobs() == {"job-a", "job-b"}
+
+
+def test_add_dismissed_hub_job_rejects_blank_id(tmp_lerobot_home: Path) -> None:
+    assert cfg.add_dismissed_hub_job("") is False
+    assert cfg.add_dismissed_hub_job("   ") is False
+    assert cfg.get_dismissed_hub_jobs() == set()
+
+
+def test_get_dismissed_hub_jobs_tolerates_corrupt_file(tmp_lerobot_home: Path) -> None:
+    """Dismissal is cosmetic — a corrupted file must yield the empty set, not
+    an exception that would block the hub listing."""
+    path = Path(cfg.DISMISSED_HUB_JOBS_FILE)
+    path.write_text("not json{")
+    assert cfg.get_dismissed_hub_jobs() == set()
+    # Wrong shape (dict instead of list) and non-string entries are dropped too.
+    path.write_text(json.dumps({"job-a": True}))
+    assert cfg.get_dismissed_hub_jobs() == set()
+    path.write_text(json.dumps(["job-a", 3, None, "  "]))
+    assert cfg.get_dismissed_hub_jobs() == {"job-a"}
+
+
+def test_prune_dismissed_hub_jobs_drops_ids_gone_from_listing(tmp_lerobot_home: Path) -> None:
+    cfg.add_dismissed_hub_job("job-live")
+    cfg.add_dismissed_hub_job("job-expired")
+    cfg.prune_dismissed_hub_jobs({"job-live", "job-other"})
+    assert cfg.get_dismissed_hub_jobs() == {"job-live"}
+    # Pruning against a listing that contains everything is a no-op.
+    cfg.prune_dismissed_hub_jobs({"job-live"})
+    assert cfg.get_dismissed_hub_jobs() == {"job-live"}

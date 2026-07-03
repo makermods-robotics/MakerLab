@@ -232,8 +232,9 @@ const Inference: React.FC = () => {
           <AlertDialogHeader>
             <AlertDialogTitle>Stop inference?</AlertDialogTitle>
             <AlertDialogDescription className="text-gray-400">
-              The follower will hold its current pose. You can launch another
-              run from the job tile.
+              The follower eases back to the pose it started the run in, then
+              releases torque and goes limp. You can launch another run from the
+              job tile.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

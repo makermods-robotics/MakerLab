@@ -27,13 +27,13 @@ from lerobot.teleoperators.bi_so_leader import BiSOLeader, BiSOLeaderConfig
 from lerobot.teleoperators.so_leader import SO101Leader, SO101LeaderConfig
 
 from .arm_identity import verify_devices
-from .motor_power import apply_motor_power, torque_limit_from_percent
+from .camera_preview import camera_preview_manager
+from .motor_power import apply_motor_power, clear_goal_velocity, torque_limit_from_percent
 from .rest_pose import capture_rest_pose, return_to_rest_pose
 from .utils.config import (
-    FOLLOWER_CONFIG_PATH,
-    LEADER_CONFIG_PATH,
-    bimanual_base,
+    bimanual_base_id,
     setup_calibration_files,
+    stage_bimanual_calibrations,
 )
 from .utils.devices import _force_close_device_resources
 
@@ -79,6 +79,7 @@ def _motor_fraction(motor_name: str, value: float, cal) -> float | None:
     if full_range_deg <= 0:
         return None
     return 0.5 + value / full_range_deg
+
 
 # Global variables for teleoperation state
 teleoperation_active = False
@@ -225,8 +226,29 @@ def finish_pending_release(timeout: float = 10.0) -> bool:
     return True
 
 
+def _return_one_follower_to_rest(bus, pose: dict, abort_event: threading.Event) -> None:
+    """Drive one follower bus back to its captured pose; log start and outcome.
+
+    The per-arm body of _return_followers_to_rest, run on its own thread so
+    the two bimanual followers return concurrently. return_to_rest_pose never
+    raises, but guard anyway so one arm's failure can never take down the
+    thread (and thus block its join) before the outcome is logged.
+    """
+    port = getattr(bus, "port", None) or "unknown port"
+    label = f"follower arm on {port}"
+    logger.info(f"Rest-pose return starting for the {label}")
+    try:
+        _arrived, reason = return_to_rest_pose(bus, pose, abort_event=abort_event, label=label)
+        logger.info(f"Rest-pose return finished for the {label}: {reason}")
+    except Exception as e:
+        # return_to_rest_pose is documented never-raises; this is belt-and-braces
+        # so a surprise failure on one arm can't prevent the other's thread from
+        # being joined or the wrapper from returning to run the torque release.
+        logger.warning(f"Rest-pose return errored for the {label}: {e}")
+
+
 def _return_followers_to_rest(rest_poses: list[tuple], abort_event: threading.Event) -> None:
-    """Drive each follower bus back to its captured session-start pose.
+    """Drive every follower bus back to its captured session-start pose, at once.
 
     Runs immediately before the torque release on a NORMAL stop only (no timed
     hold: the servos hold their last goal on their own until the return goals
@@ -235,13 +257,30 @@ def _return_followers_to_rest(rest_poses: list[tuple], abort_event: threading.Ev
     falls through to the unconditional torque release. NEVER called with a
     leader bus — the leader is human-held with torque off; driving it would
     fight the user's hand.
+
+    Each follower is its own serial bus on its own USB port (no shared bus),
+    so the returns run CONCURRENTLY: one thread per (bus, pose), all joined
+    before this returns. Bimanual arms therefore land at the same time instead
+    of one-after-the-other. The shared ``abort_event`` (a second stop /
+    release-now) cuts every arm's return short promptly; the wrapper still
+    returns only after all per-arm threads have wound down, because the
+    downstream torque-release ordering depends on this having finished. A
+    single-arm session is the same shape — one thread, joined — preserving the
+    existing single-arm timing and semantics.
     """
-    for bus, pose in rest_poses:
-        port = getattr(bus, "port", None) or "unknown port"
-        label = f"follower arm on {port}"
-        logger.info(f"Rest-pose return starting for the {label}")
-        _arrived, reason = return_to_rest_pose(bus, pose, abort_event=abort_event, label=label)
-        logger.info(f"Rest-pose return finished for the {label}: {reason}")
+    threads = [
+        threading.Thread(
+            target=_return_one_follower_to_rest,
+            args=(bus, pose, abort_event),
+            name=f"rest-return-{getattr(bus, 'port', None) or i}",
+            daemon=True,
+        )
+        for i, (bus, pose) in enumerate(rest_poses)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
 
 
 class TeleoperateRequest(BaseModel):
@@ -255,6 +294,10 @@ class TeleoperateRequest(BaseModel):
     right_follower_port: str = ""
     right_leader_config: str = ""
     right_follower_config: str = ""
+    # Robot record name — used only as the BiSO staging base id (bimanual). It
+    # decides the on-disk staging dir, not which calibration drives which arm.
+    # Blank/invalid falls back to DEFAULT_BIMANUAL_BASE.
+    robot_name: str = ""
     # Escape hatch for the arm-identity guard (see lelab/arm_identity.py):
     # when true, start even if the connected arms don't match their calibrations.
     skip_identity_check: bool = False
@@ -416,29 +459,36 @@ def _connect_bimanual(request: TeleoperateRequest):
 
     Each side is a lerobot BiSO* device wrapping two SO101 arms (left = the
     primary leader/follower pair, right = the right_* pair). lerobot loads each
-    sub-arm's calibration as "<base>_left/right.json" from the side's dir, so we
-    set the BiSO id to that base and let lerobot load it. Returns
+    sub-arm's calibration as "<base>_left/right.json" from a single dir, with no
+    way to point left/right at differently named library files, so we stage the
+    four arbitrarily-named library calibrations into per-device dirs under that
+    convention and point BiSO at those. Returns
     (robot, teleop_device, identity_warnings) connected, or raises after
-    disconnecting any device.
+    disconnecting any device. The staging copy fails fast with a clear per-slot
+    error if any library file is missing (before connect() drops into
+    interactive recalibration, which would hang this thread).
     """
-    # Validate the four files exist and follow lerobot's "<base>_left/right" naming.
-    setup_calibration_files(request.leader_config, request.follower_config)
-    setup_calibration_files(request.right_leader_config, request.right_follower_config)
-    follower_base = bimanual_base(request.follower_config, request.right_follower_config, "follower")
-    leader_base = bimanual_base(request.leader_config, request.right_leader_config, "leader")
+    base = bimanual_base_id(request.robot_name)
+    leader_staging, follower_staging, _ = stage_bimanual_calibrations(
+        base,
+        request.leader_config,
+        request.right_leader_config,
+        request.follower_config,
+        request.right_follower_config,
+    )
 
     robot = BiSOFollower(
         BiSOFollowerConfig(
-            id=follower_base,
-            calibration_dir=Path(FOLLOWER_CONFIG_PATH),
+            id=base,
+            calibration_dir=Path(follower_staging),
             left_arm_config=SO101FollowerConfig(port=request.follower_port),
             right_arm_config=SO101FollowerConfig(port=request.right_follower_port),
         )
     )
     teleop_device = BiSOLeader(
         BiSOLeaderConfig(
-            id=leader_base,
-            calibration_dir=Path(LEADER_CONFIG_PATH),
+            id=base,
+            calibration_dir=Path(leader_staging),
             left_arm_config=SO101LeaderConfig(port=request.leader_port),
             right_arm_config=SO101LeaderConfig(port=request.right_leader_port),
         )
@@ -461,9 +511,19 @@ def _connect_bimanual(request: TeleoperateRequest):
                 ) from e
 
         # Arm-identity guard: all four arms, read-only, BEFORE write_calibration
-        # below can stamp a wrong file into a swapped arm's EEPROM.
+        # below can stamp a wrong file into a swapped arm's EEPROM. The sub-arm
+        # ids are BiSO staging aliases, so pass the real library stems (in
+        # arm-iteration order: left follower, right follower, left leader, right
+        # leader) for the identity comparison.
         identity_warnings = verify_devices(
-            ((robot, "follower"), (teleop_device, "leader")), skip=request.skip_identity_check
+            ((robot, "follower"), (teleop_device, "leader")),
+            skip=request.skip_identity_check,
+            config_names=[
+                request.follower_config,
+                request.right_follower_config,
+                request.leader_config,
+                request.right_leader_config,
+            ],
         )
 
         # Each sub-arm auto-loaded its calibration in __init__ (id=<base>_side);
@@ -478,6 +538,10 @@ def _connect_bimanual(request: TeleoperateRequest):
         # human-held leader. After configure() so nothing overwrites it; a
         # failed write degrades to full power and is surfaced as a warning.
         identity_warnings += apply_motor_power(robot, request.motor_power, "follower arms")
+        # Clear any leftover Goal_Velocity speed cap a previous arm-driving
+        # feature stamped in RAM (auto-cal fold/unfold=1000, rest-pose return=400);
+        # followers only, never the human-held leader. See lelab/motor_power.py.
+        identity_warnings += clear_goal_velocity(robot, "follower arms")
         logger.info("Successfully connected to both bimanual arms")
         return robot, teleop_device, identity_warnings
     except Exception:
@@ -532,6 +596,11 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
     robot = None
     teleop_device = None
     try:
+        # Backend camera previews (GET /camera-preview/{index}) may hold cv2
+        # devices this session's robot cameras need — teleoperation always
+        # wins, so force-release them before any robot/camera construction.
+        camera_preview_manager.stop_all()
+
         logger.info(
             f"Starting teleoperation with leader port: {request.leader_port}, follower port: {request.follower_port}"
         )
@@ -607,6 +676,11 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
             # human-held leader. After configure() so nothing overwrites it; a
             # failed write degrades to full power and is surfaced as a warning.
             identity_warnings += apply_motor_power(robot, request.motor_power, "follower arm")
+            # Clear any leftover Goal_Velocity speed cap a previous arm-driving
+            # feature stamped in RAM (auto-cal fold/unfold=1000, rest-pose
+            # return=400); follower only, never the human-held leader. See
+            # lelab/motor_power.py.
+            identity_warnings += clear_goal_velocity(robot, "follower arm")
             logger.info("Successfully connected to both devices")
 
         current_robot = robot

@@ -15,8 +15,13 @@
 
 from __future__ import annotations
 
+import asyncio
+import datetime as _dt
 import logging
+import threading
+import time
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -395,8 +400,6 @@ def test_connection_manager_tracks_connect_and_disconnect() -> None:
     fake_ws = MagicMock()
     fake_ws.accept = AsyncMock()
 
-    import asyncio
-
     asyncio.run(mgr.connect(fake_ws))
     assert fake_ws in mgr.active_connections
 
@@ -410,6 +413,122 @@ def test_connection_manager_broadcast_sync_does_not_block_without_loop() -> None
     mgr = ConnectionManager()
     # Should enqueue without raising even if there are no consumers.
     mgr.broadcast_joint_data_sync({"shoulder_pan.pos": 1.0})
+
+
+class _LoopThread:
+    """A real asyncio loop on a background thread, standing in for uvicorn's
+    event loop in ConnectionManager tests: websockets are accepted on it and
+    the broadcast worker must marshal sends back onto it."""
+
+    def __init__(self) -> None:
+        self.loop = asyncio.new_event_loop()
+        self._thread = threading.Thread(target=self.loop.run_forever, daemon=True)
+        self._thread.start()
+
+    def run(self, coro):
+        return asyncio.run_coroutine_threadsafe(coro, self.loop).result(timeout=2.0)
+
+    def close(self) -> None:
+        self.loop.call_soon_threadsafe(self.loop.stop)
+        self._thread.join(timeout=2.0)
+        self.loop.close()
+
+
+@pytest.fixture
+def ws_loop():
+    loop_thread = _LoopThread()
+    yield loop_thread
+    loop_thread.close()
+
+
+def _wait_for(predicate, timeout: float = 2.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return False
+
+
+def _fake_ws(send_json=None) -> MagicMock:
+    ws = MagicMock()
+    ws.accept = AsyncMock()
+    ws.send_json = send_json if send_json is not None else AsyncMock()
+    return ws
+
+
+def test_broadcast_sends_on_owning_loop_and_survives_dead_connection(ws_loop) -> None:
+    """A send failure must drop only that connection — not kill the worker —
+    and healthy sends must run on the loop that accepted the websocket
+    (regression: 'Task got Future attached to a different loop')."""
+    from lelab.server import ConnectionManager
+
+    mgr = ConnectionManager()
+    seen: dict[str, object] = {}
+
+    async def _record(data):
+        seen["loop"] = asyncio.get_running_loop()
+        seen["data"] = data
+
+    ws_ok = _fake_ws(send_json=AsyncMock(side_effect=_record))
+    ws_dead = _fake_ws(send_json=AsyncMock(side_effect=RuntimeError("client went away")))
+
+    ws_loop.run(mgr.connect(ws_ok))
+    ws_loop.run(mgr.connect(ws_dead))
+    worker = mgr.broadcast_thread
+    try:
+        mgr.broadcast_joint_data_sync({"shoulder_pan.pos": 1.0})
+
+        assert _wait_for(lambda: ws_dead not in mgr.active_connections)
+        assert ws_ok in mgr.active_connections
+        assert seen["loop"] is ws_loop.loop
+        assert seen["data"] == {"shoulder_pan.pos": 1.0}
+        assert mgr.is_running
+        assert worker.is_alive()
+
+        # The surviving connection keeps receiving broadcasts.
+        mgr.broadcast_joint_data_sync({"shoulder_pan.pos": 2.0})
+        assert _wait_for(lambda: seen.get("data") == {"shoulder_pan.pos": 2.0})
+    finally:
+        mgr.disconnect(ws_ok)
+
+
+def test_connection_manager_rapid_reconnect_restarts_worker(ws_loop) -> None:
+    """Disconnect-then-reconnect while broadcasts flow (browser reload during
+    teleop) must hand off cleanly to a fresh worker with no self-join
+    (regression: 'cannot join current thread' killing joint streaming)."""
+    from lelab.server import ConnectionManager
+
+    mgr = ConnectionManager()
+    ws1 = _fake_ws()
+    ws2 = _fake_ws()
+
+    ws_loop.run(mgr.connect(ws1))
+    first_worker = mgr.broadcast_thread
+    mgr.broadcast_joint_data_sync({"n": 1})
+    assert _wait_for(lambda: ws1.send_json.call_count >= 1)
+
+    # Last client drops: the worker is signaled to stop but never joined.
+    mgr.disconnect(ws1)
+    assert not mgr.is_running
+
+    # Immediate reconnect restarts broadcasting on a fresh worker.
+    ws_loop.run(mgr.connect(ws2))
+    assert mgr.is_running
+    second_worker = mgr.broadcast_thread
+    assert second_worker is not first_worker
+
+    try:
+        mgr.broadcast_joint_data_sync({"n": 2})
+        assert _wait_for(lambda: ws2.send_json.call_count >= 1)
+        ws2.send_json.assert_called_with({"n": 2})
+
+        # The replaced worker notices it's been superseded and exits on its
+        # own even though is_running is True again.
+        first_worker.join(timeout=2.0)
+        assert not first_worker.is_alive()
+    finally:
+        mgr.disconnect(ws2)
 
 
 def _install_fake_pygrabber(monkeypatch: pytest.MonkeyPatch, filter_graph_cls) -> None:
@@ -595,3 +714,305 @@ def test_rename_job_route_maps_value_error_to_400(client, monkeypatch) -> None:
     resp = client.post("/jobs/act_ds_x/rename", json={"new_name": "   "})
     assert resp.status_code == 400
     assert "empty" in resp.json()["detail"]
+
+
+# --- DELETE /jobs/hub/models/{repo_id} -------------------------------------
+#
+# Deleting an orphaned hub MODEL repo. Uses a mocked shared HfApi so no real
+# Hub call is made. The endpoint is scoped to the caller's own namespace and
+# treats a missing repo (delete_repo missing_ok=True) as idempotent success.
+
+
+def _patch_hub_delete(monkeypatch, *, username, api):
+    """Point the endpoint at a fake whoami (namespace) and a fake HfApi."""
+    monkeypatch.setattr(
+        server_mod,
+        "cached_whoami",
+        lambda: {"name": username} if username else None,
+    )
+    monkeypatch.setattr(server_mod, "shared_hf_api", lambda: api)
+
+
+def test_delete_hub_model_success(client: TestClient, monkeypatch) -> None:
+    api = MagicMock()
+    _patch_hub_delete(monkeypatch, username="makermods", api=api)
+
+    resp = client.delete("/jobs/hub/models/makermods/smolvla_orphan_2026")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "success"
+    assert body["repo_id"] == "makermods/smolvla_orphan_2026"
+    api.delete_repo.assert_called_once_with(
+        "makermods/smolvla_orphan_2026", repo_type="model", missing_ok=True
+    )
+
+
+def test_delete_hub_model_missing_repo_is_idempotent_success(client: TestClient, monkeypatch) -> None:
+    # missing_ok=True means the Hub 404 never surfaces — delete_repo just
+    # returns. The endpoint therefore reports success for an already-gone repo.
+    api = MagicMock()
+    api.delete_repo.return_value = None
+    _patch_hub_delete(monkeypatch, username="makermods", api=api)
+
+    resp = client.delete("/jobs/hub/models/makermods/already_gone")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "success"
+
+
+def test_delete_hub_model_permission_error_is_friendly(client: TestClient, monkeypatch) -> None:
+    import requests
+    from huggingface_hub.errors import HfHubHTTPError
+
+    response = requests.Response()
+    response.status_code = 403
+    api = MagicMock()
+    api.delete_repo.side_effect = HfHubHTTPError("forbidden", response=response)
+    _patch_hub_delete(monkeypatch, username="makermods", api=api)
+
+    resp = client.delete("/jobs/hub/models/makermods/no_write_scope")
+    assert resp.status_code == 403
+    detail = resp.json()["detail"]
+    assert "write access" in detail
+
+
+def test_delete_hub_model_refuses_foreign_namespace(client: TestClient, monkeypatch) -> None:
+    # The caller is "makermods" but tries to delete a repo under "someoneelse".
+    # Refused up front — the Hub is never called.
+    api = MagicMock()
+    _patch_hub_delete(monkeypatch, username="makermods", api=api)
+
+    resp = client.delete("/jobs/hub/models/someoneelse/their_model")
+    assert resp.status_code == 403
+    assert "namespace" in resp.json()["detail"]
+    api.delete_repo.assert_not_called()
+
+
+def test_delete_hub_model_unauthenticated_is_401(client: TestClient, monkeypatch) -> None:
+    api = MagicMock()
+    _patch_hub_delete(monkeypatch, username=None, api=api)
+
+    resp = client.delete("/jobs/hub/models/makermods/whatever")
+    assert resp.status_code == 401
+    api.delete_repo.assert_not_called()
+
+
+# --- GET /jobs/hub model listing (tagged + untagged run-repo union) --------
+#
+# The listing must surface the user's own empty/untagged run repos (orphans a
+# crashed cloud run pre-creates) alongside the tagged ones, so the untracked
+# cleanup path can reach them. It does this with two list_models() passes per
+# author: filter="lerobot" (the real tag) PLUS an unfiltered author listing
+# restricted to lelab's "_<timestamp>" run-repo naming.
+
+
+class _FakeModel:
+    def __init__(self, repo_id, last_modified=None, private=False):
+        self.id = repo_id
+        self.last_modified = last_modified
+        self.private = private
+
+
+def _hub_api_with_models(*, tagged, all_author):
+    """Fake HfApi whose list_models() returns `tagged` when filter='lerobot'
+    is passed and `all_author` otherwise. list_jobs() returns nothing."""
+    api = MagicMock()
+    api.list_jobs.return_value = []
+
+    def _list_models(author=None, filter=None, limit=None, expand=None):
+        return list(tagged if filter == "lerobot" else all_author)
+
+    api.list_models.side_effect = _list_models
+    return api
+
+
+def _patch_hub_list(monkeypatch, *, username, api, orgs=None):
+    info = {"name": username, "orgs": orgs or []}
+    monkeypatch.setattr(server_mod, "cached_whoami", lambda: info)
+    monkeypatch.setattr(server_mod, "shared_hf_api", lambda: api)
+
+
+def test_list_hub_jobs_includes_empty_untagged_run_repos(client: TestClient, monkeypatch) -> None:
+    # The motivating case: an empty repo a crashed run pre-created. It has no
+    # "lerobot" tag, so it appears ONLY in the unfiltered author listing — and
+    # matches the run-repo timestamp suffix, so it must be surfaced.
+    empty = _FakeModel(
+        "makermods/smolvla_makermods_so101_merged_20260701_2026-07-03_09-15-57",
+        last_modified=None,
+    )
+    api = _hub_api_with_models(tagged=[], all_author=[empty])
+    _patch_hub_list(monkeypatch, username="makermods", api=api)
+
+    resp = client.get("/jobs/hub")
+    assert resp.status_code == 200
+    repo_ids = [m["repo_id"] for m in resp.json()["models"]]
+    assert empty.id in repo_ids
+
+
+def test_list_hub_jobs_unions_and_dedups_tagged_and_untagged(client: TestClient, monkeypatch) -> None:
+    tagged = _FakeModel(
+        "makermods/act_makermods_pick_2026-07-03_10-00-00",
+        last_modified=_dt.datetime(2026, 7, 3, 10, 0, tzinfo=_dt.UTC),
+    )
+    empty = _FakeModel(
+        "makermods/smolvla_makermods_so101_merged_20260701_2026-07-03_09-15-57",
+        last_modified=_dt.datetime(2026, 7, 3, 9, 15, tzinfo=_dt.UTC),
+    )
+    # The unfiltered author pass returns BOTH the tagged repo and the empty one;
+    # the tagged pass returns only the tagged one. The union must dedup so the
+    # tagged repo appears exactly once, and sort newest-first.
+    api = _hub_api_with_models(tagged=[tagged], all_author=[tagged, empty])
+    _patch_hub_list(monkeypatch, username="makermods", api=api)
+
+    resp = client.get("/jobs/hub")
+    assert resp.status_code == 200
+    repo_ids = [m["repo_id"] for m in resp.json()["models"]]
+    assert repo_ids == [tagged.id, empty.id]  # deduped, newest first
+    assert repo_ids.count(tagged.id) == 1
+
+
+def test_list_hub_jobs_excludes_foreign_personal_models(client: TestClient, monkeypatch) -> None:
+    # A user's unrelated personal model (no lerobot tag, name doesn't match the
+    # run-repo timestamp convention) must NOT be surfaced — it's theirs, not a
+    # lelab orphan. But a tagged repo is always kept even without the suffix.
+    personal = _FakeModel("makermods/my-cool-llm", last_modified=None)
+    run_repo = _FakeModel(
+        "makermods/smolvla_makermods_so101_merged_20260701_2026-07-03_09-15-57",
+        last_modified=None,
+    )
+    tagged_no_suffix = _FakeModel("makermods/some-tagged-model", last_modified=None)
+    api = _hub_api_with_models(
+        tagged=[tagged_no_suffix],
+        all_author=[personal, run_repo, tagged_no_suffix],
+    )
+    _patch_hub_list(monkeypatch, username="makermods", api=api)
+
+    resp = client.get("/jobs/hub")
+    assert resp.status_code == 200
+    repo_ids = {m["repo_id"] for m in resp.json()["models"]}
+    assert run_repo.id in repo_ids  # run-repo naming → surfaced
+    assert tagged_no_suffix.id in repo_ids  # tagged → surfaced regardless of name
+    assert personal.id not in repo_ids  # foreign personal model → excluded
+
+
+# --- POST /jobs/hub/jobs/{job_id}/dismiss + listing filter ------------------
+#
+# The HF Jobs API has no delete — a finished job stays in list_jobs()
+# indefinitely — so removing a dead untracked job from the UI is a local,
+# persisted dismissal (utils/config.DISMISSED_HUB_JOBS_FILE). The /jobs/hub
+# listing drops dismissed ids, but only in a terminal stage: a live run can
+# never be dismissed out of sight.
+
+
+class _FakeHubJob:
+    def __init__(self, job_id, stage):
+        self.id = job_id
+        self.created_at = None
+        self.docker_image = "huggingface/lerobot-gpu:latest"
+        self.space_id = None
+        self.flavor = "a100-large"
+        self.status = SimpleNamespace(stage=stage, message=None)
+        self.owner = None
+        self.url = f"https://huggingface.co/jobs/{job_id}"
+
+
+def _hub_api_with_jobs(jobs):
+    """Fake HfApi whose list_jobs() returns `jobs`. list_models() returns
+    nothing (models are irrelevant to the dismissal tests)."""
+    api = MagicMock()
+    api.list_jobs.return_value = list(jobs)
+    api.list_models.return_value = []
+    return api
+
+
+def test_dismiss_hub_job_persists_and_hides_terminal_job(
+    client: TestClient, monkeypatch, tmp_lerobot_home: Path
+) -> None:
+    dead = _FakeHubJob("job-dead", "ERROR")
+    other = _FakeHubJob("job-other", "COMPLETED")
+    _patch_hub_list(monkeypatch, username="makermods", api=_hub_api_with_jobs([dead, other]))
+
+    resp = client.post("/jobs/hub/jobs/job-dead/dismiss")
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "success", "job_id": "job-dead"}
+    assert cfg.get_dismissed_hub_jobs() == {"job-dead"}
+
+    resp = client.get("/jobs/hub")
+    assert resp.status_code == 200
+    job_ids = [j["id"] for j in resp.json()["jobs"]]
+    assert job_ids == ["job-other"]  # dismissed terminal job hidden, rest kept
+
+
+def test_dismissed_hub_job_in_active_stage_stays_listed(
+    client: TestClient, monkeypatch, tmp_lerobot_home: Path
+) -> None:
+    # Dismissing an id whose job is still RUNNING must not hide it — the
+    # listing keeps it until the job reaches a terminal stage.
+    live = _FakeHubJob("job-live", "RUNNING")
+    _patch_hub_list(monkeypatch, username="makermods", api=_hub_api_with_jobs([live]))
+    cfg.add_dismissed_hub_job("job-live")
+
+    resp = client.get("/jobs/hub")
+    assert resp.status_code == 200
+    assert [j["id"] for j in resp.json()["jobs"]] == ["job-live"]
+
+
+def test_list_hub_jobs_prunes_dismissed_ids_gone_from_listing(
+    client: TestClient, monkeypatch, tmp_lerobot_home: Path
+) -> None:
+    kept = _FakeHubJob("job-kept", "FAILED")
+    _patch_hub_list(monkeypatch, username="makermods", api=_hub_api_with_jobs([kept]))
+    cfg.add_dismissed_hub_job("job-kept")
+    cfg.add_dismissed_hub_job("job-expired")  # no longer in the Hub listing
+
+    resp = client.get("/jobs/hub")
+    assert resp.status_code == 200
+    assert resp.json()["jobs"] == []
+    assert cfg.get_dismissed_hub_jobs() == {"job-kept"}
+
+
+def test_list_hub_jobs_keeps_dismissals_when_listing_fails(
+    client: TestClient, monkeypatch, tmp_lerobot_home: Path
+) -> None:
+    # A transient list_jobs() failure returns an empty jobs list; pruning
+    # against it would forget every dismissal, so it must be skipped.
+    api = _hub_api_with_jobs([])
+    api.list_jobs.side_effect = RuntimeError("hub outage")
+    _patch_hub_list(monkeypatch, username="makermods", api=api)
+    cfg.add_dismissed_hub_job("job-dead")
+
+    resp = client.get("/jobs/hub")
+    assert resp.status_code == 200
+    assert resp.json()["jobs"] == []
+    assert cfg.get_dismissed_hub_jobs() == {"job-dead"}
+
+
+def test_dismiss_hub_job_rejects_blank_id(client: TestClient, monkeypatch, tmp_lerobot_home: Path) -> None:
+    resp = client.post("/jobs/hub/jobs/%20/dismiss")
+    assert resp.status_code == 400
+    assert cfg.get_dismissed_hub_jobs() == set()
+
+
+def test_delete_job_dismisses_its_hub_job_id(client: TestClient, monkeypatch, tmp_lerobot_home: Path) -> None:
+    # Deleting a tracked cloud run must also dismiss its hf_job_id, otherwise
+    # the Hub job resurfaces as an untracked card on the next /jobs/hub poll.
+    record = MagicMock()
+    record.hf_job_id = "hub-job-123"
+    monkeypatch.setattr(server_mod.job_registry, "get", lambda job_id: record)
+    monkeypatch.setattr(server_mod.job_registry, "delete", lambda job_id: None)
+
+    resp = client.delete("/jobs/some-cloud-run")
+    assert resp.status_code == 204
+    assert cfg.get_dismissed_hub_jobs() == {"hub-job-123"}
+
+
+def test_delete_local_job_records_no_dismissal(
+    client: TestClient, monkeypatch, tmp_lerobot_home: Path
+) -> None:
+    record = MagicMock()
+    record.hf_job_id = None
+    monkeypatch.setattr(server_mod.job_registry, "get", lambda job_id: record)
+    monkeypatch.setattr(server_mod.job_registry, "delete", lambda job_id: None)
+
+    resp = client.delete("/jobs/some-local-run")
+    assert resp.status_code == 204
+    assert cfg.get_dismissed_hub_jobs() == set()

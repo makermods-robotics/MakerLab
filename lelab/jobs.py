@@ -579,6 +579,65 @@ def _list_local_checkpoints(output_dir: str) -> list[JobCheckpoint]:
 _TRAIN_CONFIG_NAME = "train_config.json"
 
 
+# A Hub checkpoint's training_state/ is what makes it resumable (optimizer +
+# step). The cloud wrapper uploads the whole checkpoints/<step>/ entry, so both
+# subtrees land in the repo; this file is the cheapest existence probe.
+_HUB_TRAINING_STATE_FILE = "training_state/training_step.json"
+
+
+def _resolve_cloud_resume(source: JobRecord, step: int | None) -> tuple[str, str]:
+    """Return (repo_id, step_dir) identifying the Hub checkpoint a cloud run
+    should resume from (`step` = None ⇒ the latest available on the Hub).
+
+    The cloud container downloads checkpoints/<step_dir>/ (both pretrained_model/
+    and training_state/) from `repo_id` and hands lerobot the reconstructed
+    output-dir layout, so resume restores the optimizer and step counter — true
+    resume, not a weights-only re-init.
+
+    Raises ValueError (→ HTTP 400) with a user-facing message when the source
+    can't be resumed on the cloud: not a cloud run, no output repo, no
+    checkpoints at all (the run died before its first save), an unknown step, or
+    a checkpoint whose training_state/ never made it to the Hub.
+    """
+    if source.runner != "hf_cloud":
+        raise ValueError(
+            "This resume path is for cloud runs; local runs resume from their on-disk checkpoint instead."
+        )
+    if not source.hf_repo_id:
+        raise ValueError(f"Cloud run {source.id!r} has no output repo on the Hub to resume from.")
+    api = shared_hf_api()
+    checkpoints = _list_hub_checkpoints(api, source.hf_repo_id)
+    if not checkpoints:
+        raise ValueError(
+            f"Cloud run {source.id!r} left no checkpoints on the Hub — nothing to "
+            "resume from (the run died before its first save)."
+        )
+    if step is None:
+        chosen = checkpoints[-1]  # step-sorted; take the latest
+    else:
+        chosen = next((c for c in checkpoints if c.step == step), None)
+        if chosen is None:
+            raise ValueError(f"Cloud run {source.id!r} has no checkpoint at step {step}.")
+    # chosen.ref is 'repo@checkpoints/<step_dir>'; recover the zero-padded dir.
+    m = _HUB_CKPT_REF_RE.match(chosen.ref)
+    if not m:
+        raise ValueError(f"Unexpected checkpoint ref for cloud run {source.id!r}: {chosen.ref!r}")
+    step_dir = m.group("step_dir")
+    try:
+        files = set(api.list_repo_files(source.hf_repo_id, repo_type="model"))
+    except Exception as exc:
+        raise ValueError(
+            f"Could not read cloud run {source.id!r}'s repo to verify the "
+            f"checkpoint at step {chosen.step}: {exc}"
+        ) from exc
+    if f"checkpoints/{step_dir}/{_HUB_TRAINING_STATE_FILE}" not in files:
+        raise ValueError(
+            f"Checkpoint at step {chosen.step} has no optimizer/step state "
+            "(training_state/) on the Hub, so it can't be resumed."
+        )
+    return source.hf_repo_id, step_dir
+
+
 def _resolve_resume_config_path(source: JobRecord, step: int | None) -> str:
     """Return the train_config.json path lerobot needs to resume `source` from
     `step` (or its latest checkpoint if step is None).
@@ -777,6 +836,25 @@ def _read_checkpoint_config(ckpt: JobCheckpoint) -> dict[str, object]:
         return json.load(f)
 
 
+def _flat_feature_dim(feat: object) -> int | None:
+    """Flat width of a policy feature (e.g. observation.state, action).
+
+    Checkpoint config features carry a `shape` list; for the proprioceptive
+    state and action these are 1-D — `[6]` for a single SO-101 arm, `[12]` for
+    a bimanual (two-arm) checkpoint. Returns the single dim, or None when the
+    feature is absent or not 1-D (nothing downstream should guess in that
+    case)."""
+    if not isinstance(feat, dict):
+        return None
+    shape = feat.get("shape")
+    if not isinstance(shape, (list, tuple)) or len(shape) != 1:
+        return None
+    try:
+        return int(shape[0])
+    except (TypeError, ValueError):
+        return None
+
+
 def _generate_job_id(policy_type: str, dataset_repo_id: str) -> str:
     """Build a sortable, collision-free job id from policy type and dataset slug."""
     from .train import _SLUG_RE
@@ -851,6 +929,24 @@ class JobNotFoundError(Exception):
 
 class JobNotRunningError(Exception):
     """Raised when stop() is called on a non-running job."""
+
+
+class DatasetNotOnHubError(Exception):
+    """Raised by JobRegistry.start when a cloud (hf_cloud) run is requested on a
+    dataset that isn't on the Hub. HF Jobs pods resolve the dataset by repo_id
+    from the Hub — they can't see this machine's local cache — so a local-only
+    dataset would make the remote job fail. The UI's upload-then-train flow
+    makes this unreachable from the browser; this guard exists for non-UI
+    callers (and as belt-and-braces) so they get a clear 409 instead of a
+    remote crash. `repo_id` is the offending dataset."""
+
+    def __init__(self, repo_id: str) -> None:
+        self.repo_id = repo_id
+        super().__init__(
+            f"Dataset '{repo_id}' is not on the Hugging Face Hub. Cloud training "
+            "runs from the Hub, so upload the dataset first (or record/select one "
+            "that's already on the Hub)."
+        )
 
 
 class JobRegistry:
@@ -1008,6 +1104,21 @@ class JobRegistry:
         if target.runner == "hf_cloud" and not target.flavor:
             raise ValueError("flavor is required when runner is hf_cloud")
 
+        # Cloud preflight (belt-and-braces): the HF Jobs pod resolves the
+        # dataset by repo_id from the Hub and can't see this machine's local
+        # cache, so a local-only dataset would fail the remote job. Reject up
+        # front with a clear error instead of submitting a doomed job. Only a
+        # definitive "local_only" blocks; "unknown" (offline / transient
+        # transport error) is left to the existing _ensure_dataset_on_hub
+        # fallback so a network blip doesn't wrongly refuse a Hub dataset. The
+        # browser flow uploads-then-trains before ever reaching here, so this
+        # path is primarily for non-UI callers.
+        if target.runner == "hf_cloud":
+            from .datasets import get_hub_status
+
+            if get_hub_status(config.dataset_repo_id).get("status") == "local_only":
+                raise DatasetNotOnHubError(config.dataset_repo_id)
+
         with self._lock:
             # Local trainings are bounded by this machine's GPU/USB resources,
             # so at most one runs at a time. Cloud trainings each get their
@@ -1054,9 +1165,22 @@ class JobRegistry:
                         raise ValueError(
                             f"Resume source {config.resume_from_job_id!r} not found."
                         )
-                    config.config_path = _resolve_resume_config_path(
-                        source, config.resume_from_step
-                    )
+                    if source.runner == "hf_cloud":
+                        # An HF Job is immutable once ended: resuming a cloud run
+                        # launches a NEW cloud job that continues from the parent's
+                        # Hub checkpoint. Record the source repo + step dir; the
+                        # HfCloudJobRunner turns them into an in-container download
+                        # + reconstruct + --config_path. The dataset-on-Hub guard
+                        # (target.runner == hf_cloud above) still applies, so a
+                        # run whose dataset vanished fails the same way a fresh
+                        # cloud run would.
+                        repo_id, step_dir = _resolve_cloud_resume(source, config.resume_from_step)
+                        config.resume_from_hub_repo = repo_id
+                        config.resume_from_hub_step = step_dir
+                    else:
+                        config.config_path = _resolve_resume_config_path(
+                            source, config.resume_from_step
+                        )
                 elif not config.config_path:
                     raise ValueError(
                         "Resume is on but no source checkpoint was selected. Use "
@@ -1392,8 +1516,9 @@ class JobRegistry:
             raise FileNotFoundError(f"No checkpoint at step {step} for job {record.id}")
         cfg = _read_checkpoint_config(match)
         policy_type = cfg.get("type")
+        input_features = cfg.get("input_features") or {}
         image_features: dict[str, dict[str, int]] = {}
-        for full_name, feat in (cfg.get("input_features") or {}).items():
+        for full_name, feat in input_features.items():
             if feat.get("type") != "VISUAL":
                 continue
             shape = feat.get("shape") or []
@@ -1408,6 +1533,13 @@ class JobRegistry:
             "policy_type": policy_type,
             "image_features": image_features,
             "requires_task": policy_type in _LANGUAGE_CONDITIONED_POLICY_TYPES,
+            # Flat proprioceptive state / action widths. For an SO-101 arm this
+            # is 6 (one per joint); a bimanual-trained checkpoint carries 12
+            # (two arms). The inference modal compares this against the selected
+            # robot's arm count to explain a single-arm/bimanual mismatch before
+            # the user hits Start. None when the checkpoint omits the feature.
+            "state_dim": _flat_feature_dim(input_features.get("observation.state")),
+            "action_dim": _flat_feature_dim((cfg.get("output_features") or {}).get("action")),
         }
 
     def delete(self, job_id: str) -> None:

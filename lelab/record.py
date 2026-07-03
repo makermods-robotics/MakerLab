@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 import logging
 import shutil
 import threading
@@ -33,14 +34,15 @@ from lerobot.teleoperators.bi_so_leader import BiSOLeaderConfig
 from lerobot.teleoperators.so_leader import SO101LeaderConfig
 
 from .arm_identity import ArmIdentityError, verify_devices
-from .datasets import invalidate_hub_status
-from .motor_power import apply_motor_power
-from .teleoperate import force_disable_torque, hold_torque_release_grace
+from .camera_preview import camera_preview_manager
+from .datasets import _lerobot_cache_root, invalidate_hub_status
+from .motor_power import apply_motor_power, clear_goal_velocity
+from .rest_pose import capture_rest_pose
+from .teleoperate import _device_buses, _return_followers_to_rest, force_disable_torque
 from .utils.config import (
-    FOLLOWER_CONFIG_PATH,
-    LEADER_CONFIG_PATH,
-    bimanual_base,
+    bimanual_base_id,
     setup_calibration_files,
+    stage_bimanual_calibrations,
     validate_dataset_repo_id,
     with_lelab_tag,
 )
@@ -58,9 +60,10 @@ current_episode = 1  # Track current episode number
 saved_episodes = 0  # Track how many episodes have been saved
 current_phase = "preparing"  # Track current phase: "preparing", "recording", "resetting", "completed"
 phase_start_time = None  # Track when current phase started
-last_recording_info: dict[str, Any] | None = (
-    None  # Snapshot of the most recently completed dataset (for /dataset-info)
-)
+# True when the most recent session saved zero episodes and its (freshly
+# created) dataset directory was discarded. Surfaced in the session-end status
+# so the frontend can tell the user nothing was kept (see Upload.tsx).
+last_session_discarded_empty = False
 # Warn-but-allow arm-identity findings from the current session's guard (see
 # lelab/arm_identity.py). The guard runs inside the recording worker (after the
 # start response has already been sent), so the messages are surfaced through
@@ -70,13 +73,16 @@ identity_warnings: list[str] = []
 # both pass the active-flag check.
 _state_lock = threading.Lock()
 
-# True while the session's cleanup is holding torque for the release grace (see
-# teleoperate.TORQUE_RELEASE_GRACE_S): the recording loop is over but the arms
-# are still energized (holding position) and the serial ports are still held.
-# Surfaced in the status payload so the UI isn't lying about the arm's state.
+# True while the session's cleanup is driving the follower(s) back to their
+# session-start pose (and on through the release): the recording loop is over
+# but the arms are still energized (holding position, then moving home) and the
+# serial ports are still held. Surfaced in the status payload so the UI isn't
+# lying about the arm's state. No timed hold anymore — a normal stop returns the
+# follower to where the session started, then releases (same as teleop; see
+# lelab/rest_pose.py).
 releasing = False
-# Cuts the grace hold short: set by a second stop request ("release now") or by
-# a new start request that needs the serial ports. Cleared on start.
+# Cuts the post-stop return short: set by a second stop request ("release now")
+# or by a new start request that needs the serial ports. Cleared on start.
 _release_now = threading.Event()
 
 
@@ -112,6 +118,10 @@ class RecordingRequest(BaseModel):
     right_follower_port: str = ""
     right_leader_config: str = ""
     right_follower_config: str = ""
+    # Robot record name — used only as the BiSO staging base id (bimanual). It
+    # decides the on-disk staging dir, not which calibration drives which arm.
+    # Blank/invalid falls back to DEFAULT_BIMANUAL_BASE.
+    robot_name: str = ""
     dataset_repo_id: str
     single_task: str
     num_episodes: int = 5
@@ -211,24 +221,31 @@ def create_record_config(request: RecordingRequest) -> RecordConfig:
 
     if request.mode == "bimanual":
         # Build a lerobot BiSO leader+follower pair. lerobot loads each sub-arm's
-        # calibration as "<base>_left/right.json" from the side's dir, so set the
-        # BiSO id to that base + the side's calibration_dir and let it auto-load
-        # (otherwise the sub-arms have no calibration and connect() would try to
-        # interactively recalibrate — which hangs the record thread). Cameras go
-        # on the left follower arm (exposed prefixed "left_*").
-        setup_calibration_files(request.leader_config, request.follower_config)
-        setup_calibration_files(request.right_leader_config, request.right_follower_config)
-        follower_base = bimanual_base(request.follower_config, request.right_follower_config, "follower")
-        leader_base = bimanual_base(request.leader_config, request.right_leader_config, "leader")
+        # calibration as "<base>_left/right.json" from a single calibration_dir,
+        # with no way to point left/right at differently named library files. So
+        # stage the four arbitrarily-named library calibrations into per-device
+        # dirs as "<base>_left/right.json" and point BiSO at those (otherwise the
+        # sub-arms have no calibration and connect() would try to interactively
+        # recalibrate — which hangs the record thread). Cameras go on the left
+        # follower arm (exposed prefixed "left_*"). The staging copy fails fast
+        # with a clear per-slot error if any library file is missing.
+        base = bimanual_base_id(request.robot_name)
+        leader_staging, follower_staging, _ = stage_bimanual_calibrations(
+            base,
+            request.leader_config,
+            request.right_leader_config,
+            request.follower_config,
+            request.right_follower_config,
+        )
         robot_config = BiSOFollowerConfig(
-            id=follower_base,
-            calibration_dir=Path(FOLLOWER_CONFIG_PATH),
+            id=base,
+            calibration_dir=Path(follower_staging),
             left_arm_config=SO101FollowerConfig(port=request.follower_port, cameras=camera_configs),
             right_arm_config=SO101FollowerConfig(port=request.right_follower_port),
         )
         teleop_config = BiSOLeaderConfig(
-            id=leader_base,
-            calibration_dir=Path(LEADER_CONFIG_PATH),
+            id=base,
+            calibration_dir=Path(leader_staging),
             left_arm_config=SO101LeaderConfig(port=request.leader_port),
             right_arm_config=SO101LeaderConfig(port=request.right_leader_port),
         )
@@ -295,7 +312,7 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
         saved_episodes, \
         current_phase, \
         phase_start_time, \
-        last_recording_info, \
+        last_session_discarded_empty, \
         identity_warnings
 
     from . import rollout as _rollout, teleoperate as _teleoperate
@@ -357,10 +374,16 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
         saved_episodes = 0
         current_phase = "preparing"
         phase_start_time = None
-        last_recording_info = None
+        last_session_discarded_empty = False
         identity_warnings = []
 
     try:
+        # Backend camera previews (GET /camera-preview/{index}) hold the cv2
+        # devices this session is about to open — recording always wins, so
+        # force-release them now, before any robot/camera construction and
+        # before the worker's 2s browser-stream release sleep.
+        camera_preview_manager.stop_all()
+
         # The name is already validated (validate_dataset_repo_id in the lock), so
         # no sanitization is needed here. Stamp the repo_id with a timestamp
         # (matches lerobot-record CLI behavior) so each session lands in a unique
@@ -389,7 +412,7 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                 phase_start_time, \
                 current_episode, \
                 saved_episodes, \
-                last_recording_info
+                last_session_discarded_empty
             recording_start_time = time.time()
             current_episode = 1
             saved_episodes = 0
@@ -411,34 +434,52 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                     )
                     time.sleep(2.0)
 
+                # Bimanual: the sub-arm ids are BiSO staging aliases, so give the
+                # identity guard the real library stems (in arm-iteration order:
+                # left follower, right follower, left leader, right leader).
+                identity_config_names = (
+                    [
+                        request.follower_config,
+                        request.right_follower_config,
+                        request.leader_config,
+                        request.right_leader_config,
+                    ]
+                    if request.mode == "bimanual"
+                    else None
+                )
                 dataset = record_with_web_events(
                     record_config,
                     recording_events,
                     skip_identity_check=request.skip_identity_check,
                     motor_power=request.motor_power,
+                    identity_config_names=identity_config_names,
                 )
                 logger.info(f"Recording completed successfully. Dataset has {dataset.num_episodes} episodes")
-                last_recording_info = {
-                    "success": True,
-                    "dataset_repo_id": request.dataset_repo_id,
-                    "num_episodes": dataset.num_episodes,
-                    "single_task": request.single_task,
-                    "fps": dataset.fps,
-                    "features": list(dataset.features.keys()),
-                    "total_frames": dataset.num_frames,
-                    "robot_type": getattr(dataset.meta, "robot_type", "Unknown robot"),
-                }
-            except Exception as e:
+            except Exception:
                 logger.exception("Recording session failed")
                 current_phase = "error"
                 if recording_start_time:
                     session_end_elapsed_seconds = int(time.time() - recording_start_time)
-                last_recording_info = {"success": False, "error": str(e)}
             finally:
                 if current_phase != "error":
                     current_phase = "completed"
                 if recording_start_time:
                     session_end_elapsed_seconds = int(time.time() - recording_start_time)
+
+                # Discard a dataset this session created but never wrote an
+                # episode into (interrupted/failed session, or every take
+                # re-recorded away). Ordered here — after record_with_web_events
+                # has returned/raised, which released torque and disconnected in
+                # its own finally — so cleanup never blocks the hardware release.
+                # Best-effort: _discard_empty_dataset swallows its own errors and
+                # never re-raises, so the original error path is preserved.
+                # Guarded on the in-memory counter AND, inside the helper, the
+                # on-disk episode count; resume sessions are never touched.
+                if saved_episodes == 0:
+                    last_session_discarded_empty = _discard_empty_dataset(
+                        request.dataset_repo_id, request.resume
+                    )
+
                 recording_active = False
                 recording_start_time = None
                 phase_start_time = None
@@ -490,8 +531,8 @@ def handle_stop_recording() -> dict[str, Any]:
     return {
         "success": True,
         "message": (
-            "Recording stop requested. When the session ends, the arm holds its pose for ~5 s "
-            "so you can guide it to a rest position — press Stop again to release it immediately."
+            "Recording stop requested. When the session ends, the arm returns to its starting "
+            "position, then goes limp — press Stop again to release it immediately."
         ),
         "session_ending": True,
     }
@@ -549,9 +590,9 @@ def handle_recording_status() -> dict[str, Any]:
         "recording_active": recording_active,
         "current_phase": current_phase,  # "preparing", "recording", "resetting", "completed"
         "session_ended": session_ended,  # New field to indicate session completion
-        # True during the post-session grace window: the recording loop is over
-        # but the arms are still energized (holding position) so the user can
-        # guide them to a rest position before torque is released.
+        # True during the post-session rest-pose return: the recording loop is
+        # over but the arm is still energized and driving back to its
+        # session-start pose before torque is released.
         "releasing": releasing,
         "available_controls": {
             "stop_recording": recording_active,  # ESC key replacement
@@ -562,9 +603,13 @@ def handle_recording_status() -> dict[str, Any]:
         "message": "Recording session failed with error - check logs"
         if current_phase == "error"
         else (
-            "Recording session has ended - stop polling"
-            if session_ended
-            else "Recording status retrieved successfully"
+            "Returning the arm to its rest position…"
+            if releasing
+            else (
+                "Recording session has ended - stop polling"
+                if session_ended
+                else "Recording status retrieved successfully"
+            )
         ),
     }
 
@@ -572,6 +617,13 @@ def handle_recording_status() -> dict[str, Any]:
     # can read the actual on-disk repo_id (post stamp) for upload navigation.
     if recording_config:
         status["dataset_repo_id"] = recording_config.dataset_repo_id
+
+    # When the session has ended, tell the frontend honestly whether anything
+    # was kept. A session that saved zero episodes had its (freshly created)
+    # dataset directory discarded — the post-recording page shows a "nothing was
+    # saved" variant and does NOT link the (now-gone) repo id.
+    if session_ended:
+        status["discarded_empty"] = last_session_discarded_empty
 
     # Warn-but-allow arm-identity findings (the guard runs in the worker, after
     # the start response) — the frontend shows these as a non-blocking toast.
@@ -605,61 +657,8 @@ def handle_recording_status() -> dict[str, Any]:
     return status
 
 
-def handle_get_dataset_info(request: DatasetInfoRequest) -> dict[str, Any]:
-    """Return dataset metadata — from the most recent session if it matches,
-    otherwise by loading the local LeRobot cache copy."""
-    if last_recording_info and last_recording_info.get("dataset_repo_id") == request.dataset_repo_id:
-        return last_recording_info
-
-    try:
-        from lerobot.datasets import LeRobotDataset
-
-        dataset = LeRobotDataset(request.dataset_repo_id)
-        # lerobot's metadata has no `single_task` attr — the real task strings
-        # live in meta.tasks (index = task string, col = task_index). Pair each
-        # with how many episodes use it (the per-episode `tasks` column), so a
-        # merged dataset shows its distinct tasks and their episode counts.
-        tasks_df = getattr(dataset.meta, "tasks", None)
-        ordered = (
-            list(tasks_df.sort_values("task_index").index)
-            if tasks_df is not None and len(tasks_df) > 0
-            else []
-        )
-        counts: dict[str, int] = {}
-        episodes = getattr(dataset.meta, "episodes", None)
-        # meta.episodes is a HF datasets.Dataset (column_names), but tolerate a
-        # pandas DataFrame (columns) too.
-        cols = getattr(episodes, "column_names", None)
-        if cols is None:
-            cols = list(getattr(episodes, "columns", []))
-        if episodes is not None and "tasks" in cols:
-            for arr in episodes["tasks"]:
-                items = arr.tolist() if hasattr(arr, "tolist") else list(arr or [])
-                for task in set(items):
-                    counts[task] = counts.get(task, 0) + 1
-        tasks = [{"task": t, "num_episodes": counts.get(t, 0)} for t in ordered]
-        return {
-            "success": True,
-            "dataset_repo_id": request.dataset_repo_id,
-            "num_episodes": dataset.num_episodes,
-            "tasks": tasks,
-            "single_task": ordered[0] if len(ordered) == 1 else "Unknown task",
-            "fps": dataset.fps,
-            "features": list(dataset.features.keys()),
-            "total_frames": dataset.num_frames,
-            "robot_type": getattr(dataset.meta, "robot_type", "Unknown robot"),
-        }
-    except Exception as e:
-        logger.warning(f"Could not load local dataset {request.dataset_repo_id}: {e}")
-        return {
-            "success": False,
-            "message": f"Dataset {request.dataset_repo_id} not found locally",
-        }
-
-
 def handle_delete_dataset(request: DatasetInfoRequest) -> dict[str, Any]:
     """Remove a recorded dataset's directory from local disk."""
-    global last_recording_info
     from pathlib import Path
 
     from lerobot.utils.constants import HF_LEROBOT_HOME
@@ -672,6 +671,13 @@ def handle_delete_dataset(request: DatasetInfoRequest) -> dict[str, Any]:
     if target == root or root not in target.parents:
         return {"success": False, "message": "Invalid dataset path"}
 
+    # Don't yank the directory out from under an in-flight push to the Hub.
+    if upload_manager.state == "running" and upload_manager.repo_id == repo_id:
+        return {
+            "success": False,
+            "message": "This dataset is being uploaded to the Hub right now. Wait for it to finish.",
+        }
+
     if not target.exists():
         return {"success": False, "message": f"Dataset not found on disk: {repo_id}"}
 
@@ -681,74 +687,236 @@ def handle_delete_dataset(request: DatasetInfoRequest) -> dict[str, Any]:
         logger.error(f"Failed to delete dataset {repo_id}: {e}")
         return {"success": False, "message": f"Failed to delete dataset: {e}"}
 
-    if last_recording_info and last_recording_info.get("dataset_repo_id") == repo_id:
-        last_recording_info = None
-
     logger.info(f"Deleted dataset directory {target}")
     return {"success": True, "message": f"Deleted {repo_id}"}
 
 
-def handle_upload_dataset(request: UploadRequest) -> dict[str, Any]:
-    """Handle dataset upload to HuggingFace Hub"""
+def _discard_empty_dataset(repo_id: str, resume: bool) -> bool:
+    """Remove the directory of a session that saved zero episodes.
+
+    Interrupted/failed recording sessions used to leave 0-episode datasets on
+    disk — hundreds of MB of video, invisible in the picker (empties are
+    hidden) yet still consuming space. When a session ends having saved no
+    episodes, delete the directory THIS session created.
+
+    Guards (all must hold before anything is removed):
+      * ``resume`` is False — a resume/append session writes into a
+        pre-existing dataset, so we must NEVER delete it even at zero *new*
+        episodes. Only non-resume sessions stamp a fresh timestamped directory
+        (see handle_start_recording), so only those are ours to discard.
+      * The directory reports zero episodes — confirmed against ``meta/info.json``'s
+        ``total_episodes`` (the same signal the picker uses), not just the
+        in-memory counter.
+      * The path stays strictly inside the LeRobot cache root (traversal guard,
+        mirroring handle_delete_dataset).
+
+    Best-effort: any failure is logged as a warning and swallowed — this runs
+    during session-end cleanup and must never mask an original error or block
+    the hardware release. Returns True iff the directory was removed.
+    """
+    if resume:
+        # Append-into-existing: the dataset predates this session. Never delete.
+        return False
+    if not repo_id:
+        return False
+
+    root = _lerobot_cache_root().resolve()
     try:
-        # Import LeRobotDataset to load and upload the dataset
+        target = (root / repo_id).resolve()
+    except OSError:
+        return False
+
+    # Reject path traversal: target must stay strictly inside the cache root.
+    if target == root or root not in target.parents:
+        return False
+    if not target.is_dir():
+        return False
+
+    # Confirm zero episodes against the on-disk metadata, not just the counter.
+    info_path = target / "meta" / "info.json"
+    try:
+        info = json.loads(info_path.read_text())
+    except (OSError, ValueError):
+        # No readable info.json — the dataset was never created far enough to
+        # hold episodes. Treat as empty and clean it up.
+        info = {}
+    if info.get("total_episodes"):
+        return False
+
+    try:
+        shutil.rmtree(target)
+    except Exception as e:
+        logger.warning(f"Failed to remove empty dataset {repo_id}: {e}")
+        return False
+
+    # Invalidate the cached Hub-existence probe (cheap correctness — the
+    # repo no longer exists here).
+    invalidate_hub_status(repo_id)
+
+    logger.info(f"Removed empty dataset {repo_id} — no episodes were saved.")
+    return True
+
+
+def _upload_auth_error(exc: Exception) -> dict[str, str] | None:
+    """If ``exc`` is a Hub auth failure, return the friendly {message, docs_url}
+    the frontend shows for it; else None. Kept separate so the sync worker and
+    any future caller map the 401 identically."""
+    err_text = str(exc).lower()
+    looks_like_auth = any(
+        m in err_text
+        for m in ("401", "you must be authenticated", "authentication required", "huggingfacehub_token")
+    )
+    if looks_like_auth:
+        return {
+            "message": (
+                "You're not logged into the Hugging Face Hub. Run `hf auth login` in your "
+                "terminal, then retry."
+            ),
+            "docs_url": "https://huggingface.co/docs/huggingface_hub/en/quick-start#authentication",
+        }
+    return None
+
+
+class UploadManager:
+    """Runs one dataset upload at a time in a background thread.
+
+    ``push_to_hub`` copies 100+ MB of video/parquet over the network and takes
+    minutes, so we run it off the request thread (same start/poll shape as
+    MergeManager) rather than block the browser on a multi-minute HTTP request
+    that a navigation-away would abort mid-push. One upload at a time: a second
+    concurrent start for any repo is refused (409-mapped by the route). The
+    per-repo status lets the info card / picker row poll "is *my* dataset
+    uploading?" and survive navigation.
+    """
+
+    def __init__(self) -> None:
+        self.state: str = "idle"  # "idle" | "running" | "done" | "error"
+        self.repo_id: str | None = None
+        self.message: str | None = None
+        self.dataset_url: str | None = None
+        self.docs_url: str | None = None
+        self._thread: threading.Thread | None = None
+        self._lock = threading.Lock()
+
+    def start(self, request: UploadRequest) -> dict[str, Any]:
+        repo_id = request.dataset_repo_id
+        with self._lock:
+            if self.state == "running":
+                return {
+                    "started": False,
+                    "repo_id": self.repo_id,
+                    "message": f"An upload is already running for {self.repo_id}",
+                }
+            # Refuse a dataset another operation is actively writing — pushing a
+            # half-written directory would ship a corrupt dataset. Reuses the
+            # rename busy-guard (recording / merge / local training); lazy import
+            # to avoid the datasets<->record cycle documented in _dataset_in_use.
+            from .datasets import _dataset_in_use
+
+            in_use = _dataset_in_use(repo_id)
+            if in_use is not None:
+                return {"started": False, "repo_id": repo_id, "message": in_use}
+            self.state = "running"
+            self.repo_id = repo_id
+            self.message = f"Uploading {repo_id} to the Hub…"
+            self.dataset_url = None
+            self.docs_url = None
+
+        self._thread = threading.Thread(
+            target=self._worker, args=(request,), name="upload-worker", daemon=True
+        )
+        self._thread.start()
+        return {"started": True, "repo_id": repo_id, "message": "Upload started"}
+
+    def get_status(self) -> dict[str, Any]:
+        with self._lock:
+            status = {
+                "state": self.state,
+                "repo_id": self.repo_id,
+                "message": self.message,
+                "dataset_url": self.dataset_url,
+            }
+            if self.docs_url is not None:
+                status["docs_url"] = self.docs_url
+            return status
+
+    def _worker(self, request: UploadRequest) -> None:
         from lerobot.datasets import LeRobotDataset
 
-        logger.info(f"Loading dataset {request.dataset_repo_id} for upload")
+        repo_id = request.dataset_repo_id
+        try:
+            logger.info(f"Loading dataset {repo_id} for upload")
+            dataset = LeRobotDataset(repo_id)
+            logger.info(f"Dataset loaded with {dataset.num_episodes} episodes")
 
-        # Load the dataset from local storage
-        dataset = LeRobotDataset(request.dataset_repo_id)
+            tags = with_lelab_tag(request.tags)
+            logger.info(f"Uploading to HuggingFace Hub with tags: {tags}, private: {request.private}")
+            dataset.push_to_hub(tags=tags, private=request.private)
+            logger.info(f"Dataset {repo_id} uploaded successfully to HuggingFace Hub")
 
-        logger.info(f"Dataset loaded with {dataset.num_episodes} episodes")
-        tags = with_lelab_tag(request.tags)
-        logger.info(f"Uploading to HuggingFace Hub with tags: {tags}, private: {request.private}")
+            # The dataset now exists on the Hub; drop any cached "local_only"
+            # answer so the info card's next hub-status check flips to "On Hub".
+            invalidate_hub_status(repo_id)
 
-        # Upload dataset to HuggingFace Hub
-        dataset.push_to_hub(tags=tags, private=request.private)
+            with self._lock:
+                self.state = "done"
+                self.message = f"Dataset {repo_id} uploaded successfully to the Hugging Face Hub"
+                self.dataset_url = f"https://huggingface.co/datasets/{repo_id}"
+                self.docs_url = None
+        except Exception as e:
+            logger.error(f"Error uploading dataset {repo_id}: {e}")
+            import traceback
 
-        logger.info(f"Dataset {request.dataset_repo_id} uploaded successfully to HuggingFace Hub")
+            logger.error(f"Full traceback: {traceback.format_exc()}")
+            auth = _upload_auth_error(e)
+            with self._lock:
+                self.state = "error"
+                self.dataset_url = None
+                if auth is not None:
+                    self.message = auth["message"]
+                    self.docs_url = auth["docs_url"]
+                else:
+                    self.message = f"Failed to upload dataset: {e}"
+                    self.docs_url = None
 
-        # The dataset now exists on the Hub; drop any cached "local_only" answer
-        # so the info card's next hub-status check flips to "On Hub".
-        invalidate_hub_status(request.dataset_repo_id)
 
-        return {
-            "success": True,
-            "message": f"Dataset {request.dataset_repo_id} uploaded successfully to HuggingFace Hub",
-            "dataset_url": f"https://huggingface.co/datasets/{request.dataset_repo_id}",
-            "num_episodes": dataset.num_episodes,
-        }
+upload_manager = UploadManager()
 
-    except Exception as e:
-        logger.error(f"Error uploading dataset {request.dataset_repo_id}: {e}")
-        import traceback
 
-        logger.error(f"Full traceback: {traceback.format_exc()}")
+def handle_upload_dataset(request: UploadRequest) -> dict[str, Any]:
+    """Start a background upload of a local dataset to the Hub.
 
-        err_text = str(e).lower()
-        looks_like_auth = any(
-            m in err_text
-            for m in ("401", "you must be authenticated", "authentication required", "huggingfacehub_token")
-        )
-        if looks_like_auth:
-            return {
-                "success": False,
-                "message": "You're not logged into the Hugging Face Hub. Run `hf auth login` in your terminal, then retry.",
-                "docs_url": "https://huggingface.co/docs/huggingface_hub/en/quick-start#authentication",
-            }
-        return {"success": False, "message": f"Failed to upload dataset: {str(e)}"}
+    Returns immediately with ``{started, repo_id, message}`` — the actual push
+    runs in a worker thread; poll /upload-status for progress. ``started`` is
+    False when an upload is already running or the dataset is busy being
+    written (recording / merge / training)."""
+    return upload_manager.start(request)
+
+
+def handle_upload_status() -> dict[str, Any]:
+    """Current upload state (idle | running | done | error) + repo_id, message,
+    and dataset_url once done."""
+    return upload_manager.get_status()
 
 
 def record_with_web_events(
-    cfg: RecordConfig, web_events: dict, skip_identity_check: bool = False, motor_power: int = 100
+    cfg: RecordConfig,
+    web_events: dict,
+    skip_identity_check: bool = False,
+    motor_power: int = 100,
+    identity_config_names: list[str] | None = None,
 ) -> LeRobotDataset:
     """
     Implement recording with phase tracking - exactly mirrors original record() function behavior
+
+    `identity_config_names` (bimanual only) are the real library calibration stems
+    — [left_follower, right_follower, left_leader, right_leader] — so the arm
+    identity guard compares against the library instead of the BiSO staging alias
+    ids ("<base>_left"/"<base>_right"). None for single-arm (id is the real stem).
     """
     import time
 
     from lerobot.common.control_utils import (
-        sanity_check_dataset_name,
         sanity_check_dataset_robot_compatibility,
     )
     from lerobot.datasets import LeRobotDataset
@@ -788,7 +956,15 @@ def record_with_web_events(
         )
         sanity_check_dataset_robot_compatibility(dataset, robot, cfg.dataset.fps, dataset_features)
     else:
-        sanity_check_dataset_name(cfg.dataset.repo_id, None)
+        # lerobot's sanity_check_dataset_name requires a namespaced "user/name"
+        # id and crashes on the bare names we allow for local recording without
+        # an HF login. Inline its only rule that applies here (policy is None):
+        # an eval_ prefix is reserved for policy-evaluation recordings.
+        if cfg.dataset.repo_id.rsplit("/", 1)[-1].startswith("eval_"):
+            raise ValueError(
+                f"Dataset name '{cfg.dataset.repo_id}' begins with 'eval_', which is reserved "
+                "for policy-evaluation datasets recorded through the rollout flow."
+            )
         dataset = LeRobotDataset.create(
             cfg.dataset.repo_id,
             cfg.dataset.fps,
@@ -846,7 +1022,9 @@ def record_with_web_events(
     # error path surface the message via the recording status.
     try:
         identity_warnings = verify_devices(
-            ((robot, "follower"), (teleop, "leader")), skip=skip_identity_check
+            ((robot, "follower"), (teleop, "leader")),
+            skip=skip_identity_check,
+            config_names=identity_config_names,
         )
     except ArmIdentityError:
         robot.disconnect()
@@ -880,7 +1058,9 @@ def record_with_web_events(
         if wrote:
             logger.info(f"{label.capitalize()} calibration applied successfully")
         else:
-            logger.warning(f"{label.capitalize()} bus or calibration not available - calibration may not be applied")
+            logger.warning(
+                f"{label.capitalize()} bus or calibration not available - calibration may not be applied"
+            )
 
     _write_calibration(robot, "robot")
     _write_calibration(teleop, "teleop")
@@ -890,6 +1070,22 @@ def record_with_web_events(
     # nothing overwrites this before the recording loop; a failed write
     # degrades to full power (logged inside) and must not abort the session.
     apply_motor_power(robot, motor_power, "follower arm")
+    # Clear any leftover Goal_Velocity speed cap a previous arm-driving feature
+    # stamped in RAM (auto-cal fold/unfold=1000, rest-pose return=400); the
+    # follower only, never the human-held leader. See lelab/motor_power.py.
+    clear_goal_velocity(robot, "follower arm")
+
+    # Capture the follower's rest pose now — after connect/configure/identity
+    # guard, before the recording loop moves anything — so a normal stop can
+    # drive it back to where the user left it (same as teleop; see
+    # lelab/rest_pose.py). Followers only (a bimanual BiSO robot exposes two
+    # follower buses), NEVER the human-held leader. The gripper is excluded: at
+    # stop time it may be holding an object, and returning it to its (likely
+    # open) starting width would drop the object mid-return.
+    follower_rest_poses = [
+        (bus, {m: v for m, v in capture_rest_pose(bus).items() if m != "gripper"})
+        for bus in _device_buses(robot)
+    ]
 
     # Start with episode 1 - but track it properly
     current_episode = 1
@@ -933,6 +1129,28 @@ def record_with_web_events(
             )
 
             logger.info(f"Recording phase completed - events state: {web_events}")
+
+            # Stop pressed mid-episode: discard the in-progress (incomplete)
+            # episode and end the session immediately — no save, no reset phase,
+            # no re-record. Checked BEFORE the exit-early/timeout classification
+            # below, because handle_stop_recording sets exit_early (so record_loop
+            # returns early) but deliberately does NOT set _exit_early_triggered.
+            # Without this short-circuit the early return would be misclassified
+            # as a timeout, flip rerecord_episode on, and drag the user through a
+            # full reset phase before honoring the stop. Previously saved episodes
+            # stay saved; the empty-dataset discard path handles the case where
+            # this was episode 1 and nothing was ever saved.
+            if web_events["stop_recording"]:
+                logger.info(
+                    "🛑 STOP RECORDING requested during recording phase - "
+                    "discarding incomplete episode and ending session"
+                )
+                print(
+                    "🛑 STATUS CHANGE: Stopped by user during recording - "
+                    "incomplete episode discarded, ending session"
+                )
+                dataset.clear_episode_buffer()
+                break
 
             # Check if exit_early was triggered (use our tracking flag)
             recording_interrupted_by_exit_early = web_events.get("_exit_early_triggered", False)
@@ -1083,14 +1301,15 @@ def record_with_web_events(
 
     finally:
         try:
-            if ended_normally:
-                # User-initiated stop / planned session end: keep torque
-                # enabled for the grace window so the arms can be guided to a
-                # rest position before they go limp. Cut short by a second
-                # stop press or a new start (see _release_now). This only
-                # delays the release below — it never skips it.
+            if ended_normally and not _release_now.is_set():
+                # User-initiated stop / planned session end: no timed hold — the
+                # servos hold their last goal on their own in position mode — so
+                # drive the follower(s) straight back to their session-start
+                # pose, then release (same behavior as the teleop / auto-cal
+                # stop). A second stop (release-now) skips/aborts the return;
+                # error exits skip this — the bus may be gone, release ASAP.
                 releasing = True
-                hold_torque_release_grace(_release_now, label="recording arms")
+                _return_followers_to_rest(follower_rest_poses, _release_now)
             # Belt and braces: disable torque explicitly before disconnect, so a
             # failure inside disconnect() can't leave an arm energized (rigid).
             # force_disable_torque logs any failure at ERROR level with the port.

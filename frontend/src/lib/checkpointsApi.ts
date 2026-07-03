@@ -10,6 +10,13 @@ export interface PolicyConfigSummary {
   policy_type: string | null;
   image_features: Record<string, { height: number; width: number }>;
   requires_task: boolean;
+  // Flat proprioceptive state / action widths from the checkpoint. For an
+  // SO-101 arm this is 6 (one per joint); a bimanual-trained checkpoint carries
+  // 12 (two arms). The inference modal compares state_dim against the selected
+  // robot's arm count to explain a single-arm/bimanual mismatch. Either can be
+  // null when the checkpoint omits the feature.
+  state_dim: number | null;
+  action_dim: number | null;
 }
 
 export async function listJobCheckpoints(

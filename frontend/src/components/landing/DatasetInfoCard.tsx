@@ -4,6 +4,7 @@ import {
   ChevronDown,
   ExternalLink,
   Loader2,
+  Pencil,
   Upload as UploadIcon,
 } from "lucide-react";
 import {
@@ -12,24 +13,28 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from "@/components/ui/popover";
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
 import { useToast } from "@/hooks/use-toast";
 import { useApi } from "@/contexts/ApiContext";
 import { ApiError } from "@/lib/apiClient";
+import { validateDatasetName } from "@/lib/datasetName";
+import UploadDatasetDialog from "@/components/landing/UploadDatasetDialog";
+import { useDatasetUpload } from "@/hooks/useDatasetUpload";
 import {
   DatasetInfo,
   DatasetTask,
   HubStatusValue,
   getDatasetHubStatus,
   getDatasetInfo,
-  uploadDataset,
+  renameDataset,
 } from "@/lib/replayApi";
 
 /** 16723 -> "16.7k", 950 -> "950" */
@@ -132,19 +137,60 @@ const TaskList: React.FC<{ tasks: DatasetTask[] }> = ({ tasks }) => {
  *
  * Status is fetched separately/lazily so it never blocks the card render, and
  * degrades to "unknown" (nothing shown) offline/unauthenticated. The upload
- * endpoint is synchronous and datasets are large, so the button shows a
- * spinner while in flight and the rest of the card stays usable; there's no
- * client-side timeout on the request (see uploadDataset).
+ * runs in the background (see useDatasetUpload): while it's in flight this row
+ * shows an "Uploading…" state (which survives navigating away and back), and
+ * on completion it flips to "On Hub" and toasts the Hub URL.
  */
 const HubSyncRow: React.FC<{ repoId: string }> = ({ repoId }) => {
   const { baseUrl, fetchWithHeaders } = useApi();
   const { toast } = useToast();
   const [status, setStatus] = useState<HubStatusValue>("unknown");
   const [hubUrl, setHubUrl] = useState<string | null>(null);
-  const [popoverOpen, setPopoverOpen] = useState(false);
-  const [isPrivate, setIsPrivate] = useState(true);
-  const [tagsInput, setTagsInput] = useState("");
-  const [uploading, setUploading] = useState(false);
+
+  const { uploading, start } = useDatasetUpload({
+    repoId,
+    onDone: (url) => {
+      setStatus("on_hub");
+      setHubUrl(url);
+      toast({
+        title: "Uploaded to Hub",
+        description: (
+          <span>
+            {repoId} is now on the Hub.{" "}
+            <a
+              href={url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="underline font-medium"
+            >
+              View dataset
+            </a>
+          </span>
+        ),
+      });
+    },
+    onError: (message, docsUrl) => {
+      toast({
+        title: "Upload failed",
+        description: docsUrl ? (
+          <span>
+            {message}{" "}
+            <a
+              href={docsUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="underline font-medium"
+            >
+              Open setup guide
+            </a>
+          </span>
+        ) : (
+          message
+        ),
+        variant: "destructive",
+      });
+    },
+  });
 
   useEffect(() => {
     const controller = new AbortController();
@@ -162,78 +208,14 @@ const HubSyncRow: React.FC<{ repoId: string }> = ({ repoId }) => {
     return () => controller.abort();
   }, [baseUrl, fetchWithHeaders, repoId]);
 
-  const handleUpload = async () => {
-    setUploading(true);
-    try {
-      const tags = tagsInput
-        .split(",")
-        .map((t) => t.trim())
-        .filter((t) => t.length > 0);
-      const result = await uploadDataset(
-        baseUrl,
-        fetchWithHeaders,
-        repoId,
-        tags,
-        isPrivate,
-      );
-      if (result.success) {
-        const url =
-          result.dataset_url ??
-          `https://huggingface.co/datasets/${repoId}`;
-        setStatus("on_hub");
-        setHubUrl(url);
-        setPopoverOpen(false);
-        toast({
-          title: "Uploaded to Hub",
-          description: (
-            <span>
-              {repoId} is now on the Hub.{" "}
-              <a
-                href={url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="underline font-medium"
-              >
-                View dataset
-              </a>
-            </span>
-          ),
-        });
-      } else {
-        const fallback = "Failed to upload dataset to the Hub.";
-        toast({
-          title: "Upload failed",
-          description: result.docs_url ? (
-            <span>
-              {result.message || fallback}{" "}
-              <a
-                href={result.docs_url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="underline font-medium"
-              >
-                Open setup guide
-              </a>
-            </span>
-          ) : (
-            result.message || fallback
-          ),
-          variant: "destructive",
-        });
-      }
-    } catch (e) {
-      toast({
-        title: "Upload failed",
-        description:
-          e instanceof ApiError && e.detail
-            ? e.detail
-            : "Could not reach the backend to upload.",
-        variant: "destructive",
-      });
-    } finally {
-      setUploading(false);
-    }
-  };
+  if (uploading) {
+    return (
+      <div className="flex items-center gap-1.5 text-gray-400">
+        <Loader2 className="h-3 w-3 animate-spin" />
+        <span>Uploading to Hub…</span>
+      </div>
+    );
+  }
 
   if (status === "on_hub") {
     return (
@@ -260,91 +242,150 @@ const HubSyncRow: React.FC<{ repoId: string }> = ({ repoId }) => {
       <span className="text-gray-500">
         {status === "local_only" ? "Local only" : "Hub status unknown"}
       </span>
-      <Popover open={popoverOpen} onOpenChange={setPopoverOpen}>
-        <PopoverTrigger asChild>
-          <Button
-            size="sm"
-            variant="outline"
-            disabled={uploading}
-            className="h-6 gap-1 border-gray-600 px-2 text-xs text-gray-300 hover:bg-gray-700 hover:text-white"
-          >
-            {uploading ? (
-              <>
-                <Loader2 className="h-3 w-3 animate-spin" />
-                Uploading…
-              </>
-            ) : (
-              <>
-                <UploadIcon className="h-3 w-3" />
-                Upload to Hub
-              </>
-            )}
-          </Button>
-        </PopoverTrigger>
-        <PopoverContent
-          align="end"
-          className="w-72 border-gray-700 bg-gray-900 text-xs text-gray-200"
+      <UploadDatasetDialog repoId={repoId} start={start}>
+        <Button
+          size="sm"
+          variant="outline"
+          className="h-6 gap-1 border-teal-500/50 px-2 text-xs text-teal-700 dark:text-teal-300 hover:bg-teal-500/10"
         >
-          <div className="space-y-3">
-            <div className="flex items-start gap-2">
-              <Checkbox
-                id="hub-upload-private"
-                checked={isPrivate}
-                onCheckedChange={(c) => setIsPrivate(c as boolean)}
-                className="mt-0.5"
-              />
-              <Label
-                htmlFor="hub-upload-private"
-                className="cursor-pointer font-normal leading-snug text-gray-300"
-              >
-                Private dataset
-                <span className="mt-0.5 block text-gray-500">
-                  Recordings include your camera footage.
-                </span>
-              </Label>
-            </div>
-            <div className="space-y-1">
-              <Label
-                htmlFor="hub-upload-tags"
-                className="font-normal text-gray-400"
-              >
-                Tags (optional, comma-separated)
-              </Label>
-              <Input
-                id="hub-upload-tags"
-                value={tagsInput}
-                onChange={(e) => setTagsInput(e.target.value)}
-                placeholder="robotics, manipulation"
-                className="h-7 border-gray-600 bg-gray-800 text-xs text-white"
-              />
-            </div>
-            <Button
-              size="sm"
-              onClick={handleUpload}
-              disabled={uploading}
-              className="h-7 w-full gap-1 bg-blue-500 text-xs text-white hover:bg-blue-600"
-            >
-              {uploading ? (
-                <>
-                  <Loader2 className="h-3 w-3 animate-spin" />
-                  Uploading…
-                </>
-              ) : (
-                <>
-                  <UploadIcon className="h-3 w-3" />
-                  Upload to Hub
-                </>
-              )}
-            </Button>
-          </div>
-        </PopoverContent>
-      </Popover>
+          <UploadIcon className="h-3 w-3" />
+          Upload to Hub
+        </Button>
+      </UploadDatasetDialog>
     </div>
+  );
+};
+
+/**
+ * Rename dialog for a local dataset (mirrors JobCard's rename UI). The namespace
+ * prefix is fixed — the user edits only the name segment, shown after a static
+ * "namespace/" prefix. A dataset's repo id IS its directory path, so this moves
+ * the directory; the Hub copy (if any) keeps its old name, called out below.
+ */
+const RenameDatasetDialog: React.FC<{
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  repoId: string;
+  onRenamed: (newRepoId: string) => void;
+}> = ({ open, onOpenChange, repoId, onRenamed }) => {
+  const { baseUrl, fetchWithHeaders } = useApi();
+  const { toast } = useToast();
+
+  const slash = repoId.lastIndexOf("/");
+  const namespace = slash >= 0 ? repoId.slice(0, slash) : null;
+  const currentName = slash >= 0 ? repoId.slice(slash + 1) : repoId;
+
+  const [value, setValue] = useState(currentName);
+  const [error, setError] = useState<string | null>(null);
+  const [renaming, setRenaming] = useState(false);
+
+  // Reset the field to the current name whenever the dialog (re)opens.
+  useEffect(() => {
+    if (open) {
+      setValue(currentName);
+      setError(null);
+    }
+  }, [open, currentName]);
+
+  const trimmed = value.trim();
+  const validationError = trimmed === "" ? null : validateDatasetName(trimmed);
+  const unchanged = trimmed === currentName;
+
+  const doRename = async () => {
+    const next = value.trim();
+    const nameError = validateDatasetName(next);
+    if (nameError) {
+      setError(nameError);
+      return;
+    }
+    if (next === currentName) {
+      onOpenChange(false);
+      return;
+    }
+    setRenaming(true);
+    setError(null);
+    try {
+      const res = await renameDataset(baseUrl, fetchWithHeaders, repoId, next);
+      toast({ title: "Dataset renamed", description: res.repo_id });
+      onOpenChange(false);
+      onRenamed(res.repo_id);
+    } catch (e) {
+      setError(
+        e instanceof ApiError && e.detail
+          ? e.detail
+          : e instanceof Error
+            ? e.message
+            : String(e),
+      );
+    } finally {
+      setRenaming(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="bg-gray-900 border-gray-800 text-white">
+        <DialogHeader>
+          <DialogTitle>Rename dataset</DialogTitle>
+          <DialogDescription className="text-gray-400">
+            Renames the local dataset directory. If this dataset has a copy on
+            the Hub, the Hub copy keeps its old name.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="flex items-center gap-1">
+          {namespace && (
+            <span className="shrink-0 font-mono text-sm text-gray-500">
+              {namespace}/
+            </span>
+          )}
+          <Input
+            value={value}
+            onChange={(e) => {
+              setValue(e.target.value);
+              setError(null);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                void doRename();
+              }
+            }}
+            autoFocus
+            placeholder="New name"
+            className="bg-gray-800 border-gray-700 text-white"
+          />
+        </div>
+        {(error ?? validationError) && (
+          <p className="text-sm text-red-400">{error ?? validationError}</p>
+        )}
+        <DialogFooter className="flex gap-2 justify-end">
+          <Button
+            variant="outline"
+            className="border-gray-600 bg-transparent text-gray-200 hover:bg-gray-800 hover:text-white"
+            onClick={() => onOpenChange(false)}
+          >
+            Cancel
+          </Button>
+          <Button
+            className="bg-blue-600 hover:bg-blue-700 text-white"
+            disabled={
+              renaming || trimmed === "" || unchanged || validationError !== null
+            }
+            onClick={doRename}
+          >
+            {renaming ? "Renaming…" : "Rename"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 };
 
 interface DatasetInfoCardProps {
   repoId: string;
+  /** Called after a successful rename with the new repo id, so the parent can
+   * update the selection and refresh the picker list. */
+  onRenamed?: (newRepoId: string) => void;
 }
 
 /**
@@ -353,11 +394,15 @@ interface DatasetInfoCardProps {
  * training), robot type, task strings, and size on disk. Data comes from the
  * on-demand /datasets/info endpoint, which only covers the local cache.
  */
-const DatasetInfoCard: React.FC<DatasetInfoCardProps> = ({ repoId }) => {
+const DatasetInfoCard: React.FC<DatasetInfoCardProps> = ({
+  repoId,
+  onRenamed,
+}) => {
   const { baseUrl, fetchWithHeaders } = useApi();
   const [info, setInfo] = useState<DatasetInfo | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<{ notLocal: boolean } | null>(null);
+  const [renameOpen, setRenameOpen] = useState(false);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -397,19 +442,31 @@ const DatasetInfoCard: React.FC<DatasetInfoCardProps> = ({ repoId }) => {
 
       {!loading && info && (
         <div className="space-y-1.5">
-          <div className="flex flex-wrap items-center gap-2 font-medium text-gray-200">
-            <span>
-              {info.total_episodes} episode{info.total_episodes === 1 ? "" : "s"}
-              {" · "}
-              {formatCount(info.total_frames)} frames
-              {(() => {
-                const d = formatDuration(info.total_frames, info.fps);
-                return d ? ` · ${d}` : "";
-              })()}
-            </span>
-            {info.total_episodes === 0 && (
-              <WarningBadge>No episodes recorded</WarningBadge>
-            )}
+          <div className="flex items-start justify-between gap-2">
+            <div className="flex flex-wrap items-center gap-2 font-medium text-gray-200">
+              <span>
+                {info.total_episodes} episode
+                {info.total_episodes === 1 ? "" : "s"}
+                {" · "}
+                {formatCount(info.total_frames)} frames
+                {(() => {
+                  const d = formatDuration(info.total_frames, info.fps);
+                  return d ? ` · ${d}` : "";
+                })()}
+              </span>
+              {info.total_episodes === 0 && (
+                <WarningBadge>No episodes recorded</WarningBadge>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={() => setRenameOpen(true)}
+              aria-label="Rename dataset"
+              title="Rename dataset"
+              className="-mr-1 -mt-0.5 shrink-0 rounded p-1 text-gray-500 hover:text-gray-200"
+            >
+              <Pencil className="h-3.5 w-3.5" />
+            </button>
           </div>
 
           <Row label="Cameras">
@@ -435,6 +492,13 @@ const DatasetInfoCard: React.FC<DatasetInfoCardProps> = ({ repoId }) => {
           <div className="mt-1.5 border-t border-gray-800 pt-1.5">
             <HubSyncRow repoId={repoId} />
           </div>
+
+          <RenameDatasetDialog
+            open={renameOpen}
+            onOpenChange={setRenameOpen}
+            repoId={repoId}
+            onRenamed={(newRepoId) => onRenamed?.(newRepoId)}
+          />
         </div>
       )}
     </div>

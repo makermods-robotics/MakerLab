@@ -84,6 +84,35 @@ def _stem(name: str) -> str:
     return name[: -len(".json")] if name.endswith(".json") else name
 
 
+def _subprocess_output_path(device_type: str, config_stem: str) -> str:
+    """The file the vendored subprocess writes with --save.
+
+    It always saves under ``.../calibration/robots/<robot_type>/<id>.json``:
+    for a follower that IS LeLab's real library dir; for a leader it's a scratch
+    location (robots/so_leader) that _finalize_success later copies into the real
+    leader library (teleoperators/so_leader). Used to remove a stray file left by
+    a run that didn't finish cleanly, so a failed/aborted/dropped auto-calibration
+    never leaves a phantom library entry (follower) or scratch file (leader)."""
+    robot_type = "so_follower" if device_type == "robot" else "so_leader"
+    return os.path.join(CALIBRATION_BASE_PATH_ROBOTS, robot_type, f"{config_stem}.json")
+
+
+def _remove_stray_calibration_file(device_type: str, config_stem: str) -> None:
+    """Best-effort removal of the subprocess's --save output on a non-success
+    run. The subprocess only writes it at the natural end of a fully-successful
+    calibration (an interrupt raises before its save block), so on the normal
+    failed/stopped path there is nothing to remove; this is the belt-and-braces
+    guard for the case where the process wrote the file and then exited non-zero
+    (or post-processing failed), which would otherwise leave a phantom entry."""
+    path = _subprocess_output_path(device_type, config_stem)
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+            logger.info(f"Removed stray auto-calibration file from a non-successful run: {path}")
+    except OSError as e:
+        logger.warning(f"Could not remove stray auto-calibration file {path}: {e}")
+
+
 def _release_arm_torque(port: str) -> list[str]:
     """Fallback torque release, run from THIS process after the calibration
     subprocess is dead (so the serial port is free again).
@@ -194,6 +223,7 @@ class AutoCalibrationManager:
             logger.warning(f"Auto-calibration log reader error: {e}")
         code = proc.wait()
 
+        request = self._request
         with self._lock:
             if code == 0:
                 try:
@@ -203,14 +233,28 @@ class AutoCalibrationManager:
                     )
                 except Exception as e:
                     logger.error(f"Auto-calibration post-processing failed: {e}")
+                    # Post-processing failed after the subprocess wrote its file
+                    # — don't leave that file behind as a phantom under a failed
+                    # status. (The record write-back never assigns the name on
+                    # this path either: it runs inside _finalize_success, which
+                    # aborted.)
+                    if request is not None:
+                        _remove_stray_calibration_file(request.device_type, _stem(request.config_file))
                     self.status = AutoCalibrationStatus(active=False, status="failed", error=str(e))
             elif self.status.status in ("stopping", "stopped"):
                 # Stop path: _stop_worker owns the terminal status — it still
                 # has to run the fallback torque release after the process is
-                # gone, and only then flips the status to stopped/failed.
-                # Leave "stopping" (active=True) so the UI keeps polling.
+                # gone, and only then flips the status to stopped/failed. It
+                # also removes any stray output file. Leave "stopping"
+                # (active=True) so the UI keeps polling.
                 pass
             else:
+                # Plain failure (nonzero exit, connection dropped): the
+                # subprocess writes its file only on a fully-successful run, so
+                # normally there's nothing here — but remove it defensively in
+                # case the process wrote then died, so no phantom entry remains.
+                if request is not None:
+                    _remove_stray_calibration_file(request.device_type, _stem(request.config_file))
                 self.status = AutoCalibrationStatus(
                     active=False, status="failed", error=f"Auto-calibration exited with code {code}"
                 )
@@ -332,19 +376,29 @@ class AutoCalibrationManager:
         finally:
             with self._lock:
                 if self.status.status == "completed":
-                    # The run finished during the grace period; keep the result.
+                    # The run finished during the grace period; keep the result
+                    # (and its saved file — this was a success, not a stop).
                     pass
-                elif problems:
-                    self.status = AutoCalibrationStatus(
-                        active=False,
-                        status="failed",
-                        message="Auto-calibration stopped",
-                        error=" ".join(problems),
-                    )
                 else:
-                    self.status = AutoCalibrationStatus(
-                        active=False, status="stopped", message="Auto-calibration stopped"
-                    )
+                    # A stopped run must leave no phantom library entry. The
+                    # subprocess only writes its file at the natural end of a
+                    # fully-successful run, so a stop mid-calibration normally
+                    # wrote nothing — remove it defensively in case a stop
+                    # landed just after the save block.
+                    request = self._request
+                    if request is not None:
+                        _remove_stray_calibration_file(request.device_type, _stem(request.config_file))
+                    if problems:
+                        self.status = AutoCalibrationStatus(
+                            active=False,
+                            status="failed",
+                            message="Auto-calibration stopped",
+                            error=" ".join(problems),
+                        )
+                    else:
+                        self.status = AutoCalibrationStatus(
+                            active=False, status="stopped", message="Auto-calibration stopped"
+                        )
                 self._proc = None
 
     def get_status(self) -> dict:

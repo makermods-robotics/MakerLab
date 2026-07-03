@@ -14,7 +14,7 @@ import {
 import { JobRecord, jobDisplayName, renameJob } from "@/lib/jobsApi";
 import {
   Square,
-  X,
+  Trash2,
   AlertTriangle,
   CheckCircle2,
   Loader2,
@@ -25,6 +25,7 @@ import {
   FastForward,
   Download,
   Sparkles,
+  Upload,
 } from "lucide-react";
 import { useApi } from "@/contexts/ApiContext";
 import { useToast } from "@/hooks/use-toast";
@@ -85,6 +86,9 @@ const JobCard: React.FC<Props> = ({
   const Icon = present.Icon;
   const isRunning = job.state === "running";
   const isImported = job.runner === "imported";
+  // A Hub-backed import (vs a local-folder import) — provenance stays visible
+  // after an untracked Hub repo is unified into a tracked imported card.
+  const isHubImport = isImported && !!job.hf_repo_id;
   // Alias-aware display name; the true identity (run id / hub repo id) stays
   // visible as muted subtext when an alias is set.
   const displayName = jobDisplayName(job);
@@ -264,6 +268,15 @@ const JobCard: React.FC<Props> = ({
         )
       )
         onDelete(job.id);
+    } else if (job.runner === "hf_cloud") {
+      // Cloud runs live on the Hub: deleting the record only removes it (and
+      // its local logs) from this list — uploaded model repos are untouched.
+      if (
+        window.confirm(
+          "Remove this cloud run from the list? Model repos on the Hub are not deleted.",
+        )
+      )
+        onDelete(job.id);
     } else if (
       window.confirm("Delete this run? This wipes the output directory.")
     ) {
@@ -285,16 +298,32 @@ const JobCard: React.FC<Props> = ({
     onPlay(selectedJob, selectedStep);
   };
 
-  // Resume is local-only (lerobot can't resume from the Hub) and needs a saved
-  // checkpoint with optimizer/step state — i.e. a finished local training run.
+  // Continue (local resume) needs a saved checkpoint with optimizer/step state
+  // on this machine — i.e. a finished local training run.
   const canContinue =
     selectedJob.runner === "local" &&
     !isRunning &&
     lineageCheckpoints.length > 0 &&
     selectedStep != null;
 
-  const handleContinue = (e: React.MouseEvent) => {
-    e.stopPropagation();
+  // Resume (cloud): an HF Job is immutable once ended, so this launches a NEW
+  // cloud job that continues from the parent's Hub checkpoint (restoring
+  // optimizer + step, unlike Fine-tune). Offered only on a cloud run that ended
+  // BEFORE its step target — a failed/interrupted/cancelled run with a saved
+  // checkpoint. A `done` run reached its target, so there's nothing to resume.
+  const endedBeforeTarget =
+    (selectedJob.state === "failed" || selectedJob.state === "interrupted") &&
+    (selectedJob.config.steps === 0 ||
+      selectedStep == null ||
+      selectedStep < selectedJob.config.steps);
+  const canResumeCloud =
+    selectedJob.runner === "hf_cloud" &&
+    !isRunning &&
+    lineageCheckpoints.length > 0 &&
+    selectedStep != null &&
+    endedBeforeTarget;
+
+  const goToResume = (runner: "local" | "hf_cloud") => {
     if (selectedStep == null) return;
     navigate("/training", {
       state: {
@@ -307,9 +336,21 @@ const JobCard: React.FC<Props> = ({
           sourceSteps: selectedJob.config.steps,
           logFreq: selectedJob.config.log_freq,
           saveFreq: selectedJob.config.save_freq,
+          runner,
+          flavor: runner === "hf_cloud" ? (selectedJob.hf_flavor ?? undefined) : undefined,
         },
       },
     });
+  };
+
+  const handleContinue = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    goToResume("local");
+  };
+
+  const handleResumeCloud = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    goToResume("hf_cloud");
   };
 
   // Fine-tune: start a FRESH run whose weights are initialized from this
@@ -389,13 +430,24 @@ const JobCard: React.FC<Props> = ({
     >
       <CardContent className="p-4 space-y-3">
         <div className="flex items-start justify-between gap-2">
-          <div
-            className={`flex items-center gap-1.5 text-xs font-semibold ${present.color}`}
-          >
-            <Icon
-              className={`w-3.5 h-3.5 ${isRunning ? "animate-spin" : ""}`}
-            />
-            {stateLabel}
+          <div className="flex items-center gap-2">
+            <div
+              className={`flex items-center gap-1.5 text-xs font-semibold ${present.color}`}
+            >
+              <Icon
+                className={`w-3.5 h-3.5 ${isRunning ? "animate-spin" : ""}`}
+              />
+              {stateLabel}
+            </div>
+            {isHubImport ? (
+              <div
+                className="flex items-center gap-1 text-[11px] font-medium text-sky-400"
+                title="Imported from a Hugging Face Hub repo"
+              >
+                <Upload className="w-3 h-3" />
+                from Hub
+              </div>
+            ) : null}
           </div>
           <div className="flex items-center gap-0.5">
             <Button
@@ -425,21 +477,28 @@ const JobCard: React.FC<Props> = ({
                   <ExternalLink className="w-3.5 h-3.5" />
                 </a>
               </Button>
-            ) : (
+            ) : null}
+            {/* A running cloud run is steered from its Hub page (the link
+                above), so it gets no local action button. Everything else —
+                including a FINISHED cloud run — gets stop/delete, so dead
+                cloud runs are removable instead of link-only. */}
+            {!(job.runner === "hf_cloud" && job.hf_job_url && isRunning) ? (
               <Button
                 variant="ghost"
                 size="icon"
                 onClick={handleAction}
-                className="h-7 w-7 text-slate-400 hover:text-white"
+                className={`h-7 w-7 text-slate-400 ${
+                  isRunning ? "hover:text-white" : "hover:text-red-400"
+                }`}
                 aria-label={isRunning ? "Stop job" : "Delete job"}
               >
                 {isRunning ? (
                   <Square className="w-3.5 h-3.5" />
                 ) : (
-                  <X className="w-3.5 h-3.5" />
+                  <Trash2 className="w-3.5 h-3.5" />
                 )}
               </Button>
-            )}
+            ) : null}
           </div>
         </div>
         <div>
@@ -506,6 +565,18 @@ const JobCard: React.FC<Props> = ({
                 aria-label="Continue training from this checkpoint"
               >
                 <FastForward className="w-3.5 h-3.5" /> Continue
+              </Button>
+            ) : null}
+            {canResumeCloud ? (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={handleResumeCloud}
+                className="h-8 gap-1 border-sky-500/50 text-sky-700 dark:text-sky-300 hover:bg-sky-500/10"
+                aria-label="Resume this cloud run from its last checkpoint"
+                title="Resume: launch a new cloud job continuing from this checkpoint"
+              >
+                <FastForward className="w-3.5 h-3.5" /> Resume
               </Button>
             ) : null}
             {canFinetune ? (

@@ -11,6 +11,12 @@ const ApiContext = createContext<ApiContextType | undefined>(undefined);
 const STORAGE_KEY = "lelab.apiBaseUrl";
 const DEFAULT_LOCALHOST = "http://localhost:8000";
 
+// In production the backend serves the UI, so the page origin is the API. In
+// Vite dev the UI is on :8080 while the API stays on :8000, so the origin
+// would be wrong there.
+const defaultBaseUrl = (): string =>
+  import.meta.env.DEV ? DEFAULT_LOCALHOST : window.location.origin;
+
 const httpToWs = (url: string): string => url.replace(/^http(s?):/, "ws$1:");
 
 const resolveInitialBaseUrl = (): string => {
@@ -28,7 +34,7 @@ const resolveInitialBaseUrl = (): string => {
     }
   }
 
-  return window.localStorage.getItem(STORAGE_KEY) || DEFAULT_LOCALHOST;
+  return window.localStorage.getItem(STORAGE_KEY) || defaultBaseUrl();
 };
 
 export const ApiProvider: React.FC<{ children: ReactNode }> = ({

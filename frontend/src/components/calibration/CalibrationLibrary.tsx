@@ -39,10 +39,17 @@ interface CalibrationLibraryProps {
    */
   configField?: string;
   /**
-   * A config already used by the OTHER same-side arm — greyed out here so you
-   * can't point two physical arms at one calibration (the proactive guard).
+   * A config currently assigned to the OTHER same-side arm. Picking it here is
+   * allowed but triggers a SWAP (this slot takes it; the other slot takes this
+   * slot's config) so two physical arms never share one calibration.
    */
   excludeConfig?: string;
+  /**
+   * The record field the `excludeConfig` config lives in (the counterpart
+   * same-side slot). Set together with `excludeConfig` in bimanual mode so the
+   * swap can repoint both slots in a single upsert.
+   */
+  excludeConfigField?: string;
   /** Called after a successful reassignment so the parent can refetch the robot. */
   onAssigned?: () => void | Promise<void>;
   /**
@@ -54,8 +61,10 @@ interface CalibrationLibraryProps {
 
 /**
  * Per-side calibration "library" as a dropdown: pick a saved config, then
- * Download / Delete it, or Import a new one. Both import and download operate on
- * the same named files, so they stay symmetric.
+ * Download, Rename, or Delete it, or Import a new one. Delete acts on the
+ * selected config (not per dropdown entry, which would clash with
+ * swap-on-select); deleting an in-use config unassigns it server-side and the
+ * affected arm returns to "needs calibration".
  */
 const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
   device,
@@ -63,6 +72,7 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
   robotName,
   configField,
   excludeConfig,
+  excludeConfigField,
   onAssigned,
   reloadToken,
 }) => {
@@ -202,19 +212,34 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
       const field =
         configField ??
         (device === "teleop" ? "leader_config" : "follower_config");
+      // If the picked config is the one the counterpart same-side slot holds,
+      // SWAP: this slot takes `selected`, the counterpart takes this slot's
+      // current config. One upsert of both fields — the backend's
+      // config-slot-conflict guard evaluates the merged record, so a two-slot
+      // swap of distinct configs passes. Otherwise a plain single-field assign.
+      const isSwap =
+        !!excludeConfig &&
+        !!excludeConfigField &&
+        selected === excludeConfig &&
+        excludeConfigField !== field;
+      const body = isSwap
+        ? { [field]: selected, [excludeConfigField as string]: assignedConfig ?? "" }
+        : { [field]: selected };
       const res = await fetchWithHeaders(
         `${baseUrl}/robots/${encodeURIComponent(robotName)}`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ [field]: selected }),
+          body: JSON.stringify(body),
         },
       );
       const data = await res.json().catch(() => ({}));
       if (res.ok && data.status === "success") {
         toast({
-          title: "Config assigned",
-          description: `"${selected}" is now used for this robot.`,
+          title: isSwap ? "Configs swapped" : "Config assigned",
+          description: isSwap
+            ? `"${selected}" is now used for this arm; the other arm took "${assignedConfig || "(none)"}".`
+            : `"${selected}" is now used for this robot.`,
         });
         await onAssigned?.();
       } else {
@@ -238,6 +263,9 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
     robotName,
     device,
     configField,
+    assignedConfig,
+    excludeConfig,
+    excludeConfigField,
     baseUrl,
     fetchWithHeaders,
     toast,
@@ -306,6 +334,15 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
 
   const empty = configs.length === 0;
   const canAssign = !!robotName && !!selected && selected !== assignedConfig;
+  // True when assigning the selected config would swap it with the counterpart
+  // same-side slot (used only to label the button — the swap is done in
+  // assignToRobot).
+  const willSwap =
+    !!excludeConfig &&
+    !!excludeConfigField &&
+    selected === excludeConfig &&
+    excludeConfigField !==
+      (configField ?? (device === "teleop" ? "leader_config" : "follower_config"));
 
   return (
     <div className="mt-1 ml-6 space-y-1">
@@ -322,15 +359,12 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
           </SelectTrigger>
           <SelectContent className="bg-slate-800 border-slate-700 text-white">
             {configs.map((c) => {
+              // The counterpart same-side slot's config stays selectable now:
+              // picking it swaps the two slots' assignments (see assignToRobot).
               const usedByOtherArm =
                 !!excludeConfig && c.name === excludeConfig;
               return (
-                <SelectItem
-                  key={c.name}
-                  value={c.name}
-                  disabled={usedByOtherArm}
-                  className="text-white"
-                >
+                <SelectItem key={c.name} value={c.name} className="text-white">
                   <span className="flex items-center gap-2">
                     {c.name}
                     {c.name === assignedConfig && (
@@ -375,7 +409,7 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
         <Button
           size="icon"
           variant="ghost"
-          className="h-8 w-8 text-red-400 hover:text-red-300 hover:bg-red-900/20"
+          className="h-8 w-8 text-slate-300 hover:text-red-400"
           disabled={!selected}
           onClick={() => selected && setPendingDelete(selected)}
           aria-label="Delete selected config"
@@ -400,7 +434,11 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
           disabled={assigning}
           onClick={assignToRobot}
         >
-          {assigning ? "Assigning…" : `Use "${selected}" for this robot`}
+          {assigning
+            ? "Assigning…"
+            : willSwap
+              ? `Swap in "${selected}" (other arm takes "${assignedConfig || "none"}")`
+              : `Use "${selected}" for this robot`}
         </Button>
       )}
 
@@ -462,16 +500,10 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
             <DialogTitle>Delete config "{pendingDelete}"?</DialogTitle>
             <DialogDescription className="text-slate-400">
               This permanently deletes the calibration file — you'd have to
-              recalibrate the arm to recreate it.
+              recalibrate the arm to recreate it. Any robot using it will need
+              calibration before its next use.
             </DialogDescription>
           </DialogHeader>
-          {pendingDelete !== null && pendingDelete === assignedConfig && (
-            <p className="text-sm text-amber-400">
-              This config is in use: deleting it will leave this arm
-              uncalibrated. It will need to be recalibrated (or have another
-              config assigned) before it can be used again.
-            </p>
-          )}
           <DialogFooter className="flex gap-2 justify-end">
             <Button
               variant="outline"
@@ -481,7 +513,7 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
               Cancel
             </Button>
             <Button
-              className="bg-red-500 hover:bg-red-600 text-white"
+              className="bg-red-600 hover:bg-red-700 text-white"
               onClick={confirmDelete}
             >
               Delete

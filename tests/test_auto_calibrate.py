@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import threading
 
@@ -225,6 +226,132 @@ def test_stop_surfaces_failed_torque_release(
     assert status["active"] is False
     assert "TORQUE MAY STILL BE ENABLED" in status["error"]
     assert "/dev/arm" in status["error"]
+
+
+# ---------------------------------------------------------------------------
+# Success-only persistence: a non-successful run must leave no phantom file
+# ---------------------------------------------------------------------------
+
+
+def _point_robots_base_at(monkeypatch: pytest.MonkeyPatch, base: str) -> None:
+    """Redirect the module-level robots calibration base the manager reads.
+
+    auto_calibrate binds CALIBRATION_BASE_PATH_ROBOTS at import, so patching
+    cfg alone wouldn't reach it — patch the name on the module directly."""
+    monkeypatch.setattr(auto_calibrate, "CALIBRATION_BASE_PATH_ROBOTS", base)
+
+
+def _plant_follower_file(base: str, stem: str) -> str:
+    """Create the file the subprocess would have written for a follower run."""
+    path = os.path.join(base, "so_follower", f"{stem}.json")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        f.write("{}")
+    return path
+
+
+def test_stray_file_removed_when_run_fails_nonzero(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """A run that exits non-zero after the subprocess already wrote its file
+    must not leave a phantom library entry behind."""
+    _point_robots_base_at(monkeypatch, str(tmp_path))
+    stray = _plant_follower_file(str(tmp_path), "my_arm")
+
+    class FailProc:
+        def __init__(self) -> None:
+            self.stdout = iter(["Stage 0: init\n"])
+
+        def wait(self) -> int:
+            return 1
+
+        def terminate(self) -> None:
+            pass
+
+    monkeypatch.setattr(auto_calibrate.subprocess, "Popen", lambda *a, **k: FailProc())
+
+    mgr = auto_calibrate.AutoCalibrationManager()
+    mgr.start(auto_calibrate.AutoCalibrationRequest(device_type="robot", port="/dev/x", config_file="my_arm"))
+    if mgr._thread is not None:
+        mgr._thread.join(timeout=2)
+
+    assert mgr.get_status()["status"] == "failed"
+    assert not os.path.exists(stray)
+
+
+def test_stray_file_removed_when_post_processing_fails(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """A successful subprocess whose post-processing (_finalize_success) raises
+    must clean up the file the subprocess wrote — the run is 'failed', so its
+    name must not persist as a phantom entry."""
+    _point_robots_base_at(monkeypatch, str(tmp_path))
+    stray = _plant_follower_file(str(tmp_path), "my_arm")
+
+    class OkProc:
+        def __init__(self) -> None:
+            self.stdout = iter(["calibration done\n"])
+
+        def wait(self) -> int:
+            return 0
+
+        def terminate(self) -> None:
+            pass
+
+    monkeypatch.setattr(auto_calibrate.subprocess, "Popen", lambda *a, **k: OkProc())
+
+    mgr = auto_calibrate.AutoCalibrationManager()
+
+    def _boom() -> None:
+        raise RuntimeError("record write-back exploded")
+
+    monkeypatch.setattr(mgr, "_finalize_success", _boom)
+    mgr.start(auto_calibrate.AutoCalibrationRequest(device_type="robot", port="/dev/x", config_file="my_arm"))
+    if mgr._thread is not None:
+        mgr._thread.join(timeout=2)
+
+    assert mgr.get_status()["status"] == "failed"
+    assert not os.path.exists(stray)
+
+
+def test_stray_file_removed_on_stop(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """A stopped run must leave no phantom file even if a stop landed just after
+    the subprocess wrote it."""
+    _point_robots_base_at(monkeypatch, str(tmp_path))
+    stray = _plant_follower_file(str(tmp_path), "my_arm")
+
+    proc = StoppableFakeProc()
+    released: list[str] = []
+    mgr, _ = _start_with_fake_proc(monkeypatch, proc, released)
+
+    assert mgr.stop()["success"] is True
+    _join_stop(mgr)
+
+    assert mgr.get_status()["status"] == "stopped"
+    assert not os.path.exists(stray)
+
+
+def test_completed_during_grace_keeps_file(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """If the run finishes successfully during the stop grace period, its saved
+    file must be KEPT — the terminal status is 'completed', not a stop."""
+    _point_robots_base_at(monkeypatch, str(tmp_path))
+    kept = _plant_follower_file(str(tmp_path), "my_arm")
+
+    mgr = auto_calibrate.AutoCalibrationManager()
+    mgr._request = auto_calibrate.AutoCalibrationRequest(
+        device_type="robot", port="/dev/arm", config_file="my_arm"
+    )
+    mgr.status = auto_calibrate.AutoCalibrationStatus(active=False, status="completed", message="done")
+    monkeypatch.setattr(auto_calibrate, "_release_arm_torque", lambda port: [])
+
+    class _DoneProc:
+        def wait(self, timeout=None) -> int:
+            return 0
+
+        def terminate(self) -> None:
+            pass
+
+    mgr._thread = None
+    mgr._stop_worker(_DoneProc(), "/dev/arm")
+
+    assert mgr.get_status()["status"] == "completed"
+    assert os.path.exists(kept)
 
 
 def test_release_arm_torque_disables_all_motors(monkeypatch: pytest.MonkeyPatch) -> None:

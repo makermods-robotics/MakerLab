@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import { ChevronsUpDown, GitMerge } from "lucide-react";
+import { ChevronsUpDown, GitMerge, Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
 import LandingTopBar from "@/components/landing/LandingTopBar";
@@ -8,6 +8,7 @@ import Footer from "@/components/Footer";
 import RobotConfigManager from "@/components/landing/RobotConfigManager";
 import RecordingModal from "@/components/landing/RecordingModal";
 import DatasetPicker from "@/components/landing/DatasetPicker";
+import CreateDatasetDialog from "@/components/landing/CreateDatasetDialog";
 import DatasetInfoCard from "@/components/landing/DatasetInfoCard";
 import MergeDatasetsDialog from "@/components/landing/MergeDatasetsDialog";
 import JobsSection from "@/components/jobs/JobsSection";
@@ -64,6 +65,7 @@ const Landing = () => {
     refresh: refreshDatasets,
   } = useDatasets();
   const [showMergeDialog, setShowMergeDialog] = useState(false);
+  const [showCreateDatasetDialog, setShowCreateDatasetDialog] = useState(false);
   const [pendingDeleteDataset, setPendingDeleteDataset] =
     useState<DatasetItem | null>(null);
   const { selectedDataset, setSelectedDataset } = useSelectedDataset();
@@ -288,6 +290,9 @@ const Landing = () => {
       right_follower_port: robot.right_follower_port,
       right_leader_config: robot.right_leader_config,
       right_follower_config: robot.right_follower_config,
+      // Robot name → BiSO staging base id (bimanual). Names the per-session
+      // staging dir; does not affect which calibration drives which arm.
+      robot_name: robot.name,
       // Follower torque limit for the session (10-100% of full power).
       motor_power: robot.motor_power ?? 100,
       dataset_repo_id: datasetRepoId,
@@ -314,10 +319,9 @@ const Landing = () => {
     >
       <LandingTopBar />
 
-      <div
-        className="sticky z-20 bg-black/95 backdrop-blur supports-[backdrop-filter]:bg-black/70 border-b border-gray-800"
-        style={{ top: "var(--lelab-topbar-h)" }}
-      >
+      {/* Scrolls with the page (user preference) — only the slim top bar stays
+          sticky; the card row previously pinned itself below it. */}
+      <div className="bg-black border-b border-gray-800">
         <div className="mx-auto max-w-7xl px-4 py-4 grid gap-4 grid-cols-1 lg:grid-cols-[1.2fr_2fr]">
           <RobotConfigManager
             records={records}
@@ -336,30 +340,55 @@ const Landing = () => {
               <h3 className="font-semibold text-lg text-center h-10 flex items-center justify-center">
                 Dataset
               </h3>
-              <DatasetPicker
-                datasets={datasets}
-                loading={datasetsLoading}
-                onPickExisting={handlePickExisting}
-                onOpenCustom={handleOpenCustom}
-                onCreateNew={handleCreateDataset}
-                onDelete={handleDeleteDataset}
-              >
+              <div className="flex items-center gap-2">
+                <div className="flex-1 min-w-0">
+                  <DatasetPicker
+                    datasets={datasets}
+                    loading={datasetsLoading}
+                    onPickExisting={handlePickExisting}
+                    onOpenCustom={handleOpenCustom}
+                    onCreateNew={handleCreateDataset}
+                    onDelete={handleDeleteDataset}
+                    onUploaded={() => refreshDatasets()}
+                  >
+                    <Button
+                      variant="outline"
+                      role="combobox"
+                      className="w-full justify-between bg-gray-800 border-gray-600 text-white hover:bg-gray-700"
+                    >
+                      <span
+                        className={`truncate ${selectedDataset ? "text-white" : "text-gray-300"}`}
+                      >
+                        {datasetsLoading
+                          ? "Loading datasets…"
+                          : (selectedDataset ?? "Select or create a dataset…")}
+                      </span>
+                      <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                    </Button>
+                  </DatasetPicker>
+                </div>
                 <Button
                   variant="outline"
-                  role="combobox"
-                  className="w-full justify-between bg-gray-800 border-gray-600 text-white hover:bg-gray-700"
+                  size="sm"
+                  onClick={() => setShowCreateDatasetDialog(true)}
+                  className="h-8 shrink-0 border-gray-600 bg-gray-800 text-white hover:bg-gray-700 hover:text-white"
                 >
-                  <span
-                    className={`truncate ${selectedDataset ? "text-white" : "text-gray-300"}`}
-                  >
-                    {datasetsLoading
-                      ? "Loading datasets…"
-                      : (selectedDataset ?? "Select or create a dataset…")}
-                  </span>
-                  <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                  <Plus className="w-3.5 h-3.5 mr-1.5" />
+                  New dataset
                 </Button>
-              </DatasetPicker>
-              {selectedDataset && <DatasetInfoCard repoId={selectedDataset} />}
+              </div>
+              {selectedDataset && (
+                <DatasetInfoCard
+                  repoId={selectedDataset}
+                  onRenamed={(newRepoId) => {
+                    // The renamed dir has a new repo id: repoint the selection
+                    // (so the card + training read the new id) and refresh the
+                    // picker list so both reflect it without a manual reload.
+                    setSelectedDataset(newRepoId);
+                    refreshDatasets();
+                  }}
+                />
+              )}
               <button
                 type="button"
                 onClick={() => setShowMergeDialog(true)}
@@ -372,8 +401,10 @@ const Landing = () => {
               <h3 className="font-semibold text-lg text-center h-10 flex items-center justify-center">
                 Create a model
               </h3>
-              <div className="grid grid-cols-3 gap-2">
-                {POLICY_TYPE_OPTIONS.map((policy) => {
+              {/* Stable = tested on our hardware (see POLICY_TYPE_OPTIONS).
+                  Untested types stay selectable, just visually subdued. */}
+              <div className="grid grid-cols-2 gap-2">
+                {POLICY_TYPE_OPTIONS.filter((p) => p.stable).map((policy) => {
                   const unavailable =
                     policyAvailability?.[policy.value] === false;
                   return (
@@ -392,6 +423,35 @@ const Landing = () => {
                         disabled={!selectedDataset || unavailable}
                         size="sm"
                         className="w-full bg-green-500 hover:bg-green-600 text-white px-2"
+                      >
+                        <span className="truncate">{policy.label}</span>
+                      </Button>
+                    </span>
+                  );
+                })}
+              </div>
+              <p className="text-xs text-gray-500 mt-1">
+                Untested in LeLab — use at your own risk
+              </p>
+              <div className="grid grid-cols-3 gap-2">
+                {POLICY_TYPE_OPTIONS.filter((p) => !p.stable).map((policy) => {
+                  const unavailable =
+                    policyAvailability?.[policy.value] === false;
+                  return (
+                    <span
+                      key={policy.value}
+                      title={
+                        unavailable
+                          ? "Not available in this lerobot version"
+                          : `Train a ${policy.label} model — untested in LeLab, use at your own risk`
+                      }
+                    >
+                      <Button
+                        onClick={() => handleTrainingClick(policy.value)}
+                        disabled={!selectedDataset || unavailable}
+                        size="sm"
+                        variant="outline"
+                        className="w-full border-gray-600 bg-gray-900/40 text-gray-400 hover:bg-gray-700 hover:text-white px-2"
                       >
                         <span className="truncate">{policy.label}</span>
                       </Button>
@@ -424,6 +484,13 @@ const Landing = () => {
         onOpenChange={setShowMergeDialog}
         datasets={datasets}
         onMerged={refreshDatasets}
+      />
+
+      <CreateDatasetDialog
+        open={showCreateDatasetDialog}
+        onOpenChange={setShowCreateDatasetDialog}
+        existingRepoIds={datasets.map((d) => d.repo_id)}
+        onCreateNew={handleCreateDataset}
       />
 
       <AlertDialog

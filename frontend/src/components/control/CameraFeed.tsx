@@ -1,18 +1,30 @@
 import React from "react";
 import { VideoOff } from "lucide-react";
 import { useCameraStream } from "@/hooks/useCameraStream";
+import BackendCameraStream from "@/components/BackendCameraStream";
 
 interface CameraFeedProps {
   /** Browser deviceId to stream. Empty string renders the "no camera" state. */
   deviceId: string;
+  /** cv2 index on the server — MJPEG fallback when there's no deviceId match
+   * (headless deployment: the cameras are plugged into the server). */
+  cameraIndex?: number;
   /** Optional caption shown under the feed. */
   label?: string;
 }
 
-/** Live browser-camera feed bound to a deviceId via getUserMedia. */
-const CameraFeed: React.FC<CameraFeedProps> = ({ deviceId, label }) => {
+/** Live camera feed: browser getUserMedia when a deviceId match exists,
+ * otherwise the backend MJPEG stream for the camera's cv2 index. */
+const CameraFeed: React.FC<CameraFeedProps> = ({
+  deviceId,
+  cameraIndex,
+  label,
+}) => {
   const { videoRef, hasError } = useCameraStream(deviceId, false);
+
   const showVideo = deviceId && !hasError;
+  // BackendCameraStream owns its own failure/retry UI — no error latch here.
+  const showMjpeg = !showVideo && !deviceId && cameraIndex !== undefined;
 
   return (
     <div className="bg-gray-900 rounded-lg border border-gray-700 overflow-hidden">
@@ -23,6 +35,11 @@ const CameraFeed: React.FC<CameraFeedProps> = ({ deviceId, label }) => {
             autoPlay
             muted
             playsInline
+            className="w-full h-full object-cover"
+          />
+        ) : showMjpeg ? (
+          <BackendCameraStream
+            cameraIndex={cameraIndex}
             className="w-full h-full object-cover"
           />
         ) : (

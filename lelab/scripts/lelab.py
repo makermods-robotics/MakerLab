@@ -42,8 +42,97 @@ logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 FRONTEND_PATH = PROJECT_ROOT / "frontend"
 FRONTEND_DIST = FRONTEND_PATH / "dist"
+FRONTEND_PACKAGE_JSON = FRONTEND_PATH / "package.json"
 BACKEND_PORT = 8000
 FRONTEND_DEV_PORT = 8080
+ENTRY_POINT_NAMES = ("lelab", "lelab-station", "makerlabs")
+# `uv tool install` lays down a symlink in ~/.local/bin that resolves into
+# this tree (verified empirically: ~/.local/bin/<exe> ->
+# ~/.local/share/uv/tools/<tool>/bin/<exe>). We use containment under this
+# dir to recognise a uv-managed entry and refuse to clobber it.
+UV_TOOLS_DIR = Path.home() / ".local" / "share" / "uv" / "tools"
+
+
+def _is_uv_tool_link(link: Path, uv_tools_dir: Path = UV_TOOLS_DIR) -> bool:
+    """True if `link` is a symlink whose target lives under uv's tools dir.
+
+    That is the fingerprint of a `uv tool install` executable — a separate,
+    self-contained flavor we must never silently overwrite with a venv link.
+    """
+    if not link.is_symlink():
+        return False
+    try:
+        target = link.resolve()
+        uv_root = uv_tools_dir.resolve()
+    except OSError:
+        return False
+    return target == uv_root or uv_root in target.parents
+
+
+def _ensure_path_symlinks(
+    source_dir: Path | None = None,
+    bin_dir: Path | None = None,
+    uv_tools_dir: Path = UV_TOOLS_DIR,
+) -> None:
+    """Self-install the entry points onto PATH (idempotent, best-effort).
+
+    pip has no post-install hook, so the first run by full path does the
+    INSTALL.md symlink step itself: each venv entry point gets a symlink in
+    ~/.local/bin. Correct links are left alone; stale symlinks (an old
+    clone's venv) are repointed; anything that is NOT a symlink is never
+    clobbered. A name already owned by a `uv tool install` (its symlink
+    resolves under uv's tools dir) is left alone too — both flavors are
+    present, and we tell the user how to pick one rather than fight it.
+    Failures only log — PATH convenience must never block a server start.
+    Set LELAB_NO_PATH_LINK=1 to opt out.
+    """
+    if os.name != "posix" or os.environ.get("LELAB_NO_PATH_LINK"):
+        return
+    try:
+        source_dir = source_dir or Path(sys.executable).parent
+        bin_dir = bin_dir or Path.home() / ".local" / "bin"
+        created: list[str] = []
+        for name in ENTRY_POINT_NAMES:
+            source = source_dir / name
+            if not source.is_file():
+                continue  # partial env (entry point not installed here)
+            link = bin_dir / name
+            if _is_uv_tool_link(link, uv_tools_dir):
+                logger.info(
+                    "`%s` on your PATH is a `uv tool install` (%s), not a venv "
+                    "symlink — leaving it. Both install flavors are present; pick "
+                    "one: `uv tool uninstall %s` to prefer this checkout, or set "
+                    "LELAB_NO_PATH_LINK=1 to keep the tool install and silence this.",
+                    name,
+                    link,
+                    name,
+                )
+                continue
+            if link.is_symlink():
+                if link.resolve() == source.resolve():
+                    continue
+                link.unlink()  # stale: points into an old venv/clone
+            elif link.exists():
+                logger.warning(
+                    "Not shadowing %s — it exists and is not a symlink; remove it "
+                    "manually if `%s` should run this venv's copy.",
+                    link,
+                    name,
+                )
+                continue
+            bin_dir.mkdir(parents=True, exist_ok=True)
+            link.symlink_to(source)
+            created.append(name)
+        if created:
+            logger.info(
+                "🔗 Linked %s into %s — new shells can run them from any directory",
+                ", ".join(created),
+                bin_dir,
+            )
+            if str(bin_dir) not in os.environ.get("PATH", "").split(os.pathsep):
+                logger.warning("%s is not on your PATH — add it in your shell profile", bin_dir)
+    except Exception as exc:
+        logger.debug("PATH symlink self-install skipped: %s", exc)
 
 
 def _wait_for_port(port: int, timeout: int = 30) -> bool:
@@ -72,22 +161,30 @@ def _open_browser_when_ready():
         return
 
 
-def _run_prod():
-    """Serve built frontend from backend on a single port."""
+def _run_prod(lan: bool = False):
+    """Serve built frontend from backend on a single port.
+
+    `lan` binds 0.0.0.0 for headless stations serving other machines on the
+    network; it also skips the open-a-local-browser step (there is no local
+    browser worth opening in that deployment).
+    """
     if not FRONTEND_DIST.exists():
         logger.error(f"❌ Built frontend not found at {FRONTEND_DIST}")
         logger.error("   Run `npm run build` in frontend/ first, or use `lelab --dev`.")
         sys.exit(1)
 
-    logger.info("🚀 Starting LeLab on http://localhost:%d ...", BACKEND_PORT)
-
-    threading.Thread(target=_open_browser_when_ready, daemon=True).start()
+    host = "0.0.0.0" if lan else "127.0.0.1"  # noqa: S104
+    if lan:
+        logger.info("🚀 Starting LeLab on http://0.0.0.0:%d (LAN) ...", BACKEND_PORT)
+    else:
+        logger.info("🚀 Starting LeLab on http://localhost:%d ...", BACKEND_PORT)
+        threading.Thread(target=_open_browser_when_ready, daemon=True).start()
 
     # Run uvicorn in the main thread so its native SIGINT handler works,
     # and bound graceful shutdown so a stuck WebSocket can't hang Ctrl+C.
     uvicorn.run(
         "lelab.server:app",
-        host="127.0.0.1",
+        host=host,
         port=BACKEND_PORT,
         log_level="info",
         reload=False,
@@ -97,8 +194,18 @@ def _run_prod():
 
 def _run_dev():
     """Vite dev server (HMR) + uvicorn --reload."""
-    if not FRONTEND_PATH.exists():
-        logger.error(f"❌ Frontend not found at {FRONTEND_PATH}")
+    # --dev needs the frontend *source* (Vite config, package.json), which
+    # only exists in a git checkout. A non-editable `uv tool install`
+    # resolves PROJECT_ROOT into site-packages, where the shipped wheel has
+    # only frontend/dist — no package.json — so `npm run dev` would fail with
+    # a confusing path/npm error. Fail fast with a pointer to the fix instead.
+    if not FRONTEND_PACKAGE_JSON.is_file():
+        logger.error("❌ Dev mode needs the git checkout — %s not found.", FRONTEND_PACKAGE_JSON)
+        logger.error(
+            "   You're likely running a `uv tool install` copy (frontend source "
+            "isn't shipped in the wheel). Clone the repo and run `lelab --dev` "
+            "from there — see INSTALL.md."
+        )
         sys.exit(1)
 
     logger.info("📦 Installing frontend deps...")
@@ -188,12 +295,47 @@ def main():
         action="store_true",
         help="Dev mode: Vite HMR + uvicorn --reload (requires Node.js)",
     )
+    parser.add_argument(
+        "--lan",
+        action="store_true",
+        help="Headless station mode: bind 0.0.0.0 (serve other machines), don't open a browser",
+    )
+    parser.add_argument(
+        "--offline",
+        action="store_true",
+        help="Set HF_HUB_OFFLINE=1: every Hub call fails fast (all hardware flows work offline)",
+    )
     args = parser.parse_args()
 
+    _ensure_path_symlinks()
+
+    if args.offline:
+        # Must land in the environment before lelab.server (and its
+        # huggingface_hub import) loads — uvicorn imports the app lazily, so
+        # setting it here covers both prod and the dev subprocess (env copy).
+        os.environ["HF_HUB_OFFLINE"] = "1"
+        logger.info(
+            "HF_HUB_OFFLINE=1 (--offline): Hub features disabled (login/whoami/"
+            "dataset push will fail fast), hardware flows unaffected."
+        )
+
     if args.dev:
+        if args.lan:
+            logger.warning("--lan is ignored in --dev mode (Vite serves localhost only)")
         _run_dev()
     else:
-        _run_prod()
+        _run_prod(lan=args.lan)
+
+
+def station():
+    """Entry point for headless robot stations: `lelab --lan --offline`.
+
+    Installed as `lelab-station` (see pyproject.toml) so the posture is a
+    first-class command — and what deploy/lelab-station.service runs at boot.
+    Extra CLI args still pass through.
+    """
+    sys.argv = [sys.argv[0], "--lan", "--offline", *sys.argv[1:]]
+    main()
 
 
 if __name__ == "__main__":

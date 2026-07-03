@@ -10,7 +10,7 @@ import {
 } from "@/components/ui/select";
 import { Input } from "@/components/ui/input";
 import { NumberInput } from "@/components/ui/number-input";
-import { Camera, Plus, X, VideoOff, RefreshCw, ChevronRight } from "lucide-react";
+import { Camera, Plus, Trash2, VideoOff, RefreshCw, ChevronRight } from "lucide-react";
 import {
   Collapsible,
   CollapsibleContent,
@@ -19,6 +19,7 @@ import {
 import { useToast } from "@/hooks/use-toast";
 import { useAvailableCameras } from "@/hooks/useAvailableCameras";
 import { useCameraStream } from "@/hooks/useCameraStream";
+import BackendCameraStream from "@/components/BackendCameraStream";
 
 // Sentinels distinguish "leave unset" (auto-detect / platform default) from an
 // explicit choice. Radix Select disallows an empty-string value, so we map these
@@ -274,6 +275,7 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
             <div className="bg-gray-900 rounded-lg border border-gray-700 overflow-hidden">
               <CameraStreamBox
                 deviceId={selectedCamera.deviceId}
+                cameraIndex={selectedCamera.index}
                 paused={streamsPaused}
               />
             </div>
@@ -338,19 +340,29 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
 interface CameraStreamBoxProps {
   deviceId: string;
   paused: boolean;
+  /** cv2 index on the server — MJPEG fallback when there's no browser
+   * deviceId match (headless deployment: cameras plugged into the server). */
+  cameraIndex?: number;
 }
 
-/** Live browser stream for a camera by deviceId. Used both for the
- * pre-add preview (as soon as a camera is picked in the dropdown) and for
- * each configured camera's card. The underlying useCameraStream hook stops
- * the browser stream on deviceId change and on unmount, so switching
- * cameras or closing the dialog releases the device. */
+/** Live preview for a camera. Used both for the pre-add preview (as soon as
+ * a camera is picked in the dropdown) and for each configured camera's card.
+ * A camera with a browser deviceId match streams via getUserMedia (the hook
+ * stops the stream on deviceId change and on unmount); one without a match
+ * but with a known cv2 index falls back to the backend MJPEG stream. Pausing
+ * (recording start / modal close) unmounts the MJPEG img, whose cleanup
+ * clears the src so the HTTP connection drops and the server releases the
+ * camera — mirroring the getUserMedia release semantics. */
 const CameraStreamBox: React.FC<CameraStreamBoxProps> = ({
   deviceId,
   paused,
+  cameraIndex,
 }) => {
   const { videoRef, hasError: streamError } = useCameraStream(deviceId, paused);
+
   const showVideo = !paused && deviceId && !streamError;
+  // BackendCameraStream owns its own failure/retry UI — no error latch here.
+  const showMjpeg = !paused && !deviceId && cameraIndex !== undefined;
   return (
     <div className="aspect-[4/3] bg-gray-800 relative">
       {showVideo ? (
@@ -359,6 +371,11 @@ const CameraStreamBox: React.FC<CameraStreamBoxProps> = ({
           autoPlay
           muted
           playsInline
+          className="w-full h-full object-cover"
+        />
+      ) : showMjpeg ? (
+        <BackendCameraStream
+          cameraIndex={cameraIndex}
           className="w-full h-full object-cover"
         />
       ) : (
@@ -392,7 +409,11 @@ const CameraPreview: React.FC<CameraPreviewProps> = ({
 }) => {
   return (
     <div className="bg-gray-900 rounded-lg border border-gray-700 overflow-hidden">
-      <CameraStreamBox deviceId={camera.device_id} paused={paused} />
+      <CameraStreamBox
+        deviceId={camera.device_id}
+        cameraIndex={camera.camera_index}
+        paused={paused}
+      />
 
       {/* Camera Info */}
       <div className="p-3 space-y-2">
@@ -403,8 +424,9 @@ const CameraPreview: React.FC<CameraPreviewProps> = ({
             size="sm"
             variant="ghost"
             className="text-red-400 hover:text-red-300 hover:bg-red-900/20 p-1"
+            aria-label="Remove camera"
           >
-            <X className="w-4 h-4" />
+            <Trash2 className="w-4 h-4" />
           </Button>
         </div>
 

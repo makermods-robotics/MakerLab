@@ -10,11 +10,18 @@ import {
   JobProgressSnapshot,
   JobRecord,
   deleteJob,
+  dismissHubJob,
   getJob,
+  importModel,
+  isHubJobActive,
+  jobDisplayName,
   listHubJobs,
   listJobs,
   stopJob,
 } from "@/lib/jobsApi";
+import { ApiError } from "@/lib/apiClient";
+import { listJobCheckpoints } from "@/lib/checkpointsApi";
+import { useNavigate } from "react-router-dom";
 import JobCard from "./JobCard";
 import HubJobCard from "./HubJobCard";
 import HubModelCard from "./HubModelCard";
@@ -30,19 +37,13 @@ import { ChevronRight, Download, RefreshCw, Search } from "lucide-react";
 
 const LIMIT = 10;
 
-// Hub stages still doing work. Anything outside this set (COMPLETED, FAILED,
-// CANCELED, …) gets demoted to UNTRACKED.
-const HUB_ACTIVE_STAGES = new Set(["RUNNING", "QUEUED", "SCHEDULING"]);
-
 const isJobActive = (j: JobRecord) =>
   j.state === "running" || j.checkpoint_count > 0;
-
-const isHubJobActive = (h: HubJob) =>
-  HUB_ACTIVE_STAGES.has((h.status?.stage ?? "").toUpperCase());
 
 const JobsSection: React.FC = () => {
   const { baseUrl, fetchWithHeaders } = useApi();
   const { toast } = useToast();
+  const navigate = useNavigate();
 
   const [jobs, setJobs] = useState<JobRecord[]>([]);
   // Ancestors referenced via resume_from_job_id but paged out of the list, so a
@@ -191,10 +192,82 @@ const JobsSection: React.FC = () => {
     }
   };
 
-  const handlePlay = (job: JobRecord, step: number) => {
+  const handlePlay = (job: JobRecord, step: number | null) => {
     setInferenceJob(job);
     setInferenceStep(step);
     setInferenceModalOpen(true);
+  };
+
+  // Lazy auto-import: an untracked Hub model card's Run inference / Fine-tune
+  // buttons route through here. We first register the repo as an imported
+  // pseudo-job (idempotent — a re-import returns the existing record), then
+  // proceed exactly as if the user had clicked the action on the resulting
+  // imported-model card. The listing then re-renders the repo as a tracked
+  // imported card (see trackedRepoIds, which now also covers imported records),
+  // so the Hub card disappears on the next refresh.
+  //
+  // Husk repos (a cloud run that died before its first checkpoint save) have no
+  // usable model, so register_imported rejects them with a 400 — we catch it and
+  // show the plain "no checkpoints" answer instead of opening a broken modal.
+  const handleLazyImportAction = async (
+    repoId: string,
+    action: "inference" | "finetune",
+  ) => {
+    let record: JobRecord;
+    try {
+      record = await importModel(baseUrl, fetchWithHeaders, repoId);
+    } catch (e) {
+      const isHusk =
+        e instanceof ApiError && (e.status === 400 || e.status === 404);
+      toast({
+        title: isHusk ? "No checkpoints in this repo" : "Import failed",
+        description: isHusk
+          ? "The run likely died before its first checkpoint save."
+          : e instanceof Error
+            ? e.message
+            : String(e),
+        variant: "destructive",
+      });
+      return;
+    }
+    // The imported record now tracks this repo; drop the Hub card immediately
+    // rather than waiting for the WS/refresh round-trip.
+    refresh();
+    if (action === "inference") {
+      // initialStep = null: the inference modal loads the repo's checkpoints and
+      // auto-selects the latest (or shows its own empty-checkpoints message).
+      handlePlay(record, null);
+      return;
+    }
+    // Fine-tune needs a concrete checkpoint step to seed the training form.
+    try {
+      const cks = await listJobCheckpoints(baseUrl, fetchWithHeaders, record.id);
+      const latest = cks.length > 0 ? cks[cks.length - 1].step : null;
+      if (latest == null) {
+        toast({
+          title: "No checkpoints in this repo",
+          description: "The run likely died before its first checkpoint save.",
+          variant: "destructive",
+        });
+        return;
+      }
+      navigate("/training", {
+        state: {
+          finetune: {
+            jobId: record.id,
+            step: latest,
+            name: jobDisplayName(record),
+            policyType: record.config.policy_type,
+          },
+        },
+      });
+    } catch (e) {
+      toast({
+        title: "Couldn't start fine-tune",
+        description: e instanceof Error ? e.message : String(e),
+        variant: "destructive",
+      });
+    }
   };
 
   const handleDelete = async (id: string) => {
@@ -205,6 +278,22 @@ const JobsSection: React.FC = () => {
     } catch (e) {
       toast({
         title: "Delete failed",
+        description: e instanceof Error ? e.message : String(e),
+        variant: "destructive",
+      });
+    }
+  };
+
+  // Untracked hub jobs aren't deletable on the Hub (the Jobs API has no
+  // delete), so "remove" is a persisted backend-side dismissal.
+  const handleDismissHubJob = async (id: string) => {
+    try {
+      await dismissHubJob(baseUrl, fetchWithHeaders, id);
+      toast({ title: "Job removed from list" });
+      refresh();
+    } catch (e) {
+      toast({
+        title: "Remove failed",
         description: e instanceof Error ? e.message : String(e),
         variant: "destructive",
       });
@@ -261,20 +350,25 @@ const JobsSection: React.FC = () => {
     () => filteredHubJobs.filter((h) => !trackedHfJobIds.has(h.id)),
     [filteredHubJobs, trackedHfJobIds],
   );
-  // Hide model repos that map 1-to-1 to a tracked cloud job (those already
-  // appear via JobCard); the remainder are past trainings the registry no
-  // longer remembers.
+  // Hide model repos already claimed by a tracked job — a cloud run (shown via
+  // JobCard) OR an imported model (also a JobCard, and the target a lazy
+  // auto-import lands on). Repo ids are compared case-insensitively to match
+  // the backend's find_imported dedup. The remainder are past trainings the
+  // registry no longer remembers, rendered as untracked Hub cards.
   const trackedRepoIds = useMemo(
     () =>
       new Set(
-        trackedCloudJobs
-          .map((j) => j.hf_repo_id)
+        [...trackedCloudJobs, ...importedJobs]
+          .map((j) => j.hf_repo_id?.toLowerCase())
           .filter((id): id is string => !!id),
       ),
-    [trackedCloudJobs],
+    [trackedCloudJobs, importedJobs],
   );
   const untrackedHubModels = useMemo(
-    () => filteredHubModels.filter((m) => !trackedRepoIds.has(m.repo_id)),
+    () =>
+      filteredHubModels.filter(
+        (m) => !trackedRepoIds.has(m.repo_id.toLowerCase()),
+      ),
     [filteredHubModels, trackedRepoIds],
   );
 
@@ -353,7 +447,7 @@ const JobsSection: React.FC = () => {
     <section className="grid grid-cols-1 lg:grid-cols-2 gap-x-8 gap-y-10 items-start">
       {/* Jobs column: local runs, cloud runs, and inactive/untracked leftovers.
           The search box lives here (it primarily filters job text) but keeps
-          filtering the imported-models column too, so behavior is unchanged. */}
+          filtering the models column too, so behavior is unchanged. */}
       <div className="space-y-6">
         <div className="flex items-center justify-between gap-3">
           <h2 className="text-lg font-semibold text-white">Jobs</h2>
@@ -421,11 +515,7 @@ const JobsSection: React.FC = () => {
         <Collapsible defaultOpen>
           <CollapsibleTrigger className="group flex items-center gap-1.5 text-sm font-semibold uppercase tracking-wide text-slate-400 hover:text-white transition-colors">
             <ChevronRight className="w-3.5 h-3.5 transition-transform group-data-[state=open]:rotate-90" />
-            Online jobs (
-            {trackedCloudActive.length +
-              untrackedHubActive.length +
-              untrackedHubModels.length}
-            )
+            Online jobs ({trackedCloudActive.length + untrackedHubActive.length})
           </CollapsibleTrigger>
           <CollapsibleContent className="pt-3">
             {hubError ? (
@@ -443,12 +533,11 @@ const JobsSection: React.FC = () => {
                     Your Hugging Face token is missing the{" "}
                     <code className="text-amber-200">job.read</code> permission,
                     so cloud jobs can't be listed. Uploaded models still appear
-                    below.
+                    under Models.
                   </p>
                 ) : null}
                 {trackedCloudActive.length === 0 &&
-                untrackedHubActive.length === 0 &&
-                untrackedHubModels.length === 0 ? (
+                untrackedHubActive.length === 0 ? (
                   hubAuthenticated && !hubJobsPermission ? null : (
                     <p className="text-sm text-slate-500">
                       {query
@@ -469,10 +558,11 @@ const JobsSection: React.FC = () => {
                       />
                     ))}
                     {untrackedHubActive.map((job) => (
-                      <HubJobCard key={job.id} job={job} />
-                    ))}
-                    {untrackedHubModels.map((model) => (
-                      <HubModelCard key={model.repo_id} model={model} />
+                      <HubJobCard
+                        key={job.id}
+                        job={job}
+                        onDismiss={handleDismissHubJob}
+                      />
                     ))}
                   </div>
                 )}
@@ -511,7 +601,11 @@ const JobsSection: React.FC = () => {
                   />
                 ))}
                 {untrackedHubInactive.map((job) => (
-                  <HubJobCard key={job.id} job={job} />
+                  <HubJobCard
+                    key={job.id}
+                    job={job}
+                    onDismiss={handleDismissHubJob}
+                  />
                 ))}
               </div>
             </CollapsibleContent>
@@ -519,12 +613,17 @@ const JobsSection: React.FC = () => {
         ) : null}
       </div>
 
-      {/* Imported models column. Owns the Import button; rendered even when
-          empty so the entry point is always visible. */}
+      {/* Models column: imported models plus uploaded hub repos no job tracks
+          (a model artifact, not a run — so it doesn't sit under Online jobs).
+          Owns the Import button; rendered even when empty so the entry point
+          is always visible. */}
       <div className="space-y-6">
         <div className="flex items-center justify-between gap-3">
           <h2 className="text-lg font-semibold text-white">
-            Imported models{importedJobs.length > 0 ? ` (${importedJobs.length})` : ""}
+            Models
+            {importedJobs.length + untrackedHubModels.length > 0
+              ? ` (${importedJobs.length + untrackedHubModels.length})`
+              : ""}
           </h2>
           <Button
             variant="outline"
@@ -536,11 +635,11 @@ const JobsSection: React.FC = () => {
             Import model
           </Button>
         </div>
-        {importedJobs.length === 0 ? (
+        {importedJobs.length === 0 && untrackedHubModels.length === 0 ? (
           <p className="text-sm text-slate-500">
             {query
-              ? "No imported models match your search."
-              : "No imported models. Use Import model to add one from the Hub or a local folder."}
+              ? "No models match your search."
+              : "No models yet. Use Import model to add one from the Hub or a local folder."}
           </p>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-1 gap-4">
@@ -552,6 +651,14 @@ const JobsSection: React.FC = () => {
                 onDelete={handleDelete}
                 onPlay={handlePlay}
                 onRenamed={refresh}
+              />
+            ))}
+            {untrackedHubModels.map((model) => (
+              <HubModelCard
+                key={model.repo_id}
+                model={model}
+                onDeleted={refresh}
+                onAction={handleLazyImportAction}
               />
             ))}
           </div>

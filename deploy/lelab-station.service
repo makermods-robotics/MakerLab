@@ -1,0 +1,39 @@
+# LeLab headless robot station — starts at boot, restarts on crash.
+#
+# One-time install (adjust the two paths/user if yours differ):
+#   sudo cp deploy/lelab-station.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now lelab-station
+#
+# Day-to-day:
+#   systemctl status lelab-station      # is it up, recent log lines
+#   journalctl -u lelab-station -f      # follow the server log
+#   sudo systemctl restart lelab-station
+#   sudo systemctl stop lelab-station   # e.g. before running `lelab --dev`
+#
+# The service runs the offline posture (HF_HUB_OFFLINE=1 via lelab-station):
+# every hardware flow works, Hub calls fail fast. For an upload/Hub session,
+# stop the service and run `.venv/bin/lelab --lan` in a proxied shell — or
+# uncomment the Environment lines below to run the service itself through a
+# proxy (then it is NOT offline-deterministic; see INSTALL.md "server
+# posture").
+
+[Unit]
+Description=LeLab robot station (headless, LAN-served, Hub-offline)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=makermods
+WorkingDirectory=/home/makermods/MakerLab
+ExecStart=/home/makermods/MakerLab/.venv/bin/lelab-station
+Restart=on-failure
+RestartSec=3
+# Serial ports: the unit user must be in dialout (usermod -aG dialout <user>).
+# Proxy for an online posture (see note above) — normally leave commented:
+#Environment=https_proxy=http://127.0.0.1:7897
+#Environment=http_proxy=http://127.0.0.1:7897
+#Environment=no_proxy=localhost,127.0.0.1,192.168.0.0/16
+
+[Install]
+WantedBy=multi-user.target

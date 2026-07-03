@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useSyncExternalStore } from "react";
 import { useLocation } from "react-router-dom";
 import { useApi } from "@/contexts/ApiContext";
 import { useToast } from "@/hooks/use-toast";
@@ -46,36 +46,88 @@ const writeSelected = (name: string | null) => {
   }
 };
 
+// Module-level store shared by every useRobots() instance. The Landing card,
+// JobsSection, and Training page mount simultaneously, so per-instance
+// useState copies drift: selecting a robot on Landing left the inference
+// modal (mounted under JobsSection) holding the stale previous selection.
+// One store, one truth — instances subscribe via useSyncExternalStore.
+interface RobotsState {
+  records: Record<string, RobotRecord>;
+  selectedName: string | null;
+  isLoading: boolean;
+}
+
+let state: RobotsState = {
+  records: {},
+  selectedName: readSelected(),
+  isLoading: false,
+};
+const listeners = new Set<() => void>();
+
+const setState = (patch: Partial<RobotsState>) => {
+  state = { ...state, ...patch };
+  listeners.forEach((l) => l());
+};
+
+const subscribe = (l: () => void) => {
+  listeners.add(l);
+  return () => {
+    listeners.delete(l);
+  };
+};
+
+const getSnapshot = (): RobotsState => state;
+
+const setSelectedShared = (name: string | null) => {
+  writeSelected(name);
+  setState({ selectedName: name });
+};
+
+const patchRecords = (
+  updater: (prev: Record<string, RobotRecord>) => Record<string, RobotRecord>
+) => {
+  setState({ records: updater(state.records) });
+};
+
+// Several instances can fetch concurrently (each mount refreshes); isLoading
+// is true while ANY fetch is in flight, not just the last one to finish.
+let pendingFetches = 0;
+
 export const useRobots = () => {
   const { baseUrl, fetchWithHeaders } = useApi();
   const { toast } = useToast();
   const location = useLocation();
 
-  const [records, setRecords] = useState<Record<string, RobotRecord>>({});
-  const [selectedName, setSelectedName] = useState<string | null>(() => readSelected());
-  const [isLoading, setIsLoading] = useState(false);
+  const { records, selectedName, isLoading } = useSyncExternalStore(
+    subscribe,
+    getSnapshot
+  );
 
   // Re-fetch records when location changes (RobotConfigManager mounts only on Landing,
   // so this fires on initial mount and on back-navigation to Landing)
   useEffect(() => {
     let cancelled = false;
     const fetchAll = async () => {
-      setIsLoading(true);
+      pendingFetches += 1;
+      setState({ isLoading: true });
       try {
         const res = await fetchWithHeaders(`${baseUrl}/robots`);
         const data = await res.json();
         if (cancelled) return;
         const next: Record<string, RobotRecord> = {};
         for (const r of data.robots ?? []) next[r.name] = r;
-        setRecords(next);
+        setState({ records: next });
         // Drop the selection if the underlying record vanished (deleted from another tab)
-        setSelectedName((prev) => (prev && prev in next ? prev : null));
+        if (state.selectedName && !(state.selectedName in next)) {
+          setSelectedShared(null);
+        }
       } catch (e) {
         if (!cancelled) {
           console.error("Failed to fetch robots:", e);
         }
       } finally {
-        if (!cancelled) setIsLoading(false);
+        pendingFetches -= 1;
+        setState({ isLoading: pendingFetches > 0 });
       }
     };
     fetchAll();
@@ -84,17 +136,12 @@ export const useRobots = () => {
     };
   }, [baseUrl, fetchWithHeaders, location.key]);
 
-  // Persist selection to localStorage
-  useEffect(() => {
-    writeSelected(selectedName);
-  }, [selectedName]);
-
   const selectRobot = useCallback((name: string) => {
-    setSelectedName(name);
+    setSelectedShared(name);
   }, []);
 
   const clearSelection = useCallback(() => {
-    setSelectedName(null);
+    setSelectedShared(null);
   }, []);
 
   const createRobot = useCallback(
@@ -129,8 +176,8 @@ export const useRobots = () => {
         }
         const data = await res.json();
         if (data.robot) {
-          setRecords((prev) => ({ ...prev, [name]: data.robot }));
-          setSelectedName(name);
+          patchRecords((prev) => ({ ...prev, [name]: data.robot }));
+          setSelectedShared(name);
         }
         return true;
       } catch (e) {
@@ -155,11 +202,11 @@ export const useRobots = () => {
           toast({ title: "Delete failed", description: text, variant: "destructive" });
           return false;
         }
-        setRecords((prev) => {
+        patchRecords((prev) => {
           const { [name]: _omit, ...rest } = prev;
           return rest;
         });
-        setSelectedName((prev) => (prev === name ? null : prev));
+        if (state.selectedName === name) setSelectedShared(null);
         toast({
           title: "Robot deleted",
           description:
@@ -209,11 +256,11 @@ export const useRobots = () => {
         }
         const data = await res.json();
         // Swap the key oldName → newName in the local map, preserving order roughly.
-        setRecords((prev) => {
+        patchRecords((prev) => {
           const { [oldName]: _omit, ...rest } = prev;
           return data.robot ? { ...rest, [newName]: data.robot } : rest;
         });
-        setSelectedName((prev) => (prev === oldName ? newName : prev));
+        if (state.selectedName === oldName) setSelectedShared(newName);
         return true;
       } catch (e) {
         toast({ title: "Network error", description: String(e), variant: "destructive" });

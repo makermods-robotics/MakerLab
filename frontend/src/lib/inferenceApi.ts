@@ -15,6 +15,17 @@ export interface StartInferenceRequest {
   duration_s: number;
   // Follower torque limit for the session (10-100% of full power).
   motor_power?: number;
+  // Bimanual: "single" (default) drives one follower; "bimanual" drives two.
+  // In bimanual mode follower_port/follower_config above is the LEFT arm and
+  // the right_* fields carry the RIGHT arm. Inference has no leader arms.
+  mode?: "single" | "bimanual";
+  right_follower_port?: string;
+  right_follower_config?: string;
+  // Robot record name — the BiSO calibration-staging base id (bimanual only).
+  robot_name?: string;
+  // Checkpoint's flat state width (6 = single arm, 12 = bimanual). Lets the
+  // server reject an arm-count mismatch before spawning the rollout subprocess.
+  checkpoint_state_dim?: number;
 }
 
 export interface InferenceStatus {

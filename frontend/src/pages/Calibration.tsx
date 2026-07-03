@@ -24,6 +24,16 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import {
   ArrowLeft,
   Settings,
   Activity,
@@ -119,25 +129,24 @@ const Calibration = () => {
   ) as keyof RobotRecord;
 
   const assignedConfig = robot ? (robot[configField] as string) : "";
-  // Bimanual MUST follow lerobot's "<base>_left"/"<base>_right" convention, so
-  // the name is forced to "<robot>_<arm>" regardless of any assigned config.
-  // Single-arm recalibration defaults to the in-use config (or the robot name).
-  const defaultConfigName = isBimanual
-    ? `${robotName}_${arm}`
-    : ((assignedConfig?.trim() ? assignedConfig : robotName) ?? "");
+  // Calibration names are arbitrary in every mode — bimanual no longer forces
+  // "<robot>_<arm>" (lerobot's "<base>_left/right" convention is satisfied by a
+  // per-session staging copy on the backend, not by the on-disk name). Default
+  // to the in-use config for this slot, else a per-arm suggestion so a fresh
+  // bimanual robot doesn't propose the same name for all four slots.
+  const defaultConfigName = assignedConfig?.trim()
+    ? assignedConfig
+    : ((isBimanual ? `${robotName}_${arm}` : robotName) ?? "");
 
-  // Editable "save as" name (single-arm only) so one robot can own multiple
-  // named calibrations instead of overwriting. Blank falls back to the default;
-  // bimanual stays locked to the lerobot naming convention. The field re-syncs
-  // to the default whenever the target side changes (device/arm switch, robot
-  // load, or a just-saved calibration reassigning the robot).
+  // Editable "save as" name (all modes) so one robot can own multiple named
+  // calibrations instead of overwriting. Blank falls back to the default. The
+  // field re-syncs to the default whenever the target side changes (device/arm
+  // switch, robot load, or a just-saved calibration reassigning the robot).
   const [configNameInput, setConfigNameInput] = useState("");
   useEffect(() => {
     setConfigNameInput(defaultConfigName);
   }, [defaultConfigName]);
-  const calibrationConfigName = isBimanual
-    ? defaultConfigName
-    : configNameInput.trim() || defaultConfigName;
+  const calibrationConfigName = configNameInput.trim() || defaultConfigName;
 
   // Bumped when a calibration completes so the per-side CalibrationLibrary
   // dropdowns re-fetch and surface any newly-named file.
@@ -185,6 +194,26 @@ const Calibration = () => {
   const [wiggling, setWiggling] = useState(false);
   // Touch-to-identify: watching every port for a hand-moved shoulder-pan swing.
   const [detecting, setDetecting] = useState(false);
+  // Picking a port that's in use by another arm (via the dropdown OR Detect)
+  // stages the assignment here and opens a confirmation dialog instead of
+  // applying immediately. Two shapes, distinguished by `source`:
+  //  - When the OTHER slot holds this port and THIS slot already had a port,
+  //    confirming SWAPS: the other slot receives this slot's old port, so no
+  //    slot ends up empty. `swapPort` carries the old port for the message and
+  //    the patch.
+  //  - When this slot had no port, the swap degenerates to a take-with-warning:
+  //    the other slot is left empty. `swapPort` is null in that case.
+  // `releasedField`/`releasedLabel` are null when the port isn't in use at all
+  // (plain Detect assign) — then confirming is just a straight assignment.
+  const [portAssignPrompt, setPortAssignPrompt] = useState<{
+    source: "detect" | "manual";
+    port: string;
+    message: string;
+    targetLabel: string;
+    releasedField: keyof RobotRecord | null;
+    releasedLabel: string | null;
+    swapPort: string | null;
+  } | null>(null);
   const [autoCalPromptOpen, setAutoCalPromptOpen] = useState(false);
   const [autoCal, setAutoCal] = useState<{
     active: boolean;
@@ -395,15 +424,19 @@ const Calibration = () => {
   // The inverse of Wiggle: instead of driving a motor, the backend watches
   // every detected port (read-only) while the user swings the arm's base by
   // hand, then reports which port saw the motion. On success the detected
-  // port is assigned to the CURRENT device/arm slot.
+  // port is STAGED for confirmation (see handleConfirmDetectedPort) — nothing
+  // is selected or persisted until the user confirms in the dialog.
   //
   // Detect is physical ground truth — the user just swung THIS arm on THIS
   // port — so if the record currently assigns the detected port to a DIFFERENT
-  // slot, that slot's entry is stale (typical after a cable swap). Rather than
-  // dead-ending on the backend's duplicate-port 409, we reassign: clear the
-  // stale slot and set the current slot in a single upsert (the backend's
-  // port-conflict guard evaluates the prospective merged record, so
-  // clearing+assigning together passes), then announce the release.
+  // slot, that slot's entry is stale (typical after a cable swap). We surface
+  // that in the confirmation dialog and, on confirm, SWAP: the other slot
+  // receives this slot's previous port (if any) while this slot takes the
+  // detected port, in a single upsert (the backend's port-conflict guard
+  // evaluates the prospective merged record, so a two-slot swap passes). If
+  // this slot had no port the swap degenerates to a take-with-warning that
+  // leaves the other slot empty. Confirm/messaging happen in
+  // handleConfirmPortAssign.
   const handleDetect = async () => {
     setDetecting(true);
     try {
@@ -422,30 +455,23 @@ const Calibration = () => {
               (f) => f !== portField && (robot[f] as string) === data.port,
             )
           : undefined;
+        // The port THIS slot currently holds — handed to the other slot on a
+        // swap. Null/empty means the swap degenerates to a take-with-warning.
+        const currentPort = robot ? (robot[portField] as string) || "" : "";
 
-        setPort(data.port);
-
-        if (conflictingField) {
-          // Reassign in one request: clear the stale slot, set the current one.
-          const releasedLabel = portFieldLabel(conflictingField);
-          const nextRobot = await persistPorts({
-            [conflictingField]: "",
-            [portField]: data.port,
-          });
-          if (nextRobot) {
-            toast({
-              title: "Arm identified — port moved",
-              description: `${data.message} This port was assigned to the ${releasedLabel}; moved it here. The ${releasedLabel} now needs a port.`,
-            });
-          }
-          // persistPorts surfaces its own error toast on failure.
-        } else {
-          persistPort(data.port);
-          toast({
-            title: "Arm identified",
-            description: `${data.message} Port assigned to this arm.`,
-          });
-        }
+        // Stage the result and open the confirmation dialog. No assignment or
+        // persist happens here — that's deferred to handleConfirmPortAssign.
+        setPortAssignPrompt({
+          source: "detect",
+          port: data.port,
+          message: data.message,
+          targetLabel: portFieldLabel(portField),
+          releasedField: conflictingField ?? null,
+          releasedLabel: conflictingField
+            ? portFieldLabel(conflictingField)
+            : null,
+          swapPort: conflictingField && currentPort ? currentPort : null,
+        });
       } else {
         toast({
           title: "No arm detected",
@@ -462,6 +488,79 @@ const Calibration = () => {
     } finally {
       setDetecting(false);
     }
+  };
+
+  // Apply a staged port assignment (from Detect or the manual dropdown) once
+  // the user confirms. Cancel simply closes the dialog (setPortAssignPrompt(null))
+  // and leaves everything as-is. Three cases:
+  //  - releasedField + swapPort: SWAP — this slot takes the port, the other slot
+  //    takes this slot's old port. One upsert; the backend's port-conflict guard
+  //    evaluates the merged record, so a two-slot swap of distinct ports passes.
+  //  - releasedField, no swapPort: take-with-warning — this slot had no port, so
+  //    the other slot is left empty.
+  //  - neither: straight assign (port wasn't in use anywhere).
+  const handleConfirmPortAssign = async () => {
+    const prompt = portAssignPrompt;
+    if (!prompt) return;
+    setPortAssignPrompt(null);
+
+    setPort(prompt.port);
+    const detected = prompt.source === "detect";
+
+    if (prompt.releasedField) {
+      const nextRobot = await persistPorts({
+        [prompt.releasedField]: prompt.swapPort ?? "",
+        [portField]: prompt.port,
+      });
+      if (nextRobot) {
+        if (prompt.swapPort) {
+          toast({
+            title: detected ? "Arm identified — ports swapped" : "Ports swapped",
+            description: `${detected ? `${prompt.message} ` : ""}${prompt.port} is now this arm's; the ${prompt.releasedLabel} took ${prompt.swapPort}.`,
+          });
+        } else {
+          toast({
+            title: detected ? "Arm identified — port moved" : "Port moved",
+            description: `${detected ? `${prompt.message} ` : ""}${prompt.port} was assigned to the ${prompt.releasedLabel}; moved it here. The ${prompt.releasedLabel} now needs a port.`,
+          });
+        }
+      }
+      // persistPorts surfaces its own error toast on failure.
+    } else {
+      persistPort(prompt.port);
+      toast({
+        title: detected ? "Arm identified" : "Port assigned",
+        description: detected
+          ? `${prompt.message} Port assigned to this arm.`
+          : `${prompt.port} assigned to this arm.`,
+      });
+    }
+  };
+
+  // Manual dropdown pick. In-use ports are now selectable (no longer greyed
+  // out): picking one that another slot holds stages a swap/take confirmation
+  // (same dialog as Detect). Picking a free port assigns immediately.
+  const handleSelectPort = (nextPort: string) => {
+    const conflictingField = robot
+      ? portFields.find(
+          (f) => f !== portField && (robot[f] as string) === nextPort,
+        )
+      : undefined;
+    if (conflictingField) {
+      const currentPort = robot ? (robot[portField] as string) || "" : "";
+      setPortAssignPrompt({
+        source: "manual",
+        port: nextPort,
+        message: "",
+        targetLabel: portFieldLabel(portField),
+        releasedField: conflictingField,
+        releasedLabel: portFieldLabel(conflictingField),
+        swapPort: currentPort || null,
+      });
+      return;
+    }
+    setPort(nextPort);
+    persistPort(nextPort);
   };
 
   // Resume the auto-cal panel if a run is in progress (e.g. page reload).
@@ -1081,13 +1180,7 @@ const Calibration = () => {
                   Port *
                 </Label>
                 <div className="flex flex-wrap gap-2">
-                  <Select
-                    value={port}
-                    onValueChange={(v) => {
-                      setPort(v);
-                      persistPort(v);
-                    }}
-                  >
+                  <Select value={port} onValueChange={handleSelectPort}>
                     <SelectTrigger
                       id="port"
                       className="bg-slate-700 border-slate-600 text-white rounded-md flex-1 min-w-[200px]"
@@ -1102,14 +1195,12 @@ const Calibration = () => {
                     </SelectTrigger>
                     <SelectContent className="bg-slate-800 border-slate-700 text-white">
                       {availablePorts.map((p) => {
+                        // In-use ports stay selectable: picking one prompts a
+                        // swap (this slot's current port goes to the other arm)
+                        // or, if this slot is empty, a take-with-warning.
                         const usedByOtherArm = otherArmPorts.includes(p);
                         return (
-                          <SelectItem
-                            key={p}
-                            value={p}
-                            disabled={usedByOtherArm}
-                            className="text-white"
-                          >
+                          <SelectItem key={p} value={p} className="text-white">
                             <span className="flex items-center gap-2">
                               {p}
                               {usedByOtherArm && (
@@ -1222,34 +1313,32 @@ const Calibration = () => {
                 )}
               </div>
 
-              {!isBimanual && (
-                <div className="space-y-2">
-                  <Label
-                    htmlFor="configName"
-                    className="text-sm font-medium text-slate-300"
-                  >
-                    Calibration name
-                  </Label>
-                  <Input
-                    id="configName"
-                    value={configNameInput}
-                    onChange={(e) => setConfigNameInput(e.target.value)}
-                    placeholder={defaultConfigName}
-                    disabled={
-                      calibrationStatus.calibration_active || autoCal.active
-                    }
-                    className="bg-slate-700 border-slate-600 text-white rounded-md"
-                  />
-                  <p className="text-xs text-slate-500">
-                    Saves as{" "}
-                    <span className="font-mono text-slate-400">
-                      {calibrationConfigName || "…"}
-                    </span>
-                    . Change it to keep the current calibration and save a new
-                    one instead of overwriting.
-                  </p>
-                </div>
-              )}
+              <div className="space-y-2">
+                <Label
+                  htmlFor="configName"
+                  className="text-sm font-medium text-slate-300"
+                >
+                  Calibration name
+                </Label>
+                <Input
+                  id="configName"
+                  value={configNameInput}
+                  onChange={(e) => setConfigNameInput(e.target.value)}
+                  placeholder={defaultConfigName}
+                  disabled={
+                    calibrationStatus.calibration_active || autoCal.active
+                  }
+                  className="bg-slate-700 border-slate-600 text-white rounded-md"
+                />
+                <p className="text-xs text-slate-500">
+                  Saves as{" "}
+                  <span className="font-mono text-slate-400">
+                    {calibrationConfigName || "…"}
+                  </span>
+                  . Change it to keep the current calibration and save a new one
+                  instead of overwriting.
+                </p>
+              </div>
 
               <Separator className="bg-slate-700" />
 
@@ -1273,23 +1362,28 @@ const Calibration = () => {
                     Stop auto-calibration
                   </Button>
                 ) : (
+                  // Auto-calibrate is the default calibration mode: it's the
+                  // prominent primary action. Manual step-by-step calibration
+                  // stays fully available as the secondary button below — a user
+                  // who wants it just clicks it, but landing here nudges toward
+                  // the hands-off auto flow.
                   <>
                     <Button
-                      onClick={() => handleStartCalibration()}
-                      className="w-full bg-blue-600 hover:bg-blue-700 text-white rounded-full py-6 text-lg"
-                      disabled={!robotName || !deviceType || !port}
-                    >
-                      <Play className="w-5 h-5 mr-2" />
-                      Start Calibration
-                    </Button>
-                    <Button
                       onClick={() => setAutoCalPromptOpen(true)}
-                      variant="outline"
+                      className="w-full bg-purple-600 hover:bg-purple-700 text-white rounded-full py-6 text-lg"
                       disabled={!robotName || !deviceType || !port}
-                      className="w-full border-purple-500/50 text-purple-700 hover:bg-purple-900/20 hover:text-purple-800 dark:text-purple-300 dark:hover:text-purple-200 rounded-full py-5"
                     >
                       <Wand2 className="w-5 h-5 mr-2" />
                       Auto-calibrate
+                    </Button>
+                    <Button
+                      onClick={() => handleStartCalibration()}
+                      variant="outline"
+                      disabled={!robotName || !deviceType || !port}
+                      className="w-full border-blue-500/50 text-blue-700 hover:bg-blue-900/20 hover:text-blue-800 dark:text-blue-300 dark:hover:text-blue-200 rounded-full py-5"
+                    >
+                      <Play className="w-5 h-5 mr-2" />
+                      Calibrate manually
                     </Button>
                   </>
                 )}
@@ -1464,116 +1558,169 @@ const Calibration = () => {
                 </DialogContent>
               </Dialog>
 
+              <AlertDialog
+                open={portAssignPrompt !== null}
+                onOpenChange={(open) => {
+                  if (!open) setPortAssignPrompt(null);
+                }}
+              >
+                <AlertDialogContent className="bg-slate-900 border-slate-800 text-white">
+                  <AlertDialogHeader>
+                    <AlertDialogTitle>
+                      {portAssignPrompt?.swapPort
+                        ? "Swap ports?"
+                        : portAssignPrompt?.source === "detect"
+                          ? "Assign detected port?"
+                          : "Assign port?"}
+                    </AlertDialogTitle>
+                    <AlertDialogDescription className="text-slate-400">
+                      {portAssignPrompt?.source === "detect"
+                        ? "Detected "
+                        : "Assign "}
+                      <span className="font-mono text-slate-200">
+                        {portAssignPrompt?.port}
+                      </span>{" "}
+                      {portAssignPrompt?.source === "detect"
+                        ? "— assign it to the "
+                        : "to the "}
+                      <strong>{portAssignPrompt?.targetLabel}</strong>?
+                      {portAssignPrompt?.releasedLabel &&
+                        (portAssignPrompt.swapPort ? (
+                          <>
+                            {" "}
+                            It's currently assigned to the{" "}
+                            <strong>{portAssignPrompt.releasedLabel}</strong>;
+                            confirming swaps them — the{" "}
+                            <strong>{portAssignPrompt.releasedLabel}</strong>{" "}
+                            takes this arm's current port{" "}
+                            <span className="font-mono text-slate-200">
+                              {portAssignPrompt.swapPort}
+                            </span>{" "}
+                            in exchange, so neither arm is left without a port.
+                          </>
+                        ) : (
+                          <>
+                            {" "}
+                            It's currently assigned to the{" "}
+                            <strong>{portAssignPrompt.releasedLabel}</strong>;
+                            this arm has no port to swap back, so confirming
+                            moves it here and leaves the{" "}
+                            <strong>{portAssignPrompt.releasedLabel}</strong>{" "}
+                            without a port.
+                          </>
+                        ))}
+                    </AlertDialogDescription>
+                  </AlertDialogHeader>
+                  <AlertDialogFooter className="flex gap-2 justify-end">
+                    <AlertDialogCancel className="border-slate-600 text-slate-700 dark:text-slate-300">
+                      Cancel
+                    </AlertDialogCancel>
+                    <AlertDialogAction
+                      className="bg-emerald-600 hover:bg-emerald-700 text-white"
+                      onClick={handleConfirmPortAssign}
+                    >
+                      {portAssignPrompt?.swapPort
+                        ? "Swap ports"
+                        : portAssignPrompt?.releasedLabel
+                          ? "Move & assign"
+                          : "Assign port"}
+                    </AlertDialogAction>
+                  </AlertDialogFooter>
+                </AlertDialogContent>
+              </AlertDialog>
+
               {robot && (
                 <div className="space-y-2 pt-2">
                   <div className="text-sm font-medium text-slate-300">
                     Robot calibration
                   </div>
-                  {isBimanual
-                    ? // Bimanual configs are fixed by lerobot's convention
-                      // ("<robot>_left"/"<robot>_right"), so there's no config
-                      // picker — each arm just shows its convention name + whether
-                      // it's been calibrated to it.
-                      (
-                        [
-                          {
-                            label: "Left Leader (Teleoperator)",
-                            cfgField: "leader_config",
-                            side: "left",
-                          },
-                          {
-                            label: "Left Follower (Robot)",
-                            cfgField: "follower_config",
-                            side: "left",
-                          },
-                          {
-                            label: "Right Leader (Teleoperator)",
-                            cfgField: "right_leader_config",
-                            side: "right",
-                          },
-                          {
-                            label: "Right Follower (Robot)",
-                            cfgField: "right_follower_config",
-                            side: "right",
-                          },
-                        ] as const
-                      ).map((row) => {
-                        const expected = `${robotName}_${row.side}`;
-                        const current = (robot[row.cfgField] as string) || "";
-                        const compliant = current === expected;
-                        return (
-                          <div key={row.label}>
-                            <div className="flex items-center gap-2 text-sm">
-                              {compliant ? (
-                                <CheckCircle className="w-4 h-4 text-green-400" />
-                              ) : (
-                                <Circle className="w-4 h-4 text-slate-500" />
-                              )}
-                              <span
-                                className={
-                                  compliant
-                                    ? "text-slate-200"
-                                    : "text-slate-400"
-                                }
-                              >
-                                {row.label}
-                              </span>
-                              <span className="ml-auto font-mono text-xs text-slate-500">
-                                {expected}
-                              </span>
-                            </div>
-                            {!compliant && (
-                              <div className="ml-6 text-xs text-amber-400">
-                                {current
-                                  ? `Currently "${current}" — recalibrate this arm to use ${expected}.`
-                                  : "Not calibrated yet — calibrate this arm."}
-                              </div>
-                            )}
-                          </div>
-                        );
-                      })
-                    : (
-                        [
-                          {
-                            label: "Leader (Teleoperator)",
-                            device: "teleop",
-                            cfgField: "leader_config",
-                          },
-                          {
-                            label: "Follower (Robot)",
-                            device: "robot",
-                            cfgField: "follower_config",
-                          },
-                        ] as const
-                      ).map((row) => {
-                        const cfg = (robot[row.cfgField] as string) || "";
-                        return (
-                          <div key={row.label}>
-                            <div className="flex items-center gap-2 text-sm">
-                              {cfg ? (
-                                <CheckCircle className="w-4 h-4 text-green-400" />
-                              ) : (
-                                <Circle className="w-4 h-4 text-slate-500" />
-                              )}
-                              <span
-                                className={
-                                  cfg ? "text-slate-200" : "text-slate-400"
-                                }
-                              >
-                                {row.label}
-                              </span>
-                            </div>
-                            <CalibrationLibrary
-                              device={row.device}
-                              assignedConfig={cfg}
-                              configField={row.cfgField}
-                              robotName={robotName}
-                              onAssigned={fetchRobot}
-                              reloadToken={calibReloadToken}
-                            />
-                          </div>
-                        );
-                      })}
+                  {(isBimanual
+                    ? // Bimanual: each of the four slots gets the same free-naming
+                      // picker as single mode — names are arbitrary now, and the
+                      // SLOT (not the name) decides which arm the file drives.
+                      ([
+                        {
+                          label: "Left Leader (Teleoperator)",
+                          device: "teleop",
+                          cfgField: "leader_config",
+                        },
+                        {
+                          label: "Left Follower (Robot)",
+                          device: "robot",
+                          cfgField: "follower_config",
+                        },
+                        {
+                          label: "Right Leader (Teleoperator)",
+                          device: "teleop",
+                          cfgField: "right_leader_config",
+                        },
+                        {
+                          label: "Right Follower (Robot)",
+                          device: "robot",
+                          cfgField: "right_follower_config",
+                        },
+                      ] as const)
+                    : ([
+                        {
+                          label: "Leader (Teleoperator)",
+                          device: "teleop",
+                          cfgField: "leader_config",
+                        },
+                        {
+                          label: "Follower (Robot)",
+                          device: "robot",
+                          cfgField: "follower_config",
+                        },
+                      ] as const)
+                  ).map((row) => {
+                    const cfg = (robot[row.cfgField] as string) || "";
+                    // The same config may drive both same-side slots only by
+                    // mistake (one physical arm on two arms), so exclude the
+                    // counterpart slot's config from this picker in bimanual mode.
+                    const counterpartField =
+                      row.cfgField === "leader_config"
+                        ? "right_leader_config"
+                        : row.cfgField === "right_leader_config"
+                          ? "leader_config"
+                          : row.cfgField === "follower_config"
+                            ? "right_follower_config"
+                            : "follower_config";
+                    const excludeConfig = isBimanual
+                      ? (robot[counterpartField] as string) || undefined
+                      : undefined;
+                    // The counterpart slot's config field, so the library can
+                    // SWAP assignments when the user picks its in-use config
+                    // (this slot takes it; the counterpart takes this slot's).
+                    const excludeConfigField = isBimanual
+                      ? counterpartField
+                      : undefined;
+                    return (
+                      <div key={row.label}>
+                        <div className="flex items-center gap-2 text-sm">
+                          {cfg ? (
+                            <CheckCircle className="w-4 h-4 text-green-400" />
+                          ) : (
+                            <Circle className="w-4 h-4 text-slate-500" />
+                          )}
+                          <span
+                            className={cfg ? "text-slate-200" : "text-slate-400"}
+                          >
+                            {row.label}
+                          </span>
+                        </div>
+                        <CalibrationLibrary
+                          device={row.device}
+                          assignedConfig={cfg}
+                          configField={row.cfgField}
+                          excludeConfig={excludeConfig}
+                          excludeConfigField={excludeConfigField}
+                          robotName={robotName}
+                          onAssigned={fetchRobot}
+                          reloadToken={calibReloadToken}
+                        />
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </CardContent>

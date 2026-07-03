@@ -31,8 +31,9 @@ from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from huggingface_hub.errors import HfHubHTTPError
 from pydantic import BaseModel
 from starlette.datastructures import Headers
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -41,13 +42,18 @@ from starlette.types import Scope
 
 from lerobot.policies.factory import make_policy_config
 
-from . import datasets as dataset_browser
+# Module objects (not from-imports) for the camera-preview mutex checks:
+# record/teleoperate REBIND their *_active globals, so only live attribute
+# access sees the current value — a from-import would freeze the startup value.
+from . import datasets as dataset_browser, record as record_state, teleoperate as teleoperate_state
 
 # Import our custom calibration functionality
 from .auto_calibrate import AutoCalibrationRequest, auto_calibration_manager
 from .calibrate import CalibrationRequest, calibration_manager
+from .camera_preview import CameraOpenError, camera_preview_manager
 from .identify import identify_arm_by_motion
 from .jobs import (
+    DatasetNotOnHubError,
     JobAlreadyRunningError,
     JobNotFoundError,
     JobNotRunningError,
@@ -65,12 +71,12 @@ from .record import (
     UploadRequest,
     handle_delete_dataset,
     handle_exit_early,
-    handle_get_dataset_info,
     handle_recording_status,
     handle_rerecord_episode,
     handle_start_recording,
     handle_stop_recording,
     handle_upload_dataset,
+    handle_upload_status,
 )
 from .rollout import (
     InferenceRequest,
@@ -95,6 +101,7 @@ from .utils import config
 from .utils.config import (
     FOLLOWER_CONFIG_PATH,
     LEADER_CONFIG_PATH,
+    add_dismissed_hub_job,
     clear_config_references,
     config_slot_conflict,
     delete_robot_record,
@@ -102,19 +109,27 @@ from .utils.config import (
     find_available_ports,
     find_robot_port,
     get_default_robot_port,
+    get_dismissed_hub_jobs,
     get_robot_record,
     get_saved_robot_port,
     is_robot_record_clean,
     is_valid_robot_name,
     list_robot_records,
     port_slot_conflict,
+    prune_dismissed_hub_jobs,
     rename_calibration_config,
     rename_robot_record,
     save_imported_calibration,
     save_robot_port,
     save_robot_record,
 )
-from .utils.hf_auth import cached_whoami, handle_hf_auth_status, handle_hf_login, shared_hf_api
+from .utils.hf_auth import (
+    cached_whoami,
+    handle_hf_auth_status,
+    handle_hf_login,
+    hf_hub_offline,
+    shared_hf_api,
+)
 from .utils.system import (
     handle_get_cuda_status,
     handle_get_policy_extra,
@@ -218,7 +233,9 @@ logger.info(f"LeRobot path: {LEROBOT_PATH}")
 
 class ConnectionManager:
     def __init__(self):
-        self.active_connections: list[WebSocket] = []
+        # Each websocket is bound to the asyncio loop that accepted it; sends
+        # from the broadcast worker thread must be marshaled onto that loop.
+        self.active_connections: dict[WebSocket, asyncio.AbstractEventLoop] = {}
         self.broadcast_queue = queue.Queue()
         self.broadcast_thread = None
         self.is_running = False
@@ -229,7 +246,7 @@ class ConnectionManager:
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
         with self._connections_lock:
-            self.active_connections.append(websocket)
+            self.active_connections[websocket] = asyncio.get_running_loop()
             count = len(self.active_connections)
         logger.info(f"WebSocket connected. Total connections: {count}")
 
@@ -237,9 +254,14 @@ class ConnectionManager:
             self.start_broadcast_thread()
 
     def disconnect(self, websocket: WebSocket):
+        """Remove a connection and stop the worker if none remain.
+
+        Only called from request-handler context (the endpoint's cleanup and
+        server shutdown), never from the broadcast worker — the worker uses
+        _drop_connection so it can't end up joining its own thread.
+        """
         with self._connections_lock:
-            if websocket in self.active_connections:
-                self.active_connections.remove(websocket)
+            if self.active_connections.pop(websocket, None) is not None:
                 count = len(self.active_connections)
                 logger.info(f"WebSocket disconnected. Total connections: {count}")
             else:
@@ -247,6 +269,17 @@ class ConnectionManager:
 
         if count == 0 and self.is_running:
             self.stop_broadcast_thread()
+
+    def _drop_connection(self, websocket: WebSocket):
+        """Forget a connection whose send failed, without stopping the worker.
+
+        The endpoint's receive loop notices the disconnect independently and
+        its cleanup calls disconnect(), which is where thread stop happens.
+        """
+        with self._connections_lock:
+            if self.active_connections.pop(websocket, None) is not None:
+                count = len(self.active_connections)
+                logger.info(f"Dropped unreachable WebSocket. Total connections: {count}")
 
     def start_broadcast_thread(self):
         """Start the background thread for broadcasting data"""
@@ -259,57 +292,71 @@ class ConnectionManager:
         logger.info("📡 Broadcast thread started")
 
     def stop_broadcast_thread(self):
-        """Stop the background thread"""
+        """Signal the worker thread to stop. Never joins.
+
+        Joining here is unsafe in both directions: from the uvicorn event
+        loop it can stall the loop while the worker waits on a send it
+        scheduled onto that same loop, and from the worker itself it would
+        be a self-join. The daemon worker notices the cleared flag (or a
+        newer thread replacing it) within its 0.1 s queue timeout and exits.
+        """
         self.is_running = False
-        if self.broadcast_thread:
-            self.broadcast_thread.join(timeout=1.0)
-            logger.info("📡 Broadcast thread stopped")
+        self.broadcast_thread = None
+        logger.info("📡 Broadcast thread stop requested")
 
     def _broadcast_worker(self):
         """Background worker thread for broadcasting WebSocket data"""
-        import asyncio
+        me = threading.current_thread()
+        # The identity check makes a rapid stop→start cycle safe: if a new
+        # worker has been started, this one exits even though is_running is
+        # True again.
+        while self.is_running and self.broadcast_thread is me:
+            try:
+                # Get data from queue with timeout
+                data = self.broadcast_queue.get(timeout=0.1)
+                if data is None:  # Poison pill to stop
+                    break
 
-        # Create a new event loop for this thread
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+                self._send_to_all_connections(data)
 
-        try:
-            while self.is_running:
-                try:
-                    # Get data from queue with timeout
-                    data = self.broadcast_queue.get(timeout=0.1)
-                    if data is None:  # Poison pill to stop
-                        break
+            except queue.Empty:
+                continue
+            except Exception as e:
+                logger.error(f"Error in broadcast worker: {e}")
 
-                    # Broadcast to all connections
-                    if self.active_connections:
-                        loop.run_until_complete(self._send_to_all_connections(data))
+        logger.info("📡 Broadcast thread stopped")
 
-                except queue.Empty:
-                    continue
-                except Exception as e:
-                    logger.error(f"Error in broadcast worker: {e}")
+    def _send_to_all_connections(self, data: dict[str, Any]):
+        """Send data to all active connections, each on its own event loop.
 
-        finally:
-            loop.close()
-
-    async def _send_to_all_connections(self, data: dict[str, Any]):
-        """Send data to all active WebSocket connections"""
+        Runs on the broadcast worker thread: every send is submitted to the
+        loop that accepted the websocket via run_coroutine_threadsafe (a
+        websocket's ASGI channel is not usable from any other loop). All
+        sends are submitted before any is waited on so one slow client
+        doesn't delay the others.
+        """
         with self._connections_lock:
-            connections = list(self.active_connections)
+            connections = list(self.active_connections.items())
         if not connections:
             return
 
-        disconnected = []
-        for connection in connections:
+        pending = []
+        for connection, loop in connections:
             try:
-                await connection.send_json(data)
+                future = asyncio.run_coroutine_threadsafe(connection.send_json(data), loop)
+            except Exception as e:  # loop closed or shutting down
+                logger.error(f"Error scheduling send to WebSocket: {e}")
+                self._drop_connection(connection)
+            else:
+                pending.append((connection, future))
+
+        for connection, future in pending:
+            try:
+                future.result(timeout=1.0)
             except Exception as e:
                 logger.error(f"Error sending data to WebSocket: {e}")
-                disconnected.append(connection)
-
-        for connection in disconnected:
-            self.disconnect(connection)
+                future.cancel()
+                self._drop_connection(connection)
 
     def broadcast_joint_data_sync(self, data: dict[str, Any]):
         """Thread-safe method to queue data for broadcasting"""
@@ -560,6 +607,26 @@ def datasets_hub_status(repo_id: str):
     return dataset_browser.get_hub_status(repo_id)
 
 
+class DatasetRenameBody(BaseModel):
+    repo_id: str
+    new_name: str
+
+
+@app.post("/datasets/rename")
+def datasets_rename(body: DatasetRenameBody):
+    """Rename a locally-cached dataset by moving its directory.
+
+    `new_name` is the NAME PART ONLY — the namespace prefix stays fixed, so
+    `ns/old` renamed to `new` becomes `ns/new`. Refuses (409) if the dataset is
+    being recorded, merged, or trained on locally. Returns the new repo_id.
+    """
+    try:
+        new_repo_id = dataset_browser.rename_local_dataset(body.repo_id, body.new_name)
+    except dataset_browser.DatasetRenameError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.message) from exc
+    return {"success": True, "repo_id": new_repo_id}
+
+
 @app.post("/datasets/merge")
 def datasets_merge(request: MergeRequest):
     """Aggregate 2+ datasets into a new local dataset in the background."""
@@ -642,14 +709,21 @@ def recording_rerecord_episode():
 
 @app.post("/upload-dataset")
 def upload_dataset(request: UploadRequest):
-    """Upload dataset to HuggingFace Hub"""
-    return handle_upload_dataset(request)
+    """Start a background upload of a local dataset to the Hub.
+
+    Returns immediately with {started, repo_id, message}; poll /upload-status
+    for progress. 409 when an upload is already running (frontend maps it to a
+    "an upload is already running" toast)."""
+    result = handle_upload_dataset(request)
+    if not result.get("started"):
+        raise HTTPException(status_code=409, detail=result.get("message", "Upload could not be started"))
+    return result
 
 
-@app.post("/dataset-info")
-def get_dataset_info(request: DatasetInfoRequest):
-    """Get information about a saved dataset"""
-    return handle_get_dataset_info(request)
+@app.get("/upload-status")
+def upload_status():
+    """Current upload state + repo_id, message, and dataset_url once done."""
+    return handle_upload_status()
 
 
 @app.post("/delete-dataset")
@@ -705,6 +779,11 @@ async def create_training_job(req: Request):
         record = job_registry.start(body.config, body.target)
     except JobAlreadyRunningError as exc:
         raise HTTPException(status_code=409, detail=f"Job already running: {exc}") from exc
+    except DatasetNotOnHubError as exc:
+        # Cloud run on a local-only dataset. 409: the caller must upload the
+        # dataset first (the browser flow does this automatically before
+        # submitting, so this fires for non-UI callers).
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         # e.g. "flavor is required when runner is hf_cloud"
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -742,6 +821,25 @@ def list_jobs(limit: int = 10):
     return {"jobs": job_registry.list(limit=limit)}
 
 
+# A lelab cloud-training run repo is named "<policy>_<namespace>_<dataset>_<ts>"
+# where the trailing "_YYYY-MM-DD_HH-MM-SS" is stamped by _generate_job_id()
+# (jobs.py). We match on that timestamp suffix rather than the policy prefix so
+# the pattern stays policy-agnostic as new policy types are added. Used to pull
+# lelab's OWN empty/untagged run repos into the /jobs/hub listing without also
+# surfacing a user's unrelated personal models.
+_RUN_REPO_RE = re.compile(r"_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$")
+
+# Hub job stages still doing work. Mirrors HUB_ACTIVE_STAGES in the frontend
+# (jobsApi.ts); a dismissed id in one of these stages is NOT hidden from the
+# listing, so a live run can never be dismissed out of sight.
+_HUB_ACTIVE_STAGES = {"RUNNING", "QUEUED", "SCHEDULING"}
+
+
+def _hub_job_stage(ji) -> str:
+    """Uppercased status stage of a huggingface_hub JobInfo ('' when absent)."""
+    return (ji.status.stage or "").upper() if ji.status else ""
+
+
 @app.get("/jobs/hub")
 def list_hub_jobs():
     """List the user's HF Cloud compute Jobs and their uploaded LeRobot model
@@ -766,6 +864,7 @@ def list_hub_jobs():
             authors.append(o["name"])
 
     jobs_permission = True
+    jobs_listed = True
     try:
         # list_jobs() returns a lazy pagination generator — materialize it here
         # so any HTTP error (e.g. 403 when the token lacks the job.read scope)
@@ -775,6 +874,7 @@ def list_hub_jobs():
     except Exception as exc:
         logger.warning("list_jobs failed: %s", exc)
         jobs = []
+        jobs_listed = False
         # A 401/403 means the token is valid but lacks the job.read scope —
         # surface that to the frontend so it can show a hint instead of a
         # silently-empty list. Other failures are treated as transient.
@@ -782,23 +882,61 @@ def list_hub_jobs():
         if status in (401, 403):
             jobs_permission = False
 
+    # Drop jobs the user dismissed from the UI — but only in a terminal stage:
+    # an id whose job is still active stays visible, so a live run can't be
+    # dismissed out of sight. Ids that have fallen out of the Hub listing are
+    # pruned so the file doesn't grow forever; skipped when list_jobs() failed,
+    # otherwise a transient outage would forget every dismissal.
+    dismissed = get_dismissed_hub_jobs()
+    if jobs_listed:
+        prune_dismissed_hub_jobs({ji.id for ji in jobs})
+    if dismissed:
+        jobs = [ji for ji in jobs if ji.id not in dismissed or _hub_job_stage(ji) in _HUB_ACTIVE_STAGES]
+
     seen_models: set[str] = set()
     models: list[dict] = []
+
+    def _add(m) -> None:
+        if m.id in seen_models:
+            return
+        seen_models.add(m.id)
+        models.append(
+            {
+                "repo_id": m.id,
+                "last_modified": m.last_modified.isoformat() if m.last_modified else None,
+                "private": bool(getattr(m, "private", False)),
+            }
+        )
+
     for author in authors:
+        # Two passes, unioned + deduped by _add():
+        #
+        # 1. The `lerobot` library tag — lowercase, which is what LeRobot's
+        #    push_to_hub actually stamps (the old `filter="LeRobot"` was both the
+        #    wrong case AND excluded any repo without a tag, so it returned
+        #    NOTHING here — hiding even a successfully-pushed run).
+        # 2. An UNFILTERED author listing restricted to lelab run-repo names
+        #    (the "_<timestamp>" suffix). This is what pulls in the empty repos
+        #    a crashed cloud run pre-creates but never populates (no commit, no
+        #    tags) — the orphans the untracked-cleanup path exists to delete.
+        #    Restricting to the run-repo naming keeps a user's unrelated personal
+        #    models out of the list; those are theirs, not lelab's to surface.
+        #
+        # expand=["lastModified", ...] is requested because the default listing
+        # returns last_modified=None, which would collapse the sort key.
         try:
-            for m in api.list_models(author=author, filter="LeRobot", limit=200):
-                if m.id in seen_models:
-                    continue
-                seen_models.add(m.id)
-                models.append(
-                    {
-                        "repo_id": m.id,
-                        "last_modified": m.last_modified.isoformat() if m.last_modified else None,
-                        "private": bool(getattr(m, "private", False)),
-                    }
-                )
+            for m in api.list_models(
+                author=author, filter="lerobot", limit=200, expand=["lastModified", "private"]
+            ):
+                _add(m)
         except Exception as exc:
-            logger.warning("list_models(%s) failed: %s", author, exc)
+            logger.warning("list_models(%s, tag=lerobot) failed: %s", author, exc)
+        try:
+            for m in api.list_models(author=author, limit=200, expand=["lastModified", "private"]):
+                if _RUN_REPO_RE.search(m.id.split("/", 1)[-1]):
+                    _add(m)
+        except Exception as exc:
+            logger.warning("list_models(%s, unfiltered) failed: %s", author, exc)
     models.sort(key=lambda m: m["last_modified"] or "", reverse=True)
 
     return {
@@ -819,6 +957,83 @@ def list_hub_jobs():
         ],
         "models": models,
     }
+
+
+@app.delete("/jobs/hub/models/{repo_id:path}")
+def delete_hub_model(repo_id: str):
+    """Permanently delete a model repo from the Hugging Face Hub.
+
+    Scoped to model repos under the authenticated user's own namespace — used
+    to clean up orphaned repos (e.g. an empty repo left behind by a crashed
+    cloud run). This destroys weights on the Hub; it is not a local-record
+    deletion.
+
+    Semantics:
+    - A missing repo (404 from the Hub) is treated as already-gone success,
+      mirroring the idempotent robot-delete convention.
+    - Repos NOT under the caller's own username are refused up front with a
+      clear message (the Hub would 403 anyway; fail fast).
+    - Auth/permission failures (401/403) surface the friendly "token needs
+      write access" message.
+
+    The `/jobs/hub` listing is not cached backend-side — it re-queries the Hub
+    on every call — so the frontend just needs to re-fetch after this returns.
+    """
+    info = cached_whoami()
+    username = info.get("name") if info else None
+    if not username:
+        raise HTTPException(
+            status_code=401,
+            detail="Not authenticated. Add a Hugging Face token with write access first.",
+        )
+
+    # Only allow deleting repos the caller owns (namespace == their username).
+    # An org-owned repo (username/... mismatch) is refused rather than 403ing.
+    namespace = repo_id.split("/", 1)[0] if "/" in repo_id else ""
+    if namespace != username:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"Refusing to delete {repo_id!r}: it is not under your namespace "
+                f"({username!r}). You can only delete your own model repos."
+            ),
+        )
+
+    api = shared_hf_api()
+    try:
+        # missing_ok=True: a repo that's already gone (404) is a no-op success,
+        # so re-issuing the delete is idempotent.
+        api.delete_repo(repo_id, repo_type="model", missing_ok=True)
+    except HfHubHTTPError as exc:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        if status in (401, 403):
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "Your Hugging Face token can't delete this repo. It needs "
+                    "write access to your namespace — re-log in with a write token."
+                ),
+            ) from exc
+        logger.warning("delete_repo(%s) failed: %s", repo_id, exc)
+        raise HTTPException(status_code=502, detail=f"Hub delete failed: {exc}") from exc
+
+    return {"status": "success", "repo_id": repo_id}
+
+
+@app.post("/jobs/hub/jobs/{job_id}/dismiss")
+def dismiss_hub_job(job_id: str):
+    """Hide a Hub job from the /jobs/hub listing.
+
+    The HF Jobs API has no delete — a finished job stays in list_jobs()
+    indefinitely — so "removing" a dead untracked job from the UI is a local,
+    persisted hide (utils/config.DISMISSED_HUB_JOBS_FILE), not a Hub mutation.
+    The listing keeps showing a dismissed id while its stage is still active
+    (RUNNING/QUEUED/SCHEDULING); it disappears once the job reaches a terminal
+    stage. Ids that later drop out of the Hub listing are pruned automatically.
+    """
+    if not add_dismissed_hub_job(job_id):
+        raise HTTPException(status_code=400, detail="Job id can't be empty.")
+    return {"status": "success", "job_id": job_id.strip()}
 
 
 @app.get("/jobs/{job_id}")
@@ -876,7 +1091,9 @@ def get_job_checkpoints(job_id: str):
 @app.get("/jobs/{job_id}/checkpoints/{step}/policy-config")
 def get_checkpoint_policy_config(job_id: str, step: int):
     """Return the UX-relevant slice of a checkpoint's pretrained_model config:
-    policy_type, image_features (per-camera height/width), and requires_task."""
+    policy_type, image_features (per-camera height/width), requires_task, and
+    the flat state_dim/action_dim (6 = single arm, 12 = bimanual) the inference
+    modal uses to flag a single-arm/bimanual mismatch."""
     try:
         return job_registry.get_policy_config_summary(job_id, step)
     except JobNotFoundError as exc:
@@ -978,11 +1195,17 @@ def stop_job(job_id: str):
 @app.delete("/jobs/{job_id}", status_code=204)
 def delete_job(job_id: str):
     try:
+        record = job_registry.get(job_id)
         job_registry.delete(job_id)
     except JobNotFoundError as exc:
         raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found") from exc
     except JobNotRunningError as exc:
         raise HTTPException(status_code=409, detail=f"Job {job_id!r} is running; stop it first") from exc
+    # Deleting a tracked cloud run removes the local record, but its Hub job
+    # would resurface in /jobs/hub as an untracked card on the next poll (the
+    # HF Jobs API has no delete). Mark it dismissed so the removal sticks.
+    if record.hf_job_id:
+        add_dismissed_hub_job(record.hf_job_id)
 
 
 @app.get("/jobs/runners/hardware")
@@ -993,9 +1216,13 @@ def get_runners_hardware():
     keep this endpoint cheap (it can be re-fetched whenever auth state
     changes). The whoami cache is invalidated on login.
     """
+    # Offline mode disables every Hub write, so the cloud-training flow can't
+    # upload a local-only dataset. Surface it here (same fetch TargetCard uses)
+    # so the UI can keep Start disabled and explain why for those datasets.
+    offline = hf_hub_offline()
     info = cached_whoami()
     if info is None or not info.get("name"):
-        return {"authenticated": False, "username": None, "flavors": []}
+        return {"authenticated": False, "username": None, "flavors": [], "offline": offline}
     username: str = info["name"]
     api = shared_hf_api()
 
@@ -1005,7 +1232,7 @@ def get_runners_hardware():
             hw_list = api.list_jobs_hardware()
         except Exception as exc:
             logger.warning("list_jobs_hardware failed: %s", exc)
-            return {"authenticated": True, "username": username, "flavors": []}
+            return {"authenticated": True, "username": username, "flavors": [], "offline": offline}
         _flavors_cache["data"] = [
             {
                 "name": h.name,
@@ -1024,6 +1251,7 @@ def get_runners_hardware():
         "authenticated": True,
         "username": username,
         "flavors": _flavors_cache["data"],
+        "offline": offline,
     }
 
 
@@ -1568,6 +1796,36 @@ def get_available_cameras():
     except Exception as e:
         logger.error(f"Error detecting cameras: {e}")
         return {"status": "error", "message": str(e), "cameras": []}
+
+
+@app.get("/camera-preview/{index}")
+def camera_preview_stream(index: int):
+    """MJPEG preview stream of a camera attached to the *server* machine.
+
+    Fallback for headless deployments (e.g. a Jetson on the LAN): the browser's
+    getUserMedia can't see the server's cameras, so the preview tiles render
+    ``<img src="/camera-preview/{index}">`` instead. The capture is shared and
+    refcounted per index (see lelab/camera_preview.py); recording and
+    teleoperation always win — their start paths force-release every preview.
+
+    Returns 409 while recording or teleoperation is active (they own the cv2
+    devices) and 503 when the camera can't be opened.
+    """
+    if record_state.recording_active:
+        raise HTTPException(
+            status_code=409,
+            detail="Recording is active — the cameras are in use. Stop recording to preview them.",
+        )
+    if teleoperate_state.teleoperation_active:
+        raise HTTPException(
+            status_code=409,
+            detail="Teleoperation is active — stop it to preview the cameras.",
+        )
+    try:
+        stream = camera_preview_manager.open_stream(index)
+    except CameraOpenError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return StreamingResponse(stream, media_type="multipart/x-mixed-replace; boundary=frame")
 
 
 RobotSideLiteral = Literal["leader", "follower"]
