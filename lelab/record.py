@@ -34,6 +34,7 @@ from lerobot.teleoperators.bi_so_leader import BiSOLeaderConfig
 from lerobot.teleoperators.so_leader import SO101LeaderConfig
 
 from .arm_identity import ArmIdentityError, verify_devices
+from .camera_preview import camera_preview_manager
 from .datasets import _lerobot_cache_root, invalidate_hub_status
 from .motor_power import apply_motor_power, clear_goal_velocity
 from .rest_pose import capture_rest_pose
@@ -382,6 +383,12 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
         identity_warnings = []
 
     try:
+        # Backend camera previews (GET /camera-preview/{index}) hold the cv2
+        # devices this session is about to open — recording always wins, so
+        # force-release them now, before any robot/camera construction and
+        # before the worker's 2s browser-stream release sleep.
+        camera_preview_manager.stop_all()
+
         # The name is already validated (validate_dataset_repo_id in the lock), so
         # no sanitization is needed here. Stamp the repo_id with a timestamp
         # (matches lerobot-record CLI behavior) so each session lands in a unique

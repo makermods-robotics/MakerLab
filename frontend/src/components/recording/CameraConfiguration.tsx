@@ -19,6 +19,7 @@ import {
 import { useToast } from "@/hooks/use-toast";
 import { useAvailableCameras } from "@/hooks/useAvailableCameras";
 import { useCameraStream } from "@/hooks/useCameraStream";
+import BackendCameraStream from "@/components/BackendCameraStream";
 
 // Sentinels distinguish "leave unset" (auto-detect / platform default) from an
 // explicit choice. Radix Select disallows an empty-string value, so we map these
@@ -274,6 +275,7 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
             <div className="bg-gray-900 rounded-lg border border-gray-700 overflow-hidden">
               <CameraStreamBox
                 deviceId={selectedCamera.deviceId}
+                cameraIndex={selectedCamera.index}
                 paused={streamsPaused}
               />
             </div>
@@ -338,19 +340,35 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
 interface CameraStreamBoxProps {
   deviceId: string;
   paused: boolean;
+  /** cv2 index on the server — MJPEG fallback when there's no browser
+   * deviceId match (headless deployment: cameras plugged into the server). */
+  cameraIndex?: number;
 }
 
-/** Live browser stream for a camera by deviceId. Used both for the
- * pre-add preview (as soon as a camera is picked in the dropdown) and for
- * each configured camera's card. The underlying useCameraStream hook stops
- * the browser stream on deviceId change and on unmount, so switching
- * cameras or closing the dialog releases the device. */
+/** Live preview for a camera. Used both for the pre-add preview (as soon as
+ * a camera is picked in the dropdown) and for each configured camera's card.
+ * A camera with a browser deviceId match streams via getUserMedia (the hook
+ * stops the stream on deviceId change and on unmount); one without a match
+ * but with a known cv2 index falls back to the backend MJPEG stream. Pausing
+ * (recording start / modal close) unmounts the MJPEG img, whose cleanup
+ * clears the src so the HTTP connection drops and the server releases the
+ * camera — mirroring the getUserMedia release semantics. */
 const CameraStreamBox: React.FC<CameraStreamBoxProps> = ({
   deviceId,
   paused,
+  cameraIndex,
 }) => {
   const { videoRef, hasError: streamError } = useCameraStream(deviceId, paused);
+  const [mjpegError, setMjpegError] = useState(false);
+  // Retry the backend stream on unpause (the 409-while-recording clears) and
+  // whenever the index changes (a new stream, not the failed one).
+  useEffect(() => {
+    if (!paused) setMjpegError(false);
+  }, [paused, cameraIndex]);
+
   const showVideo = !paused && deviceId && !streamError;
+  const showMjpeg =
+    !paused && !deviceId && cameraIndex !== undefined && !mjpegError;
   return (
     <div className="aspect-[4/3] bg-gray-800 relative">
       {showVideo ? (
@@ -361,13 +379,19 @@ const CameraStreamBox: React.FC<CameraStreamBoxProps> = ({
           playsInline
           className="w-full h-full object-cover"
         />
+      ) : showMjpeg ? (
+        <BackendCameraStream
+          cameraIndex={cameraIndex}
+          onError={() => setMjpegError(true)}
+          className="w-full h-full object-cover"
+        />
       ) : (
         <div className="w-full h-full flex flex-col items-center justify-center">
           <VideoOff className="w-8 h-8 text-gray-500 mb-2" />
           <span className="text-gray-500 text-sm">
             {paused
               ? "Preview paused"
-              : deviceId
+              : deviceId || mjpegError
               ? "Preview failed"
               : "No browser match"}
           </span>
@@ -392,7 +416,11 @@ const CameraPreview: React.FC<CameraPreviewProps> = ({
 }) => {
   return (
     <div className="bg-gray-900 rounded-lg border border-gray-700 overflow-hidden">
-      <CameraStreamBox deviceId={camera.device_id} paused={paused} />
+      <CameraStreamBox
+        deviceId={camera.device_id}
+        cameraIndex={camera.camera_index}
+        paused={paused}
+      />
 
       {/* Camera Info */}
       <div className="p-3 space-y-2">

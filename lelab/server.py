@@ -31,7 +31,7 @@ from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from huggingface_hub.errors import HfHubHTTPError
 from pydantic import BaseModel
@@ -42,11 +42,15 @@ from starlette.types import Scope
 
 from lerobot.policies.factory import make_policy_config
 
-from . import datasets as dataset_browser
+# Module objects (not from-imports) for the camera-preview mutex checks:
+# record/teleoperate REBIND their *_active globals, so only live attribute
+# access sees the current value — a from-import would freeze the startup value.
+from . import datasets as dataset_browser, record as record_state, teleoperate as teleoperate_state
 
 # Import our custom calibration functionality
 from .auto_calibrate import AutoCalibrationRequest, auto_calibration_manager
 from .calibrate import CalibrationRequest, calibration_manager
+from .camera_preview import CameraOpenError, camera_preview_manager
 from .identify import identify_arm_by_motion
 from .jobs import (
     JobAlreadyRunningError,
@@ -1748,6 +1752,36 @@ def get_available_cameras():
     except Exception as e:
         logger.error(f"Error detecting cameras: {e}")
         return {"status": "error", "message": str(e), "cameras": []}
+
+
+@app.get("/camera-preview/{index}")
+def camera_preview_stream(index: int):
+    """MJPEG preview stream of a camera attached to the *server* machine.
+
+    Fallback for headless deployments (e.g. a Jetson on the LAN): the browser's
+    getUserMedia can't see the server's cameras, so the preview tiles render
+    ``<img src="/camera-preview/{index}">`` instead. The capture is shared and
+    refcounted per index (see lelab/camera_preview.py); recording and
+    teleoperation always win — their start paths force-release every preview.
+
+    Returns 409 while recording or teleoperation is active (they own the cv2
+    devices) and 503 when the camera can't be opened.
+    """
+    if record_state.recording_active:
+        raise HTTPException(
+            status_code=409,
+            detail="Recording is active — the cameras are in use. Stop recording to preview them.",
+        )
+    if teleoperate_state.teleoperation_active:
+        raise HTTPException(
+            status_code=409,
+            detail="Teleoperation is active — stop it to preview the cameras.",
+        )
+    try:
+        stream = camera_preview_manager.open_stream(index)
+    except CameraOpenError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return StreamingResponse(stream, media_type="multipart/x-mixed-replace; boundary=frame")
 
 
 RobotSideLiteral = Literal["leader", "follower"]

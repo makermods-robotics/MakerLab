@@ -33,6 +33,9 @@ const TeleopCameraPanel: React.FC = () => {
     key: c.id,
     name: c.name,
     deviceId: c.device_id,
+    // MJPEG fallback for headless deployments: no browser deviceId match, but
+    // the server knows the camera by its cv2 index.
+    cameraIndex: c.camera_index,
   }));
 
   return (
@@ -71,6 +74,7 @@ const TeleopCameraPanel: React.FC = () => {
               <CameraFeed
                 key={`${feed.key}:${reloadKey}`}
                 deviceId={feed.deviceId}
+                cameraIndex={feed.cameraIndex}
                 label={feed.name}
               />
             ))}

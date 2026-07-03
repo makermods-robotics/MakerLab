@@ -27,6 +27,7 @@ from lerobot.teleoperators.bi_so_leader import BiSOLeader, BiSOLeaderConfig
 from lerobot.teleoperators.so_leader import SO101Leader, SO101LeaderConfig
 
 from .arm_identity import verify_devices
+from .camera_preview import camera_preview_manager
 from .motor_power import apply_motor_power, clear_goal_velocity, torque_limit_from_percent
 from .rest_pose import capture_rest_pose, return_to_rest_pose
 from .utils.config import (
@@ -595,6 +596,11 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
     robot = None
     teleop_device = None
     try:
+        # Backend camera previews (GET /camera-preview/{index}) may hold cv2
+        # devices this session's robot cameras need — teleoperation always
+        # wins, so force-release them before any robot/camera construction.
+        camera_preview_manager.stop_all()
+
         logger.info(
             f"Starting teleoperation with leader port: {request.leader_port}, follower port: {request.follower_port}"
         )
