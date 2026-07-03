@@ -225,8 +225,29 @@ def finish_pending_release(timeout: float = 10.0) -> bool:
     return True
 
 
+def _return_one_follower_to_rest(bus, pose: dict, abort_event: threading.Event) -> None:
+    """Drive one follower bus back to its captured pose; log start and outcome.
+
+    The per-arm body of _return_followers_to_rest, run on its own thread so
+    the two bimanual followers return concurrently. return_to_rest_pose never
+    raises, but guard anyway so one arm's failure can never take down the
+    thread (and thus block its join) before the outcome is logged.
+    """
+    port = getattr(bus, "port", None) or "unknown port"
+    label = f"follower arm on {port}"
+    logger.info(f"Rest-pose return starting for the {label}")
+    try:
+        _arrived, reason = return_to_rest_pose(bus, pose, abort_event=abort_event, label=label)
+        logger.info(f"Rest-pose return finished for the {label}: {reason}")
+    except Exception as e:
+        # return_to_rest_pose is documented never-raises; this is belt-and-braces
+        # so a surprise failure on one arm can't prevent the other's thread from
+        # being joined or the wrapper from returning to run the torque release.
+        logger.warning(f"Rest-pose return errored for the {label}: {e}")
+
+
 def _return_followers_to_rest(rest_poses: list[tuple], abort_event: threading.Event) -> None:
-    """Drive each follower bus back to its captured session-start pose.
+    """Drive every follower bus back to its captured session-start pose, at once.
 
     Runs immediately before the torque release on a NORMAL stop only (no timed
     hold: the servos hold their last goal on their own until the return goals
@@ -235,13 +256,30 @@ def _return_followers_to_rest(rest_poses: list[tuple], abort_event: threading.Ev
     falls through to the unconditional torque release. NEVER called with a
     leader bus — the leader is human-held with torque off; driving it would
     fight the user's hand.
+
+    Each follower is its own serial bus on its own USB port (no shared bus),
+    so the returns run CONCURRENTLY: one thread per (bus, pose), all joined
+    before this returns. Bimanual arms therefore land at the same time instead
+    of one-after-the-other. The shared ``abort_event`` (a second stop /
+    release-now) cuts every arm's return short promptly; the wrapper still
+    returns only after all per-arm threads have wound down, because the
+    downstream torque-release ordering depends on this having finished. A
+    single-arm session is the same shape — one thread, joined — preserving the
+    existing single-arm timing and semantics.
     """
-    for bus, pose in rest_poses:
-        port = getattr(bus, "port", None) or "unknown port"
-        label = f"follower arm on {port}"
-        logger.info(f"Rest-pose return starting for the {label}")
-        _arrived, reason = return_to_rest_pose(bus, pose, abort_event=abort_event, label=label)
-        logger.info(f"Rest-pose return finished for the {label}: {reason}")
+    threads = [
+        threading.Thread(
+            target=_return_one_follower_to_rest,
+            args=(bus, pose, abort_event),
+            name=f"rest-return-{getattr(bus, 'port', None) or i}",
+            daemon=True,
+        )
+        for i, (bus, pose) in enumerate(rest_poses)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
 
 
 class TeleoperateRequest(BaseModel):
