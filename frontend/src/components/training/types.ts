@@ -56,19 +56,28 @@ export interface TrainingConfig {
 // The policy types the trainer supports. The model is chosen up-front on the
 // landing page's "Create a model" card (one button per type, short `label`);
 // the training config then shows it frozen using the full `display` name.
+// `stable` = tested on our hardware (user decision 2026-07-03) — a statement
+// about what we've validated in LeLab, not about upstream lerobot quality.
+// Unstable types stay selectable; the landing card just subdues them.
 export const POLICY_TYPE_OPTIONS: {
   value: string;
   label: string;
   display: string;
+  stable: boolean;
 }[] = [
-  { value: "act", label: "ACT", display: "ACT (Action Chunking Transformer)" },
-  { value: "diffusion", label: "Diffusion", display: "Diffusion Policy" },
-  { value: "pi0", label: "PI0", display: "PI0" },
-  { value: "smolvla", label: "SmolVLA", display: "SmolVLA" },
-  { value: "tdmpc", label: "TD-MPC", display: "TD-MPC" },
-  { value: "vqbet", label: "VQ-BeT", display: "VQ-BeT" },
-  { value: "pi0_fast", label: "PI0 Fast", display: "PI0 Fast" },
-  { value: "sac", label: "SAC", display: "SAC" },
+  {
+    value: "act",
+    label: "ACT",
+    display: "ACT (Action Chunking Transformer)",
+    stable: true,
+  },
+  { value: "diffusion", label: "Diffusion", display: "Diffusion Policy", stable: false },
+  { value: "pi0", label: "PI0", display: "PI0", stable: false },
+  { value: "smolvla", label: "SmolVLA", display: "SmolVLA", stable: true },
+  { value: "tdmpc", label: "TD-MPC", display: "TD-MPC", stable: false },
+  { value: "vqbet", label: "VQ-BeT", display: "VQ-BeT", stable: false },
+  { value: "pi0_fast", label: "PI0 Fast", display: "PI0 Fast", stable: false },
+  { value: "sac", label: "SAC", display: "SAC", stable: false },
   // reward_classifier deliberately absent: it isn't a policy in the pinned
   // lerobot (separate RewardModelConfig registry — scores outcomes, doesn't
   // output actions) so lerobot-train can never construct it. Re-add alongside

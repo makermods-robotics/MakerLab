@@ -401,8 +401,10 @@ const Landing = () => {
               <h3 className="font-semibold text-lg text-center h-10 flex items-center justify-center">
                 Create a model
               </h3>
-              <div className="grid grid-cols-3 gap-2">
-                {POLICY_TYPE_OPTIONS.map((policy) => {
+              {/* Stable = tested on our hardware (see POLICY_TYPE_OPTIONS).
+                  Untested types stay selectable, just visually subdued. */}
+              <div className="grid grid-cols-2 gap-2">
+                {POLICY_TYPE_OPTIONS.filter((p) => p.stable).map((policy) => {
                   const unavailable =
                     policyAvailability?.[policy.value] === false;
                   return (
@@ -421,6 +423,35 @@ const Landing = () => {
                         disabled={!selectedDataset || unavailable}
                         size="sm"
                         className="w-full bg-green-500 hover:bg-green-600 text-white px-2"
+                      >
+                        <span className="truncate">{policy.label}</span>
+                      </Button>
+                    </span>
+                  );
+                })}
+              </div>
+              <p className="text-xs text-gray-500 mt-1">
+                Untested in LeLab — use at your own risk
+              </p>
+              <div className="grid grid-cols-3 gap-2">
+                {POLICY_TYPE_OPTIONS.filter((p) => !p.stable).map((policy) => {
+                  const unavailable =
+                    policyAvailability?.[policy.value] === false;
+                  return (
+                    <span
+                      key={policy.value}
+                      title={
+                        unavailable
+                          ? "Not available in this lerobot version"
+                          : `Train a ${policy.label} model — untested in LeLab, use at your own risk`
+                      }
+                    >
+                      <Button
+                        onClick={() => handleTrainingClick(policy.value)}
+                        disabled={!selectedDataset || unavailable}
+                        size="sm"
+                        variant="outline"
+                        className="w-full border-gray-600 bg-gray-900/40 text-gray-400 hover:bg-gray-700 hover:text-white px-2"
                       >
                         <span className="truncate">{policy.label}</span>
                       </Button>
