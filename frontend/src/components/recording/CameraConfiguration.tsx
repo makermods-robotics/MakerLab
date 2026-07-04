@@ -64,11 +64,17 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
 }) => {
   const { toast } = useToast();
 
+  // Recording start pauses the previews via releaseStreamsRef; gate camera
+  // enumeration on the same flag so the getUserMedia/devicechange probing fully
+  // stops before cv2 opens the devices. Otherwise the enumeration probe can
+  // keep index 0 open and starve the recorder (OpenCVCamera(0) actual_fps=5.0).
+  const [streamsPaused, setStreamsPaused] = useState(false);
+
   const {
     cameras: availableCameras,
     isLoading: isLoadingCameras,
     refresh: refreshCameras,
-  } = useAvailableCameras();
+  } = useAvailableCameras({ enabled: !streamsPaused });
   const [selectedCameraIndex, setSelectedCameraIndex] = useState<string>("");
   const [cameraName, setCameraName] = useState("");
 
@@ -185,8 +191,8 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
 
   // When the recording session is starting, the parent calls
   // releaseStreamsRef.current() to make every CameraPreview drop its browser
-  // stream so cv2.VideoCapture can grab the camera exclusively.
-  const [streamsPaused, setStreamsPaused] = useState(false);
+  // stream so cv2.VideoCapture can grab the camera exclusively. Flipping
+  // streamsPaused also disables useAvailableCameras above (see its comment).
   const releaseAllCameraStreams = useCallback(() => {
     setStreamsPaused(true);
   }, []);

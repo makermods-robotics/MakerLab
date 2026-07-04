@@ -933,23 +933,57 @@ def record_with_web_events(
             encoder_threads=cfg.dataset.encoder_threads,
         )
 
-    # 🔧 ROBOT CONNECTION: Connect with enhanced error handling for camera conflicts
-    try:
-        logger.info("🔧 ROBOT CONNECTION: Attempting to connect robot...")
-        # Calibration is already on disk (loaded via the configs above), so never
-        # let connect() drop into interactive recalibration — that would hang the
-        # headless record thread (the "stuck on preparing session" symptom).
-        robot.connect(calibrate=False)
-        logger.info("✅ ROBOT CONNECTION: Robot connected successfully")
-    except Exception as e:
-        logger.error(f"❌ ROBOT CONNECTION: Failed to connect robot: {e}")
-        # If robot connection fails due to camera conflict, provide clear error
-        if "camera" in str(e).lower() or "device" in str(e).lower() or "busy" in str(e).lower():
-            logger.error("💡 ROBOT CONNECTION: Camera connection failure - likely camera resource conflict")
-            logger.error(
-                "💡 ROBOT CONNECTION: Make sure frontend camera streams are released before recording"
+    # 🔧 ROBOT CONNECTION: Connect with enhanced error handling for camera conflicts.
+    #
+    # A camera can read back a degraded fps on the FIRST open — macOS AVFoundation
+    # reports e.g. actual_fps=5.0 when the device was just released by a browser
+    # preview / enumeration probe and the OS-level release (which is asynchronous)
+    # hasn't settled. lerobot's _validate_fps then raises before any warmup frame.
+    # The device isn't broken: a cold re-open a moment later negotiates 30fps
+    # cleanly, so retry the transient fps failure a couple of times.
+    CONNECT_ATTEMPTS = 3
+    for attempt in range(1, CONNECT_ATTEMPTS + 1):
+        try:
+            logger.info(
+                "🔧 ROBOT CONNECTION: Attempting to connect robot (attempt %d/%d)...",
+                attempt,
+                CONNECT_ATTEMPTS,
             )
-        raise
+            # Calibration is already on disk (loaded via the configs above), so never
+            # let connect() drop into interactive recalibration — that would hang the
+            # headless record thread (the "stuck on preparing session" symptom).
+            robot.connect(calibrate=False)
+            logger.info("✅ ROBOT CONNECTION: Robot connected successfully")
+            break
+        except Exception as e:
+            msg = str(e)
+            # macOS returns the read-back value in the message ("failed to set
+            # fps=30 (actual_fps=5.0)"); treat that specific failure as transient.
+            transient_fps = "failed to set fps" in msg
+            logger.error(f"❌ ROBOT CONNECTION: Failed to connect robot: {e}")
+            # If robot connection fails due to camera conflict, provide clear error
+            if (
+                "camera" in msg.lower()
+                or "device" in msg.lower()
+                or "busy" in msg.lower()
+                or transient_fps
+            ):
+                logger.error(
+                    "💡 ROBOT CONNECTION: Camera connection failure - resource conflict or cold-open fps read"
+                )
+                logger.error(
+                    "💡 ROBOT CONNECTION: Make sure frontend camera streams are released before recording"
+                )
+            if attempt < CONNECT_ATTEMPTS and transient_fps:
+                # Drop any half-open handles from this failed attempt so the retry
+                # starts from a clean device, then let the OS release settle.
+                try:
+                    robot.disconnect()
+                except Exception:
+                    pass
+                time.sleep(1.5)
+                continue
+            raise
 
     if teleop is not None:
         try:
