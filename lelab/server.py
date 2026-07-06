@@ -48,7 +48,12 @@ from lerobot.policies.factory import make_policy_config
 from . import datasets as dataset_browser, record as record_state, teleoperate as teleoperate_state
 
 # Import our custom calibration functionality
-from .auto_calibrate import AutoCalibrationRequest, auto_calibration_manager
+from .auto_calibrate import (
+    AutoCalibrationBatchRequest,
+    AutoCalibrationRequest,
+    auto_calibration_batch_manager,
+    auto_calibration_manager,
+)
 from .calibrate import CalibrationRequest, calibration_manager
 from .camera_preview import CameraOpenError, camera_preview_manager
 from .identify import identify_arm_by_motion
@@ -156,6 +161,7 @@ logger = logging.getLogger(__name__)
 # subpaths like /jobs/{id}/logs), and error responses still log.
 _QUIET_STATUS_POLL_PATHS = {
     "/auto-calibration-status",
+    "/auto-calibration-batch-status",
     "/calibration-status",
     "/teleoperation-status",
     "/recording-status",
@@ -1384,6 +1390,28 @@ def stop_auto_calibration():
 def auto_calibration_status():
     """Current auto-calibration state + streamed log lines."""
     return auto_calibration_manager.get_status()
+
+
+@app.post("/start-auto-calibration-batch")
+def start_auto_calibration_batch(request: AutoCalibrationBatchRequest):
+    """Auto-calibrate a user-selected subset of arms CONCURRENTLY. Each arm runs
+    its own subprocess on its own serial port with an independent outcome
+    (partial success). Validated up front (1-4 arms, distinct ports, distinct
+    same-side names, name-taken pre-check) before any hardware is touched."""
+    return auto_calibration_batch_manager.start(request)
+
+
+@app.post("/stop-auto-calibration-batch")
+def stop_auto_calibration_batch():
+    """Stop ALL running arms of a batch auto-calibration, releasing each arm's
+    torque independently."""
+    return auto_calibration_batch_manager.stop()
+
+
+@app.get("/auto-calibration-batch-status")
+def auto_calibration_batch_status():
+    """Per-arm status + logs and overall counts for a batch auto-calibration."""
+    return auto_calibration_batch_manager.get_status()
 
 
 @app.get("/calibration-configs/{device_type}")

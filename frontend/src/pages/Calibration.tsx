@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -86,6 +86,38 @@ interface CalibrationRequest {
   robot_name: string | null;
   overwrite?: boolean; // must be true to replace an existing config of the same name
   arm?: "left" | "right"; // which arm of a bimanual robot ("left" = the single pair)
+}
+
+// One selectable arm slot in the multi-arm auto-calibration picker. `key`
+// uniquely identifies the (device_type, arm) slot; cfgField/portField map it to
+// the robot record's fields so the slot can prefill its name + port.
+interface ArmSlot {
+  key: string;
+  label: string;
+  device: "teleop" | "robot";
+  arm: "left" | "right";
+  cfgField: keyof RobotRecord;
+  portField: keyof RobotRecord;
+}
+
+// Per-arm terminal/running state in a concurrent batch (from the backend).
+interface BatchArmStatus {
+  name: string;
+  port: string;
+  device_type: string;
+  arm: string;
+  status: string; // running | completed | failed | stopped | stopping | idle
+  error: string | null;
+  logs: string[];
+}
+
+interface BatchAutoCalStatus {
+  active: boolean;
+  arms: BatchArmStatus[];
+  total: number;
+  completed: number;
+  failed: number;
+  logs: string[];
 }
 
 const Calibration = () => {
@@ -222,6 +254,29 @@ const Calibration = () => {
     error: string | null;
     logs: string[];
   }>({ active: false, status: "idle", message: "", error: null, logs: [] });
+
+  // --- Concurrent multi-arm auto-calibration (opt-in) ---
+  // A separate flow from single-arm auto-cal: the user picks 1-4 arm slots and
+  // every one's hands-off auto-cal subprocess runs at the SAME TIME, each on its
+  // own port. Single-arm auto-cal and the manual flow are untouched.
+  const [batchAutoCalOpen, setBatchAutoCalOpen] = useState(false);
+  const [batchAutoCalPromptOpen, setBatchAutoCalPromptOpen] = useState(false);
+  const [batchOverwriteAll, setBatchOverwriteAll] = useState(false);
+  // Which arm slots are ticked, plus each slot's port + save-as name.
+  const [batchSelected, setBatchSelected] = useState<Record<string, boolean>>(
+    {},
+  );
+  const [batchInputs, setBatchInputs] = useState<
+    Record<string, { port: string; configName: string }>
+  >({});
+  const [batchAutoCal, setBatchAutoCal] = useState<BatchAutoCalStatus>({
+    active: false,
+    arms: [],
+    total: 0,
+    completed: 0,
+    failed: 0,
+    logs: [],
+  });
   const [availablePorts, setAvailablePorts] = useState<string[]>([]);
   const [portsLoading, setPortsLoading] = useState(false);
   const [cameras, setCameras] = useState<CameraConfig[]>([]);
@@ -230,6 +285,89 @@ const Calibration = () => {
   // enumerated, and the browser permission prompt is requested.
   const [camerasActive, setCamerasActive] = useState(false);
   const cameraSaveTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Arm slots the multi-arm auto-cal picker can offer. Bimanual exposes all
+  // four (left/right × leader/follower); single-arm exposes the leader +
+  // follower pair. Each maps to the record's config/port fields for prefill.
+  const armSlots: ArmSlot[] = useMemo(
+    () =>
+      isBimanual
+        ? [
+            {
+              key: "teleop:left",
+              label: "Left Leader",
+              device: "teleop",
+              arm: "left",
+              cfgField: "leader_config",
+              portField: "leader_port",
+            },
+            {
+              key: "robot:left",
+              label: "Left Follower",
+              device: "robot",
+              arm: "left",
+              cfgField: "follower_config",
+              portField: "follower_port",
+            },
+            {
+              key: "teleop:right",
+              label: "Right Leader",
+              device: "teleop",
+              arm: "right",
+              cfgField: "right_leader_config",
+              portField: "right_leader_port",
+            },
+            {
+              key: "robot:right",
+              label: "Right Follower",
+              device: "robot",
+              arm: "right",
+              cfgField: "right_follower_config",
+              portField: "right_follower_port",
+            },
+          ]
+        : [
+            {
+              key: "teleop:left",
+              label: "Leader",
+              device: "teleop",
+              arm: "left",
+              cfgField: "leader_config",
+              portField: "leader_port",
+            },
+            {
+              key: "robot:left",
+              label: "Follower",
+              device: "robot",
+              arm: "left",
+              cfgField: "follower_config",
+              portField: "follower_port",
+            },
+          ],
+    [isBimanual],
+  );
+
+  // Seed each slot's port + name inputs from the robot record. Prefills the
+  // in-use config (else a per-arm "<robot>_<arm>" suggestion, matching the
+  // single-arm default) and the saved port; keeps any edits the user made.
+  useEffect(() => {
+    if (!robot) return;
+    setBatchInputs((prev) => {
+      const next: Record<string, { port: string; configName: string }> = {};
+      for (const slot of armSlots) {
+        const assigned = (robot[slot.cfgField] as string) || "";
+        const savedPort = (robot[slot.portField] as string) || "";
+        const suggested = isBimanual
+          ? `${robotName}_${slot.arm}`
+          : (robotName ?? "");
+        next[slot.key] = prev[slot.key] ?? {
+          port: savedPort,
+          configName: assigned || suggested,
+        };
+      }
+      return next;
+    });
+  }, [robot, armSlots, isBimanual, robotName]);
 
   const fetchRobot = useCallback(async (): Promise<RobotRecord | null> => {
     if (!robotName) return null;
@@ -659,6 +797,155 @@ const Calibration = () => {
       });
     } catch (e) {
       console.error("Failed to stop auto-calibration:", e);
+    }
+  };
+
+  // --- Concurrent multi-arm auto-calibration ---
+
+  // The slots the user ticked, in canonical order, with their inputs.
+  const selectedBatchSlots = armSlots.filter((s) => batchSelected[s.key]);
+
+  // Resume the batch panel if a run is in progress (e.g. page reload).
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetchWithHeaders(
+          `${baseUrl}/auto-calibration-batch-status`,
+        );
+        const data = await res.json();
+        setBatchAutoCal(data);
+        if (data.active) setBatchAutoCalOpen(true);
+      } catch {
+        // ignore
+      }
+    })();
+  }, [baseUrl, fetchWithHeaders]);
+
+  // Poll batch status + logs while a run is active.
+  useEffect(() => {
+    if (!batchAutoCal.active) return;
+    const id = setInterval(async () => {
+      try {
+        const res = await fetchWithHeaders(
+          `${baseUrl}/auto-calibration-batch-status`,
+        );
+        const data: BatchAutoCalStatus = await res.json();
+        setBatchAutoCal(data);
+        if (!data.active) {
+          setCalibReloadToken((t) => t + 1);
+          fetchRobot();
+          if (data.failed === 0) {
+            toast({
+              title: `Auto-calibrated ${data.completed} arm(s)`,
+            });
+          } else {
+            toast({
+              title: "Batch auto-calibration finished with issues",
+              description: `${data.completed} completed, ${data.failed} failed/stopped.`,
+              variant: data.completed > 0 ? "default" : "destructive",
+            });
+          }
+        }
+      } catch {
+        // transient; keep polling
+      }
+    }, 700);
+    return () => clearInterval(id);
+  }, [batchAutoCal.active, baseUrl, fetchWithHeaders, fetchRobot, toast]);
+
+  const startBatchAutoCalibration = async (overwrite = false) => {
+    setBatchAutoCalPromptOpen(false);
+    if (!robotName) return;
+    const slots = selectedBatchSlots;
+    if (slots.length === 0) {
+      toast({
+        title: "No arms selected",
+        description: "Tick at least one arm to auto-calibrate.",
+        variant: "destructive",
+      });
+      return;
+    }
+    // Client-side guards mirroring the backend: a port per arm, distinct ports.
+    const missingPort = slots.find(
+      (s) => !(batchInputs[s.key]?.port || "").trim(),
+    );
+    if (missingPort) {
+      toast({
+        title: "Missing port",
+        description: `Set a port for ${missingPort.label} before starting.`,
+        variant: "destructive",
+      });
+      return;
+    }
+    const ports = slots.map((s) => (batchInputs[s.key]?.port || "").trim());
+    if (new Set(ports).size !== ports.length) {
+      toast({
+        title: "Duplicate port",
+        description: "Each arm needs its own serial port.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    const arms = slots.map((s) => ({
+      device_type: s.device,
+      port: (batchInputs[s.key]?.port || "").trim(),
+      config_file:
+        (batchInputs[s.key]?.configName || "").trim() ||
+        (isBimanual ? `${robotName}_${s.arm}` : robotName || ""),
+      arm: s.arm,
+    }));
+
+    try {
+      const res = await fetchWithHeaders(
+        `${baseUrl}/start-auto-calibration-batch`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ robot_name: robotName, overwrite, arms }),
+        },
+      );
+      const data = await res.json();
+      if (data.success) {
+        setBatchAutoCal({
+          active: true,
+          arms: [],
+          total: data.total ?? arms.length,
+          completed: 0,
+          failed: 0,
+          logs: [],
+        });
+        toast({
+          title: `Auto-calibration started on ${data.launched ?? arms.length} arm(s)`,
+          description: "The arms are moving — keep the workspace clear.",
+        });
+      } else if (data.code === "name_taken") {
+        // One or more names already exist — confirm before overwriting all.
+        setBatchOverwriteAll(true);
+        setBatchAutoCalPromptOpen(true);
+      } else {
+        toast({
+          title: "Couldn't start auto-calibration",
+          description: data.message,
+          variant: "destructive",
+        });
+      }
+    } catch (e) {
+      toast({
+        title: "Couldn't start auto-calibration",
+        description: String(e),
+        variant: "destructive",
+      });
+    }
+  };
+
+  const stopBatchAutoCalibration = async () => {
+    try {
+      await fetchWithHeaders(`${baseUrl}/stop-auto-calibration-batch`, {
+        method: "POST",
+      });
+    } catch (e) {
+      console.error("Failed to stop batch auto-calibration:", e);
     }
   };
 
@@ -1352,6 +1639,15 @@ const Calibration = () => {
                     <Square className="w-5 h-5 mr-2" />
                     Cancel Calibration
                   </Button>
+                ) : batchAutoCal.active ? (
+                  <Button
+                    onClick={stopBatchAutoCalibration}
+                    variant="destructive"
+                    className="w-full rounded-full py-6 text-lg"
+                  >
+                    <Square className="w-5 h-5 mr-2" />
+                    Stop all auto-calibration
+                  </Button>
                 ) : autoCal.active ? (
                   <Button
                     onClick={stopAutoCalibration}
@@ -1385,7 +1681,191 @@ const Calibration = () => {
                       <Play className="w-5 h-5 mr-2" />
                       Calibrate manually
                     </Button>
+                    {/* Opt-in concurrent multi-arm auto-cal: distinct from the
+                        single-arm flow above — several arms run at once, each on
+                        its own port, with independent (partial-success)
+                        outcomes. */}
+                    <Button
+                      onClick={() => setBatchAutoCalOpen((v) => !v)}
+                      variant="ghost"
+                      disabled={!robotName}
+                      className="w-full text-slate-400 hover:text-purple-300 hover:bg-purple-900/10 rounded-full py-4"
+                    >
+                      <Wand2 className="w-4 h-4 mr-2" />
+                      {batchAutoCalOpen
+                        ? "Hide multi-arm auto-calibration"
+                        : "Auto-calibrate multiple arms at once"}
+                    </Button>
                   </>
+                )}
+
+                {(batchAutoCalOpen || batchAutoCal.active) && (
+                  <div className="rounded-lg border border-purple-800/50 bg-purple-950/20 p-3 space-y-3">
+                    <div className="flex items-center gap-2 text-sm font-medium text-purple-200">
+                      <Wand2 className="w-4 h-4" />
+                      Multi-arm auto-calibration
+                    </div>
+                    {!batchAutoCal.active ? (
+                      <>
+                        <p className="text-xs text-slate-400">
+                          Pick the arms to calibrate. Each runs its own hands-off
+                          calibration <strong>at the same time</strong> on its
+                          own port — one arm failing doesn't stop the others.
+                        </p>
+                        <div className="space-y-2">
+                          {armSlots.map((slot) => {
+                            const selected = !!batchSelected[slot.key];
+                            const input = batchInputs[slot.key] ?? {
+                              port: "",
+                              configName: "",
+                            };
+                            return (
+                              <div
+                                key={slot.key}
+                                className={`rounded-md border p-2 ${
+                                  selected
+                                    ? "border-purple-600 bg-slate-800/60"
+                                    : "border-slate-700 bg-slate-800/20"
+                                }`}
+                              >
+                                <label className="flex items-center gap-2 cursor-pointer">
+                                  <input
+                                    type="checkbox"
+                                    checked={selected}
+                                    onChange={(e) =>
+                                      setBatchSelected((prev) => ({
+                                        ...prev,
+                                        [slot.key]: e.target.checked,
+                                      }))
+                                    }
+                                    className="accent-purple-500"
+                                  />
+                                  <span className="text-sm text-slate-200">
+                                    {slot.label}
+                                  </span>
+                                </label>
+                                {selected && (
+                                  <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                    <Select
+                                      value={input.port}
+                                      onValueChange={(v) =>
+                                        setBatchInputs((prev) => ({
+                                          ...prev,
+                                          [slot.key]: {
+                                            ...(prev[slot.key] ?? {
+                                              port: "",
+                                              configName: "",
+                                            }),
+                                            port: v,
+                                          },
+                                        }))
+                                      }
+                                    >
+                                      <SelectTrigger className="bg-slate-700 border-slate-600 text-white text-xs h-8">
+                                        <SelectValue placeholder="Port" />
+                                      </SelectTrigger>
+                                      <SelectContent className="bg-slate-800 border-slate-700 text-white">
+                                        {availablePorts.map((p) => (
+                                          <SelectItem key={p} value={p}>
+                                            {p}
+                                          </SelectItem>
+                                        ))}
+                                      </SelectContent>
+                                    </Select>
+                                    <Input
+                                      value={input.configName}
+                                      onChange={(e) =>
+                                        setBatchInputs((prev) => ({
+                                          ...prev,
+                                          [slot.key]: {
+                                            ...(prev[slot.key] ?? {
+                                              port: "",
+                                              configName: "",
+                                            }),
+                                            configName: e.target.value,
+                                          },
+                                        }))
+                                      }
+                                      placeholder="Save as…"
+                                      className="bg-slate-700 border-slate-600 text-white text-xs h-8"
+                                    />
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                        <Button
+                          onClick={() => {
+                            setBatchOverwriteAll(false);
+                            setBatchAutoCalPromptOpen(true);
+                          }}
+                          disabled={selectedBatchSlots.length === 0}
+                          className="w-full bg-purple-600 hover:bg-purple-700 text-white rounded-full py-4"
+                        >
+                          <Wand2 className="w-4 h-4 mr-2" />
+                          Auto-calibrate {selectedBatchSlots.length || 0} arm
+                          {selectedBatchSlots.length === 1 ? "" : "s"}
+                        </Button>
+                      </>
+                    ) : (
+                      <p className="text-xs text-slate-400">
+                        {batchAutoCal.completed + batchAutoCal.failed} of{" "}
+                        {batchAutoCal.total} done — the arms are moving. Keep the
+                        workspace clear.
+                      </p>
+                    )}
+
+                    {/* Per-arm status rows (running + terminal), shown live. */}
+                    {batchAutoCal.arms.length > 0 && (
+                      <div className="space-y-1">
+                        {batchAutoCal.arms.map((a) => (
+                          <div
+                            key={`${a.device_type}:${a.port}`}
+                            className="flex items-center justify-between gap-2 text-xs rounded bg-slate-900/60 px-2 py-1"
+                          >
+                            <span className="font-mono text-slate-300 truncate">
+                              {a.name || a.port}
+                            </span>
+                            <span
+                              className={
+                                a.status === "completed"
+                                  ? "text-green-400"
+                                  : a.status === "failed"
+                                    ? "text-red-400"
+                                    : a.status === "stopped"
+                                      ? "text-amber-400"
+                                      : "text-purple-300"
+                              }
+                              title={a.error ?? undefined}
+                            >
+                              {a.status === "completed"
+                                ? "✓ done"
+                                : a.status === "failed"
+                                  ? "✗ failed"
+                                  : a.status === "stopped"
+                                    ? "stopped"
+                                    : "running…"}
+                            </span>
+                          </div>
+                        ))}
+                        {!batchAutoCal.active && batchAutoCal.total > 0 && (
+                          <p className="text-xs text-slate-400 pt-1">
+                            {batchAutoCal.completed} completed,{" "}
+                            {batchAutoCal.failed} failed/stopped.
+                          </p>
+                        )}
+                      </div>
+                    )}
+
+                    {batchAutoCal.logs.length > 0 && (
+                      <div className="bg-slate-900 rounded border border-slate-700 p-2 max-h-40 overflow-auto text-xs font-mono text-slate-300 whitespace-pre-wrap">
+                        {batchAutoCal.logs.slice(-120).map((line, i) => (
+                          <div key={i}>{line}</div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                 )}
 
                 {robot && (
@@ -1521,6 +2001,57 @@ const Calibration = () => {
                       onClick={startAutoCalibration}
                     >
                       Start auto-calibration
+                    </Button>
+                  </DialogFooter>
+                </DialogContent>
+              </Dialog>
+
+              <Dialog
+                open={batchAutoCalPromptOpen}
+                onOpenChange={setBatchAutoCalPromptOpen}
+              >
+                <DialogContent className="bg-slate-900 border-slate-800 text-white">
+                  <DialogHeader>
+                    <DialogTitle>
+                      {batchOverwriteAll
+                        ? "Overwrite existing calibrations?"
+                        : "Auto-calibrate multiple arms — they will move"}
+                    </DialogTitle>
+                    <DialogDescription className="text-slate-400">
+                      {batchOverwriteAll ? (
+                        <>
+                          One or more of the selected names already exist.
+                          Continuing will <strong>replace</strong> them when each
+                          arm completes.
+                        </>
+                      ) : (
+                        <>
+                          {selectedBatchSlots.length} arm
+                          {selectedBatchSlots.length === 1 ? "" : "s"} will{" "}
+                          <strong>move on their own under power</strong> at the
+                          same time to find each joint's range. Clear the
+                          workspace and keep hands away from every arm.
+                        </>
+                      )}
+                    </DialogDescription>
+                  </DialogHeader>
+                  <DialogFooter className="flex gap-2 justify-end">
+                    <Button
+                      variant="outline"
+                      className="border-slate-600 text-slate-700 dark:text-slate-300"
+                      onClick={() => setBatchAutoCalPromptOpen(false)}
+                    >
+                      Cancel
+                    </Button>
+                    <Button
+                      className="bg-purple-600 hover:bg-purple-700 text-white"
+                      onClick={() =>
+                        startBatchAutoCalibration(batchOverwriteAll)
+                      }
+                    >
+                      {batchOverwriteAll
+                        ? "Overwrite and start"
+                        : "Start auto-calibration"}
                     </Button>
                   </DialogFooter>
                 </DialogContent>
