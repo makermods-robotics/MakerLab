@@ -266,8 +266,10 @@ const Calibration = () => {
   const [batchSelected, setBatchSelected] = useState<Record<string, boolean>>(
     {},
   );
+  // Only the save-as name is collected per arm; each arm's port comes straight
+  // from its assignment on the robot record (set in the per-arm flow above).
   const [batchInputs, setBatchInputs] = useState<
-    Record<string, { port: string; configName: string }>
+    Record<string, { configName: string }>
   >({});
   const [batchAutoCal, setBatchAutoCal] = useState<BatchAutoCalStatus>({
     active: false,
@@ -347,21 +349,20 @@ const Calibration = () => {
     [isBimanual],
   );
 
-  // Seed each slot's port + name inputs from the robot record. Prefills the
-  // in-use config (else a per-arm "<robot>_<arm>" suggestion, matching the
-  // single-arm default) and the saved port; keeps any edits the user made.
+  // Seed each slot's save-as name from the robot record: the in-use config, else
+  // a per-arm "<robot>_<arm>" suggestion (matching the single-arm default).
+  // Ports are NOT seeded here — the batch consumes each arm's assigned port
+  // directly from the record (see slotPort), so there's a single source of truth.
   useEffect(() => {
     if (!robot) return;
     setBatchInputs((prev) => {
-      const next: Record<string, { port: string; configName: string }> = {};
+      const next: Record<string, { configName: string }> = {};
       for (const slot of armSlots) {
         const assigned = (robot[slot.cfgField] as string) || "";
-        const savedPort = (robot[slot.portField] as string) || "";
         const suggested = isBimanual
           ? `${robotName}_${slot.arm}`
           : (robotName ?? "");
         next[slot.key] = prev[slot.key] ?? {
-          port: savedPort,
           configName: assigned || suggested,
         };
       }
@@ -802,6 +803,33 @@ const Calibration = () => {
 
   // --- Concurrent multi-arm auto-calibration ---
 
+  // Each arm's port as designated on the robot record (assigned in the per-arm
+  // flow above). Raw value — may name a port that isn't currently plugged in.
+  const slotSavedPort = useCallback(
+    (slot: ArmSlot) => ((robot?.[slot.portField] as string) || "").trim(),
+    [robot],
+  );
+
+  // The port the batch will actually use: the saved port ONLY if it's currently
+  // detected. A saved-but-undetected port (arm unplugged, moved, or renamed by
+  // the OS) is treated as no port at all — you can't calibrate against an absent
+  // bus, and the subprocess would just fail to open it. Single source of truth
+  // for batch ports; never re-entered by the user.
+  const slotPort = useCallback(
+    (slot: ArmSlot) => {
+      const saved = slotSavedPort(slot);
+      return saved && availablePorts.includes(saved) ? saved : "";
+    },
+    [slotSavedPort, availablePorts],
+  );
+
+  // Single-arm picker: the selected port only counts if it's actually detected.
+  // A saved-but-unplugged port is treated as no port — same rule as the batch
+  // flow — so calibration can't start against an absent bus. `port` stays set to
+  // the saved value so it re-selects automatically once the arm is plugged back
+  // in and ports are rescanned.
+  const portDetected = !!port && availablePorts.includes(port);
+
   // The slots the user ticked, in canonical order, with their inputs.
   const selectedBatchSlots = armSlots.filter((s) => batchSelected[s.key]);
 
@@ -865,19 +893,19 @@ const Calibration = () => {
       });
       return;
     }
-    // Client-side guards mirroring the backend: a port per arm, distinct ports.
-    const missingPort = slots.find(
-      (s) => !(batchInputs[s.key]?.port || "").trim(),
-    );
+    // Ports come from each arm's assignment on the robot record — the batch
+    // never re-collects them. Guards mirror the backend; the missing-port case
+    // is normally prevented by gating selection on an assigned port.
+    const missingPort = slots.find((s) => !slotPort(s));
     if (missingPort) {
       toast({
-        title: "Missing port",
-        description: `Set a port for ${missingPort.label} before starting.`,
+        title: "Arm has no detected port",
+        description: `${missingPort.label} has no port that's currently plugged in — assign/reconnect it above before starting.`,
         variant: "destructive",
       });
       return;
     }
-    const ports = slots.map((s) => (batchInputs[s.key]?.port || "").trim());
+    const ports = slots.map((s) => slotPort(s));
     if (new Set(ports).size !== ports.length) {
       toast({
         title: "Duplicate port",
@@ -889,7 +917,7 @@ const Calibration = () => {
 
     const arms = slots.map((s) => ({
       device_type: s.device,
-      port: (batchInputs[s.key]?.port || "").trim(),
+      port: slotPort(s),
       config_file:
         (batchInputs[s.key]?.configName || "").trim() ||
         (isBimanual ? `${robotName}_${s.arm}` : robotName || ""),
@@ -1499,12 +1527,11 @@ const Calibration = () => {
                           </SelectItem>
                         );
                       })}
-                      {/* Keep a persisted port selectable even if it's unplugged. */}
-                      {port && !availablePorts.includes(port) && (
-                        <SelectItem value={port} className="text-white">
-                          {port} (saved, not detected)
-                        </SelectItem>
-                      )}
+                      {/* A saved-but-undetected port is intentionally NOT offered
+                          here: an unplugged bus can't be calibrated against, so
+                          it's treated as no port. The trigger falls back to the
+                          placeholder, and the port re-selects on its own once the
+                          arm is plugged back in and ports are rescanned. */}
                     </SelectContent>
                   </Select>
                   <Button
@@ -1667,7 +1694,7 @@ const Calibration = () => {
                     <Button
                       onClick={() => setAutoCalPromptOpen(true)}
                       className="w-full bg-purple-600 hover:bg-purple-700 text-white rounded-full py-6 text-lg"
-                      disabled={!robotName || !deviceType || !port}
+                      disabled={!robotName || !deviceType || !portDetected}
                     >
                       <Wand2 className="w-5 h-5 mr-2" />
                       Auto-calibrate
@@ -1675,7 +1702,7 @@ const Calibration = () => {
                     <Button
                       onClick={() => handleStartCalibration()}
                       variant="outline"
-                      disabled={!robotName || !deviceType || !port}
+                      disabled={!robotName || !deviceType || !portDetected}
                       className="w-full border-blue-500/50 text-blue-700 hover:bg-blue-900/20 hover:text-blue-800 dark:text-blue-300 dark:hover:text-blue-200 rounded-full py-5"
                     >
                       <Play className="w-5 h-5 mr-2" />
@@ -1710,15 +1737,22 @@ const Calibration = () => {
                         <p className="text-xs text-slate-400">
                           Pick the arms to calibrate. Each runs its own hands-off
                           calibration <strong>at the same time</strong> on its
-                          own port — one arm failing doesn't stop the others.
+                          assigned port — one arm failing doesn't stop the
+                          others. Ports come from each arm's assignment above;
+                          an arm with no port yet can't be picked.
                         </p>
                         <div className="space-y-2">
                           {armSlots.map((slot) => {
                             const selected = !!batchSelected[slot.key];
                             const input = batchInputs[slot.key] ?? {
-                              port: "",
                               configName: "",
                             };
+                            const assignedPort = slotPort(slot);
+                            const hasPort = !!assignedPort;
+                            // Distinguish "never assigned" from "assigned but
+                            // not currently detected" so the hint is actionable.
+                            const savedButUndetected =
+                              !hasPort && !!slotSavedPort(slot);
                             return (
                               <div
                                 key={slot.key}
@@ -1726,12 +1760,17 @@ const Calibration = () => {
                                   selected
                                     ? "border-purple-600 bg-slate-800/60"
                                     : "border-slate-700 bg-slate-800/20"
-                                }`}
+                                } ${hasPort ? "" : "opacity-60"}`}
                               >
-                                <label className="flex items-center gap-2 cursor-pointer">
+                                <label
+                                  className={`flex items-center gap-2 ${
+                                    hasPort ? "cursor-pointer" : "cursor-not-allowed"
+                                  }`}
+                                >
                                   <input
                                     type="checkbox"
                                     checked={selected}
+                                    disabled={!hasPort}
                                     onChange={(e) =>
                                       setBatchSelected((prev) => ({
                                         ...prev,
@@ -1743,35 +1782,20 @@ const Calibration = () => {
                                   <span className="text-sm text-slate-200">
                                     {slot.label}
                                   </span>
+                                  <span
+                                    className={`ml-auto text-xs font-mono ${
+                                      hasPort ? "text-slate-400" : "text-amber-400/80"
+                                    }`}
+                                  >
+                                    {hasPort
+                                      ? assignedPort
+                                      : savedButUndetected
+                                        ? "port not detected"
+                                        : "no port — assign above"}
+                                  </span>
                                 </label>
-                                {selected && (
-                                  <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-2">
-                                    <Select
-                                      value={input.port}
-                                      onValueChange={(v) =>
-                                        setBatchInputs((prev) => ({
-                                          ...prev,
-                                          [slot.key]: {
-                                            ...(prev[slot.key] ?? {
-                                              port: "",
-                                              configName: "",
-                                            }),
-                                            port: v,
-                                          },
-                                        }))
-                                      }
-                                    >
-                                      <SelectTrigger className="bg-slate-700 border-slate-600 text-white text-xs h-8">
-                                        <SelectValue placeholder="Port" />
-                                      </SelectTrigger>
-                                      <SelectContent className="bg-slate-800 border-slate-700 text-white">
-                                        {availablePorts.map((p) => (
-                                          <SelectItem key={p} value={p}>
-                                            {p}
-                                          </SelectItem>
-                                        ))}
-                                      </SelectContent>
-                                    </Select>
+                                {selected && hasPort && (
+                                  <div className="mt-2">
                                     <Input
                                       value={input.configName}
                                       onChange={(e) =>
@@ -1779,7 +1803,6 @@ const Calibration = () => {
                                           ...prev,
                                           [slot.key]: {
                                             ...(prev[slot.key] ?? {
-                                              port: "",
                                               configName: "",
                                             }),
                                             configName: e.target.value,
