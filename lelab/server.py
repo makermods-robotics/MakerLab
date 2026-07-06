@@ -1649,7 +1649,12 @@ for name in (
     "AVCaptureDeviceTypeExternalUnknown",   # macOS < 14
     "AVCaptureDeviceTypeExternal",          # macOS >= 14
     "AVCaptureDeviceTypeContinuityCamera",  # macOS >= 14
-    "AVCaptureDeviceTypeDeskViewCamera",    # macOS >= 13
+    # AVCaptureDeviceTypeDeskViewCamera (Continuity Desk View, macOS >= 13) is
+    # deliberately omitted: AVFoundation enumerates it, but OpenCV's index-based
+    # cv2.VideoCapture cannot open it ("out device of bound"), so listing it
+    # produced permanent /camera-preview 503s and a retry-looping frontend tile.
+    # Excluding it here also keeps the reported index aligned with cv2's own
+    # ordering, which doesn't count Desk View.
 ):
     loaded = {}
     try:
