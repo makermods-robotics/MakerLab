@@ -51,7 +51,7 @@ const MonitoringStats: React.FC<MonitoringStatsProps> = ({
 
   // Seed the curves from the persisted log on mount (and when the active job
   // changes). Without this, the chart starts empty on every page reload,
-  // after navigating away and back, or after a lelab restart re-attaches to
+  // after navigating away and back, or after a makerlab restart re-attaches to
   // a still-running job. Live-append continues from the last seeded step.
   useEffect(() => {
     let cancelled = false;

@@ -11,12 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for lelab.calibrate — manager initial state, request schema, and the
+"""Tests for makerlab.calibrate — manager initial state, request schema, and the
 post-recording centering guard."""
 
 from __future__ import annotations
 
-from lelab.calibrate import final_motor_ranges, find_off_center_joints
+from makerlab.calibrate import final_motor_ranges, find_off_center_joints
 
 
 def test_final_motor_ranges_forces_wrist_roll_full_turn() -> None:
@@ -38,7 +38,7 @@ def test_final_motor_ranges_forces_full_turn_even_if_unmoved() -> None:
 
 
 def test_calibration_status_defaults_to_idle() -> None:
-    from lelab.calibrate import CalibrationStatus
+    from makerlab.calibrate import CalibrationStatus
 
     status = CalibrationStatus()
     assert status.calibration_active is False
@@ -49,7 +49,7 @@ def test_calibration_status_defaults_to_idle() -> None:
 
 
 def test_calibration_request_dataclass_round_trip() -> None:
-    from lelab.calibrate import CalibrationRequest
+    from makerlab.calibrate import CalibrationRequest
 
     req = CalibrationRequest(
         device_type="teleop",
@@ -63,7 +63,7 @@ def test_calibration_request_dataclass_round_trip() -> None:
 
 
 def test_calibration_manager_starts_idle() -> None:
-    from lelab.calibrate import CalibrationManager
+    from makerlab.calibrate import CalibrationManager
 
     mgr = CalibrationManager()
     assert mgr.status.calibration_active is False
@@ -73,7 +73,7 @@ def test_calibration_manager_starts_idle() -> None:
 
 
 def test_calibration_manager_get_status_when_idle_returns_status_object() -> None:
-    from lelab.calibrate import CalibrationManager, CalibrationStatus
+    from makerlab.calibrate import CalibrationManager, CalibrationStatus
 
     mgr = CalibrationManager()
     s = mgr.get_status()
@@ -83,7 +83,7 @@ def test_calibration_manager_get_status_when_idle_returns_status_object() -> Non
 
 def test_calibration_manager_rejects_double_start_via_message() -> None:
     """When calibration_active is True, start_calibration returns success=False."""
-    from lelab.calibrate import CalibrationManager, CalibrationRequest
+    from makerlab.calibrate import CalibrationManager, CalibrationRequest
 
     mgr = CalibrationManager()
     mgr.status.calibration_active = True  # simulate already running
@@ -101,8 +101,8 @@ def test_start_calibration_refuses_existing_config_without_overwrite(tmp_lerobot
     file is silently clobbered, and no hardware is touched."""
     from pathlib import Path
 
-    from lelab.calibrate import CalibrationManager, CalibrationRequest
-    from lelab.utils import config as cfg
+    from makerlab.calibrate import CalibrationManager, CalibrationRequest
+    from makerlab.utils import config as cfg
 
     (Path(cfg.LEADER_CONFIG_PATH) / "taken.json").write_text("{}")
 

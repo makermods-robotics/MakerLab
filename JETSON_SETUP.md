@@ -1,6 +1,6 @@
-# Running LeLab on an NVIDIA Jetson
+# Running MakerLab on an NVIDIA Jetson
 
-Notes from bringing LeLab up on a headless Jetson used as a robot station
+Notes from bringing MakerLab up on a headless Jetson used as a robot station
 (arms + cameras plugged into the Jetson, UI opened from a laptop browser on
 the same LAN). Everything below was hit in practice; the happy path hides
 none of it.
@@ -22,13 +22,13 @@ uv venv --python 3.12                                # JetPack 6 ships 3.10; uv 
 uv pip install -e .                                  # GPU inference: install Jetson torch FIRST, see below
 
 # --- run (headless) ---
-.venv/bin/lelab --lan --offline
+.venv/bin/makerlab --lan --offline
 # browse from the laptop: http://<jetson-ip>:8000
 ```
 
 ## Python version vs. GPU torch — decide before installing
 
-LeLab and its pinned `lerobot` both require **Python ≥ 3.12**, but JetPack 6
+MakerLab and its pinned `lerobot` both require **Python ≥ 3.12**, but JetPack 6
 (Ubuntu 22.04) ships 3.10 and the community GPU torch wheels for JetPack 6
 (`pypi.jetson-ai-lab.io/jp6/...`) are **cp310 only**. These constraints are
 incompatible — pick a lane:
@@ -105,7 +105,7 @@ or unreliable network the install fails in several distinct ways:
   permissions**, not a wrong port: you must be in the `dialout` group
   (`crw-rw---- root dialout`). After `sudo usermod -aG dialout $USER`,
   **log out and back in** — group membership is stamped at login — and
-  restart the LeLab server from the *new* session, or the server process
+  restart the MakerLab server from the *new* session, or the server process
   keeps the old groups.
 - **Disable ModemManager.** Stock Ubuntu probes every new ACM device with
   AT commands for ~15–30 s after plug-in, holding the port busy — on a bus
@@ -125,7 +125,7 @@ or unreliable network the install fails in several distinct ways:
 
 ## Serving the UI over the LAN
 
-- Run the launcher with `--lan` (`.venv/bin/lelab --lan`) to bind 0.0.0.0
+- Run the launcher with `--lan` (`.venv/bin/makerlab --lan`) to bind 0.0.0.0
   and skip the open-a-local-browser step; add `--offline` for
   `HF_HUB_OFFLINE=1`. (Without `--lan`, the launcher binds 127.0.0.1 only —
   useless headless.) The committed `frontend/dist/` is served at `/`, so no

@@ -11,8 +11,8 @@ const Logo: React.FC<LogoProps> = ({
   iconOnly = false
 }) => {
   return <div className={cn("flex items-center gap-2", className)}>
-      <img src="/lovable-uploads/5e648747-34b7-4d8f-93fd-4dbd00aeeefc.png" alt="LeLab Logo" className="h-8 w-8" />
-      {!iconOnly && <span className="font-bold text-white text-2xl">LeLab</span>}
+      <img src="/lovable-uploads/5e648747-34b7-4d8f-93fd-4dbd00aeeefc.png" alt="MakerLab Logo" className="h-8 w-8" />
+      {!iconOnly && <span className="font-bold text-white text-2xl">MakerLab</span>}
     </div>;
 };
 

@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for lelab.datasets — local cache walk and merge logic."""
+"""Tests for makerlab.datasets — local cache walk and merge logic."""
 
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ def test_list_local_datasets_empty_when_root_missing(
     # "missing root" branch.
     import shutil
 
-    from lelab.datasets import list_local_datasets
+    from makerlab.datasets import list_local_datasets
 
     shutil.rmtree(tmp_lerobot_home)
     assert list_local_datasets() == []
@@ -50,7 +50,7 @@ def test_list_local_datasets_empty_when_root_missing(
 def test_list_local_datasets_finds_top_level_dataset(
     tmp_lerobot_home: Path,
 ) -> None:
-    from lelab.datasets import list_local_datasets
+    from makerlab.datasets import list_local_datasets
 
     _make_dataset(tmp_lerobot_home, "pusht")
     result = list_local_datasets()
@@ -61,7 +61,7 @@ def test_list_local_datasets_finds_top_level_dataset(
 def test_list_local_datasets_finds_nested_user_dataset(
     tmp_lerobot_home: Path,
 ) -> None:
-    from lelab.datasets import list_local_datasets
+    from makerlab.datasets import list_local_datasets
 
     _make_dataset(tmp_lerobot_home, "alice/pusht")
     result = list_local_datasets()
@@ -72,7 +72,7 @@ def test_list_local_datasets_finds_nested_user_dataset(
 def test_list_local_datasets_skips_non_dataset_dirs(
     tmp_lerobot_home: Path,
 ) -> None:
-    from lelab.datasets import list_local_datasets
+    from makerlab.datasets import list_local_datasets
 
     (tmp_lerobot_home / "calibration").mkdir(exist_ok=True)
     (tmp_lerobot_home / "ports").mkdir(exist_ok=True)
@@ -90,7 +90,7 @@ def test_list_local_datasets_hides_empty_dataset(
 ) -> None:
     """A 0-episode dataset (aborted recording) is hidden so it can't be picked
     for merging/training, where it only errors out."""
-    from lelab.datasets import list_local_datasets
+    from makerlab.datasets import list_local_datasets
 
     _make_dataset(tmp_lerobot_home, "has_eps", episodes=3)
     _make_dataset(tmp_lerobot_home, "empty_ds", episodes=0)
@@ -103,21 +103,21 @@ def test_list_local_datasets_hides_empty_dataset(
 def test_list_user_datasets_returns_empty_when_not_logged_in(
     tmp_lerobot_home: Path,
 ) -> None:
-    from lelab.datasets import list_user_datasets
+    from makerlab.datasets import list_user_datasets
 
-    with patch("lelab.datasets.cached_whoami", return_value=None):
+    with patch("makerlab.datasets.cached_whoami", return_value=None):
         assert list_user_datasets() == []
 
 
 def test_list_all_datasets_merges_hub_and_local(
     tmp_lerobot_home: Path,
 ) -> None:
-    from lelab.datasets import list_all_datasets
+    from makerlab.datasets import list_all_datasets
 
     _make_dataset(tmp_lerobot_home, "alice/pusht")
 
     with patch(
-        "lelab.datasets.list_user_datasets",
+        "makerlab.datasets.list_user_datasets",
         return_value=[
             {"repo_id": "alice/pusht", "last_modified": "2026-01-01T00:00:00Z", "private": False},
             {"repo_id": "alice/aloha", "last_modified": "2026-02-01T00:00:00Z", "private": True},
@@ -141,7 +141,7 @@ def _write_info(root: Path, repo_id: str, info: dict[str, Any]) -> Path:
 def test_get_local_dataset_info_returns_full_details(
     tmp_lerobot_home: Path,
 ) -> None:
-    from lelab.datasets import get_local_dataset_info
+    from makerlab.datasets import get_local_dataset_info
 
     d = _write_info(
         tmp_lerobot_home,
@@ -203,7 +203,7 @@ def test_get_local_dataset_info_returns_full_details(
 def test_get_local_dataset_info_reads_v2_tasks_jsonl(
     tmp_lerobot_home: Path,
 ) -> None:
-    from lelab.datasets import get_local_dataset_info
+    from makerlab.datasets import get_local_dataset_info
 
     d = _write_info(
         tmp_lerobot_home,
@@ -235,7 +235,7 @@ def test_get_local_dataset_info_single_task_missing_episode_metadata(
     tmp_lerobot_home: Path,
 ) -> None:
     """Task strings without episode metadata still render — counts degrade to 0."""
-    from lelab.datasets import get_local_dataset_info
+    from makerlab.datasets import get_local_dataset_info
 
     d = _write_info(
         tmp_lerobot_home,
@@ -257,7 +257,7 @@ def test_get_local_dataset_info_zero_episodes_and_no_cameras(
 ) -> None:
     """A 0-episode dataset is hidden from the listing but must still resolve
     here, so the frontend can render its warning badges."""
-    from lelab.datasets import get_local_dataset_info
+    from makerlab.datasets import get_local_dataset_info
 
     _write_info(
         tmp_lerobot_home,
@@ -281,7 +281,7 @@ def test_get_local_dataset_info_zero_episodes_and_no_cameras(
 def test_get_local_dataset_info_missing_dataset_returns_none(
     tmp_lerobot_home: Path,
 ) -> None:
-    from lelab.datasets import get_local_dataset_info
+    from makerlab.datasets import get_local_dataset_info
 
     assert get_local_dataset_info("nobody/nothing") is None
 
@@ -289,7 +289,7 @@ def test_get_local_dataset_info_missing_dataset_returns_none(
 def test_get_local_dataset_info_rejects_path_traversal(
     tmp_lerobot_home: Path,
 ) -> None:
-    from lelab.datasets import get_local_dataset_info
+    from makerlab.datasets import get_local_dataset_info
 
     # A dataset-shaped dir OUTSIDE the cache root must not be reachable.
     outside = tmp_lerobot_home.parent / "outside"
@@ -329,19 +329,19 @@ def test_datasets_info_endpoint(client: TestClient, tmp_lerobot_home: Path) -> N
 
 
 def _clear_hub_status_cache() -> None:
-    from lelab import datasets as ds
+    from makerlab import datasets as ds
 
     with ds._HUB_STATUS_LOCK:
         ds._HUB_STATUS_CACHE.clear()
 
 
 def test_get_hub_status_reports_on_hub_when_repo_exists() -> None:
-    from lelab import datasets as ds
+    from makerlab import datasets as ds
 
     _clear_hub_status_cache()
     fake_api = MagicMock()
     fake_api.repo_exists.return_value = True
-    with patch("lelab.datasets.shared_hf_api", return_value=fake_api):
+    with patch("makerlab.datasets.shared_hf_api", return_value=fake_api):
         result = ds.get_hub_status("alice/pick")
 
     assert result["status"] == "on_hub"
@@ -350,12 +350,12 @@ def test_get_hub_status_reports_on_hub_when_repo_exists() -> None:
 
 
 def test_get_hub_status_reports_local_only_when_repo_missing() -> None:
-    from lelab import datasets as ds
+    from makerlab import datasets as ds
 
     _clear_hub_status_cache()
     fake_api = MagicMock()
     fake_api.repo_exists.return_value = False
-    with patch("lelab.datasets.shared_hf_api", return_value=fake_api):
+    with patch("makerlab.datasets.shared_hf_api", return_value=fake_api):
         result = ds.get_hub_status("alice/pick")
 
     assert result["status"] == "local_only"
@@ -365,12 +365,12 @@ def test_get_hub_status_reports_local_only_when_repo_missing() -> None:
 def test_get_hub_status_degrades_to_unknown_offline() -> None:
     """A transport error (offline / rate-limited) degrades to "unknown" and is
     NOT cached, so the next check re-tries once connectivity returns."""
-    from lelab import datasets as ds
+    from makerlab import datasets as ds
 
     _clear_hub_status_cache()
     fake_api = MagicMock()
     fake_api.repo_exists.side_effect = OSError("no network")
-    with patch("lelab.datasets.shared_hf_api", return_value=fake_api):
+    with patch("makerlab.datasets.shared_hf_api", return_value=fake_api):
         result = ds.get_hub_status("alice/pick")
         assert result["status"] == "unknown"
         assert result["url"] is None
@@ -381,12 +381,12 @@ def test_get_hub_status_degrades_to_unknown_offline() -> None:
 
 def test_get_hub_status_caches_definitive_answer() -> None:
     """A definitive answer is memoized: repo_exists runs once across calls."""
-    from lelab import datasets as ds
+    from makerlab import datasets as ds
 
     _clear_hub_status_cache()
     fake_api = MagicMock()
     fake_api.repo_exists.return_value = True
-    with patch("lelab.datasets.shared_hf_api", return_value=fake_api):
+    with patch("makerlab.datasets.shared_hf_api", return_value=fake_api):
         ds.get_hub_status("alice/pick")
         ds.get_hub_status("alice/pick")
     assert fake_api.repo_exists.call_count == 1
@@ -395,12 +395,12 @@ def test_get_hub_status_caches_definitive_answer() -> None:
 def test_invalidate_hub_status_forces_recheck() -> None:
     """After invalidation (called on successful upload), the next check
     re-queries the Hub — so a "local_only" answer can flip to "on_hub"."""
-    from lelab import datasets as ds
+    from makerlab import datasets as ds
 
     _clear_hub_status_cache()
     fake_api = MagicMock()
     fake_api.repo_exists.return_value = False
-    with patch("lelab.datasets.shared_hf_api", return_value=fake_api):
+    with patch("makerlab.datasets.shared_hf_api", return_value=fake_api):
         assert ds.get_hub_status("alice/pick")["status"] == "local_only"
         # Simulate a successful upload: repo now exists, cache invalidated.
         ds.invalidate_hub_status("alice/pick")
@@ -413,7 +413,7 @@ def test_hub_status_endpoint(client: TestClient) -> None:
     _clear_hub_status_cache()
     fake_api = MagicMock()
     fake_api.repo_exists.return_value = True
-    with patch("lelab.datasets.shared_hf_api", return_value=fake_api):
+    with patch("makerlab.datasets.shared_hf_api", return_value=fake_api):
         resp = client.get("/datasets/hub-status", params={"repo_id": "alice/pick"})
     assert resp.status_code == 200
     body = resp.json()
@@ -428,7 +428,7 @@ def test_hub_status_endpoint(client: TestClient) -> None:
 def test_rename_local_dataset_moves_directory(tmp_lerobot_home: Path) -> None:
     """Happy path: the directory moves, only the name segment changes, and the
     returned repo id carries the fixed namespace prefix."""
-    from lelab.datasets import rename_local_dataset
+    from makerlab.datasets import rename_local_dataset
 
     _make_dataset(tmp_lerobot_home, "makermods/old_name", episodes=3)
 
@@ -464,7 +464,7 @@ def test_rename_endpoint_old_id_404s_new_id_resolves(client: TestClient, tmp_ler
 
 def test_rename_bare_dataset_keeps_no_namespace(tmp_lerobot_home: Path) -> None:
     """A dataset with no namespace renames to a bare name (no prefix invented)."""
-    from lelab.datasets import rename_local_dataset
+    from makerlab.datasets import rename_local_dataset
 
     _make_dataset(tmp_lerobot_home, "solo", episodes=1)
     assert rename_local_dataset("solo", "solo2") == "solo2"
@@ -472,7 +472,7 @@ def test_rename_bare_dataset_keeps_no_namespace(tmp_lerobot_home: Path) -> None:
 
 
 def test_rename_same_name_is_noop(tmp_lerobot_home: Path) -> None:
-    from lelab.datasets import rename_local_dataset
+    from makerlab.datasets import rename_local_dataset
 
     _make_dataset(tmp_lerobot_home, "makermods/keep", episodes=1)
     assert rename_local_dataset("makermods/keep", "keep") == "makermods/keep"
@@ -481,7 +481,7 @@ def test_rename_same_name_is_noop(tmp_lerobot_home: Path) -> None:
 def test_rename_rejects_invalid_name(tmp_lerobot_home: Path) -> None:
     """new_name is validated with the same rules as recording — a slash is a
     name segment, not a namespace, so it's rejected."""
-    from lelab.datasets import DatasetRenameError, rename_local_dataset
+    from makerlab.datasets import DatasetRenameError, rename_local_dataset
 
     _make_dataset(tmp_lerobot_home, "makermods/src", episodes=1)
 
@@ -494,7 +494,7 @@ def test_rename_rejects_invalid_name(tmp_lerobot_home: Path) -> None:
 
 
 def test_rename_missing_source_404s(tmp_lerobot_home: Path) -> None:
-    from lelab.datasets import DatasetRenameError, rename_local_dataset
+    from makerlab.datasets import DatasetRenameError, rename_local_dataset
 
     with pytest.raises(DatasetRenameError) as exc:
         rename_local_dataset("makermods/ghost", "new")
@@ -502,7 +502,7 @@ def test_rename_missing_source_404s(tmp_lerobot_home: Path) -> None:
 
 
 def test_rename_target_exists_409s(tmp_lerobot_home: Path) -> None:
-    from lelab.datasets import DatasetRenameError, rename_local_dataset
+    from makerlab.datasets import DatasetRenameError, rename_local_dataset
 
     _make_dataset(tmp_lerobot_home, "makermods/src", episodes=1)
     _make_dataset(tmp_lerobot_home, "makermods/taken", episodes=1)
@@ -517,7 +517,7 @@ def test_rename_target_exists_409s(tmp_lerobot_home: Path) -> None:
 
 def test_rename_rejects_path_traversal(tmp_lerobot_home: Path) -> None:
     """A source id escaping the cache root is refused before any move."""
-    from lelab.datasets import DatasetRenameError, rename_local_dataset
+    from makerlab.datasets import DatasetRenameError, rename_local_dataset
 
     outside = tmp_lerobot_home.parent / "outside"
     (outside / "meta").mkdir(parents=True)
@@ -531,8 +531,8 @@ def test_rename_rejects_path_traversal(tmp_lerobot_home: Path) -> None:
 def test_rename_busy_guard_recording(tmp_lerobot_home: Path) -> None:
     """A rename is refused (409) while a recording session writes to the id —
     matching either the stamped id or a rename of the still-writing base."""
-    from lelab import record as rec
-    from lelab.datasets import DatasetRenameError, rename_local_dataset
+    from makerlab import record as rec
+    from makerlab.datasets import DatasetRenameError, rename_local_dataset
 
     _make_dataset(tmp_lerobot_home, "makermods/live", episodes=1)
 
@@ -551,8 +551,8 @@ def test_rename_busy_guard_recording(tmp_lerobot_home: Path) -> None:
 
 def test_rename_busy_guard_merge(tmp_lerobot_home: Path) -> None:
     """A rename is refused while a merge is producing the target id."""
-    from lelab import merge
-    from lelab.datasets import DatasetRenameError, rename_local_dataset
+    from makerlab import merge
+    from makerlab.datasets import DatasetRenameError, rename_local_dataset
 
     _make_dataset(tmp_lerobot_home, "makermods/out", episodes=1)
 
@@ -567,8 +567,8 @@ def test_rename_busy_guard_merge(tmp_lerobot_home: Path) -> None:
 
 def test_rename_busy_guard_upload(tmp_lerobot_home: Path) -> None:
     """A rename is refused (409) while the dataset is being pushed to the Hub."""
-    from lelab import record as rec
-    from lelab.datasets import DatasetRenameError, rename_local_dataset
+    from makerlab import record as rec
+    from makerlab.datasets import DatasetRenameError, rename_local_dataset
 
     _make_dataset(tmp_lerobot_home, "makermods/uploading", episodes=1)
 
@@ -584,13 +584,13 @@ def test_rename_busy_guard_upload(tmp_lerobot_home: Path) -> None:
 
 def test_rename_busy_guard_local_training(tmp_lerobot_home: Path) -> None:
     """A rename is refused while a running local job trains on the id."""
-    from lelab.datasets import DatasetRenameError, rename_local_dataset
+    from makerlab.datasets import DatasetRenameError, rename_local_dataset
 
     _make_dataset(tmp_lerobot_home, "makermods/train_ds", episodes=1)
 
     # _dataset_in_use imports job_registry from .jobs lazily (datasets<->record
     # cycle), so patch it at its source module.
-    from lelab import jobs
+    from makerlab import jobs
 
     job = MagicMock()
     job.state = "running"
@@ -607,11 +607,11 @@ def test_rename_busy_guard_local_training(tmp_lerobot_home: Path) -> None:
 def test_rename_invalidates_hub_status_for_both_ids(tmp_lerobot_home: Path) -> None:
     """The cached Hub-existence answer is dropped for BOTH the old and new id,
     so the info card re-checks each after the move."""
-    from lelab import datasets as ds
+    from makerlab import datasets as ds
 
     _make_dataset(tmp_lerobot_home, "makermods/before", episodes=1)
 
-    with patch("lelab.datasets.invalidate_hub_status") as inval:
+    with patch("makerlab.datasets.invalidate_hub_status") as inval:
         ds.rename_local_dataset("makermods/before", "after")
 
     called = {c.args[0] for c in inval.call_args_list}

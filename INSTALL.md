@@ -1,4 +1,4 @@
-# Installing LeLab (macOS & Ubuntu/Jetson)
+# Installing MakerLab (macOS & Ubuntu/Jetson)
 
 Battle-tested install paths for the two machines we actually run: a macOS
 dev/operator machine and a headless Ubuntu box (NVIDIA Jetson) wired to the
@@ -31,14 +31,14 @@ speed-ups.
 
 ## Choose your install
 
-Two supported flavors — pick by whether you want to **run** LeLab or **hack on**
+Two supported flavors — pick by whether you want to **run** MakerLab or **hack on**
 it. They can even coexist on one machine (see the precedence note below).
 
 - **Tool install** — `uv tool install <local-path-or-git-url>`. One command,
-  no clone, a global `lelab`/`makerlabs`/`lelab-station` on your PATH. The
+  no clone, a global `makerlab`/`makerlabs`/`makerlab-station` on your PATH. The
   built frontend ships inside the wheel (`frontend/dist`), so a tool install is
   a fully runnable app — nothing to build. This is the way to just *use*
-  LeLab. Trade-offs:
+  MakerLab. Trade-offs:
   - It builds a **second full environment** (torch + lerobot duplicated in
     `~/.local/share/uv/tools/`). On a Jetson wanting CUDA torch this fights the
     GPU-torch install ordering — those stations should prefer the from-source
@@ -47,7 +47,7 @@ it. They can even coexist on one machine (see the precedence note below).
     does **not** track the repo — upgrade explicitly (see below).
   - `--dev` (Vite HMR) is unavailable: the frontend *source* and
     `package.json` aren't in the wheel, only the built `dist/`. Running
-    `lelab --dev` from a tool install fails fast and tells you to use a
+    `makerlab --dev` from a tool install fails fast and tells you to use a
     checkout.
 
   ```bash
@@ -56,14 +56,14 @@ it. They can even coexist on one machine (see the precedence note below).
   # or straight from git (needs github reachable; unreliable behind the GFW):
   uv tool install "git+https://github.com/makermods-robotics/MakerLab"
 
-  lelab                 # global command, runs from any directory
+  makerlab                 # global command, runs from any directory
   # upgrade to newer code — re-pull the source, then:
   uv tool install --reinstall /path/to/MakerLab
   ```
 
 - **From-source setup** — clone + editable venv (`uv pip install -e .`). This
-  is what you do to **develop** LeLab: edits to `lelab/` take effect on the
-  next run, and `lelab --dev` gives you Vite HMR + `uvicorn --reload`. On first
+  is what you do to **develop** MakerLab: edits to `makerlab/` take effect on the
+  next run, and `makerlab --dev` gives you Vite HMR + `uvicorn --reload`. On first
   launch the entry points self-install onto your PATH (see below). This is the
   flow the platform sections document next.
 
@@ -74,18 +74,18 @@ git clone https://github.com/makermods-robotics/MakerLab && cd MakerLab
 git lfs install --local && git lfs pull
 uv venv --python 3.12
 uv pip install -e .
-.venv/bin/lelab          # prod: serves built frontend on :8000
-.venv/bin/lelab --dev    # dev: Vite HMR on :8080 + uvicorn --reload
+.venv/bin/makerlab          # prod: serves built frontend on :8000
+.venv/bin/makerlab --dev    # dev: Vite HMR on :8080 + uvicorn --reload
 ```
 
-**When hacking on LeLab, invoke through `.venv/bin/...`.** A bare `lelab` on
+**When hacking on MakerLab, invoke through `.venv/bin/...`.** A bare `makerlab` on
 your PATH may resolve to a [tool install](#choose-your-install) — a frozen
 snapshot that won't reflect your edits — rather than this checkout's venv;
 explicit venv paths cannot lie. If a fix "isn't working", check where the
-command actually points (`which lelab`, then `readlink` it: a target under
+command actually points (`which makerlab`, then `readlink` it: a target under
 `~/.local/share/uv/tools/` is the tool install) and what's serving :8000
 (`lsof -i :8000`). To hand PATH back to the checkout, `uv tool uninstall
-lelab` and re-run `.venv/bin/lelab` once to re-link.
+makerlab` and re-run `.venv/bin/makerlab` once to re-link.
 
 macOS ships `openrsync`, not GNU rsync — use `--progress`, not
 `--info=progress2`, and `ssh <host> "mkdir -p <dir>"` before rsyncing into a
@@ -104,7 +104,7 @@ uv venv --python 3.12                       # JetPack 6 ships 3.10; uv fetches 3
 uv pip install -e .                         # GPU inference? read JETSON_SETUP.md FIRST
 
 # run headless — --lan binds 0.0.0.0, --offline sets HF_HUB_OFFLINE=1:
-.venv/bin/lelab --lan --offline          # or: .venv/bin/lelab-station
+.venv/bin/makerlab --lan --offline          # or: .venv/bin/makerlab-station
 # browse from any LAN machine: http://<jetson-ip>:8000
 ```
 
@@ -113,31 +113,31 @@ systemd unit so the server starts at power-on and restarts on crashes — no
 shell, no typing:
 
 ```bash
-sudo cp deploy/lelab-station.service /etc/systemd/system/
-sudo systemctl daemon-reload && sudo systemctl enable --now lelab-station
-journalctl -u lelab-station -f           # the server log
+sudo cp deploy/makerlab-station.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now makerlab-station
+journalctl -u makerlab-station -f           # the server log
 ```
 
-The unit runs `lelab-station` (the offline posture) as user `makermods` —
+The unit runs `makerlab-station` (the offline posture) as user `makermods` —
 edit the paths/user in the file if yours differ, and see the comments in
-[deploy/lelab-station.service](deploy/lelab-station.service) for the
+[deploy/makerlab-station.service](deploy/makerlab-station.service) for the
 online-posture variant and day-to-day systemctl commands.
 
 **Global commands without `.venv/bin/` prefixes:** three entry points live in
-the venv. `lelab` and its house name `makerlabs` are **the same command** —
-run LeLab in the friendly default posture (serve on localhost, open a browser,
-Hub reachable). `lelab-station` is the headless offline station posture
+the venv. `makerlab` and its house name `makerlabs` are **the same command** —
+run MakerLab in the friendly default posture (serve on localhost, open a browser,
+Hub reachable). `makerlab-station` is the headless offline station posture
 (`--lan --offline`; see below). They **self-install onto your PATH on first
-launch**: any run by full path (e.g. `.venv/bin/lelab`) symlinks all three
+launch**: any run by full path (e.g. `.venv/bin/makerlab`) symlinks all three
 into `~/.local/bin` — global command, no duplicated environment, always as
-fresh as the venv. From then on, bare `lelab` works from any directory. The step is
+fresh as the venv. From then on, bare `makerlab` works from any directory. The step is
 idempotent, repoints stale links from old clones, never clobbers a
-non-symlink, and can be disabled with `LELAB_NO_PATH_LINK=1`. The manual
+non-symlink, and can be disabled with `MAKERLAB_NO_PATH_LINK=1`. The manual
 equivalent, if you prefer to do it yourself:
 
 ```bash
 mkdir -p ~/.local/bin
-ln -sf ~/MakerLab/.venv/bin/lelab ~/MakerLab/.venv/bin/lelab-station \
+ln -sf ~/MakerLab/.venv/bin/makerlab ~/MakerLab/.venv/bin/makerlab-station \
        ~/MakerLab/.venv/bin/makerlabs ~/.local/bin/
 ```
 
@@ -147,8 +147,8 @@ install](#choose-your-install)) puts its *own* symlinks in the same
 recognises those and **leaves them alone** — it will not overwrite a tool
 install with a venv link. If both flavors are present for the same name, the
 one already on your PATH wins and the launcher logs which it is; pick
-deliberately with `uv tool uninstall lelab` (to prefer this checkout) or
-`LELAB_NO_PATH_LINK=1` (to keep the tool install and silence the self-link).
+deliberately with `uv tool uninstall makerlab` (to prefer this checkout) or
+`MAKERLAB_NO_PATH_LINK=1` (to keep the tool install and silence the self-link).
 
 The `usermod` only takes effect on a fresh login, and the server inherits its
 groups from the shell that launched it — log out, back in, *then* start the
@@ -218,7 +218,7 @@ client flag fixes that. Use a mirror, a proxy, or LAN seeding (below).
 
 **Problem:** pip/uv installs take minutes per package.
 **Solution:** use a domestic full PyPI mirror (TUNA). Set it in the shell
-that launches the server too — lelab's in-app policy installer inherits it:
+that launches the server too — makerlab's in-app policy installer inherits it:
 
 ```bash
 export PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
@@ -399,7 +399,7 @@ Remember services don't read `~/.bashrc` — consumers still need the
 ### Skip the internet: LAN seeding
 
 A second machine that already has the bits beats any mirror. These are plain
-directory copies — lerobot/lelab discover content by scanning; no
+directory copies — lerobot/makerlab discover content by scanning; no
 registration step except where noted.
 
 **Problem:** the station can't pull code from GitHub (blocked/throttled).

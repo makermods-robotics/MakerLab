@@ -23,7 +23,7 @@ export interface ApiRequestOptions {
 }
 
 /**
- * Performs a request against the lelab backend and parses the JSON response.
+ * Performs a request against the makerlab backend and parses the JSON response.
  * Throws ApiError with FastAPI's `detail` field on non-2xx, or on JSON parse
  * failure. Use this in place of ad-hoc `r.ok` / `r.json()` branching.
  */

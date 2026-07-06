@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for lelab.merge — the request guards that run before any subprocess."""
+"""Tests for makerlab.merge — the request guards that run before any subprocess."""
 
 from __future__ import annotations
 
@@ -45,7 +45,7 @@ def _write_info(
 
 
 def test_merge_incompatibility_identical_returns_none(tmp_lerobot_home: Path) -> None:
-    from lelab.merge import _merge_incompatibility
+    from makerlab.merge import _merge_incompatibility
 
     _write_info(tmp_lerobot_home, "a/one", cameras=("front", "wrist"))
     _write_info(tmp_lerobot_home, "a/two", cameras=("front", "wrist"))
@@ -53,7 +53,7 @@ def test_merge_incompatibility_identical_returns_none(tmp_lerobot_home: Path) ->
 
 
 def test_merge_incompatibility_different_cameras(tmp_lerobot_home: Path) -> None:
-    from lelab.merge import _merge_incompatibility
+    from makerlab.merge import _merge_incompatibility
 
     _write_info(tmp_lerobot_home, "a/one", cameras=("front", "wrist"))
     _write_info(tmp_lerobot_home, "a/two", cameras=("front", "wrist", "side"))
@@ -64,7 +64,7 @@ def test_merge_incompatibility_different_cameras(tmp_lerobot_home: Path) -> None
 
 
 def test_merge_incompatibility_different_fps(tmp_lerobot_home: Path) -> None:
-    from lelab.merge import _merge_incompatibility
+    from makerlab.merge import _merge_incompatibility
 
     _write_info(tmp_lerobot_home, "a/one", fps=30)
     _write_info(tmp_lerobot_home, "a/two", fps=50)
@@ -75,7 +75,7 @@ def test_merge_incompatibility_different_fps(tmp_lerobot_home: Path) -> None:
 
 
 def test_merge_incompatibility_different_feature_shape(tmp_lerobot_home: Path) -> None:
-    from lelab.merge import _merge_incompatibility
+    from makerlab.merge import _merge_incompatibility
 
     _write_info(tmp_lerobot_home, "a/one", action_shape=(6,))
     _write_info(tmp_lerobot_home, "a/two", action_shape=(7,))
@@ -85,7 +85,7 @@ def test_merge_incompatibility_different_feature_shape(tmp_lerobot_home: Path) -
 
 
 def test_merge_incompatibility_skips_when_not_local(tmp_lerobot_home: Path) -> None:
-    from lelab.merge import _merge_incompatibility
+    from makerlab.merge import _merge_incompatibility
 
     # Only one source is present locally → can't compare → don't block.
     _write_info(tmp_lerobot_home, "a/one", cameras=("front", "wrist", "side"))
@@ -93,7 +93,7 @@ def test_merge_incompatibility_skips_when_not_local(tmp_lerobot_home: Path) -> N
 
 
 def test_merge_rejects_fewer_than_two_sources() -> None:
-    from lelab.merge import MergeManager, MergeRequest
+    from makerlab.merge import MergeManager, MergeRequest
 
     mgr = MergeManager()
     res = mgr.start(MergeRequest(source_repo_ids=["a/one"], output_repo_id="a/merged"))
@@ -103,29 +103,25 @@ def test_merge_rejects_fewer_than_two_sources() -> None:
 
 
 def test_merge_rejects_output_matching_a_source() -> None:
-    from lelab.merge import MergeManager, MergeRequest
+    from makerlab.merge import MergeManager, MergeRequest
 
     mgr = MergeManager()
-    res = mgr.start(
-        MergeRequest(source_repo_ids=["a/one", "a/two"], output_repo_id="a/one")
-    )
+    res = mgr.start(MergeRequest(source_repo_ids=["a/one", "a/two"], output_repo_id="a/one"))
     assert res["started"] is False
     assert mgr.state == "idle"
 
 
 def test_merge_rejects_blank_output() -> None:
-    from lelab.merge import MergeManager, MergeRequest
+    from makerlab.merge import MergeManager, MergeRequest
 
     mgr = MergeManager()
-    res = mgr.start(
-        MergeRequest(source_repo_ids=["a/one", "a/two"], output_repo_id="  ")
-    )
+    res = mgr.start(MergeRequest(source_repo_ids=["a/one", "a/two"], output_repo_id="  "))
     assert res["started"] is False
     assert mgr.state == "idle"
 
 
 def test_merge_status_shape_when_idle() -> None:
-    from lelab.merge import MergeManager
+    from makerlab.merge import MergeManager
 
     status = MergeManager().get_status()
     assert status["state"] == "idle"
@@ -162,7 +158,7 @@ def _write_dataset_tree(cache: Path, repo_id: str, *, total_episodes: int = 1) -
 
 
 def test_merge_source_problem_valid_returns_none(tmp_lerobot_home: Path) -> None:
-    from lelab.merge import _merge_source_problem
+    from makerlab.merge import _merge_source_problem
 
     _write_dataset_tree(tmp_lerobot_home, "a/one")
     _write_dataset_tree(tmp_lerobot_home, "a/two")
@@ -170,7 +166,7 @@ def test_merge_source_problem_valid_returns_none(tmp_lerobot_home: Path) -> None
 
 
 def test_merge_source_problem_missing_tasks_parquet(tmp_lerobot_home: Path) -> None:
-    from lelab.merge import _merge_source_problem
+    from makerlab.merge import _merge_source_problem
 
     _write_dataset_tree(tmp_lerobot_home, "a/one")
     _write_dataset_tree(tmp_lerobot_home, "a/two")
@@ -184,7 +180,7 @@ def test_merge_source_problem_missing_tasks_parquet(tmp_lerobot_home: Path) -> N
 
 
 def test_merge_source_problem_missing_data_parquet(tmp_lerobot_home: Path) -> None:
-    from lelab.merge import _merge_source_problem
+    from makerlab.merge import _merge_source_problem
 
     _write_dataset_tree(tmp_lerobot_home, "a/one")
     _write_dataset_tree(tmp_lerobot_home, "a/two")
@@ -196,14 +192,12 @@ def test_merge_source_problem_missing_data_parquet(tmp_lerobot_home: Path) -> No
     assert "incomplete" in msg.lower() or "corrupt" in msg.lower()
 
 
-def test_merge_source_problem_not_found_on_hub(
-    tmp_lerobot_home: Path, monkeypatch
-) -> None:
+def test_merge_source_problem_not_found_on_hub(tmp_lerobot_home: Path, monkeypatch) -> None:
     from unittest.mock import MagicMock
 
     from huggingface_hub.utils import RepositoryNotFoundError
 
-    from lelab import merge
+    from makerlab import merge
 
     _write_dataset_tree(tmp_lerobot_home, "a/one")
 
@@ -218,10 +212,8 @@ def test_merge_source_problem_not_found_on_hub(
     assert "hub" in msg.lower()
 
 
-def test_merge_source_problem_offline_does_not_block(
-    tmp_lerobot_home: Path, monkeypatch
-) -> None:
-    from lelab import merge
+def test_merge_source_problem_offline_does_not_block(tmp_lerobot_home: Path, monkeypatch) -> None:
+    from makerlab import merge
 
     _write_dataset_tree(tmp_lerobot_home, "a/one")
 

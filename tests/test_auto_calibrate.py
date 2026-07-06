@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for lelab.auto_calibrate — subprocess manager (process mocked)."""
+"""Tests for makerlab.auto_calibrate — subprocess manager (process mocked)."""
 
 from __future__ import annotations
 
@@ -21,8 +21,8 @@ import threading
 
 import pytest
 
-import lelab.auto_calibrate as auto_calibrate
-from lelab.vendor.feetech_autocal import auto_calibrate_script as acs
+import makerlab.auto_calibrate as auto_calibrate
+from makerlab.vendor.feetech_autocal import auto_calibrate_script as acs
 
 
 class StoppableFakeProc:
@@ -68,7 +68,7 @@ def _start_with_fake_proc(
     monkeypatch: pytest.MonkeyPatch, proc: StoppableFakeProc, released_ports: list[str]
 ):
     """Start a manager on a fake process, with the fallback release recorded."""
-    import lelab.auto_calibrate as ac
+    import makerlab.auto_calibrate as ac
 
     popen_kwargs: dict = {}
 
@@ -96,7 +96,7 @@ def _join_stop(mgr) -> None:
 
 
 def test_auto_calibration_rejects_bad_device() -> None:
-    import lelab.auto_calibrate as ac
+    import makerlab.auto_calibrate as ac
 
     mgr = ac.AutoCalibrationManager()
     result = mgr.start(ac.AutoCalibrationRequest(device_type="bogus", port="/dev/x", config_file="c"))
@@ -104,7 +104,7 @@ def test_auto_calibration_rejects_bad_device() -> None:
 
 
 def test_auto_calibration_rejects_empty_port() -> None:
-    import lelab.auto_calibrate as ac
+    import makerlab.auto_calibrate as ac
 
     mgr = ac.AutoCalibrationManager()
     result = mgr.start(ac.AutoCalibrationRequest(device_type="robot", port="", config_file="c"))
@@ -112,7 +112,7 @@ def test_auto_calibration_rejects_empty_port() -> None:
 
 
 def test_auto_calibration_status_idle() -> None:
-    import lelab.auto_calibrate as ac
+    import makerlab.auto_calibrate as ac
 
     status = ac.AutoCalibrationManager().get_status()
     assert status["status"] == "idle"
@@ -124,7 +124,7 @@ def test_auto_calibration_launches_captures_logs_and_completes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A successful subprocess run captures its stdout and ends 'completed'."""
-    import lelab.auto_calibrate as ac
+    import makerlab.auto_calibrate as ac
 
     class FakeProc:
         def __init__(self) -> None:
@@ -207,7 +207,7 @@ def test_stop_surfaces_failed_torque_release(
 ) -> None:
     """When the fallback release fails, the status must end terminal (not
     frozen) with an unmistakable torque warning for the UI."""
-    import lelab.auto_calibrate as ac
+    import makerlab.auto_calibrate as ac
 
     proc = StoppableFakeProc(ignore_sigterm=True)
     released: list[str] = []
@@ -355,7 +355,7 @@ def test_completed_during_grace_keeps_file(monkeypatch: pytest.MonkeyPatch, tmp_
 
 
 def test_release_arm_torque_disables_all_motors(monkeypatch: pytest.MonkeyPatch) -> None:
-    import lelab.auto_calibrate as ac
+    import makerlab.auto_calibrate as ac
 
     class _FakeReleaseBus:
         instances: list[_FakeReleaseBus] = []
@@ -613,9 +613,7 @@ def test_graceful_stop_diagnoses_a_stalled_return(
     assert "ticks" in out
 
 
-def test_graceful_stop_diagnoses_a_missing_pose(
-    no_sleep: list[float], capsys: pytest.CaptureFixture
-) -> None:
+def test_graceful_stop_diagnoses_a_missing_pose(no_sleep: list[float], capsys: pytest.CaptureFixture) -> None:
     bus = _FakeScriptBus()
 
     acs._graceful_stop(bus, {})
@@ -741,7 +739,7 @@ def test_stop_sequence_budget_stays_inside_sigterm_grace() -> None:
 
 
 def test_release_arm_torque_reports_connect_failure(monkeypatch: pytest.MonkeyPatch) -> None:
-    import lelab.auto_calibrate as ac
+    import makerlab.auto_calibrate as ac
 
     class _DeadBus:
         def __init__(self, port: str, motors: dict) -> None:

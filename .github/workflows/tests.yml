@@ -24,7 +24,7 @@ on:
     branches:
       - main
     paths:
-      - "lelab/**"
+      - "makerlab/**"
       - "tests/**"
       - ".github/workflows/tests.yml"
       - "pyproject.toml"
@@ -32,7 +32,7 @@ on:
     branches:
       - main
     paths:
-      - "lelab/**"
+      - "makerlab/**"
       - "tests/**"
       - ".github/workflows/tests.yml"
       - "pyproject.toml"
@@ -68,7 +68,7 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
 
-      - name: Install lelab + test extras
+      - name: Install makerlab + test extras
         run: pip install -e ".[test]"
 
       - name: Run pytest
