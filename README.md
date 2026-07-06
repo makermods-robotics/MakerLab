@@ -16,16 +16,24 @@ MakerLab is a fork of Hugging Face's **[LeLab](https://github.com/huggingface/le
 
 ## Quick Start
 
-Install from source (requires Python ≥ 3.12):
+Requires Python ≥ 3.12 and [uv](https://docs.astral.sh/uv/). Just want to run it? One line, no clone:
+
+```bash
+uv tool install "git+https://github.com/makermods-robotics/MakerLab"
+makerlab            # serves the UI + API on :8000, opens your browser
+```
+
+Working on the code? Clone and do an editable install instead:
 
 ```bash
 git clone https://github.com/makermods-robotics/MakerLab
 cd MakerLab
-pip install -e .
-makerlab            # serves the UI + API on :8000, opens your browser
+uv venv --python 3.12
+uv pip install -e .
+.venv/bin/makerlab            # serves the UI + API on :8000, opens your browser
 ```
 
-The package and CLI are named `makerlab`.
+The package and CLI are named `makerlab`. See [INSTALL.md](INSTALL.md) for platform-specific setup (macOS, Jetson) and network tips.
 
 ## What you can do
 
