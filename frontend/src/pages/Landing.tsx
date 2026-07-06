@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import { ChevronsUpDown, GitMerge, Plus } from "lucide-react";
+import { ChevronsUpDown, GitMerge, HardDrive, Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
 import LandingTopBar from "@/components/landing/LandingTopBar";
@@ -11,6 +11,7 @@ import DatasetPicker from "@/components/landing/DatasetPicker";
 import CreateDatasetDialog from "@/components/landing/CreateDatasetDialog";
 import DatasetInfoCard from "@/components/landing/DatasetInfoCard";
 import MergeDatasetsDialog from "@/components/landing/MergeDatasetsDialog";
+import ManageCachesDialog from "@/components/landing/ManageCachesDialog";
 import JobsSection from "@/components/jobs/JobsSection";
 import { POLICY_TYPE_OPTIONS } from "@/components/training/types";
 import {
@@ -65,6 +66,7 @@ const Landing = () => {
     refresh: refreshDatasets,
   } = useDatasets();
   const [showMergeDialog, setShowMergeDialog] = useState(false);
+  const [showManageCachesDialog, setShowManageCachesDialog] = useState(false);
   const [showCreateDatasetDialog, setShowCreateDatasetDialog] = useState(false);
   const [pendingDeleteDataset, setPendingDeleteDataset] =
     useState<DatasetItem | null>(null);
@@ -389,13 +391,22 @@ const Landing = () => {
                   }}
                 />
               )}
-              <button
-                type="button"
-                onClick={() => setShowMergeDialog(true)}
-                className="self-start text-xs text-gray-400 hover:text-white transition-colors inline-flex items-center gap-1"
-              >
-                <GitMerge className="h-3.5 w-3.5" /> Merge datasets…
-              </button>
+              <div className="flex items-center gap-4">
+                <button
+                  type="button"
+                  onClick={() => setShowMergeDialog(true)}
+                  className="text-xs text-gray-400 hover:text-white transition-colors inline-flex items-center gap-1"
+                >
+                  <GitMerge className="h-3.5 w-3.5" /> Merge datasets…
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowManageCachesDialog(true)}
+                  className="text-xs text-gray-400 hover:text-white transition-colors inline-flex items-center gap-1"
+                >
+                  <HardDrive className="h-3.5 w-3.5" /> Manage cached datasets…
+                </button>
+              </div>
             </div>
             <div className="bg-gray-800 rounded-lg border border-gray-700 p-3 flex flex-col gap-2">
               <h3 className="font-semibold text-lg text-center h-10 flex items-center justify-center">
@@ -484,6 +495,13 @@ const Landing = () => {
         onOpenChange={setShowMergeDialog}
         datasets={datasets}
         onMerged={refreshDatasets}
+      />
+
+      <ManageCachesDialog
+        open={showManageCachesDialog}
+        onOpenChange={setShowManageCachesDialog}
+        datasets={datasets}
+        onCleared={refreshDatasets}
       />
 
       <CreateDatasetDialog

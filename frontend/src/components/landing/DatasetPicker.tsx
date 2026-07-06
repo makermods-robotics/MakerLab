@@ -156,8 +156,9 @@ const DatasetPicker: React.FC<DatasetPickerProps> = ({
   const canOpenCustom = isRepoId && !matchesExisting;
 
   // Strict partition by Hub status (user-decided): Local = not yet on the
-  // Hub; Hugging Face = on the Hub, whether or not a local copy also exists
-  // ("both" rows keep a "local copy" badge and their local-copy trash).
+  // Hub; Hugging Face = on the Hub, whether or not a local copy also exists.
+  // Clearing the local cache of a "both" dataset lives in the "Manage cached
+  // datasets" dialog, not inline here.
   const localDatasets = datasets.filter((d) => d.source === "local");
   const hubDatasets = datasets.filter(
     (d) => d.source === "hub" || d.source === "both",
@@ -193,11 +194,6 @@ const DatasetPicker: React.FC<DatasetPickerProps> = ({
       className="text-white aria-selected:bg-gray-700"
     >
       <span className="flex-1 truncate">{d.repo_id}</span>
-      {/* In the Hugging Face section, "on Hub" is implied by placement — the
-          useful signal for a "both" row is that a local working copy exists. */}
-      {d.source === "both" && (
-        <span className="text-xs text-gray-400 mr-2">local copy</span>
-      )}
       {d.private && <span className="text-xs text-amber-400">private</span>}
       {/* Upload to Hub — local rows only (a "both" row is already on the Hub).
           Opens the same confirm popover the info card uses; the row shows a
@@ -205,16 +201,14 @@ const DatasetPicker: React.FC<DatasetPickerProps> = ({
       {d.source === "local" && (
         <RowUploadButton repoId={d.repo_id} onUploaded={() => onUploaded?.(d)} />
       )}
-      {onDelete && (d.source === "local" || d.source === "both") && (
+      {/* Trash on local-only rows: deletes the only copy of a not-yet-uploaded
+          dataset. "both" rows have no trash here — clearing their local cache
+          lives in the "Manage cached datasets" dialog. */}
+      {onDelete && d.source === "local" && (
         <button
           type="button"
           aria-label={`Delete ${d.repo_id}`}
-          // On a "both" row (HF section) this deletes only the local copy.
-          title={
-            d.source === "both"
-              ? "Delete local copy — the Hub copy stays"
-              : "Delete dataset"
-          }
+          title="Delete dataset"
           className="ml-2 shrink-0 text-gray-500 hover:text-red-400"
           // stop cmdk from treating the click as a selection of the row
           onMouseDown={(e) => {
