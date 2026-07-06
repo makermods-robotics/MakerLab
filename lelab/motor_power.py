@@ -102,6 +102,37 @@ def _device_buses(device) -> list:
     return [target.bus for target in targets if getattr(target, "bus", None) is not None]
 
 
+def _for_each_motor(device, action, on_fail_message, on_success_message=None) -> list[str]:
+    """Apply ``action`` to every motor of every bus on ``device``, tolerating
+    per-motor failures.
+
+    For each bus: run ``action(bus, motor)`` on each motor, collecting
+    "<motor>: <exc>" for the ones that raise. When any failed, build a warning
+    via ``on_fail_message(port, failed)``, log it at WARNING, and add it to the
+    returned list; otherwise (and only when supplied) log
+    ``on_success_message(port)`` at INFO. ``port`` is the bus's ``.port`` or
+    "unknown port". Never raises — this is the shared, failure-tolerant
+    scaffold behind apply_motor_power / clear_goal_velocity. Returns the
+    accumulated warning messages (empty when every motor succeeded).
+    """
+    warnings: list[str] = []
+    for bus in _device_buses(device):
+        failed: list[str] = []
+        for motor in getattr(bus, "motors", None) or {}:
+            try:
+                action(bus, motor)
+            except Exception as e:
+                failed.append(f"{motor}: {e}")
+        port = getattr(bus, "port", None) or "unknown port"
+        if failed:
+            message = on_fail_message(port, failed)
+            logger.warning(message)
+            warnings.append(message)
+        elif on_success_message is not None:
+            logger.info(on_success_message(port))
+    return warnings
+
+
 def apply_motor_power(device, percent: object, label: str = "follower arm") -> list[str]:
     """Write the session torque limit to every motor of a FOLLOWER device.
 
@@ -117,26 +148,20 @@ def apply_motor_power(device, percent: object, label: str = "follower arm") -> l
     """
     percent = clamp_motor_power(percent)
     value = percent * _TORQUE_LIMIT_PER_PERCENT
-    warnings: list[str] = []
-    for bus in _device_buses(device):
-        failed: list[str] = []
-        for motor in getattr(bus, "motors", None) or {}:
-            try:
-                bus.write(_TORQUE_LIMIT_REGISTER, motor, value, normalize=False, num_retry=2)
-            except Exception as e:
-                failed.append(f"{motor}: {e}")
-        port = getattr(bus, "port", None) or "unknown port"
-        if failed:
-            message = (
-                f"Could not set motor power to {percent}% on {port} "
-                f"({label}; failed motors — {'; '.join(failed)}). "
-                "Those motors run at their previous limit (full power after a power-up) for this session."
-            )
-            logger.warning(message)
-            warnings.append(message)
-        else:
-            logger.info(f"Motor power set to {percent}% (Torque_Limit={value}) on {port} ({label})")
-    return warnings
+
+    def _fail(port, failed):
+        return (
+            f"Could not set motor power to {percent}% on {port} "
+            f"({label}; failed motors — {'; '.join(failed)}). "
+            "Those motors run at their previous limit (full power after a power-up) for this session."
+        )
+
+    return _for_each_motor(
+        device,
+        lambda bus, motor: bus.write(_TORQUE_LIMIT_REGISTER, motor, value, normalize=False, num_retry=2),
+        _fail,
+        lambda port: f"Motor power set to {percent}% (Torque_Limit={value}) on {port} ({label})",
+    )
 
 
 def clear_goal_velocity(device, label: str = "follower arm") -> list[str]:
@@ -157,26 +182,20 @@ def clear_goal_velocity(device, label: str = "follower arm") -> list[str]:
     degraded but safe outcome that must not abort the session start). Returns
     the warning messages so callers can surface them.
     """
-    warnings: list[str] = []
-    for bus in _device_buses(device):
-        failed: list[str] = []
-        for motor in getattr(bus, "motors", None) or {}:
-            try:
-                bus.write(_GOAL_VELOCITY_REGISTER, motor, 0, normalize=False, num_retry=2)
-            except Exception as e:
-                failed.append(f"{motor}: {e}")
-        port = getattr(bus, "port", None) or "unknown port"
-        if failed:
-            message = (
-                f"Could not clear the speed cap (Goal_Velocity) on {port} "
-                f"({label}; failed motors — {'; '.join(failed)}). "
-                "Those motors keep any leftover speed cap from a previous session for this run."
-            )
-            logger.warning(message)
-            warnings.append(message)
-        else:
-            logger.info(f"Speed cap cleared (Goal_Velocity=0) on {port} ({label})")
-    return warnings
+
+    def _fail(port, failed):
+        return (
+            f"Could not clear the speed cap (Goal_Velocity) on {port} "
+            f"({label}; failed motors — {'; '.join(failed)}). "
+            "Those motors keep any leftover speed cap from a previous session for this run."
+        )
+
+    return _for_each_motor(
+        device,
+        lambda bus, motor: bus.write(_GOAL_VELOCITY_REGISTER, motor, 0, normalize=False, num_retry=2),
+        _fail,
+        lambda port: f"Speed cap cleared (Goal_Velocity=0) on {port} ({label})",
+    )
 
 
 def voltage_from_raw(raw: object) -> float:
