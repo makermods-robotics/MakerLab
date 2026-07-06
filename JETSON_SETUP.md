@@ -22,7 +22,7 @@ uv venv --python 3.12                                # JetPack 6 ships 3.10; uv 
 uv pip install -e .                                  # GPU inference: install Jetson torch FIRST, see below
 
 # --- run (headless) ---
-.venv/bin/lelab --lan --offline
+.venv/bin/makerlab --lan --offline
 # browse from the laptop: http://<jetson-ip>:8000
 ```
 
@@ -125,7 +125,7 @@ or unreliable network the install fails in several distinct ways:
 
 ## Serving the UI over the LAN
 
-- Run the launcher with `--lan` (`.venv/bin/lelab --lan`) to bind 0.0.0.0
+- Run the launcher with `--lan` (`.venv/bin/makerlab --lan`) to bind 0.0.0.0
   and skip the open-a-local-browser step; add `--offline` for
   `HF_HUB_OFFLINE=1`. (Without `--lan`, the launcher binds 127.0.0.1 only —
   useless headless.) The committed `frontend/dist/` is served at `/`, so no

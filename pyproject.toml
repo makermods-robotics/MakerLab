@@ -35,15 +35,12 @@ test = [
 ]
 
 [project.scripts]
-lelab = "lelab.scripts.lelab:main"
+# The installed command is `makerlab`. The Python package/module stays
+# `lelab` (imports, the wheel, `lelab.server:app`) — only the CLI is rebranded.
+makerlab = "lelab.scripts.lelab:main"
 # Headless robot-station posture as an installed command: --lan --offline
 # defaults, extra args pass through. What the systemd unit runs.
-lelab-station = "lelab.scripts.lelab:station"
-# House name for plain LeLab — `makerlabs` at any prompt runs the friendly
-# default (localhost, opens a browser, Hub reachable), identical to `lelab`.
-# For the headless offline station posture use `lelab-station` (or pass
-# `makerlabs --lan --offline` ad hoc).
-makerlabs = "lelab.scripts.lelab:main"
+makerlab-station = "lelab.scripts.lelab:station"
 
 [tool.setuptools.packages.find]
 where = ["."]

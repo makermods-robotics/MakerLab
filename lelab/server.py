@@ -2153,5 +2153,5 @@ if FRONTEND_DIST.exists():
     app.mount("/", SPAStaticFiles(directory=FRONTEND_DIST, html=True), name="frontend")
 else:
     logger.warning(
-        f"frontend/dist not found at {FRONTEND_DIST}; run `npm run build` in frontend/ or use `lelab --dev`."
+        f"frontend/dist not found at {FRONTEND_DIST}; run `npm run build` in frontend/ or use `makerlab --dev`."
     )

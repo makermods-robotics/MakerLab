@@ -45,7 +45,7 @@ FRONTEND_DIST = FRONTEND_PATH / "dist"
 FRONTEND_PACKAGE_JSON = FRONTEND_PATH / "package.json"
 BACKEND_PORT = 8000
 FRONTEND_DEV_PORT = 8080
-ENTRY_POINT_NAMES = ("lelab", "lelab-station", "makerlabs")
+ENTRY_POINT_NAMES = ("makerlab", "makerlab-station")
 # `uv tool install` lays down a symlink in ~/.local/bin that resolves into
 # this tree (verified empirically: ~/.local/bin/<exe> ->
 # ~/.local/share/uv/tools/<tool>/bin/<exe>). We use containment under this
@@ -170,7 +170,7 @@ def _run_prod(lan: bool = False):
     """
     if not FRONTEND_DIST.exists():
         logger.error(f"❌ Built frontend not found at {FRONTEND_DIST}")
-        logger.error("   Run `npm run build` in frontend/ first, or use `lelab --dev`.")
+        logger.error("   Run `npm run build` in frontend/ first, or use `makerlab --dev`.")
         sys.exit(1)
 
     host = "0.0.0.0" if lan else "127.0.0.1"  # noqa: S104
@@ -203,7 +203,7 @@ def _run_dev():
         logger.error("❌ Dev mode needs the git checkout — %s not found.", FRONTEND_PACKAGE_JSON)
         logger.error(
             "   You're likely running a `uv tool install` copy (frontend source "
-            "isn't shipped in the wheel). Clone the repo and run `lelab --dev` "
+            "isn't shipped in the wheel). Clone the repo and run `makerlab --dev` "
             "from there — see INSTALL.md."
         )
         sys.exit(1)
@@ -289,7 +289,7 @@ def _run_dev():
 
 
 def main():
-    parser = argparse.ArgumentParser(prog="lelab", description="Run LeLab")
+    parser = argparse.ArgumentParser(prog="makerlab", description="Run MakerLab")
     parser.add_argument(
         "--dev",
         action="store_true",
@@ -328,10 +328,10 @@ def main():
 
 
 def station():
-    """Entry point for headless robot stations: `lelab --lan --offline`.
+    """Entry point for headless robot stations: `makerlab --lan --offline`.
 
-    Installed as `lelab-station` (see pyproject.toml) so the posture is a
-    first-class command — and what deploy/lelab-station.service runs at boot.
+    Installed as `makerlab-station` (see pyproject.toml) so the posture is a
+    first-class command — and what deploy/makerlab-station.service runs at boot.
     Extra CLI args still pass through.
     """
     sys.argv = [sys.argv[0], "--lan", "--offline", *sys.argv[1:]]

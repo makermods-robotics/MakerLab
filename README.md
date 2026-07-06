@@ -22,10 +22,10 @@ Install from source (requires Python ≥ 3.12):
 git clone https://github.com/makermods-robotics/MakerLab
 cd MakerLab
 pip install -e .
-lelab            # serves the UI + API on :8000, opens your browser
+makerlab         # serves the UI + API on :8000, opens your browser
 ```
 
-The package and CLI keep the upstream `lelab` name.
+The CLI command is `makerlab`; the Python package/module keeps the upstream `lelab` name.
 
 ## What you can do
 
@@ -103,7 +103,7 @@ The core LeRobot workflow, inherited from LeLab and extended throughout:
 PRs welcome. Hot-reload mode for working on the code:
 
 ```bash
-lelab --dev
+makerlab --dev
 ```
 
 Vite on `:8080`, uvicorn `--reload` on `:8000`.

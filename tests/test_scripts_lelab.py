@@ -130,12 +130,12 @@ def test_ensure_path_symlinks_repoints_stale_link(tmp_path) -> None:
     bin_dir.mkdir()
     old_venv = tmp_path / "old-venv-bin"
     old_venv.mkdir()
-    (old_venv / "makerlabs").write_text("#!/bin/sh\n")
-    (bin_dir / "makerlabs").symlink_to(old_venv / "makerlabs")
+    (old_venv / "makerlab").write_text("#!/bin/sh\n")
+    (bin_dir / "makerlab").symlink_to(old_venv / "makerlab")
 
     _ensure_path_symlinks(source_dir=source_dir, bin_dir=bin_dir)
 
-    assert (bin_dir / "makerlabs").resolve() == (source_dir / "makerlabs").resolve()
+    assert (bin_dir / "makerlab").resolve() == (source_dir / "makerlab").resolve()
 
 
 def test_ensure_path_symlinks_never_clobbers_regular_files(tmp_path) -> None:
@@ -144,16 +144,15 @@ def test_ensure_path_symlinks_never_clobbers_regular_files(tmp_path) -> None:
     source_dir = _fake_entry_points(tmp_path)
     bin_dir = tmp_path / "local-bin"
     bin_dir.mkdir()
-    foreign = bin_dir / "lelab"
+    foreign = bin_dir / "makerlab"
     foreign.write_text("someone else's script\n")
 
     _ensure_path_symlinks(source_dir=source_dir, bin_dir=bin_dir)
 
     assert not foreign.is_symlink()
     assert foreign.read_text() == "someone else's script\n"
-    # The other two are still linked.
-    assert (bin_dir / "makerlabs").is_symlink()
-    assert (bin_dir / "lelab-station").is_symlink()
+    # The other entry point is still linked.
+    assert (bin_dir / "makerlab-station").is_symlink()
 
 
 def test_ensure_path_symlinks_skips_missing_entry_points(tmp_path) -> None:
@@ -161,14 +160,13 @@ def test_ensure_path_symlinks_skips_missing_entry_points(tmp_path) -> None:
 
     source_dir = tmp_path / "venv-bin"
     source_dir.mkdir()
-    (source_dir / "lelab").write_text("#!/bin/sh\n")  # only one installed
+    (source_dir / "makerlab").write_text("#!/bin/sh\n")  # only one installed
     bin_dir = tmp_path / "local-bin"
 
     _ensure_path_symlinks(source_dir=source_dir, bin_dir=bin_dir)
 
-    assert (bin_dir / "lelab").is_symlink()
-    assert not (bin_dir / "makerlabs").exists()
-    assert not (bin_dir / "lelab-station").exists()
+    assert (bin_dir / "makerlab").is_symlink()
+    assert not (bin_dir / "makerlab-station").exists()
 
 
 def test_ensure_path_symlinks_env_opt_out(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -202,9 +200,9 @@ def _fake_uv_tool_link(tmp_path, name: str):
 def test_is_uv_tool_link_recognizes_uv_managed_symlink(tmp_path) -> None:
     from lelab.scripts.lelab import _is_uv_tool_link
 
-    bin_dir, uv_tools_dir = _fake_uv_tool_link(tmp_path, "lelab")
+    bin_dir, uv_tools_dir = _fake_uv_tool_link(tmp_path, "makerlab")
 
-    assert _is_uv_tool_link(bin_dir / "lelab", uv_tools_dir) is True
+    assert _is_uv_tool_link(bin_dir / "makerlab", uv_tools_dir) is True
 
 
 def test_is_uv_tool_link_false_for_venv_symlink(tmp_path) -> None:
@@ -213,10 +211,10 @@ def test_is_uv_tool_link_false_for_venv_symlink(tmp_path) -> None:
     source_dir = _fake_entry_points(tmp_path)
     bin_dir = tmp_path / "local-bin"
     bin_dir.mkdir()
-    (bin_dir / "lelab").symlink_to(source_dir / "lelab")
+    (bin_dir / "makerlab").symlink_to(source_dir / "makerlab")
     uv_tools_dir = tmp_path / "uv-tools"  # nonexistent / unrelated
 
-    assert _is_uv_tool_link(bin_dir / "lelab", uv_tools_dir) is False
+    assert _is_uv_tool_link(bin_dir / "makerlab", uv_tools_dir) is False
 
 
 def test_is_uv_tool_link_false_for_regular_file(tmp_path) -> None:
@@ -224,10 +222,10 @@ def test_is_uv_tool_link_false_for_regular_file(tmp_path) -> None:
 
     bin_dir = tmp_path / "local-bin"
     bin_dir.mkdir()
-    (bin_dir / "lelab").write_text("not a symlink\n")
+    (bin_dir / "makerlab").write_text("not a symlink\n")
     uv_tools_dir = tmp_path / "uv-tools"
 
-    assert _is_uv_tool_link(bin_dir / "lelab", uv_tools_dir) is False
+    assert _is_uv_tool_link(bin_dir / "makerlab", uv_tools_dir) is False
 
 
 def test_station_injects_lan_and_offline(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -241,11 +239,11 @@ def test_station_injects_lan_and_offline(monkeypatch: pytest.MonkeyPatch) -> Non
         captured["argv"] = list(launcher.sys.argv)
 
     monkeypatch.setattr(launcher, "main", fake_main)
-    monkeypatch.setattr(launcher.sys, "argv", ["lelab-station"])
+    monkeypatch.setattr(launcher.sys, "argv", ["makerlab-station"])
 
     launcher.station()
 
-    assert captured["argv"] == ["lelab-station", "--lan", "--offline"]
+    assert captured["argv"] == ["makerlab-station", "--lan", "--offline"]
 
 
 def test_station_passes_extra_args_through(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -254,31 +252,32 @@ def test_station_passes_extra_args_through(monkeypatch: pytest.MonkeyPatch) -> N
 
     captured: dict[str, list[str]] = {}
     monkeypatch.setattr(launcher, "main", lambda: captured.setdefault("argv", list(launcher.sys.argv)))
-    monkeypatch.setattr(launcher.sys, "argv", ["lelab-station", "--dev"])
+    monkeypatch.setattr(launcher.sys, "argv", ["makerlab-station", "--dev"])
 
     launcher.station()
 
-    assert captured["argv"] == ["lelab-station", "--lan", "--offline", "--dev"]
+    assert captured["argv"] == ["makerlab-station", "--lan", "--offline", "--dev"]
 
 
-def test_makerlabs_entry_point_targets_main() -> None:
-    """`makerlabs` is plain LeLab (== `lelab`), NOT the station posture.
+def test_entry_points_target_correct_functions() -> None:
+    """`makerlab` -> `main` (friendly default), `makerlab-station` ->
+    `station` (headless posture). The old `lelab*` / `makerlabs` names are
+    gone.
 
     Reads the declared console_scripts so we never invoke the entry point
-    (which would start a server). `lelab`/`makerlabs` -> `main`;
-    `lelab-station` -> `station`.
+    (which would start a server). NOTE: this reflects the *installed*
+    metadata, so after renaming in pyproject.toml you must `pip install -e .`
+    for it to pass.
     """
     from importlib.metadata import entry_points
 
-    scripts = {
-        ep.name: ep.value
-        for ep in entry_points(group="console_scripts")
-        if ep.name.startswith("lelab") or ep.name == "makerlabs"
-    }
+    scripts = {ep.name: ep.value for ep in entry_points(group="console_scripts")}
 
-    assert scripts["makerlabs"] == "lelab.scripts.lelab:main"
-    assert scripts["makerlabs"] == scripts["lelab"]
-    assert scripts["lelab-station"] == "lelab.scripts.lelab:station"
+    assert scripts["makerlab"] == "lelab.scripts.lelab:main"
+    assert scripts["makerlab-station"] == "lelab.scripts.lelab:station"
+    assert "lelab" not in scripts
+    assert "lelab-station" not in scripts
+    assert "makerlabs" not in scripts
 
 
 def test_ensure_path_symlinks_leaves_uv_tool_entry_untouched(tmp_path) -> None:
@@ -287,14 +286,13 @@ def test_ensure_path_symlinks_leaves_uv_tool_entry_untouched(tmp_path) -> None:
     from lelab.scripts.lelab import _ensure_path_symlinks
 
     source_dir = _fake_entry_points(tmp_path)
-    bin_dir, uv_tools_dir = _fake_uv_tool_link(tmp_path, "lelab")
-    uv_target_before = (bin_dir / "lelab").resolve()
+    bin_dir, uv_tools_dir = _fake_uv_tool_link(tmp_path, "makerlab")
+    uv_target_before = (bin_dir / "makerlab").resolve()
 
     _ensure_path_symlinks(source_dir=source_dir, bin_dir=bin_dir, uv_tools_dir=uv_tools_dir)
 
-    # lelab still points at the uv tool, NOT the venv.
-    assert (bin_dir / "lelab").resolve() == uv_target_before
-    assert (bin_dir / "lelab").resolve() != (source_dir / "lelab").resolve()
-    # The other two names, not uv-owned, are linked to the venv as usual.
-    assert (bin_dir / "makerlabs").resolve() == (source_dir / "makerlabs").resolve()
-    assert (bin_dir / "lelab-station").resolve() == (source_dir / "lelab-station").resolve()
+    # makerlab still points at the uv tool, NOT the venv.
+    assert (bin_dir / "makerlab").resolve() == uv_target_before
+    assert (bin_dir / "makerlab").resolve() != (source_dir / "makerlab").resolve()
+    # The other name, not uv-owned, is linked to the venv as usual.
+    assert (bin_dir / "makerlab-station").resolve() == (source_dir / "makerlab-station").resolve()
