@@ -77,7 +77,10 @@ def test_start_teleoperation_reports_connection_failure(
     import lelab.teleoperate as teleop
 
     monkeypatch.setattr(teleop, "teleoperation_active", False)
-    monkeypatch.setattr(teleop, "setup_calibration_files", lambda leader, follower: ("leader", "follower"))
+    monkeypatch.setattr(
+        "lelab.utils.robot_factory.setup_calibration_files",
+        lambda leader, follower: ("leader", "follower"),
+    )
 
     class _Bus:
         def connect(self) -> None:
@@ -120,7 +123,10 @@ def test_start_teleoperation_disconnects_follower_when_leader_fails(
     import lelab.teleoperate as teleop
 
     monkeypatch.setattr(teleop, "teleoperation_active", False)
-    monkeypatch.setattr(teleop, "setup_calibration_files", lambda leader, follower: ("leader", "follower"))
+    monkeypatch.setattr(
+        "lelab.utils.robot_factory.setup_calibration_files",
+        lambda leader, follower: ("leader", "follower"),
+    )
 
     class _OkBus:
         def connect(self) -> None:
@@ -880,7 +886,10 @@ def test_start_clears_stale_release_state_from_previous_double_stop(
     monkeypatch.setattr(teleop, "teleoperation_thread", None)
     monkeypatch.setattr(teleop, "_release_now", stale)
     monkeypatch.setattr(teleop, "releasing", True)
-    monkeypatch.setattr(teleop, "setup_calibration_files", lambda leader, follower: ("leader", "follower"))
+    monkeypatch.setattr(
+        "lelab.utils.robot_factory.setup_calibration_files",
+        lambda leader, follower: ("leader", "follower"),
+    )
 
     class _Bus:
         def connect(self) -> None:
