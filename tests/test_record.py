@@ -164,7 +164,10 @@ def test_create_record_config_pins_dshow_on_windows(monkeypatch: pytest.MonkeyPa
     from lerobot.cameras.configs import Cv2Backends
 
     monkeypatch.setattr("platform.system", lambda: "Windows")
-    monkeypatch.setattr(record, "setup_calibration_files", lambda leader, follower: ("leader", "follower"))
+    monkeypatch.setattr(
+        "lelab.utils.robot_factory.setup_calibration_files",
+        lambda leader, follower: ("leader", "follower"),
+    )
 
     request = record.RecordingRequest(
         leader_port="COM_LEADER",
@@ -197,7 +200,7 @@ def test_create_record_config_builds_biso_for_bimanual(monkeypatch: pytest.Monke
         )
         return (f"/staging/{base}/leader", f"/staging/{base}/follower", base)
 
-    monkeypatch.setattr(record, "stage_bimanual_calibrations", _fake_stage)
+    monkeypatch.setattr("lelab.utils.robot_factory.stage_bimanual_calibrations", _fake_stage)
 
     # Config names are ARBITRARY — no "<base>_left/right" convention required.
     request = record.RecordingRequest(
@@ -571,9 +574,11 @@ def _run_record_session(
 def test_record_accepts_bare_repo_id(monkeypatch: pytest.MonkeyPatch, tmp_lerobot_home) -> None:
     """A bare dataset name (no HF login → no `user/` namespace) records fine —
     lerobot's sanity_check_dataset_name would crash on it, so we don't call it."""
-    import lelab.record as record
 
-    monkeypatch.setattr(record, "setup_calibration_files", lambda leader, follower: ("leader", "follower"))
+    monkeypatch.setattr(
+        "lelab.utils.robot_factory.setup_calibration_files",
+        lambda leader, follower: ("leader", "follower"),
+    )
     bus = _RecReturnBus(positions=dict.fromkeys(_RecReturnBus._MOTORS, 1500))
     robot = _RecRobot(bus)
 
@@ -585,9 +590,11 @@ def test_record_accepts_bare_repo_id(monkeypatch: pytest.MonkeyPatch, tmp_lerobo
 def test_record_refuses_eval_prefixed_repo_id(monkeypatch: pytest.MonkeyPatch, tmp_lerobot_home) -> None:
     """eval_ names are reserved for policy-evaluation recordings (rollout flow),
     with or without a namespace."""
-    import lelab.record as record
 
-    monkeypatch.setattr(record, "setup_calibration_files", lambda leader, follower: ("leader", "follower"))
+    monkeypatch.setattr(
+        "lelab.utils.robot_factory.setup_calibration_files",
+        lambda leader, follower: ("leader", "follower"),
+    )
     for repo_id in ("eval_ds", "tester/eval_ds"):
         bus = _RecReturnBus(positions=dict.fromkeys(_RecReturnBus._MOTORS, 1500))
         robot = _RecRobot(bus)
@@ -601,7 +608,10 @@ def test_record_normal_end_returns_then_releases(monkeypatch: pytest.MonkeyPatch
     (once), then disconnects — same as teleop's stop, no timed hold."""
     import lelab.record as record
 
-    monkeypatch.setattr(record, "setup_calibration_files", lambda leader, follower: ("leader", "follower"))
+    monkeypatch.setattr(
+        "lelab.utils.robot_factory.setup_calibration_files",
+        lambda leader, follower: ("leader", "follower"),
+    )
     bus = _RecReturnBus(positions=dict.fromkeys(_RecReturnBus._MOTORS, 1500))
     robot = _RecRobot(bus)
 
@@ -618,9 +628,11 @@ def test_record_captures_pose_per_follower_excluding_gripper(
 ) -> None:
     """The captured pose is the follower's raw ticks with the gripper removed
     (it may be holding an object at stop time)."""
-    import lelab.record as record
 
-    monkeypatch.setattr(record, "setup_calibration_files", lambda leader, follower: ("leader", "follower"))
+    monkeypatch.setattr(
+        "lelab.utils.robot_factory.setup_calibration_files",
+        lambda leader, follower: ("leader", "follower"),
+    )
     positions = {
         "shoulder_pan": 1111,
         "shoulder_lift": 2222,
@@ -645,9 +657,11 @@ def test_record_captures_pose_per_follower_excluding_gripper(
 def test_record_double_stop_skips_the_return(monkeypatch: pytest.MonkeyPatch, tmp_lerobot_home) -> None:
     """A second stop (release-now) set before the session-end cleanup runs must
     skip the return and release immediately, mirroring teleop."""
-    import lelab.record as record
 
-    monkeypatch.setattr(record, "setup_calibration_files", lambda leader, follower: ("leader", "follower"))
+    monkeypatch.setattr(
+        "lelab.utils.robot_factory.setup_calibration_files",
+        lambda leader, follower: ("leader", "follower"),
+    )
     robot = _RecRobot(_RecReturnBus())
 
     return_calls, robot, error, _dataset_calls = _run_record_session(
@@ -664,9 +678,11 @@ def test_record_error_path_skips_return_and_releases(
 ) -> None:
     """An exception in the loop (dead bus) skips the return entirely — the bus
     may be gone, so release ASAP — but still disconnects."""
-    import lelab.record as record
 
-    monkeypatch.setattr(record, "setup_calibration_files", lambda leader, follower: ("leader", "follower"))
+    monkeypatch.setattr(
+        "lelab.utils.robot_factory.setup_calibration_files",
+        lambda leader, follower: ("leader", "follower"),
+    )
     robot = _RecRobot(_RecReturnBus())
 
     return_calls, robot, error, _dataset_calls = _run_record_session(monkeypatch, robot, raise_in_loop=True)
@@ -685,7 +701,10 @@ def test_stop_during_recording_phase_discards_episode_no_reset(
     immediately, with no reset detour, then return to rest and disconnect once."""
     import lelab.record as record
 
-    monkeypatch.setattr(record, "setup_calibration_files", lambda leader, follower: ("leader", "follower"))
+    monkeypatch.setattr(
+        "lelab.utils.robot_factory.setup_calibration_files",
+        lambda leader, follower: ("leader", "follower"),
+    )
     robot = _RecRobot(_RecReturnBus())
 
     # No _exit_early_triggered: the pre-fix classification would have called this
@@ -709,7 +728,10 @@ def test_stop_wins_over_skip_when_both_set_in_same_episode(
     not saved. (Stop is a deliberate 'end now, drop this take' action.)"""
     import lelab.record as record
 
-    monkeypatch.setattr(record, "setup_calibration_files", lambda leader, follower: ("leader", "follower"))
+    monkeypatch.setattr(
+        "lelab.utils.robot_factory.setup_calibration_files",
+        lambda leader, follower: ("leader", "follower"),
+    )
     robot = _RecRobot(_RecReturnBus())
 
     return_calls, robot, error, dataset_calls = _run_record_session(

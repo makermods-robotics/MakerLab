@@ -567,7 +567,10 @@ def _patch_teleop_devices(monkeypatch: pytest.MonkeyPatch, follower: _GuardDevic
     import lelab.teleoperate as teleop
 
     monkeypatch.setattr(teleop, "teleoperation_active", False)
-    monkeypatch.setattr(teleop, "setup_calibration_files", lambda le, fo: ("leader_a", "follower_a"))
+    monkeypatch.setattr(
+        "lelab.utils.robot_factory.setup_calibration_files",
+        lambda le, fo: ("leader_a", "follower_a"),
+    )
     monkeypatch.setattr(teleop, "SO101Follower", lambda config: follower)
     monkeypatch.setattr(teleop, "SO101Leader", lambda config: leader)
     # The guard loads the calibration library from disk; pin it to the fixtures.

@@ -277,7 +277,7 @@ def test_start_teleoperation_stops_camera_previews(monkeypatch: pytest.MonkeyPat
     def _boom(leader, follower):
         raise RuntimeError("stop before hardware")
 
-    monkeypatch.setattr(teleoperate, "setup_calibration_files", _boom)
+    monkeypatch.setattr("lelab.utils.robot_factory.setup_calibration_files", _boom)
 
     result = teleoperate.handle_start_teleoperation(
         teleoperate.TeleoperateRequest(
