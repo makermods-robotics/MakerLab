@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for lelab.arm_identity — the fingerprint-first swapped-port guard.
+"""Tests for makerlab.arm_identity — the fingerprint-first swapped-port guard.
 
 The fixtures use the real numbers from the 2026-07-02 swapped-port incidents:
 the two arms' gripper homing-offset families are -98 (leader) vs -1202
@@ -30,8 +30,8 @@ import json
 
 import pytest
 
-import lelab.arm_identity as arm_identity
-from lelab.arm_identity import (
+import makerlab.arm_identity as arm_identity
+from makerlab.arm_identity import (
     ArmIdentityError,
     ArmSlot,
     check_arm_identity,
@@ -564,7 +564,7 @@ def test_verify_devices_config_names_length_mismatch_raises() -> None:
 
 
 def _patch_teleop_devices(monkeypatch: pytest.MonkeyPatch, follower: _GuardDevice, leader: _GuardDevice):
-    import lelab.teleoperate as teleop
+    import makerlab.teleoperate as teleop
 
     monkeypatch.setattr(teleop, "teleoperation_active", False)
     monkeypatch.setattr(teleop, "setup_calibration_files", lambda le, fo: ("leader_a", "follower_a"))
@@ -576,7 +576,7 @@ def _patch_teleop_devices(monkeypatch: pytest.MonkeyPatch, follower: _GuardDevic
 
 
 def _teleop_request(**overrides):
-    from lelab.teleoperate import TeleoperateRequest
+    from makerlab.teleoperate import TeleoperateRequest
 
     fields = {
         "leader_port": "COM_LEADER",
@@ -632,7 +632,7 @@ def test_start_teleoperation_skip_flag_bypasses_the_guard(monkeypatch: pytest.Mo
     assert result["success"] is True
     # No identity reads happened; calibration was written as usual. The single
     # follower read is NOT the guard: it is the rest-pose capture
-    # (lelab/rest_pose.py) every start performs so a normal stop can drive the
+    # (makerlab/rest_pose.py) every start performs so a normal stop can drive the
     # follower back to its starting pose. The leader — never returned to rest,
     # human-held — must stay untouched.
     assert follower.bus.guard_reads == 1
@@ -681,7 +681,7 @@ def test_start_teleoperation_verified_arms_pass_without_identity_warnings(
 
 
 def test_start_inference_refuses_on_identity_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    from lelab import rollout
+    from makerlab import rollout
 
     monkeypatch.setattr(rollout, "inference_active", False)
     monkeypatch.setattr(rollout, "setup_follower_calibration_file", lambda config: "follower_a")
@@ -706,7 +706,7 @@ def test_start_inference_refuses_on_identity_error(monkeypatch: pytest.MonkeyPat
 def test_rollout_counterpart_slots_come_from_robot_records(monkeypatch: pytest.MonkeyPatch) -> None:
     """Inference has no leader in the session; the counterpart slot is looked
     up from any robot record pairing this follower config with a leader."""
-    from lelab import rollout
+    from makerlab import rollout
 
     records = [
         {
@@ -737,9 +737,9 @@ def test_rollout_counterpart_slots_come_from_robot_records(monkeypatch: pytest.M
 
 
 def test_request_models_default_to_running_the_guard() -> None:
-    from lelab.record import RecordingRequest
-    from lelab.rollout import InferenceRequest
-    from lelab.teleoperate import TeleoperateRequest
+    from makerlab.record import RecordingRequest
+    from makerlab.rollout import InferenceRequest
+    from makerlab.teleoperate import TeleoperateRequest
 
     assert _teleop_request().skip_identity_check is False
     assert (

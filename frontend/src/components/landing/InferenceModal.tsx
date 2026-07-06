@@ -93,7 +93,7 @@ const DEFAULT_FPS = 30;
  *
  * `feature` is the checkpoint's camera key exactly as it comes back from
  * `get_policy_config_summary` (the suffix after `observation.images.`). For a
- * bimanual checkpoint recorded through lelab, lerobot's BiSOFollower parks every
+ * bimanual checkpoint recorded through makerlab, lerobot's BiSOFollower parks every
  * camera on the LEFT arm and auto-prefixes each feature with `left_` when it
  * writes the dataset — so a camera the user named `front` at record time becomes
  * the feature `left_front`.
@@ -131,7 +131,7 @@ const ARM_PREFIX_RE = /^(left|right)_/;
  * Guard against collisions: if two features would strip to the same bare name
  * (a checkpoint carrying BOTH `left_x` and `right_x`, or a bare `x` alongside
  * `left_x`), fall back to the FULL feature name for every colliding entry —
- * correctness over cosmetics. lelab can't produce `right_*` checkpoints today,
+ * correctness over cosmetics. makerlab can't produce `right_*` checkpoints today,
  * so this is a defensive branch for externally-recorded bimanual checkpoints;
  * it must not silently mis-bind them.
  */

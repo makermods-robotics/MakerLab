@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for lelab.utils.hf_auth — whoami caching."""
+"""Tests for makerlab.utils.hf_auth — whoami caching."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from unittest.mock import patch
 
 
 def test_invalidate_whoami_cache_clears_cached_value() -> None:
-    from lelab.utils import hf_auth
+    from makerlab.utils import hf_auth
 
     # cached_whoami() delegates to _WHOAMI_API.whoami(cache=True), which stores
     # results in _WHOAMI_API._whoami_cache keyed by token. Patching the whole
@@ -27,7 +27,7 @@ def test_invalidate_whoami_cache_clears_cached_value() -> None:
     # (the actual HTTP call) instead — the real caching code then runs around it.
     # get_token() must return a truthy value so cached_whoami() doesn't short-circuit.
     with (
-        patch("lelab.utils.hf_auth.get_token", return_value="hf_fake_token"),
+        patch("makerlab.utils.hf_auth.get_token", return_value="hf_fake_token"),
         patch.object(hf_auth._WHOAMI_API, "_inner_whoami", return_value={"name": "alice"}) as spy,
     ):
         # Clear any pre-existing cache entry.
@@ -49,10 +49,10 @@ def test_invalidate_whoami_cache_clears_cached_value() -> None:
 
 
 def test_handle_hf_auth_status_returns_dict() -> None:
-    from lelab.utils import hf_auth
+    from makerlab.utils import hf_auth
 
     # handle_hf_auth_status() calls the module-level whoami() directly.
-    with patch("lelab.utils.hf_auth.whoami", return_value={"name": "alice", "orgs": []}):
+    with patch("makerlab.utils.hf_auth.whoami", return_value={"name": "alice", "orgs": []}):
         hf_auth.invalidate_whoami_cache()
         result = hf_auth.handle_hf_auth_status()
         assert isinstance(result, dict)
@@ -64,7 +64,7 @@ def test_handle_hf_auth_status_returns_dict() -> None:
 
 
 def test_hf_hub_offline_detects_offline_env(monkeypatch) -> None:
-    from lelab.utils import hf_auth
+    from makerlab.utils import hf_auth
 
     monkeypatch.delenv("TRANSFORMERS_OFFLINE", raising=False)
     for truthy in ("1", "true", "TRUE", "yes", "on"):
@@ -73,7 +73,7 @@ def test_hf_hub_offline_detects_offline_env(monkeypatch) -> None:
 
 
 def test_hf_hub_offline_false_when_unset_or_zero(monkeypatch) -> None:
-    from lelab.utils import hf_auth
+    from makerlab.utils import hf_auth
 
     monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
     monkeypatch.delenv("TRANSFORMERS_OFFLINE", raising=False)
@@ -85,7 +85,7 @@ def test_hf_hub_offline_false_when_unset_or_zero(monkeypatch) -> None:
 
 
 def test_hf_hub_offline_honours_legacy_transformers_var(monkeypatch) -> None:
-    from lelab.utils import hf_auth
+    from makerlab.utils import hf_auth
 
     monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
     monkeypatch.setenv("TRANSFORMERS_OFFLINE", "1")

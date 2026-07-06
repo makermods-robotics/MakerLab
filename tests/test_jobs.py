@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for lelab.jobs — parsers and Pydantic models. Does not exercise
+"""Tests for makerlab.jobs — parsers and Pydantic models. Does not exercise
 LocalJobRunner.start() (see plan, "Discovered issue")."""
 
 from __future__ import annotations
@@ -35,8 +35,8 @@ def _make_checkpoint(output_dir: Path, step: int, *, with_state: bool = True) ->
 
 
 def _record(output_dir: Path, runner: str = "local"):
-    from lelab.jobs import JobRecord
-    from lelab.train import TrainingRequest
+    from makerlab.jobs import JobRecord
+    from makerlab.train import TrainingRequest
 
     return JobRecord(
         id="job-1",
@@ -50,7 +50,7 @@ def _record(output_dir: Path, runner: str = "local"):
 
 
 def test_resolve_resume_config_path_returns_train_config(tmp_path) -> None:
-    from lelab.jobs import _resolve_resume_config_path
+    from makerlab.jobs import _resolve_resume_config_path
 
     out = tmp_path / "run"
     _make_checkpoint(out, 5000)
@@ -59,7 +59,7 @@ def test_resolve_resume_config_path_returns_train_config(tmp_path) -> None:
 
 
 def test_resolve_resume_config_path_defaults_to_latest(tmp_path) -> None:
-    from lelab.jobs import _resolve_resume_config_path
+    from makerlab.jobs import _resolve_resume_config_path
 
     out = tmp_path / "run"
     _make_checkpoint(out, 1000)
@@ -69,7 +69,7 @@ def test_resolve_resume_config_path_defaults_to_latest(tmp_path) -> None:
 
 
 def test_resolve_resume_config_path_rejects_missing_training_state(tmp_path) -> None:
-    from lelab.jobs import _resolve_resume_config_path
+    from makerlab.jobs import _resolve_resume_config_path
 
     out = tmp_path / "run"
     _make_checkpoint(out, 2000, with_state=False)  # weights-only (e.g. imported)
@@ -78,7 +78,7 @@ def test_resolve_resume_config_path_rejects_missing_training_state(tmp_path) -> 
 
 
 def test_resolve_resume_config_path_rejects_non_local(tmp_path) -> None:
-    from lelab.jobs import _resolve_resume_config_path
+    from makerlab.jobs import _resolve_resume_config_path
 
     out = tmp_path / "run"
     _make_checkpoint(out, 2000)
@@ -87,7 +87,7 @@ def test_resolve_resume_config_path_rejects_non_local(tmp_path) -> None:
 
 
 def test_resolve_resume_config_path_rejects_unknown_step(tmp_path) -> None:
-    from lelab.jobs import _resolve_resume_config_path
+    from makerlab.jobs import _resolve_resume_config_path
 
     out = tmp_path / "run"
     _make_checkpoint(out, 2000)
@@ -96,8 +96,8 @@ def test_resolve_resume_config_path_rejects_unknown_step(tmp_path) -> None:
 
 
 def _cloud_record(repo_id: str | None = "user/act_ds_2026", state: str = "failed"):
-    from lelab.jobs import JobRecord
-    from lelab.train import TrainingRequest
+    from makerlab.jobs import JobRecord
+    from makerlab.train import TrainingRequest
 
     return JobRecord(
         id="cloud-1",
@@ -122,20 +122,20 @@ class _FakeHubApi:
 
 
 def test_resolve_cloud_resume_returns_repo_and_step_dir(monkeypatch) -> None:
-    from lelab.jobs import _resolve_cloud_resume
+    from makerlab.jobs import _resolve_cloud_resume
 
     files = [
         "checkpoints/005000/pretrained_model/config.json",
         "checkpoints/005000/training_state/training_step.json",
     ]
-    monkeypatch.setattr("lelab.jobs.shared_hf_api", lambda: _FakeHubApi(files))
+    monkeypatch.setattr("makerlab.jobs.shared_hf_api", lambda: _FakeHubApi(files))
     repo_id, step_dir = _resolve_cloud_resume(_cloud_record(), 5000)
     assert repo_id == "user/act_ds_2026"
     assert step_dir == "005000"  # zero-padded dir name preserved
 
 
 def test_resolve_cloud_resume_defaults_to_latest(monkeypatch) -> None:
-    from lelab.jobs import _resolve_cloud_resume
+    from makerlab.jobs import _resolve_cloud_resume
 
     files = [
         "checkpoints/001000/pretrained_model/config.json",
@@ -143,71 +143,71 @@ def test_resolve_cloud_resume_defaults_to_latest(monkeypatch) -> None:
         "checkpoints/003000/pretrained_model/config.json",
         "checkpoints/003000/training_state/training_step.json",
     ]
-    monkeypatch.setattr("lelab.jobs.shared_hf_api", lambda: _FakeHubApi(files))
+    monkeypatch.setattr("makerlab.jobs.shared_hf_api", lambda: _FakeHubApi(files))
     _repo, step_dir = _resolve_cloud_resume(_cloud_record(), None)  # None ⇒ latest
     assert step_dir == "003000"
 
 
 def test_resolve_cloud_resume_rejects_no_checkpoints(monkeypatch) -> None:
-    from lelab.jobs import _resolve_cloud_resume
+    from makerlab.jobs import _resolve_cloud_resume
 
-    monkeypatch.setattr("lelab.jobs.shared_hf_api", lambda: _FakeHubApi(["README.md"]))
+    monkeypatch.setattr("makerlab.jobs.shared_hf_api", lambda: _FakeHubApi(["README.md"]))
     with pytest.raises(ValueError, match="died before its first save"):
         _resolve_cloud_resume(_cloud_record(), None)
 
 
 def test_resolve_cloud_resume_rejects_missing_training_state(monkeypatch) -> None:
-    from lelab.jobs import _resolve_cloud_resume
+    from makerlab.jobs import _resolve_cloud_resume
 
     # Weights present but no training_state/ on the Hub ⇒ not resumable.
     files = ["checkpoints/005000/pretrained_model/config.json"]
-    monkeypatch.setattr("lelab.jobs.shared_hf_api", lambda: _FakeHubApi(files))
+    monkeypatch.setattr("makerlab.jobs.shared_hf_api", lambda: _FakeHubApi(files))
     with pytest.raises(ValueError, match="training_state"):
         _resolve_cloud_resume(_cloud_record(), 5000)
 
 
 def test_resolve_cloud_resume_rejects_unknown_step(monkeypatch) -> None:
-    from lelab.jobs import _resolve_cloud_resume
+    from makerlab.jobs import _resolve_cloud_resume
 
     files = [
         "checkpoints/005000/pretrained_model/config.json",
         "checkpoints/005000/training_state/training_step.json",
     ]
-    monkeypatch.setattr("lelab.jobs.shared_hf_api", lambda: _FakeHubApi(files))
+    monkeypatch.setattr("makerlab.jobs.shared_hf_api", lambda: _FakeHubApi(files))
     with pytest.raises(ValueError, match="no checkpoint at step 9999"):
         _resolve_cloud_resume(_cloud_record(), 9999)
 
 
 def test_resolve_cloud_resume_rejects_non_cloud(tmp_path) -> None:
-    from lelab.jobs import _resolve_cloud_resume
+    from makerlab.jobs import _resolve_cloud_resume
 
     with pytest.raises(ValueError, match="cloud"):
         _resolve_cloud_resume(_record(tmp_path, runner="local"), None)
 
 
 def test_resolve_cloud_resume_rejects_missing_repo() -> None:
-    from lelab.jobs import _resolve_cloud_resume
+    from makerlab.jobs import _resolve_cloud_resume
 
     with pytest.raises(ValueError, match="no output repo"):
         _resolve_cloud_resume(_cloud_record(repo_id=None), None)
 
 
 def test_extract_wandb_run_url_finds_canonical_url() -> None:
-    from lelab.jobs import extract_wandb_run_url
+    from makerlab.jobs import extract_wandb_run_url
 
     line = "wandb: \U0001f680 View run at https://wandb.ai/me/myproj/runs/abc123 trailing text"
     assert extract_wandb_run_url(line) == "https://wandb.ai/me/myproj/runs/abc123"
 
 
 def test_extract_wandb_run_url_returns_none_when_absent() -> None:
-    from lelab.jobs import extract_wandb_run_url
+    from makerlab.jobs import extract_wandb_run_url
 
     assert extract_wandb_run_url("nothing here") is None
     assert extract_wandb_run_url("https://example.com/runs/abc") is None
 
 
 def test_parse_duration_handles_mm_ss_and_hh_mm_ss() -> None:
-    from lelab.jobs import _parse_duration
+    from makerlab.jobs import _parse_duration
 
     assert _parse_duration("01:30") == 90
     assert _parse_duration("01:00:00") == 3600
@@ -216,7 +216,7 @@ def test_parse_duration_handles_mm_ss_and_hh_mm_ss() -> None:
 
 
 def test_parse_metrics_into_extracts_loss_and_step() -> None:
-    from lelab.jobs import TrainingMetrics, parse_metrics_into
+    from makerlab.jobs import TrainingMetrics, parse_metrics_into
 
     m = TrainingMetrics()
     line = "INFO ... step:42 smpl:336 loss:0.0123 grdn:1.5 lr:0.0001 ..."
@@ -235,7 +235,7 @@ def test_parse_metrics_into_keeps_tqdm_step_when_log_line_step_is_abbreviated() 
     step and still extract the loss — this is what read_metrics_history relies
     on so it doesn't drop every point past step 1000.
     """
-    from lelab.jobs import TrainingMetrics, parse_metrics_into
+    from makerlab.jobs import TrainingMetrics, parse_metrics_into
 
     m = TrainingMetrics()
     parse_metrics_into("Training:  10%|██░| 1000/10000 [00:30<04:30, 3.2it/s]", m)
@@ -247,7 +247,7 @@ def test_parse_metrics_into_keeps_tqdm_step_when_log_line_step_is_abbreviated() 
 
 
 def test_parse_metrics_into_extracts_tqdm_progress() -> None:
-    from lelab.jobs import TrainingMetrics, parse_metrics_into
+    from makerlab.jobs import TrainingMetrics, parse_metrics_into
 
     m = TrainingMetrics()
     # tqdm format: "Training:  10%|...| 100/1000 [00:30<04:30, ..."
@@ -263,7 +263,7 @@ def test_parse_metrics_into_rebases_resumed_tqdm_to_global_step() -> None:
     """On resume lerobot's bar counts only the remaining window (0 → steps−ckpt),
     so a raw 55/100 is really global step 155 of 200. With resume_total set, the
     parser must rebase so the UI shows 155/200, not 55/100."""
-    from lelab.jobs import TrainingMetrics, parse_metrics_into
+    from makerlab.jobs import TrainingMetrics, parse_metrics_into
 
     m = TrainingMetrics()
     parse_metrics_into(
@@ -275,7 +275,7 @@ def test_parse_metrics_into_rebases_resumed_tqdm_to_global_step() -> None:
 
 def test_parse_metrics_into_fresh_run_ignores_resume_rebase() -> None:
     """A fresh run passes resume_total=None; its bar is already the global step."""
-    from lelab.jobs import TrainingMetrics, parse_metrics_into
+    from makerlab.jobs import TrainingMetrics, parse_metrics_into
 
     m = TrainingMetrics()
     parse_metrics_into("Training:  30%|███| 30/100 [00:30<01:00, 2.0s/step]", m)
@@ -286,8 +286,8 @@ def test_parse_metrics_into_fresh_run_ignores_resume_rebase() -> None:
 def test_read_metrics_history_stitches_resume_lineage(tmp_path) -> None:
     """A resumed run's curve is continuous across the whole lineage: the source
     run's points (0→100) are prepended to the resumed run's (150→200)."""
-    from lelab.jobs import JobRecord, JobRegistry, LogLine, _job_log_path
-    from lelab.train import TrainingRequest
+    from makerlab.jobs import JobRecord, JobRegistry, LogLine, _job_log_path
+    from makerlab.train import TrainingRequest
 
     reg = JobRegistry(tmp_path)
     root = reg._output_root
@@ -318,7 +318,7 @@ def test_read_metrics_history_stitches_resume_lineage(tmp_path) -> None:
 
 
 def test_parse_metrics_into_ignores_unrelated_lines() -> None:
-    from lelab.jobs import TrainingMetrics, parse_metrics_into
+    from makerlab.jobs import TrainingMetrics, parse_metrics_into
 
     m = TrainingMetrics()
     parse_metrics_into("just a log line with no metrics", m)
@@ -326,7 +326,7 @@ def test_parse_metrics_into_ignores_unrelated_lines() -> None:
 
 
 def test_log_line_round_trips_to_json() -> None:
-    from lelab.jobs import LogLine
+    from makerlab.jobs import LogLine
 
     line = LogLine(timestamp=1.5, message="hello")
     payload = line.model_dump_json()
@@ -336,7 +336,7 @@ def test_log_line_round_trips_to_json() -> None:
 
 
 def test_pid_alive_returns_false_for_unlikely_pid() -> None:
-    from lelab.jobs import _pid_alive
+    from makerlab.jobs import _pid_alive
 
     # DISCOVERED: os.kill(-1, 0) on macOS sends to process group and succeeds
     # (returns True), so we use a large PID that certainly does not exist.
@@ -344,7 +344,7 @@ def test_pid_alive_returns_false_for_unlikely_pid() -> None:
 
 
 def test_hub_checkpoints_from_files_parses_tree() -> None:
-    from lelab.jobs import _hub_checkpoints_from_files
+    from makerlab.jobs import _hub_checkpoints_from_files
 
     files = [
         "README.md",
@@ -364,7 +364,7 @@ def _make_pretrained(dir_path) -> None:
 
 
 def test_list_imported_local_single_model(tmp_path) -> None:
-    from lelab.jobs import _list_imported_local
+    from makerlab.jobs import _list_imported_local
 
     _make_pretrained(tmp_path)  # config.json at the root
     out = _list_imported_local(str(tmp_path))
@@ -375,7 +375,7 @@ def test_list_imported_local_single_model(tmp_path) -> None:
 
 
 def test_list_imported_local_checkpoints_tree(tmp_path) -> None:
-    from lelab.jobs import _list_imported_local
+    from makerlab.jobs import _list_imported_local
 
     _make_pretrained(tmp_path / "checkpoints" / "000010" / "pretrained_model")
     out = _list_imported_local(str(tmp_path))
@@ -385,13 +385,13 @@ def test_list_imported_local_checkpoints_tree(tmp_path) -> None:
 
 
 def test_list_imported_local_empty_when_no_model(tmp_path) -> None:
-    from lelab.jobs import _list_imported_local
+    from makerlab.jobs import _list_imported_local
 
     assert _list_imported_local(str(tmp_path)) == []
 
 
 def test_list_imported_hub_single_model() -> None:
-    from lelab.jobs import _list_imported_hub
+    from makerlab.jobs import _list_imported_hub
 
     class FakeApi:
         def list_repo_files(self, repo_id, repo_type):
@@ -405,7 +405,7 @@ def test_list_imported_hub_single_model() -> None:
 
 
 def test_list_imported_hub_prefers_checkpoints_tree() -> None:
-    from lelab.jobs import _list_imported_hub
+    from makerlab.jobs import _list_imported_hub
 
     class FakeApi:
         def list_repo_files(self, repo_id, repo_type):
@@ -420,7 +420,7 @@ def test_list_imported_hub_prefers_checkpoints_tree() -> None:
 
 
 def test_list_imported_hub_empty_when_no_model() -> None:
-    from lelab.jobs import _list_imported_hub
+    from makerlab.jobs import _list_imported_hub
 
     class FakeApi:
         def list_repo_files(self, repo_id, repo_type):
@@ -430,7 +430,7 @@ def test_list_imported_hub_empty_when_no_model() -> None:
 
 
 def test_read_checkpoint_config_local_reads_config_json(tmp_path) -> None:
-    from lelab.jobs import JobCheckpoint, _read_checkpoint_config
+    from makerlab.jobs import JobCheckpoint, _read_checkpoint_config
 
     (tmp_path / "config.json").write_text(_json.dumps({"type": "act"}))
     ckpt = JobCheckpoint(step=0, source="local", ref=str(tmp_path))
@@ -438,7 +438,7 @@ def test_read_checkpoint_config_local_reads_config_json(tmp_path) -> None:
 
 
 def test_read_checkpoint_config_hub_root(monkeypatch, tmp_path) -> None:
-    from lelab.jobs import JobCheckpoint, _read_checkpoint_config
+    from makerlab.jobs import JobCheckpoint, _read_checkpoint_config
 
     cfg_file = tmp_path / "config.json"
     cfg_file.write_text(_json.dumps({"type": "smolvla"}))
@@ -456,7 +456,7 @@ def test_read_checkpoint_config_hub_root(monkeypatch, tmp_path) -> None:
 
 
 def test_read_checkpoint_config_hub_tree(monkeypatch, tmp_path) -> None:
-    from lelab.jobs import JobCheckpoint, _read_checkpoint_config
+    from makerlab.jobs import JobCheckpoint, _read_checkpoint_config
 
     cfg_file = tmp_path / "config.json"
     cfg_file.write_text(_json.dumps({"type": "act"}))
@@ -474,7 +474,7 @@ def test_read_checkpoint_config_hub_tree(monkeypatch, tmp_path) -> None:
 
 
 def test_register_imported_local_dir(tmp_path) -> None:
-    from lelab.jobs import JobRegistry
+    from makerlab.jobs import JobRegistry
 
     model = tmp_path / "model"
     _make_pretrained(model)  # config.json at root
@@ -493,7 +493,7 @@ def test_register_imported_local_dir(tmp_path) -> None:
 
 
 def test_register_imported_rejects_unusable_source(tmp_path) -> None:
-    from lelab.jobs import JobRegistry
+    from makerlab.jobs import JobRegistry
 
     empty = tmp_path / "empty"
     empty.mkdir()
@@ -505,7 +505,7 @@ def test_register_imported_rejects_unusable_source(tmp_path) -> None:
 def test_rename_sets_display_name_and_persists(tmp_path) -> None:
     """Rename is a metadata-only alias: trimmed, persisted to job.json, and the
     immutable identity (id / name / output_dir) is untouched."""
-    from lelab.jobs import JobRegistry
+    from makerlab.jobs import JobRegistry
 
     model = tmp_path / "model"
     _make_pretrained(model)
@@ -525,7 +525,7 @@ def test_rename_sets_display_name_and_persists(tmp_path) -> None:
 
 
 def test_rename_rejects_empty_and_path_characters(tmp_path) -> None:
-    from lelab.jobs import JobRegistry
+    from makerlab.jobs import JobRegistry
 
     model = tmp_path / "model"
     _make_pretrained(model)
@@ -540,7 +540,7 @@ def test_rename_rejects_empty_and_path_characters(tmp_path) -> None:
 
 
 def test_rename_unknown_job_raises(tmp_path) -> None:
-    from lelab.jobs import JobNotFoundError, JobRegistry
+    from makerlab.jobs import JobNotFoundError, JobRegistry
 
     reg = JobRegistry(tmp_path / "root")
     with pytest.raises(JobNotFoundError):
@@ -550,8 +550,8 @@ def test_rename_unknown_job_raises(tmp_path) -> None:
 def test_rename_allows_duplicate_aliases(tmp_path) -> None:
     """Aliases are display-only (not file keys like calibration/robot names),
     so uniqueness is deliberately NOT enforced."""
-    from lelab.jobs import JobRecord, JobRegistry
-    from lelab.train import TrainingRequest
+    from makerlab.jobs import JobRecord, JobRegistry
+    from makerlab.train import TrainingRequest
 
     reg = JobRegistry(tmp_path / "root")
     for jid in ("A", "B"):
@@ -572,7 +572,7 @@ def test_rename_allows_duplicate_aliases(tmp_path) -> None:
 def test_job_json_without_display_name_loads_with_none(tmp_path) -> None:
     """Registry files written before the alias field existed load fine, and a
     subsequent rename persists the new field alongside the old ones."""
-    from lelab.jobs import JobRegistry
+    from makerlab.jobs import JobRegistry
 
     root = tmp_path / "root"
     job_dir = root / "old-job"
@@ -596,7 +596,7 @@ def test_job_json_without_display_name_loads_with_none(tmp_path) -> None:
 
 
 def test_register_imported_hub_repo(monkeypatch, tmp_path) -> None:
-    from lelab.jobs import JobRegistry
+    from makerlab.jobs import JobRegistry
 
     class FakeApi:
         def list_repo_files(self, repo_id, repo_type):
@@ -605,7 +605,7 @@ def test_register_imported_hub_repo(monkeypatch, tmp_path) -> None:
     # Patch the symbol where jobs.py binds it (`from .utils.hf_auth import
     # shared_hf_api`) — patching it in its home module has no effect on the
     # already-bound name and the test would hit the network.
-    monkeypatch.setattr("lelab.jobs.shared_hf_api", lambda: FakeApi())
+    monkeypatch.setattr("makerlab.jobs.shared_hf_api", lambda: FakeApi())
     reg = JobRegistry(tmp_path / "root")
     rec = reg.register_imported("user/some-model")
 
@@ -619,7 +619,7 @@ def test_register_imported_hub_repo(monkeypatch, tmp_path) -> None:
 def test_register_imported_local_dir_is_idempotent(tmp_path) -> None:
     """Importing the same local dir twice returns the EXISTING record — same
     id, display alias untouched, no second registry entry."""
-    from lelab.jobs import JobRegistry
+    from makerlab.jobs import JobRegistry
 
     model = tmp_path / "model"
     _make_pretrained(model)
@@ -634,13 +634,13 @@ def test_register_imported_local_dir_is_idempotent(tmp_path) -> None:
 
 
 def test_register_imported_hub_repo_is_idempotent(monkeypatch, tmp_path) -> None:
-    from lelab.jobs import JobRegistry
+    from makerlab.jobs import JobRegistry
 
     class FakeApi:
         def list_repo_files(self, repo_id, repo_type):
             return ["config.json", "model.safetensors"]
 
-    monkeypatch.setattr("lelab.jobs.shared_hf_api", lambda: FakeApi())
+    monkeypatch.setattr("makerlab.jobs.shared_hf_api", lambda: FakeApi())
     reg = JobRegistry(tmp_path / "root")
     first = reg.register_imported("user/some-model")
     again = reg.register_imported("user/some-model")
@@ -653,13 +653,13 @@ def test_find_imported_hub_id_compare_is_case_insensitive(monkeypatch, tmp_path)
     that slipped through on a case-only difference: HF repo ids are practically
     unique case-insensitively (the Hub redirects across casings), and the
     failure mode of exact matching is silent duplicate cards."""
-    from lelab.jobs import JobRegistry
+    from makerlab.jobs import JobRegistry
 
     class FakeApi:
         def list_repo_files(self, repo_id, repo_type):
             return ["config.json"]
 
-    monkeypatch.setattr("lelab.jobs.shared_hf_api", lambda: FakeApi())
+    monkeypatch.setattr("makerlab.jobs.shared_hf_api", lambda: FakeApi())
     reg = JobRegistry(tmp_path / "root")
     first = reg.register_imported("user/some-model")
     assert reg.find_imported("user/some-model") is not None
@@ -670,14 +670,14 @@ def test_find_imported_hub_id_compare_is_case_insensitive(monkeypatch, tmp_path)
 def test_register_imported_hub_url_normalizes_to_repo_id(monkeypatch, tmp_path) -> None:
     """A pasted model-page URL is normalized to the bare repo id at the boundary
     — both for storage (so checkpoint listing works) and for dedup."""
-    from lelab.jobs import JobRegistry
+    from makerlab.jobs import JobRegistry
 
     class FakeApi:
         def list_repo_files(self, repo_id, repo_type):
             assert repo_id == "user/some-model"  # bare id, never the pasted URL
             return ["config.json"]
 
-    monkeypatch.setattr("lelab.jobs.shared_hf_api", lambda: FakeApi())
+    monkeypatch.setattr("makerlab.jobs.shared_hf_api", lambda: FakeApi())
     reg = JobRegistry(tmp_path / "root")
     first = reg.register_imported("https://huggingface.co/user/some-model/")
     assert first.hf_repo_id == "user/some-model"
@@ -705,7 +705,7 @@ def test_find_imported_local_matches_case_variant_spelling(tmp_path) -> None:
     '/Users/Mokuroh54/…' (case-insensitive macOS filesystem; Path.resolve()
     preserves the typed case) produced two cards, because identity was an
     exact string compare. Identity is now filesystem identity (samefile)."""
-    from lelab.jobs import JobRegistry
+    from makerlab.jobs import JobRegistry
 
     model = tmp_path / "so101-real" / "smolvla_real_5k" / "pretrained_model"
     _make_pretrained(model)
@@ -728,7 +728,7 @@ def test_boot_sweep_collapses_real_case_variant_duplicate_pair(tmp_path) -> None
         output_dir '…/Mokuroh54/…' (same directory, different case)
     The sweep groups local imports by device:inode, so the pair collapses to
     the oldest record and the newer job.json-only dir is removed."""
-    from lelab.jobs import JobNotFoundError, JobRegistry
+    from makerlab.jobs import JobNotFoundError, JobRegistry
 
     model = tmp_path / "so101-real" / "smolvla_real_5k" / "pretrained_model"
     _make_pretrained(model)
@@ -755,7 +755,7 @@ def test_boot_sweep_collapses_real_case_variant_duplicate_pair(tmp_path) -> None
 def test_unique_job_id_suffixes_on_same_second_collision(tmp_path, monkeypatch) -> None:
     """_generate_job_id has second-granularity timestamps; two different models
     imported within the same second must not overwrite each other."""
-    from lelab import jobs as jobs_mod
+    from makerlab import jobs as jobs_mod
 
     monkeypatch.setattr(jobs_mod, "_generate_job_id", lambda p, d: "act_imported_T")
     a = tmp_path / "a"
@@ -774,7 +774,7 @@ def _write_imported_pointer(
     root: Path, job_id: str, output_dir: str, started_at: float, display_name: str | None = None
 ) -> Path:
     """Lay out an on-disk imported pseudo-job dir (job.json only), the way
-    older lelab versions left duplicates behind before dedup-at-registration."""
+    older makerlab versions left duplicates behind before dedup-at-registration."""
     job_dir = root / job_id
     job_dir.mkdir(parents=True)
     meta = {
@@ -796,7 +796,7 @@ def test_boot_sweep_collapses_duplicate_imports_keeping_oldest(tmp_path) -> None
     """Pre-existing duplicate pointers collapse on load: oldest kept, the
     newest duplicate's alias migrated onto it, duplicate job.json-only dirs
     removed."""
-    from lelab.jobs import JobNotFoundError, JobRegistry
+    from makerlab.jobs import JobNotFoundError, JobRegistry
 
     model = tmp_path / "model"
     _make_pretrained(model)
@@ -820,7 +820,7 @@ def test_boot_sweep_collapses_duplicate_imports_keeping_oldest(tmp_path) -> None
 def test_boot_sweep_never_deletes_dirs_with_extra_content(tmp_path) -> None:
     """A duplicate whose dir holds more than job.json is only dropped from the
     in-memory map — its files stay on disk."""
-    from lelab.jobs import JobNotFoundError, JobRegistry
+    from makerlab.jobs import JobNotFoundError, JobRegistry
 
     model = tmp_path / "model"
     _make_pretrained(model)
@@ -844,7 +844,7 @@ def test_flat_feature_dim_reads_single_arm_and_bimanual_state() -> None:
     """observation.state / action are 1-D: [6] for one SO-101 arm, [12] for a
     bimanual (two-arm) checkpoint. The inference modal keys the single-arm vs
     bimanual mismatch off this."""
-    from lelab.jobs import _flat_feature_dim
+    from makerlab.jobs import _flat_feature_dim
 
     assert _flat_feature_dim({"type": "STATE", "shape": [6]}) == 6
     assert _flat_feature_dim({"type": "STATE", "shape": [12]}) == 12
@@ -852,7 +852,7 @@ def test_flat_feature_dim_reads_single_arm_and_bimanual_state() -> None:
 
 
 def test_flat_feature_dim_returns_none_for_missing_or_non_1d() -> None:
-    from lelab.jobs import _flat_feature_dim
+    from makerlab.jobs import _flat_feature_dim
 
     assert _flat_feature_dim(None) is None
     assert _flat_feature_dim({}) is None
@@ -867,8 +867,8 @@ def test_cloud_start_rejects_local_only_dataset(tmp_path) -> None:
     resolve the dataset from the Hub, so a local-only one would fail remotely."""
     from unittest.mock import patch
 
-    from lelab.jobs import DatasetNotOnHubError, JobRegistry, JobTarget
-    from lelab.train import TrainingRequest
+    from makerlab.jobs import DatasetNotOnHubError, JobRegistry, JobTarget
+    from makerlab.train import TrainingRequest
 
     reg = JobRegistry(tmp_path / "root")
     cfg = TrainingRequest(dataset_repo_id="user/local_only", policy_type="act")
@@ -876,7 +876,7 @@ def test_cloud_start_rejects_local_only_dataset(tmp_path) -> None:
 
     with (
         patch(
-            "lelab.datasets.get_hub_status",
+            "makerlab.datasets.get_hub_status",
             return_value={"repo_id": "user/local_only", "status": "local_only", "url": None},
         ),
         pytest.raises(DatasetNotOnHubError) as exc,
@@ -895,8 +895,8 @@ def test_cloud_start_allows_hub_dataset(tmp_path) -> None:
     submission)."""
     from unittest.mock import MagicMock, patch
 
-    from lelab.jobs import JobRegistry, JobTarget
-    from lelab.train import TrainingRequest
+    from makerlab.jobs import JobRegistry, JobTarget
+    from makerlab.train import TrainingRequest
 
     reg = JobRegistry(tmp_path / "root")
     cfg = TrainingRequest(dataset_repo_id="user/on_hub", policy_type="act")
@@ -911,10 +911,10 @@ def test_cloud_start_allows_hub_dataset(tmp_path) -> None:
 
     with (
         patch(
-            "lelab.datasets.get_hub_status",
+            "makerlab.datasets.get_hub_status",
             return_value={"repo_id": "user/on_hub", "status": "on_hub", "url": "u"},
         ),
-        patch("lelab.runners.hf_cloud.HfCloudJobRunner", _fake_runner_factory),
+        patch("makerlab.runners.hf_cloud.HfCloudJobRunner", _fake_runner_factory),
     ):
         record = reg.start(cfg, target)
 
@@ -929,8 +929,8 @@ def test_cloud_start_allows_unknown_status_dataset(tmp_path) -> None:
     one. The guard only rejects a definitive "local_only"."""
     from unittest.mock import MagicMock, patch
 
-    from lelab.jobs import JobRegistry, JobTarget
-    from lelab.train import TrainingRequest
+    from makerlab.jobs import JobRegistry, JobTarget
+    from makerlab.train import TrainingRequest
 
     reg = JobRegistry(tmp_path / "root")
     cfg = TrainingRequest(dataset_repo_id="user/maybe", policy_type="act")
@@ -942,10 +942,10 @@ def test_cloud_start_allows_unknown_status_dataset(tmp_path) -> None:
 
     with (
         patch(
-            "lelab.datasets.get_hub_status",
+            "makerlab.datasets.get_hub_status",
             return_value={"repo_id": "user/maybe", "status": "unknown", "url": None},
         ),
-        patch("lelab.runners.hf_cloud.HfCloudJobRunner", lambda *a, **k: fake_runner),
+        patch("makerlab.runners.hf_cloud.HfCloudJobRunner", lambda *a, **k: fake_runner),
     ):
         record = reg.start(cfg, target)
 
@@ -957,8 +957,8 @@ def test_local_start_skips_hub_preflight(tmp_path) -> None:
     preflight must not fire (get_hub_status is never consulted)."""
     from unittest.mock import MagicMock, patch
 
-    from lelab.jobs import JobRegistry, JobTarget
-    from lelab.train import TrainingRequest
+    from makerlab.jobs import JobRegistry, JobTarget
+    from makerlab.train import TrainingRequest
 
     reg = JobRegistry(tmp_path / "root")
     cfg = TrainingRequest(dataset_repo_id="user/local_only", policy_type="act")
@@ -967,8 +967,8 @@ def test_local_start_skips_hub_preflight(tmp_path) -> None:
     fake_runner.pid.return_value = 4242
 
     with (
-        patch("lelab.datasets.get_hub_status") as get_status,
-        patch("lelab.jobs.LocalJobRunner", lambda *a, **k: fake_runner),
+        patch("makerlab.datasets.get_hub_status") as get_status,
+        patch("makerlab.jobs.LocalJobRunner", lambda *a, **k: fake_runner),
     ):
         record = reg.start(cfg, JobTarget(runner="local"))
 

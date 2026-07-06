@@ -11,18 +11,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for lelab.wiggle — gripper wiggle port finder (hardware mocked)."""
+"""Tests for makerlab.wiggle — gripper wiggle port finder (hardware mocked)."""
 
 from __future__ import annotations
 
 import pytest
 from fastapi.testclient import TestClient
 
-from lelab.wiggle import plan_wiggle
+from makerlab.wiggle import plan_wiggle
 
 
 async def test_wiggle_gripper_rejects_empty_port() -> None:
-    from lelab.wiggle import wiggle_gripper
+    from makerlab.wiggle import wiggle_gripper
 
     result = await wiggle_gripper("   ")
     assert result == {"success": False, "message": "No port provided."}
@@ -30,7 +30,7 @@ async def test_wiggle_gripper_rejects_empty_port() -> None:
 
 def test_wiggle_endpoint_success(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     # Stub the blocking hardware call so the happy path runs without a device.
-    monkeypatch.setattr("lelab.wiggle._wiggle_gripper_sync", lambda port: None)
+    monkeypatch.setattr("makerlab.wiggle._wiggle_gripper_sync", lambda port: None)
 
     response = client.post("/wiggle", json={"port": "/dev/fake"})
     assert response.status_code == 200
@@ -45,7 +45,7 @@ def test_wiggle_endpoint_reports_hardware_failure(
     def boom(port: str) -> None:
         raise RuntimeError("no device on port")
 
-    monkeypatch.setattr("lelab.wiggle._wiggle_gripper_sync", boom)
+    monkeypatch.setattr("makerlab.wiggle._wiggle_gripper_sync", boom)
 
     response = client.post("/wiggle", json={"port": "/dev/fake"})
     # Logical failures stay HTTP 200 with success=False (like other handlers).

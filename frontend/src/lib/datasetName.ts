@@ -1,5 +1,5 @@
 // Client-side dataset-name validation, mirroring the backend
-// `validate_dataset_name` in lelab/utils/config.py. The user types just the
+// `validate_dataset_name` in makerlab/utils/config.py. The user types just the
 // NAME (one repo-id segment); the namespace is prepended from HF auth. Rejecting
 // a bad name here gives immediate feedback, but the backend re-validates since
 // the UI can be bypassed.

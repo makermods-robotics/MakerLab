@@ -296,7 +296,7 @@ const Recording = () => {
       if (stoppedRef.current) return;
       stoppedRef.current = true;
       try {
-        sessionStorage.setItem("lelab:recording-stopped", "1");
+        sessionStorage.setItem("makerlab:recording-stopped", "1");
       } catch {
         /* sessionStorage may be unavailable; the stop below still runs */
       }
