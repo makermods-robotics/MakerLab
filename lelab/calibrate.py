@@ -69,7 +69,9 @@ FULL_TURN_MOTORS = frozenset({"wrist_roll"})
 FULL_TURN_RANGE = (0, 4095)
 
 
-def final_motor_ranges(mins: dict[str, int], maxes: dict[str, int]) -> dict[str, tuple[int, int]]:
+def final_motor_ranges(
+    mins: dict[str, int], maxes: dict[str, int]
+) -> dict[str, tuple[int, int]]:
     """Recorded (min, max) per motor, with full-turn joints forced to 0-4095."""
     return {
         motor: (FULL_TURN_RANGE if motor in FULL_TURN_MOTORS else (mins[motor], maxes[motor]))
@@ -128,19 +130,6 @@ class CalibrationStatus:
     total_steps: int = 1  # Total number of calibration steps
     current_positions: dict[str, float] = None
     recorded_ranges: dict[str, dict[str, float]] = None  # {motor: {min: val, max: val, current: val}}
-    # Batch (multi-arm) calibration overlay. `batch_active` is True while a
-    # sequential batch driver is running; the per-arm fields above (status,
-    # step, recorded_ranges, ...) always describe the CURRENT arm, so a client
-    # reads both surfaces at once: which arm of N is active AND its step.
-    batch_active: bool = False
-    batch_total: int = 0  # Number of arms in the running batch
-    batch_index: int = 0  # 0-based index of the arm currently being calibrated
-    # Describes the current arm: {device_type, arm, port, config_file}.
-    batch_current: dict[str, str] | None = None
-    # Names of arms (device_type + arm) that finished successfully in this batch.
-    batch_completed: list[str] = None
-    # When a batch aborts on an arm's error, names the failing arm.
-    batch_failed_arm: str | None = None
 
 
 @dataclass
@@ -152,76 +141,7 @@ class CalibrationRequest:
     config_file: str
     robot_name: str | None = None  # When set, write port + config back into the robot record on success
     overwrite: bool = False  # Must be explicitly true to replace an existing config file of the same name
-    arm: Literal["left", "right"] = (
-        "left"  # Which arm of a bimanual robot; "left" is also the single-arm pair
-    )
-
-
-@dataclass
-class CalibrationBatchArm:
-    """One arm's target inside a batch calibration request.
-
-    Carries the same per-arm fields a single CalibrationRequest needs (minus
-    robot_name/overwrite, which live on the parent batch and apply to all arms).
-    """
-
-    device_type: Literal["robot", "teleop"]
-    port: str
-    config_file: str
-    arm: Literal["left", "right"] = "left"
-
-
-@dataclass
-class CalibrationBatchRequest:
-    """Request to calibrate a chosen SUBSET of arms in one guided sequence.
-
-    The arms are calibrated one at a time, reusing the single-arm flow; the
-    existing /complete-calibration-step endpoint advances whichever arm is
-    currently active. `robot_name`/`overwrite` apply to every arm.
-    """
-
-    robot_name: str
-    arms: list[CalibrationBatchArm]
-    overwrite: bool = False
-
-    def __post_init__(self) -> None:
-        # FastAPI hands us plain dicts for nested models; coerce so downstream
-        # code (and validation) always sees CalibrationBatchArm instances.
-        self.arms = [a if isinstance(a, CalibrationBatchArm) else CalibrationBatchArm(**a) for a in self.arms]
-
-
-def validate_batch_arms(arms: list[CalibrationBatchArm]) -> str | None:
-    """Return a human-readable reason the arm list is invalid, or None if OK.
-
-    Rejects: empty list, more than 4 arms, two arms targeting the same
-    (device_type, arm) slot, and two same-side arms sharing a config name
-    (mirrors config_slot_conflict: one physical arm's calibration on two arms).
-    """
-    if not arms:
-        return "Select at least one arm to calibrate."
-    if len(arms) > 4:
-        return "A batch can calibrate at most 4 arms."
-
-    slots: set[tuple[str, str]] = set()
-    for a in arms:
-        slot = (a.device_type, a.arm)
-        if slot in slots:
-            return f"Duplicate arm slot selected: {a.device_type} {a.arm}."
-        slots.add(slot)
-
-    # Same-side config-name collision (both leaders or both followers sharing a
-    # name = one physical arm's calibration on two arms).
-    for device_type in ("teleop", "robot"):
-        side = [a for a in arms if a.device_type == device_type]
-        stems = [a.config_file[:-5] if a.config_file.endswith(".json") else a.config_file for a in side]
-        dupes = {s for s in stems if stems.count(s) > 1}
-        if dupes:
-            label = "leader" if device_type == "teleop" else "follower"
-            return (
-                f"Two {label} arms share the calibration name "
-                f"'{next(iter(dupes))}'. Give each arm a distinct name."
-            )
-    return None
+    arm: Literal["left", "right"] = "left"  # Which arm of a bimanual robot; "left" is also the single-arm pair
 
 
 class CalibrationManager:
@@ -240,10 +160,6 @@ class CalibrationManager:
         self._maxes = {}
         self._homing_offsets = {}
         self._current_request: CalibrationRequest | None = None
-        # Batch driver thread + cancellation flag (separate from stop_calibration,
-        # which the per-arm logic already watches). Set to abort remaining arms.
-        self.batch_thread: threading.Thread | None = None
-        self._batch_abort = False
 
         # Initialize logging
         init_logging()
@@ -313,18 +229,6 @@ class CalibrationManager:
                 if hasattr(self.status, key):
                     setattr(self.status, key, value)
 
-    def _existing_config_name(self, device_type: str, config_file: str) -> str | None:
-        """Return the config STEM if a calibration file of that name already
-        exists for the given side, else None. Used by the overwrite guards to
-        refuse silently clobbering an existing calibration."""
-        config_dir = calibration_dir_for_device(device_type)
-        if config_dir is None:
-            return None
-        stem = config_file[:-5] if config_file.endswith(".json") else config_file
-        if os.path.exists(os.path.join(config_dir, f"{stem}.json")):
-            return stem
-        return None
-
     def start_calibration(self, request: CalibrationRequest) -> dict[str, Any]:
         """Start calibration process"""
         try:
@@ -335,9 +239,10 @@ class CalibrationManager:
             # calibration saves "<config_file>.json"; if that name is taken, the
             # caller must pass overwrite=True (after confirming) or pick another
             # name. Lets the frontend warn before any data is clobbered.
-            if not request.overwrite:
-                stem = self._existing_config_name(request.device_type, request.config_file)
-                if stem is not None:
+            config_dir = calibration_dir_for_device(request.device_type)
+            if config_dir is not None and not request.overwrite:
+                stem = request.config_file[:-5] if request.config_file.endswith(".json") else request.config_file
+                if os.path.exists(os.path.join(config_dir, f"{stem}.json")):
                     return {
                         "success": False,
                         "code": "name_taken",
@@ -379,176 +284,6 @@ class CalibrationManager:
             )
             return {"success": False, "message": str(e)}
 
-    def start_calibration_batch(self, request: CalibrationBatchRequest) -> dict[str, Any]:
-        """Start a sequential batch calibration over a chosen subset of arms.
-
-        Rejects if a single or batch calibration is already active (mutex). The
-        arm list is validated, then EVERY arm's overwrite collision is checked
-        up front so the batch fails fast before any hardware moves. One driver
-        thread then calibrates each arm in turn, reusing the single-arm flow;
-        the existing /complete-calibration-step endpoint advances whichever arm
-        is currently active.
-        """
-        try:
-            if self.status.calibration_active or self.status.batch_active:
-                return {"success": False, "message": "Calibration already active"}
-
-            reason = validate_batch_arms(request.arms)
-            if reason is not None:
-                return {"success": False, "message": reason}
-
-            # Fail fast: pre-check EVERY arm's overwrite collision before any
-            # hardware moves. Report which arm is taken (same shape/code the
-            # single-arm guard uses) so the frontend can prompt per-arm.
-            if not request.overwrite:
-                for arm in request.arms:
-                    stem = self._existing_config_name(arm.device_type, arm.config_file)
-                    if stem is not None:
-                        return {
-                            "success": False,
-                            "code": "name_taken",
-                            "arm": {"device_type": arm.device_type, "arm": arm.arm},
-                            "message": (
-                                f"A calibration named '{stem}' already exists for "
-                                f"{arm.device_type} {arm.arm}. Overwrite it or choose a different name."
-                            ),
-                        }
-
-            # Reset per-arm + batch status for a clean start.
-            self._start_positions = {}
-            self._mins = {}
-            self._maxes = {}
-            self._homing_offsets = {}
-
-            self._update_status(
-                calibration_active=True,
-                status="connecting",
-                device_type=request.arms[0].device_type,
-                error=None,
-                message="Starting batch calibration",
-                step=0,
-                current_positions=None,
-                recorded_ranges=None,
-                batch_active=True,
-                batch_total=len(request.arms),
-                batch_index=0,
-                batch_current={
-                    "device_type": request.arms[0].device_type,
-                    "arm": request.arms[0].arm,
-                    "port": request.arms[0].port,
-                    "config_file": request.arms[0].config_file,
-                },
-                batch_completed=[],
-                batch_failed_arm=None,
-            )
-
-            self.stop_calibration = False
-            self._batch_abort = False
-            self._step_complete.clear()
-            self.batch_thread = threading.Thread(target=self._batch_worker, args=(request,), daemon=True)
-            self.batch_thread.start()
-
-            return {"success": True, "message": "Batch calibration started"}
-
-        except Exception as e:
-            logger.error(f"Error starting batch calibration: {e}")
-            self._update_status(
-                calibration_active=False,
-                batch_active=False,
-                status="error",
-                error=str(e),
-                message="Failed to start batch calibration",
-            )
-            return {"success": False, "message": str(e)}
-
-    def _batch_worker(self, request: CalibrationBatchRequest):
-        """Driver thread: calibrate each arm sequentially, reusing the single-arm
-        flow. Advances batch_index after each arm completes. On any arm error the
-        batch STOPS and records which arm failed — earlier arms stay calibrated
-        (partial completion is acceptable; downstream staging handles it)."""
-        completed_labels: list[str] = []
-        try:
-            for index, arm in enumerate(request.arms):
-                if self._batch_abort or self.stop_calibration:
-                    logger.info("Batch calibration aborted before arm %d", index)
-                    break
-
-                label = f"{arm.device_type} {arm.arm}"
-                self._update_status(
-                    device_type=arm.device_type,
-                    batch_index=index,
-                    batch_current={
-                        "device_type": arm.device_type,
-                        "arm": arm.arm,
-                        "port": arm.port,
-                        "config_file": arm.config_file,
-                    },
-                    status="connecting",
-                    step=0,
-                    error=None,
-                    recorded_ranges=None,
-                    message=f"Arm {index + 1} of {len(request.arms)}: {label}",
-                )
-
-                per_arm = CalibrationRequest(
-                    device_type=arm.device_type,
-                    port=arm.port,
-                    config_file=arm.config_file,
-                    robot_name=request.robot_name,
-                    overwrite=request.overwrite,
-                    arm=arm.arm,
-                )
-
-                # The step event is reset per-arm inside _run_single_arm, and
-                # /complete-calibration-step keeps advancing THIS arm's steps.
-                try:
-                    finished = self._run_single_arm(per_arm)
-                except (CalibrationCenteringError, CalibrationDiscontinuityError) as e:
-                    logger.error(f"Batch arm {label} aborted: {e}")
-                    self._update_status(
-                        error=str(e),
-                        batch_failed_arm=label,
-                        batch_completed=list(completed_labels),
-                    )
-                    self._cleanup_and_finish(f"Batch stopped — {label}: {e}", status="error")
-                    return
-                except Exception as e:
-                    logger.error(f"Batch arm {label} failed: {e}")
-                    logger.error(traceback.format_exc())
-                    self._update_status(batch_failed_arm=label, batch_completed=list(completed_labels))
-                    self._cleanup_and_finish(f"Batch stopped — {label} failed: {e}", status="error")
-                    return
-
-                if not finished:
-                    # A stop/abort was requested mid-arm.
-                    logger.info(f"Batch cancelled during arm {label}")
-                    self._update_status(batch_completed=list(completed_labels))
-                    self._cleanup_and_finish("Batch calibration cancelled")
-                    return
-
-                completed_labels.append(label)
-                self._update_status(batch_completed=list(completed_labels))
-
-            # All requested arms done (or aborted between arms).
-            if self._batch_abort or self.stop_calibration:
-                self._update_status(batch_completed=list(completed_labels))
-                self._cleanup_and_finish("Batch calibration cancelled")
-            else:
-                self._update_status(batch_completed=list(completed_labels))
-                self._cleanup_and_finish("Batch calibration completed successfully", status="completed")
-
-        except Exception as e:
-            logger.error(f"Batch calibration driver error: {e}")
-            logger.error(traceback.format_exc())
-            self._update_status(batch_completed=list(completed_labels))
-            self._cleanup_and_finish(f"Batch calibration failed: {e}", status="error")
-        finally:
-            logger.info("Batch calibration driver thread finishing")
-            self._update_status(batch_active=False)
-            if self.status.calibration_active:
-                logger.warning("Batch driver ending but calibration still marked active - forcing cleanup")
-                self._cleanup_and_finish("Batch calibration stopped", status="idle")
-
     def complete_step(self) -> dict[str, Any]:
         """Complete the current calibration step"""
         try:
@@ -575,21 +310,19 @@ class CalibrationManager:
                 return {"success": False, "message": "No calibration active"}
 
             logger.info("Stopping calibration process...")
-            # _batch_abort skips any remaining arms; stop_calibration stops the
-            # current arm's step loop. Both are honored by the batch driver.
             self.stop_calibration = True
-            self._batch_abort = True
             self._recording_active = False
             self._step_complete.set()  # Unblock any waiting step
 
             self._update_status(status="stopping", message="Stopping calibration...")
 
-            # Wait for whichever thread is running (single-arm worker or batch driver).
-            for thread in (self.calibration_thread, self.batch_thread):
-                if thread and thread.is_alive():
-                    thread.join(timeout=5.0)
-                    if thread.is_alive():
-                        logger.warning("Calibration thread did not finish within timeout, forcing cleanup")
+            # Wait for thread to finish
+            if self.calibration_thread and self.calibration_thread.is_alive():
+                self.calibration_thread.join(timeout=5.0)
+
+            # Ensure cleanup is called if thread didn't finish properly
+            if self.calibration_thread and self.calibration_thread.is_alive():
+                logger.warning("Calibration thread did not finish within timeout, forcing cleanup")
 
             # Force cleanup and finish
             self._cleanup_and_finish("Calibration stopped", status="idle")
@@ -603,28 +336,8 @@ class CalibrationManager:
             self._cleanup_and_finish("Calibration stopped with error", status="error")
             return {"success": False, "message": str(e)}
 
-    def _run_single_arm(self, request: CalibrationRequest) -> bool:
-        """Run ONE arm's full calibration synchronously: connect → Step 1 homing
-        (waits on _step_complete) → Step 2 range recording → save + record
-        write-back. Returns True when the arm completed, False if a stop was
-        requested mid-flow. Raises on hardware/validation errors (the caller
-        decides how to surface them). Does NOT touch calibration_active or run
-        the final cleanup — the caller (single-arm worker or batch driver) owns
-        lifecycle so the same logic serves both. Always disconnects this arm's
-        device before returning/raising.
-
-        Per-arm state (_mins/_maxes/_homing_offsets/_start_positions) and the
-        _step_complete event are reset here so a batch's later arm never
-        inherits the previous arm's data.
-        """
-        # Fresh per-arm state so a batch's second arm starts clean.
-        self._start_positions = {}
-        self._mins = {}
-        self._maxes = {}
-        self._homing_offsets = {}
-        self._step_complete.clear()
-        self._current_request = request
-
+    def _calibration_worker(self, request: CalibrationRequest):
+        """Worker thread for calibration process"""
         try:
             logger.info(f"Starting calibration worker for {request.device_type}")
 
@@ -653,39 +366,29 @@ class CalibrationManager:
 
             if self.stop_calibration:
                 logger.info("Calibration stopped after device connection")
-                return False
+                self._cleanup_and_finish("Calibration cancelled")
+                return
 
             # Start Step 1: Homing
             self._step_homing()
 
             if self.stop_calibration:
                 logger.info("Calibration stopped after homing step")
-                return False
+                self._cleanup_and_finish("Calibration cancelled")
+                return
 
             # Start Step 2: Range Recording
             self._step_range_recording()
 
             if self.stop_calibration:
                 logger.info("Calibration stopped after recording step")
-                return False
+                self._cleanup_and_finish("Calibration cancelled")
+                return
 
-            # Complete calibration (save + record write-back)
+            # Complete calibration
             self._complete_calibration()
 
             logger.info("Calibration completed successfully")
-            return True
-        finally:
-            # Each arm releases its serial port before the next arm connects.
-            self._cleanup_device()
-            self._recording_active = False
-
-    def _calibration_worker(self, request: CalibrationRequest):
-        """Worker thread for a single-arm calibration."""
-        try:
-            completed = self._run_single_arm(request)
-            if not completed:
-                self._cleanup_and_finish("Calibration cancelled")
-                return
             self._cleanup_and_finish("Calibration completed successfully", status="completed")
 
         except (CalibrationCenteringError, CalibrationDiscontinuityError) as e:
@@ -932,9 +635,7 @@ class CalibrationManager:
             # user-facing name and the id lerobot uses; the extension is only the
             # on-disk filename. (Records used to store "<name>.json"; reads now
             # normalize old ones, so this stays consistent.)
-            config_stem = (
-                request.config_file[:-5] if request.config_file.endswith(".json") else request.config_file
-            )
+            config_stem = request.config_file[:-5] if request.config_file.endswith(".json") else request.config_file
             # Pick the record fields for this side AND arm. For a bimanual robot
             # the right arm writes the right_* fields; "left" is also the single
             # robot's only pair.
@@ -952,15 +653,10 @@ class CalibrationManager:
                 logger.warning(f"Robot-record write-back failed for {request.robot_name}: {e}")
 
     def _cleanup_and_finish(self, message: str, status: str = "completed"):
-        """Clean up and finish calibration.
-
-        Called only at the END of a session (single-arm worker, or the batch
-        driver after the last/failed/cancelled arm) — never between a batch's
-        arms — so clearing batch_active here always reflects a finished batch.
-        """
+        """Clean up and finish calibration"""
         self._cleanup_device()
         self._recording_active = False
-        self._update_status(calibration_active=False, batch_active=False, status=status, message=message)
+        self._update_status(calibration_active=False, status=status, message=message)
 
     def _cleanup_device(self):
         """Clean up device connection"""

@@ -77,37 +77,6 @@ interface CalibrationStatus {
     string,
     { min: number; max: number; current: number }
   > | null;
-  // Batch (multi-arm) overlay — the per-arm fields above describe the CURRENT
-  // arm; these say which arm of N is active and which have finished.
-  batch_active?: boolean;
-  batch_total?: number;
-  batch_index?: number; // 0-based
-  batch_current?: {
-    device_type: string;
-    arm: string;
-    port: string;
-    config_file: string;
-  } | null;
-  batch_completed?: string[] | null;
-  batch_failed_arm?: string | null;
-}
-
-// One selectable arm slot in the multi-arm (batch) flow. `key` uniquely
-// identifies the (device_type, arm) slot; `cfgField`/`portField` map it to the
-// robot record's config/port fields so we can prefill and default the name.
-interface ArmSlot {
-  key: string;
-  label: string;
-  device: "teleop" | "robot";
-  arm: "left" | "right";
-  cfgField: keyof RobotRecord;
-  portField: keyof RobotRecord;
-}
-
-// Per-slot editable inputs (port + calibration name) while composing a batch.
-interface BatchSlotInput {
-  port: string;
-  configName: string;
 }
 
 interface CalibrationRequest {
@@ -134,23 +103,6 @@ const Calibration = () => {
   const [arm, setArm] = useState<"left" | "right">("left");
   const [port, setPort] = useState<string>("");
   const [robot, setRobot] = useState<RobotRecord | null>(null);
-
-  // Multi-arm (batch) calibration: an opt-in mode that walks several arms'
-  // two-step flows back-to-back in one session. The single-arm flow above stays
-  // the default; toggling this on swaps the Configuration card to a slot picker.
-  const [batchMode, setBatchMode] = useState(false);
-  // Which arm slots are selected for the batch, plus their per-slot port + name.
-  const [batchSelected, setBatchSelected] = useState<Record<string, boolean>>(
-    {},
-  );
-  const [batchInputs, setBatchInputs] = useState<
-    Record<string, BatchSlotInput>
-  >({});
-  const [batchOverwritePromptOpen, setBatchOverwritePromptOpen] =
-    useState(false);
-  // Set when the up-front pre-check reports an arm's name is taken, so the
-  // overwrite dialog can name it.
-  const [batchNameTaken, setBatchNameTaken] = useState<string | null>(null);
 
   const isBimanual = robot?.mode === "bimanual";
   // In single (or left) mode the primary leader/follower fields are used; in
@@ -199,88 +151,6 @@ const Calibration = () => {
   // Bumped when a calibration completes so the per-side CalibrationLibrary
   // dropdowns re-fetch and surface any newly-named file.
   const [calibReloadToken, setCalibReloadToken] = useState(0);
-
-  // The arm slots available for the batch picker. Bimanual exposes all four
-  // (left/right × leader/follower); single-arm exposes the leader + follower
-  // pair. Each slot maps to the record's config/port fields for prefill.
-  const armSlots: ArmSlot[] = isBimanual
-    ? [
-        {
-          key: "teleop:left",
-          label: "Left Leader",
-          device: "teleop",
-          arm: "left",
-          cfgField: "leader_config",
-          portField: "leader_port",
-        },
-        {
-          key: "robot:left",
-          label: "Left Follower",
-          device: "robot",
-          arm: "left",
-          cfgField: "follower_config",
-          portField: "follower_port",
-        },
-        {
-          key: "teleop:right",
-          label: "Right Leader",
-          device: "teleop",
-          arm: "right",
-          cfgField: "right_leader_config",
-          portField: "right_leader_port",
-        },
-        {
-          key: "robot:right",
-          label: "Right Follower",
-          device: "robot",
-          arm: "right",
-          cfgField: "right_follower_config",
-          portField: "right_follower_port",
-        },
-      ]
-    : [
-        {
-          key: "teleop:left",
-          label: "Leader",
-          device: "teleop",
-          arm: "left",
-          cfgField: "leader_config",
-          portField: "leader_port",
-        },
-        {
-          key: "robot:left",
-          label: "Follower",
-          device: "robot",
-          arm: "left",
-          cfgField: "follower_config",
-          portField: "follower_port",
-        },
-      ];
-
-  // Seed each slot's port + name inputs from the robot record when the record
-  // loads or the slot set changes. Prefills the in-use config (else a per-arm
-  // "<robot>_<arm>" suggestion, matching the single-arm default) and saved port.
-  useEffect(() => {
-    if (!robot) return;
-    setBatchInputs((prev) => {
-      const next: Record<string, BatchSlotInput> = {};
-      for (const slot of armSlots) {
-        const assigned = (robot[slot.cfgField] as string) || "";
-        const savedPort = (robot[slot.portField] as string) || "";
-        const suggested = isBimanual
-          ? `${robotName}_${slot.arm}`
-          : (robotName ?? "");
-        // Keep any edits the user already made to this slot.
-        next[slot.key] = prev[slot.key] ?? {
-          port: savedPort,
-          configName: assigned || suggested,
-        };
-      }
-      return next;
-    });
-    // armSlots is derived from robot + isBimanual; depending on those is enough.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [robot, isBimanual, robotName]);
 
   // Ports already assigned to the OTHER arms of this robot — each physical arm
   // needs its own serial port, so these are greyed out in the dropdown. The
@@ -863,100 +733,6 @@ const Calibration = () => {
     }
   };
 
-  // Slots the user ticked, in the canonical slot order, with their inputs.
-  const selectedBatchSlots = armSlots.filter((s) => batchSelected[s.key]);
-
-  const handleStartBatchCalibration = async (overwrite = false) => {
-    if (!robotName) {
-      toast({
-        title: "No robot selected",
-        description:
-          "Open Calibration from a robot's gear icon on the Landing page.",
-        variant: "destructive",
-      });
-      return;
-    }
-    const slots = selectedBatchSlots;
-    if (slots.length === 0) {
-      toast({
-        title: "No arms selected",
-        description: "Tick at least one arm to calibrate.",
-        variant: "destructive",
-      });
-      return;
-    }
-    // Client-side guard: every selected slot needs a port before we start.
-    const missingPort = slots.find(
-      (s) => !(batchInputs[s.key]?.port || "").trim(),
-    );
-    if (missingPort) {
-      toast({
-        title: "Missing port",
-        description: `Set a port for ${missingPort.label} before starting.`,
-        variant: "destructive",
-      });
-      return;
-    }
-
-    const arms = slots.map((s) => ({
-      device_type: s.device,
-      port: (batchInputs[s.key]?.port || "").trim(),
-      config_file:
-        (batchInputs[s.key]?.configName || "").trim() ||
-        (isBimanual ? `${robotName}_${s.arm}` : robotName || ""),
-      arm: s.arm,
-    }));
-
-    // Optimistically mark active so the unmount cleanup fires even if the user
-    // navigates away before the backend reports calibration_active.
-    calibrationActiveRef.current = true;
-
-    try {
-      const response = await fetchWithHeaders(
-        `${baseUrl}/start-calibration-batch`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ robot_name: robotName, overwrite, arms }),
-        },
-      );
-      const result = await response.json();
-
-      if (result.success) {
-        setBatchOverwritePromptOpen(false);
-        setBatchNameTaken(null);
-        toast({
-          title: "Batch calibration started",
-          description: `Calibrating ${arms.length} arm${arms.length === 1 ? "" : "s"} in sequence.`,
-        });
-        setIsPolling(true);
-      } else if (result.code === "name_taken") {
-        // The backend pre-checks every arm and reports the first taken one.
-        calibrationActiveRef.current = false;
-        const a = result.arm as
-          | { device_type: string; arm: string }
-          | undefined;
-        setBatchNameTaken(a ? `${a.device_type} ${a.arm}` : null);
-        setBatchOverwritePromptOpen(true);
-      } else {
-        calibrationActiveRef.current = false;
-        toast({
-          title: "Couldn't start batch calibration",
-          description: result.message || "Failed to start.",
-          variant: "destructive",
-        });
-      }
-    } catch (error) {
-      calibrationActiveRef.current = false;
-      console.error("Error starting batch calibration:", error);
-      toast({
-        title: "Error",
-        description: "Failed to start batch calibration",
-        variant: "destructive",
-      });
-    }
-  };
-
   const handleStopCalibration = async () => {
     try {
       const response = await fetchWithHeaders(`${baseUrl}/stop-calibration`, {
@@ -1344,37 +1120,6 @@ const Calibration = () => {
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-6">
-              {/* Single-arm vs multi-arm mode. Multi-arm walks several arms'
-                  two-step flows in one guided sequence; single-arm is the
-                  default. Locked while a session is running so the form can't
-                  change mid-calibration. */}
-              <div className="flex items-center justify-between rounded-md bg-slate-900/40 border border-slate-700 p-3">
-                <div className="space-y-0.5">
-                  <Label
-                    htmlFor="batch-mode"
-                    className="text-sm font-medium text-slate-200 cursor-pointer"
-                  >
-                    Calibrate multiple arms
-                  </Label>
-                  <p className="text-xs text-slate-400">
-                    Pick several arms and calibrate them back-to-back in one
-                    guided sequence.
-                  </p>
-                </div>
-                <Switch
-                  id="batch-mode"
-                  checked={batchMode}
-                  onCheckedChange={setBatchMode}
-                  disabled={
-                    calibrationStatus.calibration_active || autoCal.active
-                  }
-                  className="data-[state=checked]:bg-blue-500"
-                  aria-label="Toggle multi-arm calibration"
-                />
-              </div>
-
-              {!batchMode && (
-              <div className="space-y-6">
               <div className="space-y-2">
                 <Label
                   htmlFor="deviceType"
@@ -1594,170 +1339,6 @@ const Calibration = () => {
                   instead of overwriting.
                 </p>
               </div>
-              </div>
-              )}
-
-              {batchMode && (
-                <div className="space-y-4">
-                  <div className="space-y-1">
-                    <Label className="text-sm font-medium text-slate-300">
-                      Arms to calibrate *
-                    </Label>
-                    <p className="text-xs text-slate-400">
-                      Tick each arm, set its port and calibration name, then
-                      start. They're calibrated one at a time — you'll walk each
-                      arm's two steps in turn.
-                    </p>
-                  </div>
-
-                  {armSlots.map((slot) => {
-                    const selected = !!batchSelected[slot.key];
-                    const input = batchInputs[slot.key] ?? {
-                      port: "",
-                      configName: "",
-                    };
-                    const failed =
-                      calibrationStatus.batch_failed_arm ===
-                      `${slot.device} ${slot.arm}`;
-                    const done = (
-                      calibrationStatus.batch_completed ?? []
-                    ).includes(`${slot.device} ${slot.arm}`);
-                    return (
-                      <div
-                        key={slot.key}
-                        className={`rounded-md border p-3 space-y-3 ${
-                          selected
-                            ? "border-blue-600/50 bg-slate-900/40"
-                            : "border-slate-700 bg-slate-900/20"
-                        }`}
-                      >
-                        <div className="flex items-center justify-between">
-                          <Label
-                            htmlFor={`batch-${slot.key}`}
-                            className="flex items-center gap-2 text-sm font-medium text-slate-200 cursor-pointer"
-                          >
-                            {done ? (
-                              <CheckCircle className="w-4 h-4 text-green-400" />
-                            ) : failed ? (
-                              <XCircle className="w-4 h-4 text-red-400" />
-                            ) : null}
-                            {slot.label}
-                          </Label>
-                          <Switch
-                            id={`batch-${slot.key}`}
-                            checked={selected}
-                            onCheckedChange={(v) =>
-                              setBatchSelected((prev) => ({
-                                ...prev,
-                                [slot.key]: v,
-                              }))
-                            }
-                            disabled={
-                              calibrationStatus.calibration_active ||
-                              autoCal.active
-                            }
-                            className="data-[state=checked]:bg-blue-500"
-                            aria-label={`Include ${slot.label}`}
-                          />
-                        </div>
-
-                        {selected && (
-                          <div className="space-y-2">
-                            <div className="space-y-1">
-                              <Label className="text-xs text-slate-400">
-                                Port
-                              </Label>
-                              <Select
-                                value={input.port}
-                                onValueChange={(v) =>
-                                  setBatchInputs((prev) => ({
-                                    ...prev,
-                                    [slot.key]: {
-                                      ...(prev[slot.key] ?? {
-                                        port: "",
-                                        configName: "",
-                                      }),
-                                      port: v,
-                                    },
-                                  }))
-                                }
-                                disabled={
-                                  calibrationStatus.calibration_active ||
-                                  autoCal.active
-                                }
-                              >
-                                <SelectTrigger className="bg-slate-700 border-slate-600 text-white rounded-md">
-                                  <SelectValue
-                                    placeholder={
-                                      availablePorts.length
-                                        ? "Select a port"
-                                        : "No arms detected — plug in & refresh"
-                                    }
-                                  />
-                                </SelectTrigger>
-                                <SelectContent className="bg-slate-800 border-slate-700 text-white">
-                                  {availablePorts.map((p) => (
-                                    <SelectItem
-                                      key={p}
-                                      value={p}
-                                      className="text-white"
-                                    >
-                                      {p}
-                                    </SelectItem>
-                                  ))}
-                                  {input.port &&
-                                    !availablePorts.includes(input.port) && (
-                                      <SelectItem
-                                        value={input.port}
-                                        className="text-white"
-                                      >
-                                        {input.port} (saved, not detected)
-                                      </SelectItem>
-                                    )}
-                                </SelectContent>
-                              </Select>
-                            </div>
-                            <div className="space-y-1">
-                              <Label className="text-xs text-slate-400">
-                                Calibration name
-                              </Label>
-                              <Input
-                                value={input.configName}
-                                onChange={(e) =>
-                                  setBatchInputs((prev) => ({
-                                    ...prev,
-                                    [slot.key]: {
-                                      ...(prev[slot.key] ?? {
-                                        port: "",
-                                        configName: "",
-                                      }),
-                                      configName: e.target.value,
-                                    },
-                                  }))
-                                }
-                                placeholder={
-                                  isBimanual
-                                    ? `${robotName}_${slot.arm}`
-                                    : (robotName ?? "")
-                                }
-                                disabled={
-                                  calibrationStatus.calibration_active ||
-                                  autoCal.active
-                                }
-                                className="bg-slate-700 border-slate-600 text-white rounded-md"
-                              />
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                  <p className="text-xs text-slate-500">
-                    Ports are read-only here — assign or detect them from the
-                    single-arm view first if you're unsure which is which.
-                  </p>
-                </div>
-              )}
 
               <Separator className="bg-slate-700" />
 
@@ -1779,18 +1360,6 @@ const Calibration = () => {
                   >
                     <Square className="w-5 h-5 mr-2" />
                     Stop auto-calibration
-                  </Button>
-                ) : batchMode ? (
-                  // Multi-arm: one manual guided sequence. Auto-calibrate isn't
-                  // offered for batches (single-arm follow-up — see notes).
-                  <Button
-                    onClick={() => handleStartBatchCalibration()}
-                    disabled={!robotName || selectedBatchSlots.length === 0}
-                    className="w-full bg-blue-600 hover:bg-blue-700 text-white rounded-full py-6 text-lg"
-                  >
-                    <Play className="w-5 h-5 mr-2" />
-                    Calibrate {selectedBatchSlots.length || ""} selected arm
-                    {selectedBatchSlots.length === 1 ? "" : "s"}
                   </Button>
                 ) : (
                   // Auto-calibrate is the default calibration mode: it's the
@@ -1989,40 +1558,6 @@ const Calibration = () => {
                 </DialogContent>
               </Dialog>
 
-              <Dialog
-                open={batchOverwritePromptOpen}
-                onOpenChange={setBatchOverwritePromptOpen}
-              >
-                <DialogContent className="bg-slate-900 border-slate-800 text-white">
-                  <DialogHeader>
-                    <DialogTitle>Overwrite existing calibration?</DialogTitle>
-                    <DialogDescription className="text-slate-400">
-                      {batchNameTaken
-                        ? `An arm in this batch (${batchNameTaken}) already has a calibration of that name.`
-                        : "One of the selected arms already has a calibration of that name."}{" "}
-                      Continuing will replace it (and any other name clashes)
-                      when each arm completes. To keep them, cancel and rename
-                      the clashing arms first.
-                    </DialogDescription>
-                  </DialogHeader>
-                  <DialogFooter className="flex gap-2 justify-end">
-                    <Button
-                      variant="outline"
-                      className="border-slate-600 text-slate-700 dark:text-slate-300"
-                      onClick={() => setBatchOverwritePromptOpen(false)}
-                    >
-                      Cancel
-                    </Button>
-                    <Button
-                      className="bg-red-500 hover:bg-red-600 text-white"
-                      onClick={() => handleStartBatchCalibration(true)}
-                    >
-                      Overwrite & calibrate
-                    </Button>
-                  </DialogFooter>
-                </DialogContent>
-              </Dialog>
-
               <AlertDialog
                 open={portAssignPrompt !== null}
                 onOpenChange={(open) => {
@@ -2208,59 +1743,6 @@ const Calibration = () => {
                   <span className="ml-2">{statusDisplay.text}</span>
                 </Badge>
               </div>
-
-              {/* Multi-arm progress. Shows which arm of N is active plus the
-                  running tally; the per-arm step UI below is unchanged and
-                  drives whichever arm is current. */}
-              {calibrationStatus.batch_active &&
-                (calibrationStatus.batch_total ?? 0) > 0 && (
-                  <div className="rounded-md border border-blue-700/50 bg-blue-900/20 p-3 space-y-2">
-                    <div className="flex items-center justify-between">
-                      <span className="text-sm font-medium text-blue-200">
-                        Arm {(calibrationStatus.batch_index ?? 0) + 1} of{" "}
-                        {calibrationStatus.batch_total}
-                        {calibrationStatus.batch_current && (
-                          <>
-                            {" — "}
-                            {calibrationStatus.batch_current.device_type ===
-                            "teleop"
-                              ? "Leader"
-                              : "Follower"}{" "}
-                            ({calibrationStatus.batch_current.arm})
-                          </>
-                        )}
-                      </span>
-                      <span className="text-xs text-blue-300/80">
-                        {(calibrationStatus.batch_completed ?? []).length} done
-                      </span>
-                    </div>
-                    <div className="flex gap-1">
-                      {Array.from({
-                        length: calibrationStatus.batch_total ?? 0,
-                      }).map((_, i) => {
-                        const idx = calibrationStatus.batch_index ?? 0;
-                        return (
-                          <div
-                            key={i}
-                            className={`h-1.5 flex-1 rounded-full ${
-                              i < idx
-                                ? "bg-green-500"
-                                : i === idx
-                                  ? "bg-blue-400"
-                                  : "bg-slate-700"
-                            }`}
-                          />
-                        );
-                      })}
-                    </div>
-                    {calibrationStatus.batch_failed_arm && (
-                      <p className="text-xs text-red-300">
-                        Stopped at {calibrationStatus.batch_failed_arm}. Earlier
-                        arms are calibrated; the rest were skipped.
-                      </p>
-                    )}
-                  </div>
-                )}
 
               {calibrationStatus.status === "recording" &&
                 calibrationStatus.recorded_ranges && (
