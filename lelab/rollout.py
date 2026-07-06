@@ -31,6 +31,7 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -239,6 +240,24 @@ def _counterpart_leader_slots(follower_id: str) -> list[ArmSlot]:
     return slots
 
 
+@contextmanager
+def _open_follower(port: str, follower_id: str):
+    """Open a bare follower bus on `port`, yield the connected robot, and
+    release the port read-only on exit.
+
+    Both rollout preflights connect one follower, do read-only work, then must
+    free the port for the subprocess to reopen. Torque is never enabled here,
+    so the release skips the torque-disable write (``disconnect(
+    disable_torque=False)``) — a plain port close. The disconnect runs on any
+    exit path (success or exception)."""
+    robot = SO101Follower(SO101FollowerConfig(port=port, id=follower_id))
+    robot.bus.connect()
+    try:
+        yield robot
+    finally:
+        robot.bus.disconnect(disable_torque=False)
+
+
 def _preflight_arm_identity(port: str, follower_id: str, config_name: str | None = None) -> list[str]:
     """Read-only identity check of ONE follower arm before the rollout
     subprocess starts.
@@ -256,18 +275,12 @@ def _preflight_arm_identity(port: str, follower_id: str, config_name: str | None
     entry rather than the alias (mirrors verify_devices' config_names in
     record/teleop). Bimanual runs each follower bus through this separately —
     each opens and releases its own port — so the two are never open at once."""
-    robot = SO101Follower(SO101FollowerConfig(port=port, id=follower_id))
-    robot.bus.connect()
-    try:
+    with _open_follower(port, follower_id) as robot:
         return verify_devices(
             ((robot, "follower"),),
             extra_slots=_counterpart_leader_slots(config_name or follower_id),
             config_names=[config_name] if config_name is not None else None,
         )
-    finally:
-        # Reads only: torque was never enabled, so skip the torque-disable
-        # write and just close the port.
-        robot.bus.disconnect(disable_torque=False)
 
 
 def _preflight_motor_power(port: str, follower_id: str, percent: int) -> list[str]:
@@ -285,17 +298,11 @@ def _preflight_motor_power(port: str, follower_id: str, percent: int) -> list[st
         return=400), which would otherwise throttle the whole rollout.
     Never raises: a failure degrades to the previous register value (logged)
     and returns warning messages instead of aborting the start."""
-    robot = SO101Follower(SO101FollowerConfig(port=port, id=follower_id))
     try:
-        robot.bus.connect()
-        try:
+        with _open_follower(port, follower_id) as robot:
             return apply_motor_power(robot, percent, "follower arm") + clear_goal_velocity(
                 robot, "follower arm"
             )
-        finally:
-            # Torque was never enabled here; just release the port for the
-            # subprocess to reopen.
-            robot.bus.disconnect(disable_torque=False)
     except Exception as exc:
         message = (
             f"Could not set motor power to {percent}% on {port}: {exc}. "
