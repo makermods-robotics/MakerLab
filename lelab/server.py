@@ -41,10 +41,10 @@ from starlette.types import Scope
 
 from lerobot.policies.factory import make_policy_config
 
-# Module objects (not from-imports) for the camera-preview mutex checks:
-# record/teleoperate REBIND their *_active globals, so only live attribute
-# access sees the current value — a from-import would freeze the startup value.
-from . import datasets as dataset_browser, record as record_state, teleoperate as teleoperate_state
+# Module object (not a from-import) for the camera-preview mutex check: record
+# REBINDS its recording_active global, so only live attribute access sees the
+# current value — a from-import would freeze the startup value.
+from . import datasets as dataset_browser, record as record_state
 
 # Import our custom calibration functionality
 from .auto_calibrate import (
@@ -1796,21 +1796,17 @@ def camera_preview_stream(index: int):
     Fallback for headless deployments (e.g. a Jetson on the LAN): the browser's
     getUserMedia can't see the server's cameras, so the preview tiles render
     ``<img src="/camera-preview/{index}">`` instead. The capture is shared and
-    refcounted per index (see lelab/camera_preview.py); recording and
-    teleoperation always win — their start paths force-release every preview.
+    refcounted per index (see lelab/camera_preview.py); recording force-releases
+    every preview on its start path.
 
-    Returns 409 while recording or teleoperation is active (they own the cv2
-    devices) and 503 when the camera can't be opened.
+    Returns 409 while recording is active (it owns the cv2 devices) and 503 when
+    the camera can't be opened. Teleoperation drives the serial bus and opens no
+    cv2 cameras, so a preview during teleop does not contend — it is allowed.
     """
     if record_state.recording_active:
         raise HTTPException(
             status_code=409,
             detail="Recording is active — the cameras are in use. Stop recording to preview them.",
-        )
-    if teleoperate_state.teleoperation_active:
-        raise HTTPException(
-            status_code=409,
-            detail="Teleoperation is active — stop it to preview the cameras.",
         )
     try:
         stream = camera_preview_manager.open_stream(index)
