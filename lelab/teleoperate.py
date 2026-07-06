@@ -16,26 +16,21 @@ import logging
 import math
 import threading
 import time
-from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel
 
-from lerobot.robots.bi_so_follower import BiSOFollower, BiSOFollowerConfig
-from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
-from lerobot.teleoperators.bi_so_leader import BiSOLeader, BiSOLeaderConfig
-from lerobot.teleoperators.so_leader import SO101Leader, SO101LeaderConfig
+from lerobot.robots.bi_so_follower import BiSOFollower
+from lerobot.robots.so_follower import SO101Follower
+from lerobot.teleoperators.bi_so_leader import BiSOLeader
+from lerobot.teleoperators.so_leader import SO101Leader
 
 from .arm_identity import verify_devices
 from .camera_preview import camera_preview_manager
 from .motor_power import apply_motor_power, clear_goal_velocity, torque_limit_from_percent
 from .rest_pose import capture_rest_pose, return_to_rest_pose
-from .utils.config import (
-    bimanual_base_id,
-    setup_calibration_files,
-    stage_bimanual_calibrations,
-)
 from .utils.devices import _force_close_device_resources
+from .utils.robot_factory import build_bimanual_configs, build_single_configs
 
 logger = logging.getLogger(__name__)
 
@@ -468,31 +463,10 @@ def _connect_bimanual(request: TeleoperateRequest):
     error if any library file is missing (before connect() drops into
     interactive recalibration, which would hang this thread).
     """
-    base = bimanual_base_id(request.robot_name)
-    leader_staging, follower_staging, _ = stage_bimanual_calibrations(
-        base,
-        request.leader_config,
-        request.right_leader_config,
-        request.follower_config,
-        request.right_follower_config,
-    )
+    robot_config, teleop_config = build_bimanual_configs(request)
 
-    robot = BiSOFollower(
-        BiSOFollowerConfig(
-            id=base,
-            calibration_dir=Path(follower_staging),
-            left_arm_config=SO101FollowerConfig(port=request.follower_port),
-            right_arm_config=SO101FollowerConfig(port=request.right_follower_port),
-        )
-    )
-    teleop_device = BiSOLeader(
-        BiSOLeaderConfig(
-            id=base,
-            calibration_dir=Path(leader_staging),
-            left_arm_config=SO101LeaderConfig(port=request.leader_port),
-            right_arm_config=SO101LeaderConfig(port=request.right_leader_port),
-        )
-    )
+    robot = BiSOFollower(robot_config)
+    teleop_device = BiSOLeader(teleop_config)
 
     try:
         # Connect each of the four buses, naming the one that fails.
@@ -608,21 +582,8 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
         if request.mode == "bimanual":
             robot, teleop_device, identity_warnings = _connect_bimanual(request)
         else:
-            # Setup calibration files
-            leader_config_name, follower_config_name = setup_calibration_files(
-                request.leader_config, request.follower_config
-            )
-
-            # Create robot and teleop configs
-            robot_config = SO101FollowerConfig(
-                port=request.follower_port,
-                id=follower_config_name,
-            )
-
-            teleop_config = SO101LeaderConfig(
-                port=request.leader_port,
-                id=leader_config_name,
-            )
+            # Create robot and teleop configs (stages calibration files).
+            robot_config, teleop_config = build_single_configs(request)
 
             # Connect synchronously. If either device fails to connect, clean up the
             # other (so its serial port is released) and report the error — do NOT

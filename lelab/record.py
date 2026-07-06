@@ -18,20 +18,15 @@ import shutil
 import threading
 import time
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel
 
 from lerobot.configs.dataset import DatasetRecordConfig
 from lerobot.datasets import LeRobotDataset
-from lerobot.robots.bi_so_follower import BiSOFollowerConfig
-from lerobot.robots.so_follower import SO101FollowerConfig
 
 # Import the main record functionality to reuse it
 from lerobot.scripts.lerobot_record import RecordConfig
-from lerobot.teleoperators.bi_so_leader import BiSOLeaderConfig
-from lerobot.teleoperators.so_leader import SO101LeaderConfig
 
 from .arm_identity import ArmIdentityError, verify_devices
 from .camera_preview import camera_preview_manager
@@ -40,12 +35,10 @@ from .motor_power import apply_motor_power, clear_goal_velocity
 from .rest_pose import capture_rest_pose
 from .teleoperate import _device_buses, _return_followers_to_rest, force_disable_torque
 from .utils.config import (
-    bimanual_base_id,
-    setup_calibration_files,
-    stage_bimanual_calibrations,
     validate_dataset_repo_id,
     with_lelab_tag,
 )
+from .utils.robot_factory import build_bimanual_configs, build_single_configs
 
 logger = logging.getLogger(__name__)
 
@@ -220,53 +213,12 @@ def create_record_config(request: RecordingRequest) -> RecordConfig:
     camera_configs = _build_camera_configs(request.cameras, _platform_backend())
 
     if request.mode == "bimanual":
-        # Build a lerobot BiSO leader+follower pair. lerobot loads each sub-arm's
-        # calibration as "<base>_left/right.json" from a single calibration_dir,
-        # with no way to point left/right at differently named library files. So
-        # stage the four arbitrarily-named library calibrations into per-device
-        # dirs as "<base>_left/right.json" and point BiSO at those (otherwise the
-        # sub-arms have no calibration and connect() would try to interactively
-        # recalibrate — which hangs the record thread). Cameras go on the left
-        # follower arm (exposed prefixed "left_*"). The staging copy fails fast
-        # with a clear per-slot error if any library file is missing.
-        base = bimanual_base_id(request.robot_name)
-        leader_staging, follower_staging, _ = stage_bimanual_calibrations(
-            base,
-            request.leader_config,
-            request.right_leader_config,
-            request.follower_config,
-            request.right_follower_config,
-        )
-        robot_config = BiSOFollowerConfig(
-            id=base,
-            calibration_dir=Path(follower_staging),
-            left_arm_config=SO101FollowerConfig(port=request.follower_port, cameras=camera_configs),
-            right_arm_config=SO101FollowerConfig(port=request.right_follower_port),
-        )
-        teleop_config = BiSOLeaderConfig(
-            id=base,
-            calibration_dir=Path(leader_staging),
-            left_arm_config=SO101LeaderConfig(port=request.leader_port),
-            right_arm_config=SO101LeaderConfig(port=request.right_leader_port),
-        )
+        # Build a lerobot BiSO leader+follower pair (config assembly + calibration
+        # staging in build_bimanual_configs). Cameras go on the left follower arm
+        # (exposed prefixed "left_*").
+        robot_config, teleop_config = build_bimanual_configs(request, cameras=camera_configs)
     else:
-        # Setup calibration files
-        leader_config_name, follower_config_name = setup_calibration_files(
-            request.leader_config, request.follower_config
-        )
-
-        # Create robot config
-        robot_config = SO101FollowerConfig(
-            port=request.follower_port,
-            id=follower_config_name,
-            cameras=camera_configs,
-        )
-
-        # Create teleop config
-        teleop_config = SO101LeaderConfig(
-            port=request.leader_port,
-            id=leader_config_name,
-        )
+        robot_config, teleop_config = build_single_configs(request, cameras=camera_configs)
 
     # Create dataset config
     dataset_config = DatasetRecordConfig(
