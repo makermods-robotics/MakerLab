@@ -153,3 +153,249 @@ def test_find_off_center_joints_tolerance_boundary() -> None:
     assert find_off_center_joints({"elbow_flex": (1447, 3447)}) == []
     # Midpoint 2448 deviates by 401 — just over the line.
     assert find_off_center_joints({"elbow_flex": (1448, 3448)}) == ["elbow_flex"]
+
+
+# --- Batch (multi-arm) calibration ------------------------------------------
+
+
+def _batch_arm(device_type="teleop", arm="left", config_file="c", port="/dev/null"):
+    from lelab.calibrate import CalibrationBatchArm
+
+    return CalibrationBatchArm(device_type=device_type, port=port, config_file=config_file, arm=arm)
+
+
+def test_batch_request_coerces_dict_arms() -> None:
+    """FastAPI hands nested models as dicts; __post_init__ coerces them into
+    CalibrationBatchArm instances."""
+    from lelab.calibrate import CalibrationBatchArm, CalibrationBatchRequest
+
+    req = CalibrationBatchRequest(
+        robot_name="r",
+        arms=[{"device_type": "teleop", "port": "/dev/null", "config_file": "c", "arm": "left"}],
+    )
+    assert len(req.arms) == 1
+    assert isinstance(req.arms[0], CalibrationBatchArm)
+    assert req.arms[0].device_type == "teleop"
+    assert req.overwrite is False
+
+
+def test_validate_batch_arms_rejects_empty_list() -> None:
+    from lelab.calibrate import validate_batch_arms
+
+    assert validate_batch_arms([]) is not None
+
+
+def test_validate_batch_arms_rejects_more_than_four() -> None:
+    from lelab.calibrate import validate_batch_arms
+
+    arms = [
+        _batch_arm("teleop", "left", "a"),
+        _batch_arm("teleop", "right", "b"),
+        _batch_arm("robot", "left", "c"),
+        _batch_arm("robot", "right", "d"),
+        _batch_arm("teleop", "left", "e"),  # 5th
+    ]
+    assert validate_batch_arms(arms) is not None
+
+
+def test_validate_batch_arms_rejects_duplicate_slot() -> None:
+    """Two arms targeting the same (device_type, arm) slot is invalid."""
+    from lelab.calibrate import validate_batch_arms
+
+    arms = [_batch_arm("teleop", "left", "a"), _batch_arm("teleop", "left", "b")]
+    reason = validate_batch_arms(arms)
+    assert reason is not None
+    assert "slot" in reason.lower()
+
+
+def test_validate_batch_arms_rejects_same_side_name_collision() -> None:
+    """Two same-side (both leader) arms sharing a config name is invalid."""
+    from lelab.calibrate import validate_batch_arms
+
+    arms = [_batch_arm("teleop", "left", "shared"), _batch_arm("teleop", "right", "shared")]
+    reason = validate_batch_arms(arms)
+    assert reason is not None
+    assert "shared" in reason
+
+
+def test_validate_batch_arms_allows_cross_side_same_name() -> None:
+    """A leader and a follower sharing a name is fine — different dirs."""
+    from lelab.calibrate import validate_batch_arms
+
+    arms = [_batch_arm("teleop", "left", "same"), _batch_arm("robot", "left", "same")]
+    assert validate_batch_arms(arms) is None
+
+
+def test_validate_batch_arms_accepts_four_distinct_slots() -> None:
+    from lelab.calibrate import validate_batch_arms
+
+    arms = [
+        _batch_arm("teleop", "left", "a"),
+        _batch_arm("teleop", "right", "b"),
+        _batch_arm("robot", "left", "c"),
+        _batch_arm("robot", "right", "d"),
+    ]
+    assert validate_batch_arms(arms) is None
+
+
+def test_batch_rejected_while_single_calibration_active() -> None:
+    """The batch mutex refuses to start while a single calibration is running."""
+    from lelab.calibrate import CalibrationBatchRequest, CalibrationManager
+
+    mgr = CalibrationManager()
+    mgr.status.calibration_active = True  # simulate single-arm running
+
+    result = mgr.start_calibration_batch(CalibrationBatchRequest(robot_name="r", arms=[_batch_arm()]))
+    assert result.get("success") is False
+    assert "already" in result.get("message", "").lower()
+
+
+def test_single_calibration_rejected_while_batch_active() -> None:
+    """Conversely, a single start is refused while a batch is running (both flip
+    calibration_active, so the existing single-arm mutex covers this too)."""
+    from lelab.calibrate import CalibrationManager, CalibrationRequest
+
+    mgr = CalibrationManager()
+    mgr.status.batch_active = True
+    mgr.status.calibration_active = True
+
+    result = mgr.start_calibration(
+        CalibrationRequest(device_type="teleop", port="/dev/null", config_file="x")
+    )
+    assert result.get("success") is False
+    assert "already" in result.get("message", "").lower()
+
+
+def test_batch_precheck_reports_name_taken_for_offending_arm(tmp_lerobot_home) -> None:
+    """Every arm's overwrite collision is checked UP FRONT, before any hardware
+    moves. A taken name yields code=name_taken naming the offending arm, and no
+    driver thread is spawned."""
+    from pathlib import Path
+
+    from lelab.calibrate import CalibrationBatchRequest, CalibrationManager
+    from lelab.utils import config as cfg
+
+    # The SECOND arm's follower name is taken; the first (leader) is free.
+    (Path(cfg.FOLLOWER_CONFIG_PATH) / "taken.json").write_text("{}")
+
+    mgr = CalibrationManager()
+    result = mgr.start_calibration_batch(
+        CalibrationBatchRequest(
+            robot_name="r",
+            arms=[
+                _batch_arm("teleop", "left", "free"),
+                _batch_arm("robot", "left", "taken"),
+            ],
+        )
+    )
+    assert result.get("success") is False
+    assert result.get("code") == "name_taken"
+    assert result.get("arm") == {"device_type": "robot", "arm": "left"}
+    # Fail fast: no activation, no batch thread.
+    assert mgr.status.calibration_active is False
+    assert mgr.status.batch_active is False
+    assert mgr.batch_thread is None
+
+
+def test_batch_precheck_bypassed_with_overwrite(tmp_lerobot_home, monkeypatch) -> None:
+    """With overwrite=True the up-front name-taken pre-check is skipped, so the
+    batch proceeds to spawn its driver (hardware is stubbed out via
+    _run_single_arm so no real device is touched)."""
+    from pathlib import Path
+
+    from lelab.calibrate import CalibrationBatchRequest, CalibrationManager
+    from lelab.utils import config as cfg
+
+    (Path(cfg.LEADER_CONFIG_PATH) / "taken.json").write_text("{}")
+
+    mgr = CalibrationManager()
+    # Stub the per-arm runner so the driver thread doesn't touch hardware; make
+    # it return immediately as "completed".
+    monkeypatch.setattr(mgr, "_run_single_arm", lambda request: True)
+
+    result = mgr.start_calibration_batch(
+        CalibrationBatchRequest(
+            robot_name="r",
+            arms=[_batch_arm("teleop", "left", "taken")],
+            overwrite=True,
+        )
+    )
+    assert result.get("success") is True
+    # Let the (trivial) driver thread finish.
+    if mgr.batch_thread is not None:
+        mgr.batch_thread.join(timeout=2.0)
+    assert mgr.status.batch_active is False
+    assert mgr.status.status == "completed"
+
+
+def test_batch_sequences_arms_and_advances_index(tmp_lerobot_home, monkeypatch) -> None:
+    """The driver calibrates each arm in order, advancing batch_index and
+    recording completions, then reports completed. Hardware is stubbed."""
+    from lelab.calibrate import CalibrationBatchRequest, CalibrationManager
+
+    mgr = CalibrationManager()
+    seen_indices: list[int] = []
+
+    def fake_run(request):
+        # Capture the batch_index the driver set before each arm.
+        seen_indices.append(mgr.status.batch_index)
+        return True
+
+    monkeypatch.setattr(mgr, "_run_single_arm", fake_run)
+
+    result = mgr.start_calibration_batch(
+        CalibrationBatchRequest(
+            robot_name="r",
+            arms=[
+                _batch_arm("teleop", "left", "a"),
+                _batch_arm("robot", "left", "b"),
+            ],
+        )
+    )
+    assert result.get("success") is True
+    mgr.batch_thread.join(timeout=2.0)
+
+    assert seen_indices == [0, 1]
+    assert mgr.status.status == "completed"
+    assert mgr.status.batch_active is False
+    assert mgr.status.calibration_active is False
+    assert mgr.status.batch_completed == ["teleop left", "robot left"]
+    assert mgr.status.batch_failed_arm is None
+
+
+def test_batch_stops_on_arm_error_and_names_it(tmp_lerobot_home, monkeypatch) -> None:
+    """When an arm raises, the batch STOPS: later arms are skipped, the failing
+    arm is named, and earlier arms stay recorded as completed."""
+    from lelab.calibrate import CalibrationBatchRequest, CalibrationManager
+
+    mgr = CalibrationManager()
+    calls: list[str] = []
+
+    def fake_run(request):
+        calls.append(f"{request.device_type} {request.arm}")
+        if request.device_type == "robot":
+            raise RuntimeError("connect failed")
+        return True
+
+    monkeypatch.setattr(mgr, "_run_single_arm", fake_run)
+
+    result = mgr.start_calibration_batch(
+        CalibrationBatchRequest(
+            robot_name="r",
+            arms=[
+                _batch_arm("teleop", "left", "a"),  # completes
+                _batch_arm("robot", "left", "b"),  # fails
+                _batch_arm("robot", "right", "c"),  # never reached
+            ],
+        )
+    )
+    assert result.get("success") is True
+    mgr.batch_thread.join(timeout=2.0)
+
+    # Third arm never ran.
+    assert calls == ["teleop left", "robot left"]
+    assert mgr.status.status == "error"
+    assert mgr.status.batch_failed_arm == "robot left"
+    assert mgr.status.batch_completed == ["teleop left"]
+    assert mgr.status.batch_active is False
+    assert mgr.status.calibration_active is False

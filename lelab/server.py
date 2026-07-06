@@ -49,7 +49,7 @@ from . import datasets as dataset_browser, record as record_state, teleoperate a
 
 # Import our custom calibration functionality
 from .auto_calibrate import AutoCalibrationRequest, auto_calibration_manager
-from .calibrate import CalibrationRequest, calibration_manager
+from .calibrate import CalibrationBatchRequest, CalibrationRequest, calibration_manager
 from .camera_preview import CameraOpenError, camera_preview_manager
 from .identify import identify_arm_by_motion
 from .jobs import (
@@ -1342,6 +1342,16 @@ def run_update():
 def start_calibration(request: CalibrationRequest):
     """Start calibration process"""
     return calibration_manager.start_calibration(request)
+
+
+@app.post("/start-calibration-batch")
+def start_calibration_batch(request: CalibrationBatchRequest):
+    """Calibrate a chosen subset of arms sequentially in one guided flow.
+
+    Each arm's two steps are advanced via the existing /complete-calibration-step
+    endpoint; /calibration-status reports which arm of N is active plus its step.
+    """
+    return calibration_manager.start_calibration_batch(request)
 
 
 @app.post("/stop-calibration")

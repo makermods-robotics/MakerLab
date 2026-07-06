@@ -1016,3 +1016,76 @@ def test_delete_local_job_records_no_dismissal(
     resp = client.delete("/jobs/some-local-run")
     assert resp.status_code == 204
     assert cfg.get_dismissed_hub_jobs() == set()
+
+
+# --- Batch calibration route ------------------------------------------------
+
+
+def test_start_calibration_batch_route_delegates_to_manager(
+    client: TestClient, monkeypatch
+) -> None:
+    """POST /start-calibration-batch parses the request into a
+    CalibrationBatchRequest and hands it to the manager, returning its result."""
+    captured = {}
+
+    def fake_start(request):
+        captured["request"] = request
+        return {"success": True, "message": "Batch calibration started"}
+
+    monkeypatch.setattr(
+        server_mod.calibration_manager, "start_calibration_batch", fake_start
+    )
+
+    resp = client.post(
+        "/start-calibration-batch",
+        json={
+            "robot_name": "r",
+            "overwrite": False,
+            "arms": [
+                {
+                    "device_type": "teleop",
+                    "port": "/dev/null",
+                    "config_file": "c",
+                    "arm": "left",
+                }
+            ],
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["success"] is True
+    req = captured["request"]
+    assert req.robot_name == "r"
+    assert len(req.arms) == 1
+    assert req.arms[0].device_type == "teleop"
+    assert req.arms[0].arm == "left"
+
+
+def test_start_calibration_batch_route_reports_name_taken(
+    client: TestClient, monkeypatch
+) -> None:
+    """The manager's name_taken rejection is surfaced verbatim by the route."""
+    monkeypatch.setattr(
+        server_mod.calibration_manager,
+        "start_calibration_batch",
+        lambda request: {
+            "success": False,
+            "code": "name_taken",
+            "arm": {"device_type": "robot", "arm": "left"},
+            "message": "taken",
+        },
+    )
+
+    resp = client.post(
+        "/start-calibration-batch",
+        json={
+            "robot_name": "r",
+            "arms": [
+                {"device_type": "robot", "port": "/dev/null", "config_file": "c"}
+            ],
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["success"] is False
+    assert body["code"] == "name_taken"
+    assert body["arm"] == {"device_type": "robot", "arm": "left"}
