@@ -106,9 +106,7 @@ def test_merge_rejects_output_matching_a_source() -> None:
     from makerlab.merge import MergeManager, MergeRequest
 
     mgr = MergeManager()
-    res = mgr.start(
-        MergeRequest(source_repo_ids=["a/one", "a/two"], output_repo_id="a/one")
-    )
+    res = mgr.start(MergeRequest(source_repo_ids=["a/one", "a/two"], output_repo_id="a/one"))
     assert res["started"] is False
     assert mgr.state == "idle"
 
@@ -117,9 +115,7 @@ def test_merge_rejects_blank_output() -> None:
     from makerlab.merge import MergeManager, MergeRequest
 
     mgr = MergeManager()
-    res = mgr.start(
-        MergeRequest(source_repo_ids=["a/one", "a/two"], output_repo_id="  ")
-    )
+    res = mgr.start(MergeRequest(source_repo_ids=["a/one", "a/two"], output_repo_id="  "))
     assert res["started"] is False
     assert mgr.state == "idle"
 
@@ -196,9 +192,7 @@ def test_merge_source_problem_missing_data_parquet(tmp_lerobot_home: Path) -> No
     assert "incomplete" in msg.lower() or "corrupt" in msg.lower()
 
 
-def test_merge_source_problem_not_found_on_hub(
-    tmp_lerobot_home: Path, monkeypatch
-) -> None:
+def test_merge_source_problem_not_found_on_hub(tmp_lerobot_home: Path, monkeypatch) -> None:
     from unittest.mock import MagicMock
 
     from huggingface_hub.utils import RepositoryNotFoundError
@@ -218,9 +212,7 @@ def test_merge_source_problem_not_found_on_hub(
     assert "hub" in msg.lower()
 
 
-def test_merge_source_problem_offline_does_not_block(
-    tmp_lerobot_home: Path, monkeypatch
-) -> None:
+def test_merge_source_problem_offline_does_not_block(tmp_lerobot_home: Path, monkeypatch) -> None:
     from makerlab import merge
 
     _write_dataset_tree(tmp_lerobot_home, "a/one")

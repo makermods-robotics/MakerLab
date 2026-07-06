@@ -613,9 +613,7 @@ def test_graceful_stop_diagnoses_a_stalled_return(
     assert "ticks" in out
 
 
-def test_graceful_stop_diagnoses_a_missing_pose(
-    no_sleep: list[float], capsys: pytest.CaptureFixture
-) -> None:
+def test_graceful_stop_diagnoses_a_missing_pose(no_sleep: list[float], capsys: pytest.CaptureFixture) -> None:
     bus = _FakeScriptBus()
 
     acs._graceful_stop(bus, {})

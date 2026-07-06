@@ -231,8 +231,8 @@ def test_create_record_config_builds_biso_for_bimanual(monkeypatch: pytest.Monke
 
 
 def test_build_camera_configs_uses_default_backend_when_unset() -> None:
-    from makerlab.record import _build_camera_configs
     from lerobot.cameras.configs import Cv2Backends
+    from makerlab.record import _build_camera_configs
 
     cameras = {"cam": {"type": "opencv", "camera_index": 0, "width": 640, "height": 480, "fps": 30}}
     configs = _build_camera_configs(cameras, Cv2Backends.AVFOUNDATION)
@@ -243,8 +243,8 @@ def test_build_camera_configs_uses_default_backend_when_unset() -> None:
 
 
 def test_build_camera_configs_passes_fourcc_through() -> None:
-    from makerlab.record import _build_camera_configs
     from lerobot.cameras.configs import Cv2Backends
+    from makerlab.record import _build_camera_configs
 
     cameras = {"cam": {"type": "opencv", "camera_index": 0, "fourcc": "MJPG"}}
     configs = _build_camera_configs(cameras, Cv2Backends.ANY)
@@ -253,8 +253,8 @@ def test_build_camera_configs_passes_fourcc_through() -> None:
 
 
 def test_build_camera_configs_explicit_backend_overrides_default() -> None:
-    from makerlab.record import _build_camera_configs
     from lerobot.cameras.configs import Cv2Backends
+    from makerlab.record import _build_camera_configs
 
     cameras = {"cam": {"type": "opencv", "camera_index": 0, "backend": "V4L2"}}
     configs = _build_camera_configs(cameras, Cv2Backends.AVFOUNDATION)
@@ -263,8 +263,8 @@ def test_build_camera_configs_explicit_backend_overrides_default() -> None:
 
 
 def test_build_camera_configs_invalid_backend_raises() -> None:
-    from makerlab.record import _build_camera_configs
     from lerobot.cameras.configs import Cv2Backends
+    from makerlab.record import _build_camera_configs
 
     cameras = {"cam": {"type": "opencv", "camera_index": 0, "backend": "NOPE"}}
     with pytest.raises(KeyError):
@@ -272,8 +272,8 @@ def test_build_camera_configs_invalid_backend_raises() -> None:
 
 
 def test_build_camera_configs_skips_non_opencv_type() -> None:
-    from makerlab.record import _build_camera_configs
     from lerobot.cameras.configs import Cv2Backends
+    from makerlab.record import _build_camera_configs
 
     cameras = {"cam": {"type": "realsense", "camera_index": 0}}
     configs = _build_camera_configs(cameras, Cv2Backends.ANY)
