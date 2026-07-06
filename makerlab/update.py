@@ -13,7 +13,7 @@
 # limitations under the License.
 """Notify users when a newer MakerLab is available on GitHub.
 
-MakerLab installs from git (`pip install git+https://github.com/.../leLab.git`),
+MakerLab installs from git (`pip install git+https://github.com/makermods-robotics/MakerLab.git`),
 so "newer" means the default branch has moved past the installed commit. We
 read the installed commit from pip's `direct_url.json` and compare it to the
 repo HEAD via the GitHub API. Editable/local clones have no commit_id, so they
