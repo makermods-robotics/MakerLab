@@ -350,10 +350,6 @@ def detect_cuda_status() -> dict[str, Any]:
     }
 
 
-def handle_get_cuda_status() -> dict[str, Any]:
-    return detect_cuda_status()
-
-
 def warn_if_cuda_mismatch() -> None:
     """Log a prominent warning when a GPU is present but torch is CPU-only.
 

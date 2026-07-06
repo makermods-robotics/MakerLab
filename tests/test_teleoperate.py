@@ -49,13 +49,6 @@ def test_handle_teleoperation_status_returns_dict() -> None:
     assert isinstance(result, dict)
 
 
-def test_handle_get_joint_positions_returns_dict_when_idle() -> None:
-    from lelab.teleoperate import handle_get_joint_positions
-
-    result = handle_get_joint_positions()
-    assert isinstance(result, dict)
-
-
 def test_get_joint_positions_from_robot_uses_provided_object() -> None:
     from lelab.teleoperate import get_joint_positions_from_robot
     from tests.mocks import FakeRobot

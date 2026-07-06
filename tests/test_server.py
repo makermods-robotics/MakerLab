@@ -35,11 +35,9 @@ BROWSER_ACCEPT = {"accept": "text/html,application/xhtml+xml,application/xml;q=0
 
 REQUIRED_PATHS = {
     "/health",
-    "/get-configs",
     "/move-arm",
     "/stop-teleoperation",
     "/teleoperation-status",
-    "/joint-positions",
     "/start-recording",
     "/stop-recording",
     "/recording-status",

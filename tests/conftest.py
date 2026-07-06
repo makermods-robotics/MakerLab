@@ -53,9 +53,8 @@ def tmp_lerobot_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     leader_cfg_dir = cache / "configs" / "so_leader"
     follower_cfg_dir = cache / "configs" / "so_follower"
     port_dir = cache / "ports"
-    saved_dir = cache / "saved_configs"
     robots_dir = cache / "robots"
-    for d in (teleop_dir, robot_dir, leader_cfg_dir, follower_cfg_dir, port_dir, saved_dir, robots_dir):
+    for d in (teleop_dir, robot_dir, leader_cfg_dir, follower_cfg_dir, port_dir, robots_dir):
         d.mkdir(parents=True, exist_ok=True)
 
     monkeypatch.setattr(cfg, "CALIBRATION_BASE_PATH_TELEOP", str(teleop_dir))
@@ -68,9 +67,6 @@ def tmp_lerobot_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(cfg, "PORT_CONFIG_PATH", str(port_dir))
     monkeypatch.setattr(cfg, "LEADER_PORT_FILE", str(port_dir / "leader_port.txt"))
     monkeypatch.setattr(cfg, "FOLLOWER_PORT_FILE", str(port_dir / "follower_port.txt"))
-    monkeypatch.setattr(cfg, "CONFIG_STORAGE_PATH", str(saved_dir))
-    monkeypatch.setattr(cfg, "LEADER_CONFIG_FILE", str(saved_dir / "leader_config.txt"))
-    monkeypatch.setattr(cfg, "FOLLOWER_CONFIG_FILE", str(saved_dir / "follower_config.txt"))
     monkeypatch.setattr(cfg, "DISMISSED_HUB_JOBS_FILE", str(cache / "dismissed_hub_jobs.json"))
     # BiSO staging root — without this, any bimanual staging test writes into the
     # developer's real ~/.cache dir.

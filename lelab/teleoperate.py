@@ -883,18 +883,3 @@ def handle_teleoperation_status() -> dict[str, Any]:
         "last_cleanup_error": last_cleanup_error,
         "message": message,
     }
-
-
-def handle_get_joint_positions() -> dict[str, Any]:
-    """Handle get current robot joint positions request"""
-    global current_robot
-
-    if not teleoperation_active or current_robot is None:
-        return {"success": False, "message": "No active teleoperation session"}
-
-    try:
-        joint_positions = get_joint_positions_from_robot(current_robot)
-        return {"success": True, "joint_positions": joint_positions, "timestamp": time.time()}
-    except Exception as e:
-        logger.error(f"Error getting joint positions: {e}")
-        return {"success": False, "message": f"Failed to get joint positions: {str(e)}"}

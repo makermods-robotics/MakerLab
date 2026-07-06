@@ -34,11 +34,13 @@ def _patch_robots_path(tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(cfg, "ROBOTS_PATH", str(robots_dir))
 
 
-def test_port_persistence_round_trips(tmp_lerobot_home: Path) -> None:
+def test_get_saved_robot_port_reads_legacy_port_files(tmp_lerobot_home: Path) -> None:
     from lelab.utils import config as cfg
 
-    cfg.save_robot_port("leader", "/dev/ttyUSB0")
-    cfg.save_robot_port("follower", "/dev/ttyUSB1")
+    # Nothing writes these files anymore, but existing installs still have
+    # them; the read path keeps honoring them as the default port.
+    Path(cfg.LEADER_PORT_FILE).write_text("/dev/ttyUSB0")
+    Path(cfg.FOLLOWER_PORT_FILE).write_text("/dev/ttyUSB1")
 
     assert cfg.get_saved_robot_port("leader") == "/dev/ttyUSB0"
     assert cfg.get_saved_robot_port("follower") == "/dev/ttyUSB1"
@@ -48,31 +50,6 @@ def test_get_saved_robot_port_returns_none_when_unset(tmp_lerobot_home: Path) ->
     from lelab.utils import config as cfg
 
     assert cfg.get_saved_robot_port("leader") is None
-
-
-def test_saved_robot_config_round_trips(tmp_lerobot_home: Path) -> None:
-    from lelab.utils import config as cfg
-
-    cfg.save_robot_config("leader", "my_calib")
-    assert cfg.get_saved_robot_config("leader") == "my_calib"
-
-
-def test_get_default_robot_config_falls_back_to_first_available(
-    tmp_lerobot_home: Path,
-) -> None:
-    from lelab.utils import config as cfg
-
-    available = ["alpha", "beta", "gamma"]
-    # No saved config → first available wins.
-    assert cfg.get_default_robot_config("leader", available) == "alpha"
-
-    # After saving, the saved one wins if it's still available.
-    cfg.save_robot_config("leader", "beta")
-    assert cfg.get_default_robot_config("leader", available) == "beta"
-
-    # Saved config no longer in the available list → fall back to first.
-    cfg.save_robot_config("leader", "deleted")
-    assert cfg.get_default_robot_config("leader", available) == "alpha"
 
 
 def test_is_valid_robot_name_accepts_simple_names(tmp_lerobot_home: Path) -> None:

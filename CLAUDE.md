@@ -55,8 +55,7 @@ All under `~/.cache/huggingface/lerobot/` (managed in [utils/config.py](lelab/ut
 
 - `calibration/teleoperators/so101_leader/*.json` — leader calibration files (also called "teleop")
 - `calibration/robots/so101_follower/*.json` — follower calibration files (also called "robot")
-- `ports/{leader,follower}_port.txt` — last-used serial ports
-- `saved_configs/{leader,follower}_config.txt` — last-selected config name
+- `ports/{leader,follower}_port.txt` — legacy last-used serial ports (read-only: still honored as the default port by `GET /robot-port/{robot_type}`, but nothing writes them anymore — robot records own port persistence)
 
 `device_type` in API requests is `"teleop"` or `"robot"` (mapped to leader/follower paths). `robot_type` in port endpoints is `"leader"` or `"follower"`. Don't conflate the two vocabularies.
 

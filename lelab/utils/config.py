@@ -18,7 +18,6 @@ import os
 import platform
 import re
 import shutil
-import time
 from pathlib import Path
 from typing import Literal
 
@@ -36,11 +35,6 @@ FOLLOWER_CONFIG_PATH = os.path.join(CALIBRATION_BASE_PATH_ROBOTS, "so_follower")
 PORT_CONFIG_PATH = os.path.expanduser("~/.cache/huggingface/lerobot/ports")
 LEADER_PORT_FILE = os.path.join(PORT_CONFIG_PATH, "leader_port.txt")
 FOLLOWER_PORT_FILE = os.path.join(PORT_CONFIG_PATH, "follower_port.txt")
-
-# Define configuration storage path
-CONFIG_STORAGE_PATH = os.path.expanduser("~/.cache/huggingface/lerobot/saved_configs")
-LEADER_CONFIG_FILE = os.path.join(CONFIG_STORAGE_PATH, "leader_config.txt")
-FOLLOWER_CONFIG_FILE = os.path.join(CONFIG_STORAGE_PATH, "follower_config.txt")
 
 # Robot config records (per-robot JSON metadata)
 ROBOTS_PATH = os.path.expanduser("~/.cache/huggingface/lerobot/robots")
@@ -95,15 +89,6 @@ def _port_file_for(robot_type: RobotSide) -> str:
         return LEADER_PORT_FILE
     if robot_type == "follower":
         return FOLLOWER_PORT_FILE
-    raise ValueError(f"robot_type must be 'leader' or 'follower', got {robot_type!r}")
-
-
-def _config_file_for(robot_type: RobotSide) -> str:
-    rt = robot_type.lower() if isinstance(robot_type, str) else robot_type
-    if rt == "leader":
-        return LEADER_CONFIG_FILE
-    if rt == "follower":
-        return FOLLOWER_CONFIG_FILE
     raise ValueError(f"robot_type must be 'leader' or 'follower', got {robot_type!r}")
 
 
@@ -225,77 +210,6 @@ def find_available_ports():
     return sorted(ports)
 
 
-def find_robot_port(robot_type="robot"):
-    """
-    Find the port for a robot by detecting the difference when disconnecting/reconnecting
-
-    Args:
-        robot_type (str): Type of robot ("leader" or "follower" or generic "robot")
-
-    Returns:
-        str: The detected port
-    """
-    logger.info(f"Finding port for {robot_type}")
-
-    # Get initial ports
-    ports_before = find_available_ports()
-    logger.info(f"Ports before disconnecting: {ports_before}")
-
-    # This function returns the port detection logic, but the actual user interaction
-    # should be handled by the frontend
-    return {"ports_before": ports_before, "robot_type": robot_type}
-
-
-def detect_port_after_disconnect(ports_before, timeout_s: float = 15.0, poll_interval_s: float = 0.3):
-    """
-    Wait for the user to unplug the robot and detect which port disappeared.
-
-    Polls the available ports until exactly one entry from ``ports_before`` vanishes,
-    or until ``timeout_s`` elapses. Polling avoids racing the user — they may need
-    several seconds to physically pull the USB cable.
-
-    Args:
-        ports_before (list): List of ports before disconnection
-        timeout_s (float): Maximum seconds to wait for a port to disappear
-        poll_interval_s (float): Seconds between checks
-
-    Returns:
-        str: The detected port
-
-    Raises:
-        OSError: If the timeout elapses with no change, or more than one port disappears.
-    """
-    before_set = set(ports_before)
-    deadline = time.monotonic() + timeout_s
-    last_diff: list = []
-
-    while time.monotonic() < deadline:
-        ports_after = find_available_ports()
-        ports_diff = list(before_set - set(ports_after))
-        last_diff = ports_diff
-
-        if len(ports_diff) == 1:
-            port = ports_diff[0]
-            logger.info(f"Detected port: {port}")
-            return port
-        if len(ports_diff) > 1:
-            raise OSError(f"Could not detect the port. More than one port disappeared: {ports_diff}.")
-
-        time.sleep(poll_interval_s)
-
-    logger.info(f"Timed out waiting for unplug. Final diff: {last_diff}")
-    raise OSError(
-        "Timed out waiting for the robot to be unplugged. Please try again and unplug the USB cable when prompted."
-    )
-
-
-def save_robot_port(robot_type: RobotSide, port: str) -> None:
-    """Persist the robot port for `robot_type` ('leader' or 'follower')."""
-    port_file = _port_file_for(robot_type)
-    _atomic_write_text(port_file, port)
-    logger.info(f"Saved {robot_type} port: {port}")
-
-
 def get_saved_robot_port(robot_type: RobotSide) -> str | None:
     """Return the saved port for `robot_type`, or None if no file exists."""
     port_file = _port_file_for(robot_type)
@@ -316,55 +230,6 @@ def get_default_robot_port(robot_type: RobotSide) -> str:
     if platform.system() == "Windows":
         return "COM3"
     return "/dev/ttyUSB0"
-
-
-def save_robot_config(robot_type: RobotSide, config_name: str) -> bool:
-    try:
-        config_file_path = _config_file_for(robot_type)
-    except ValueError as e:
-        logger.error(str(e))
-        return False
-    try:
-        _atomic_write_text(config_file_path, config_name.strip())
-    except Exception as e:
-        logger.error(f"Error saving {robot_type} configuration: {e}")
-        return False
-    logger.info(f"Saved {robot_type} configuration: {config_name}")
-    return True
-
-
-def get_saved_robot_config(robot_type: RobotSide) -> str | None:
-    try:
-        config_file_path = _config_file_for(robot_type)
-    except ValueError as e:
-        logger.error(str(e))
-        return None
-    if not os.path.exists(config_file_path):
-        logger.info(f"No saved {robot_type} configuration found")
-        return None
-    try:
-        with open(config_file_path) as f:
-            config_name = f.read().strip()
-    except OSError as e:
-        logger.error(f"Error reading saved {robot_type} configuration: {e}")
-        return None
-    if not config_name:
-        return None
-    logger.info(f"Found saved {robot_type} configuration: {config_name}")
-    return config_name
-
-
-def get_default_robot_config(robot_type: str, available_configs: list):
-    """Get the default configuration for a robot, checking saved configs first"""
-    saved_config = get_saved_robot_config(robot_type)
-    if saved_config and saved_config in available_configs:
-        return saved_config
-
-    # Return first available config as fallback
-    if available_configs:
-        return available_configs[0]
-
-    return None
 
 
 # ---------------------------------------------------------------------------

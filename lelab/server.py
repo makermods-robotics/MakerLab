@@ -14,7 +14,6 @@
 
 import asyncio
 import contextlib
-import glob
 import io
 import json
 import logging
@@ -93,7 +92,6 @@ from .rollout import (
 # Import our custom teleoperation functionality
 from .teleoperate import (
     TeleoperateRequest,
-    handle_get_joint_positions,
     handle_start_teleoperation,
     handle_stop_teleoperation,
     handle_teleoperation_status,
@@ -102,7 +100,6 @@ from .teleoperate import (
 # Training is now job-based; see app/jobs.py.
 from .train import TrainingRequest
 from .update import handle_run_update, handle_update_check
-from .utils import config
 from .utils.config import (
     FOLLOWER_CONFIG_PATH,
     LEADER_CONFIG_PATH,
@@ -110,9 +107,7 @@ from .utils.config import (
     clear_config_references,
     config_slot_conflict,
     delete_robot_record,
-    detect_port_after_disconnect,
     find_available_ports,
-    find_robot_port,
     get_default_robot_port,
     get_dismissed_hub_jobs,
     get_robot_record,
@@ -125,7 +120,6 @@ from .utils.config import (
     rename_calibration_config,
     rename_robot_record,
     save_imported_calibration,
-    save_robot_port,
     save_robot_record,
 )
 from .utils.hf_auth import (
@@ -136,7 +130,6 @@ from .utils.hf_auth import (
     shared_hf_api,
 )
 from .utils.system import (
-    handle_get_cuda_status,
     handle_get_policy_extra,
     handle_get_training_extra,
     handle_get_wandb_extra,
@@ -165,7 +158,6 @@ _QUIET_STATUS_POLL_PATHS = {
     "/calibration-status",
     "/teleoperation-status",
     "/recording-status",
-    "/joint-positions",
     "/jobs",
 }
 
@@ -402,22 +394,6 @@ job_registry.set_on_change(manager.notify_jobs_changed)
 job_registry.set_on_progress(manager.notify_job_progress)
 
 
-@app.get("/get-configs")
-def get_configs():
-    # Get all available calibration configs as STEMS (no .json) — the canonical
-    # user-facing name. The .json is only the on-disk filename.
-    leader_configs = [
-        os.path.splitext(os.path.basename(f))[0]
-        for f in glob.glob(os.path.join(LEADER_CONFIG_PATH, "*.json"))
-    ]
-    follower_configs = [
-        os.path.splitext(os.path.basename(f))[0]
-        for f in glob.glob(os.path.join(FOLLOWER_CONFIG_PATH, "*.json"))
-    ]
-
-    return {"leader_configs": leader_configs, "follower_configs": follower_configs}
-
-
 # Frontend policy_type -> lerobot registry name. In this lerobot pin the names
 # match 1:1 (pi0_fast registers as "pi0_fast", not the older "pi0fast").
 # reward_classifier is NOT a policy in this pin: it registers under the
@@ -523,12 +499,6 @@ def stop_teleoperation():
 def teleoperation_status():
     """Get the current teleoperation status"""
     return handle_teleoperation_status()
-
-
-@app.get("/joint-positions")
-def get_joint_positions():
-    """Get current robot joint positions"""
-    return handle_get_joint_positions()
 
 
 @app.post("/start-inference")
@@ -643,12 +613,6 @@ def datasets_merge(request: MergeRequest):
 def datasets_merge_status():
     """Current merge state + drained log lines (idle | running | done | error)."""
     return handle_merge_status()
-
-
-@app.get("/ws-test")
-def websocket_test():
-    """Test endpoint to verify WebSocket support"""
-    return {"websocket_endpoint": "/ws/joint-data", "status": "available"}
 
 
 @app.websocket("/ws/joint-data")
@@ -1266,12 +1230,6 @@ def get_runners_hardware():
 # ============================================================================
 
 
-@app.get("/system/cuda-status")
-def get_cuda_status():
-    """Report whether an NVIDIA GPU is present but PyTorch is CPU-only (issue #30)."""
-    return handle_get_cuda_status()
-
-
 @app.get("/system/training-extra")
 def get_training_extra():
     """Return whether the LeRobot training extra (accelerate) is importable."""
@@ -1864,72 +1822,12 @@ def camera_preview_stream(index: int):
 RobotSideLiteral = Literal["leader", "follower"]
 
 
-class PortDetectionBody(BaseModel):
-    robot_type: RobotSideLiteral = "follower"
-
-
-class PortDisconnectBody(BaseModel):
-    ports_before: list[str]
-
-
-class SaveRobotPortBody(BaseModel):
-    robot_type: RobotSideLiteral
-    port: str
-
-
-class SaveRobotConfigBody(BaseModel):
-    robot_type: RobotSideLiteral
-    config_name: str
-
-
-@app.post("/start-port-detection")
-def start_port_detection(body: PortDetectionBody):
-    """Snapshot available ports so the follow-up /detect-port-after-disconnect
-    call can diff them."""
-    result = find_robot_port(body.robot_type)
-    return {"status": "success", "data": result}
-
-
-@app.post("/detect-port-after-disconnect")
-def detect_port_after_disconnect_endpoint(body: PortDisconnectBody):
-    """Block up to 15s waiting for one port from `ports_before` to disappear."""
-    try:
-        detected_port = detect_port_after_disconnect(body.ports_before)
-    except OSError as exc:
-        raise HTTPException(status_code=408, detail=str(exc)) from exc
-    return {"status": "success", "port": detected_port}
-
-
-@app.post("/save-robot-port")
-def save_robot_port_endpoint(body: SaveRobotPortBody):
-    """Save a robot port for future use"""
-    save_robot_port(body.robot_type, body.port)
-    return {"status": "success", "message": f"Port {body.port} saved for {body.robot_type}"}
-
-
 @app.get("/robot-port/{robot_type}")
 def get_robot_port(robot_type: RobotSideLiteral):
     """Get the saved port for a robot type"""
     saved_port = get_saved_robot_port(robot_type)
     default_port = get_default_robot_port(robot_type)
     return {"status": "success", "saved_port": saved_port, "default_port": default_port}
-
-
-@app.post("/save-robot-config")
-def save_robot_config_endpoint(body: SaveRobotConfigBody):
-    """Save a robot configuration for future use"""
-    if not config.save_robot_config(body.robot_type, body.config_name):
-        raise HTTPException(status_code=500, detail="Failed to save configuration")
-    return {"status": "success", "message": f"Configuration saved for {body.robot_type}"}
-
-
-@app.get("/robot-config/{robot_type}")
-def get_robot_config(robot_type: RobotSideLiteral, available_configs: str = ""):
-    """Get the saved configuration for a robot type"""
-    available_configs_list = [c.strip() for c in available_configs.split(",") if c.strip()]
-    saved_config = config.get_saved_robot_config(robot_type)
-    default_config = config.get_default_robot_config(robot_type, available_configs_list)
-    return {"status": "success", "saved_config": saved_config, "default_config": default_config}
 
 
 # ============================================================================
