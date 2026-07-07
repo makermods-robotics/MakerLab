@@ -176,20 +176,6 @@ const RobotTile: React.FC<RobotTileProps> = ({
                 <Button
                   size="icon"
                   variant="ghost"
-                  className="h-8 w-8 text-gray-300 hover:text-white"
-                  onClick={() => onConfigure(robot.name)}
-                  aria-label="Configure"
-                >
-                  <Settings className="w-4 h-4" />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent>Configure (calibrate)</TooltipContent>
-            </Tooltip>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  size="icon"
-                  variant="ghost"
                   className="h-8 w-8 text-red-400 hover:text-red-300 hover:bg-red-900/20"
                   onClick={() => setConfirmDelete(true)}
                   aria-label="Delete robot"
@@ -204,26 +190,36 @@ const RobotTile: React.FC<RobotTileProps> = ({
       </div>
 
       {robot && (
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <div className="w-full">
-              <Button
-                onClick={() => onTeleop(robot)}
-                disabled={teleopDisabled}
-                className={`w-full ${
-                  teleopDisabled
-                    ? "bg-red-500/30 hover:bg-red-500/30 text-red-200 cursor-not-allowed"
-                    : "bg-yellow-500 hover:bg-yellow-600 text-white"
-                }`}
-              >
-                Teleoperation
-              </Button>
-            </div>
-          </TooltipTrigger>
-          {teleopDisabled && (
-            <TooltipContent>Configure the robot first.</TooltipContent>
-          )}
-        </Tooltip>
+        <div className="flex gap-2">
+          <Button
+            variant="outline"
+            onClick={() => onConfigure(robot.name)}
+            className="shrink-0 border-gray-600 bg-gray-900 text-white hover:bg-gray-700 hover:text-white"
+          >
+            <Settings className="w-4 h-4 mr-1.5" />
+            Configure
+          </Button>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <div className="flex-1">
+                <Button
+                  onClick={() => onTeleop(robot)}
+                  disabled={teleopDisabled}
+                  className={`w-full ${
+                    teleopDisabled
+                      ? "bg-red-500/30 hover:bg-red-500/30 text-red-200 cursor-not-allowed"
+                      : "bg-yellow-500 hover:bg-yellow-600 text-white"
+                  }`}
+                >
+                  Teleoperation
+                </Button>
+              </div>
+            </TooltipTrigger>
+            {teleopDisabled && (
+              <TooltipContent>Configure the robot first.</TooltipContent>
+            )}
+          </Tooltip>
+        </div>
       )}
 
       <CreateRobotDialog
