@@ -17,6 +17,8 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+from huggingface_hub.errors import LocalTokenNotFoundError
+
 
 def test_invalidate_whoami_cache_clears_cached_value() -> None:
     from lelab.utils import hf_auth
@@ -61,6 +63,55 @@ def test_handle_hf_auth_status_returns_dict() -> None:
         assert result["username"] == "alice"
         assert "orgs" in result
         assert "login_command" in result
+
+
+def test_handle_hf_auth_status_writable_namespaces_role_filtered() -> None:
+    from lelab.utils import hf_auth
+
+    # whoami() returns orgs with a per-org "roleInGroup". Only admin/write orgs
+    # (plus the user's own account) should land in writable_namespaces; a
+    # read-only org is excluded. The existing "orgs" field must still list ALL
+    # orgs regardless of role.
+    fake = {
+        "name": "alice",
+        "orgs": [
+            {"name": "acme-admin", "roleInGroup": "admin"},
+            {"name": "acme-write", "roleInGroup": "write"},
+            {"name": "acme-read", "roleInGroup": "read"},
+            {"name": "acme-contrib", "roleInGroup": "contributor"},
+        ],
+    }
+    with patch("lelab.utils.hf_auth.whoami", return_value=fake):
+        hf_auth.invalidate_whoami_cache()
+        result = hf_auth.handle_hf_auth_status()
+
+    # Own account is always writable; admin + write orgs included; read and
+    # contributor excluded (contributor cannot create repos in the org).
+    assert result["writable_namespaces"] == ["alice", "acme-admin", "acme-write"]
+    # The existing orgs field is unchanged: every org, role-agnostic.
+    assert result["orgs"] == ["acme-admin", "acme-write", "acme-read", "acme-contrib"]
+
+
+def test_handle_hf_auth_status_writable_namespaces_no_orgs() -> None:
+    from lelab.utils import hf_auth
+
+    with patch("lelab.utils.hf_auth.whoami", return_value={"name": "bob", "orgs": []}):
+        hf_auth.invalidate_whoami_cache()
+        result = hf_auth.handle_hf_auth_status()
+
+    # No orgs: only the user's own namespace is writable.
+    assert result["writable_namespaces"] == ["bob"]
+
+
+def test_handle_hf_auth_status_writable_namespaces_unauthenticated() -> None:
+    from lelab.utils import hf_auth
+
+    with patch("lelab.utils.hf_auth.whoami", side_effect=LocalTokenNotFoundError("no token")):
+        hf_auth.invalidate_whoami_cache()
+        result = hf_auth.handle_hf_auth_status()
+
+    assert result["authenticated"] is False
+    assert result["writable_namespaces"] == []
 
 
 def test_hf_hub_offline_detects_offline_env(monkeypatch) -> None:

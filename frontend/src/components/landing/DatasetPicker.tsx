@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useMemo, useState } from "react";
 import { ExternalLink, Trash2, Upload as UploadIcon } from "lucide-react";
 import {
   Popover,
@@ -16,7 +16,9 @@ import {
 import { Loader2 } from "lucide-react";
 import UploadDatasetDialog from "@/components/landing/UploadDatasetDialog";
 import { DatasetItem } from "@/lib/replayApi";
+import { sortDatasets } from "@/lib/sortDatasets";
 import { validateDatasetName } from "@/lib/datasetName";
+import { useHfAuth } from "@/contexts/HfAuthContext";
 import { useToast } from "@/hooks/use-toast";
 import { useDatasetUpload } from "@/hooks/useDatasetUpload";
 
@@ -143,6 +145,30 @@ const DatasetPicker: React.FC<DatasetPickerProps> = ({
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
 
+  // Namespace-first alphabetical ordering: datasets under the logged-in HF
+  // account's namespace float to the top of each section. Falls back to plain
+  // alphabetical when not authenticated / still loading.
+  const { auth } = useHfAuth();
+  const username = auth.status === "authenticated" ? auth.username : null;
+
+  // Gate each row's "Upload to Hub" button to namespaces the logged-in user can
+  // actually push to. A bare repo id (no "/") uploads to the user's own account,
+  // which is always writable. Case-insensitive: Hub namespaces aren't
+  // case-sensitive for ownership. Hidden entirely when not authenticated — you
+  // can't push without a token.
+  const writableNamespaces = useMemo(
+    () =>
+      auth.status === "authenticated"
+        ? new Set(auth.writableNamespaces.map((ns) => ns.toLowerCase()))
+        : new Set<string>(),
+    [auth],
+  );
+  const canUpload = (repoId: string): boolean => {
+    if (auth.status !== "authenticated") return false;
+    const ns = repoId.includes("/") ? repoId.split("/")[0] : username;
+    return ns != null && writableNamespaces.has(ns.toLowerCase());
+  };
+
   const trimmed = query.trim();
   const matchesExisting = datasets.some(
     (d) => d.repo_id.toLowerCase() === trimmed.toLowerCase(),
@@ -159,9 +185,17 @@ const DatasetPicker: React.FC<DatasetPickerProps> = ({
   // Hub; Hugging Face = on the Hub, whether or not a local copy also exists.
   // Clearing the local cache of a "both" dataset lives in the "Manage cached
   // datasets" dialog, not inline here.
-  const localDatasets = datasets.filter((d) => d.source === "local");
-  const hubDatasets = datasets.filter(
-    (d) => d.source === "hub" || d.source === "both",
+  const localDatasets = useMemo(
+    () => sortDatasets(datasets.filter((d) => d.source === "local"), username),
+    [datasets, username],
+  );
+  const hubDatasets = useMemo(
+    () =>
+      sortDatasets(
+        datasets.filter((d) => d.source === "hub" || d.source === "both"),
+        username,
+      ),
+    [datasets, username],
   );
 
   const reset = () => {
@@ -198,7 +232,7 @@ const DatasetPicker: React.FC<DatasetPickerProps> = ({
       {/* Upload to Hub — local rows only (a "both" row is already on the Hub).
           Opens the same confirm popover the info card uses; the row shows a
           live "Uploading…" state while the background push runs. */}
-      {d.source === "local" && (
+      {d.source === "local" && canUpload(d.repo_id) && (
         <RowUploadButton repoId={d.repo_id} onUploaded={() => onUploaded?.(d)} />
       )}
       {/* Trash on local-only rows: deletes the only copy of a not-yet-uploaded
