@@ -18,7 +18,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { AlertTriangle, CheckCircle, Loader2, Play, VideoOff } from "lucide-react";
+import { AlertTriangle, CheckCircle, Loader2, Play } from "lucide-react";
 import { RobotRecord } from "@/hooks/useRobots";
 import { useApi } from "@/contexts/ApiContext";
 import { useToast } from "@/hooks/use-toast";
@@ -32,35 +32,7 @@ import {
 import { startInference } from "@/lib/inferenceApi";
 import CheckpointDropdown from "@/components/jobs/CheckpointDropdown";
 import { useAvailableCameras } from "@/hooks/useAvailableCameras";
-import BackendCameraStream from "@/components/BackendCameraStream";
-
-const CameraThumbnail: React.FC<{
-  /** cv2 index on the server — the live backend MJPEG feed at this index, i.e.
-   * exactly what the rollout will open, independent of any browser deviceId
-   * match. Undefined (nothing bound) renders the "no preview" state. */
-  cameraIndex?: number;
-  paused: boolean;
-}> = ({ cameraIndex, paused }) => {
-  // BackendCameraStream owns its own failure/retry UI — no error latch here.
-  const showMjpeg = !paused && cameraIndex !== undefined;
-
-  if (showMjpeg) {
-    return (
-      <BackendCameraStream
-        cameraIndex={cameraIndex}
-        className="w-32 h-24 object-cover rounded border border-gray-700 bg-black"
-      />
-    );
-  }
-  return (
-    <div className="w-32 h-24 bg-gray-800 rounded border border-gray-700 flex flex-col items-center justify-center">
-      <VideoOff className="w-5 h-5 text-gray-500 mb-1" />
-      <span className="text-[10px] text-gray-500">
-        {paused ? "Released" : "No preview"}
-      </span>
-    </div>
-  );
-};
+import CameraTile from "@/components/CameraTile";
 
 interface Props {
   open: boolean;
@@ -596,9 +568,11 @@ const InferenceModal: React.FC<Props> = ({
                           )}
                         </SelectContent>
                       </Select>
-                      <CameraThumbnail
+                      <CameraTile
+                        size="sm"
                         cameraIndex={value ?? undefined}
                         paused={submitting}
+                        emptyLabel="No preview"
                       />
                     </div>
                   );

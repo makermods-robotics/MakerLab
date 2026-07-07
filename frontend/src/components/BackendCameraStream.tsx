@@ -16,6 +16,11 @@ interface BackendCameraStreamProps {
 const RETRY_BASE_MS = 2000;
 const RETRY_MAX_MS = 12000;
 
+/** The backend cv2 MJPEG endpoint for a camera index. Used for both the
+ * `<img src>` and the error-probe fetch below. */
+const cameraPreviewUrl = (baseUrl: string, index: number) =>
+  `${baseUrl}/camera-preview/${index}`;
+
 /**
  * MJPEG `<img>` stream of a camera attached to the *server* machine
  * (GET /camera-preview/{index}).
@@ -81,7 +86,7 @@ const BackendCameraStream: React.FC<BackendCameraStreamProps> = ({
     // the status detail so the tile can say "recording is using the cameras"
     // instead of a generic failure. Best-effort: any probe error is itself
     // a reason ("server unreachable").
-    fetchWithHeaders(`${baseUrl}/camera-preview/${cameraIndex}`, {
+    fetchWithHeaders(cameraPreviewUrl(baseUrl, cameraIndex), {
       method: "GET",
       headers: { Range: "bytes=0-0" },
     })
@@ -133,7 +138,7 @@ const BackendCameraStream: React.FC<BackendCameraStreamProps> = ({
     <img
       key={attempt}
       ref={imgRef}
-      src={`${baseUrl}/camera-preview/${cameraIndex}?r=${attempt}`}
+      src={`${cameraPreviewUrl(baseUrl, cameraIndex)}?r=${attempt}`}
       onError={handleError}
       className={className}
       alt="Server camera preview"

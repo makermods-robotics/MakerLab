@@ -10,7 +10,7 @@ import {
 } from "@/components/ui/select";
 import { Input } from "@/components/ui/input";
 import { NumberInput } from "@/components/ui/number-input";
-import { Camera, Plus, Trash2, VideoOff, RefreshCw, ChevronRight } from "lucide-react";
+import { Camera, Plus, Trash2, RefreshCw, ChevronRight } from "lucide-react";
 import {
   Collapsible,
   CollapsibleContent,
@@ -18,7 +18,7 @@ import {
 } from "@/components/ui/collapsible";
 import { useToast } from "@/hooks/use-toast";
 import { useAvailableCameras } from "@/hooks/useAvailableCameras";
-import BackendCameraStream from "@/components/BackendCameraStream";
+import CameraTile from "@/components/CameraTile";
 
 // Sentinels distinguish "leave unset" (auto-detect / platform default) from an
 // explicit choice. Radix Select disallows an empty-string value, so we map these
@@ -282,9 +282,11 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
         {selectedCamera && (
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div className="bg-gray-900 rounded-lg border border-gray-700 overflow-hidden">
-              <CameraStreamBox
+              <CameraTile
+                size="md"
                 cameraIndex={selectedCamera.index}
                 paused={streamsPaused}
+                emptyLabel="No camera index"
               />
               <div className="border-t border-gray-700 px-2 py-1.5">
                 <span className="text-[11px] text-gray-400 truncate">
@@ -351,45 +353,6 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
   );
 };
 
-interface CameraStreamBoxProps {
-  paused: boolean;
-  /** cv2 index on the server — the live backend MJPEG feed at this index is the
-   * recorder's own view, so what you preview is exactly what records. */
-  cameraIndex?: number;
-}
-
-/** Live preview for a camera: the backend cv2 MJPEG feed at ``cameraIndex``.
- * Used both for the pre-add preview (as soon as a camera is picked in the
- * dropdown) and for each configured camera's card. This is exactly what the
- * recorder sees at that index — no browser deviceId fuzzy-match. Pausing
- * (recording start / modal close) unmounts the MJPEG img, whose cleanup clears
- * the src so the HTTP connection drops and the server releases the shared
- * capture — so cv2 can then grab the camera exclusively for recording. */
-const CameraStreamBox: React.FC<CameraStreamBoxProps> = ({
-  paused,
-  cameraIndex,
-}) => {
-  // BackendCameraStream owns its own failure/retry UI — no error latch here.
-  const showMjpeg = !paused && cameraIndex !== undefined;
-  return (
-    <div className="aspect-[4/3] bg-gray-800 relative">
-      {showMjpeg ? (
-        <BackendCameraStream
-          cameraIndex={cameraIndex}
-          className="w-full h-full object-cover"
-        />
-      ) : (
-        <div className="w-full h-full flex flex-col items-center justify-center">
-          <VideoOff className="w-8 h-8 text-gray-500 mb-2" />
-          <span className="text-gray-500 text-sm">
-            {paused ? "Preview paused" : "No camera index"}
-          </span>
-        </div>
-      )}
-    </div>
-  );
-};
-
 interface CameraPreviewProps {
   camera: CameraConfig;
   paused: boolean;
@@ -405,9 +368,11 @@ const CameraPreview: React.FC<CameraPreviewProps> = ({
 }) => {
   return (
     <div className="bg-gray-900 rounded-lg border border-gray-700 overflow-hidden">
-      <CameraStreamBox
+      <CameraTile
+        size="md"
         cameraIndex={camera.camera_index}
         paused={paused}
+        emptyLabel="No camera index"
       />
 
       {/* Camera Info */}

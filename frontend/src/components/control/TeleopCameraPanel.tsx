@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { useRobots } from "@/hooks/useRobots";
-import CameraFeed from "./CameraFeed";
+import CameraTile from "@/components/CameraTile";
 
 /**
  * Optional live camera panel for the teleoperation page. Off by default (same
@@ -70,8 +70,9 @@ const TeleopCameraPanel: React.FC = () => {
         feeds.length > 0 ? (
           <div className="flex flex-col gap-3 overflow-y-auto">
             {feeds.map((feed) => (
-              <CameraFeed
+              <CameraTile
                 key={`${feed.key}:${reloadKey}`}
+                size="md"
                 cameraIndex={feed.cameraIndex}
                 label={feed.name}
               />
