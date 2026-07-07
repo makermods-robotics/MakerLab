@@ -13,6 +13,8 @@ interface AppShellProps {
   actions?: React.ReactNode;
   showAuthChip?: boolean;
   fullBleed?: boolean;
+  /** Set false on live-session screens so the logo can't end a session with a stray click. */
+  logoLink?: boolean;
   children: React.ReactNode;
 }
 
@@ -22,6 +24,7 @@ export function AppShell({
   actions,
   showAuthChip = true,
   fullBleed = false,
+  logoLink = true,
   children,
 }: AppShellProps) {
   const navigate = useNavigate();
@@ -29,9 +32,13 @@ export function AppShell({
     <div className="flex min-h-screen flex-col bg-background text-foreground">
       <header className="sticky top-0 z-40 border-b border-border bg-background/80 backdrop-blur-[8px] backdrop-saturate-150">
         <div className="mx-auto flex h-[52px] max-w-[1440px] items-center gap-3 px-4">
-          <Link to="/" aria-label="Home">
+          {logoLink ? (
+            <Link to="/" aria-label="Home">
+              <Logo />
+            </Link>
+          ) : (
             <Logo />
-          </Link>
+          )}
           {back && (
             <Button
               variant="ghost"

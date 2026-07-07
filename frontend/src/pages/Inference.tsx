@@ -162,6 +162,7 @@ const Inference: React.FC = () => {
   return (
     <AppShell
       fullBleed
+      logoLink={false}
       back={{ to: "/" }}
       status={<StatusPill phase={pillPhase} label={pillLabel} />}
       actions={

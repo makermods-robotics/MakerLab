@@ -114,6 +114,7 @@ const TeleoperationPage = () => {
   return (
     <AppShell
       fullBleed
+      logoLink={false}
       status={<StatusPill phase="running" label="Teleoperating" />}
       actions={
         <Button variant="secondary" onClick={handleGoBack}>

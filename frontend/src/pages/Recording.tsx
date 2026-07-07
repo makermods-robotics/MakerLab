@@ -579,6 +579,7 @@ const Recording = () => {
   return (
     <AppShell
       fullBleed
+      logoLink={false}
       status={
         <div role="status" aria-live="polite">
           <StatusPill
