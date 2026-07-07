@@ -9,7 +9,6 @@ import {
   TrainingStatus,
   LogEntry,
 } from "@/components/training/types";
-import TrainingHeader from "@/components/training/TrainingHeader";
 import ConfigurationTab from "@/components/training/ConfigurationTab";
 import MonitoringStats from "@/components/training/monitoring/MonitoringStats";
 import TrainingLogs from "@/components/training/monitoring/TrainingLogs";
@@ -17,13 +16,18 @@ import TrainingExtraGate from "@/components/training/TrainingExtraGate";
 import PolicyExtraDialog from "@/components/training/PolicyExtraDialog";
 import HfAuthBanner from "@/components/landing/HfAuthBanner";
 
+import { AppShell } from "@/components/shell/AppShell";
+import { PageHeader } from "@/components/ui/page-header";
+import { StatusPill, type SessionPhase } from "@/components/ui/status-pill";
+import { Badge } from "@/components/ui/badge";
+import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import {
   Tooltip,
   TooltipTrigger,
   TooltipContent,
 } from "@/components/ui/tooltip";
-import { Loader2, Play, Square, Trash2, ArrowLeft } from "lucide-react";
+import { Loader2, Play, Square, Trash2 } from "lucide-react";
 
 import { useSelectedDataset } from "@/hooks/useSelectedDataset";
 import {
@@ -359,7 +363,7 @@ const ConfigurationMode: React.FC = () => {
         fetchWithHeaders,
         configToRequest(trainingConfig),
       );
-      toast({ title: "Training Started", description: job.name });
+      toast({ title: "Training started", description: job.name });
       navigate(`/training/${job.id}`);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -462,26 +466,26 @@ const ConfigurationMode: React.FC = () => {
 
   if (trainingExtraAvailable === null) {
     return (
-      <div className="min-h-screen bg-slate-900 text-white p-4">
-        <div className="max-w-7xl mx-auto">
-          <TrainingHeader />
-          <div className="flex items-center justify-center py-24 text-slate-400">
-            <Loader2 className="w-6 h-6 animate-spin mr-3" />
-            Checking training environment…
-          </div>
+      <AppShell back={{ to: "/" }}>
+        <PageHeader eyebrow="[ Training ]" title="Configure a run" />
+        <div className="flex items-center justify-center py-24 text-muted-foreground">
+          <Loader2 className="mr-3 h-6 w-6 animate-spin" />
+          Checking training environment…
         </div>
-      </div>
+      </AppShell>
     );
   }
 
   if (trainingExtraAvailable === false) {
     return (
-      <div className="min-h-screen bg-slate-900 text-white p-4">
-        <div className="max-w-7xl mx-auto">
-          <TrainingHeader />
-          <TrainingExtraGate installHint={trainingExtraInstallHint} />
-        </div>
-      </div>
+      <AppShell back={{ to: "/" }}>
+        <PageHeader
+          eyebrow="[ Training ]"
+          title="Configure a run"
+          className="mb-8"
+        />
+        <TrainingExtraGate installHint={trainingExtraInstallHint} />
+      </AppShell>
     );
   }
 
@@ -523,110 +527,115 @@ const ConfigurationMode: React.FC = () => {
           : undefined;
 
   return (
-    <div className="min-h-screen bg-slate-900 text-white p-4">
-      <div className="max-w-7xl mx-auto">
-        <TrainingHeader />
-        <HfAuthBanner />
-        {resumeSource ? (
-          <div className="max-w-3xl mx-auto mb-4 rounded-lg border border-sky-500/40 bg-sky-500/10 p-4 text-sm text-sky-100">
-            <div className="font-semibold">
-              Continuing “{resumeSource.name}”
-              {resumeSource.step != null
-                ? ` from step ${resumeSource.step.toLocaleString()}`
-                : " from its latest checkpoint"}
-            </div>
-            <p className="mt-1 text-sky-200/80">
-              The dataset, policy, batch size, and optimizer are inherited from
-              the checkpoint — only <span className="font-medium">Steps</span>{" "}
-              applies here. Set it above the resumed step to train further
-              (prefilled to {trainingConfig.steps.toLocaleString()}).
-            </p>
+    <AppShell back={{ to: "/" }}>
+      <PageHeader
+        eyebrow="[ Training ]"
+        title="Configure a run"
+        className="mb-8"
+      />
+      <HfAuthBanner />
+      {resumeSource ? (
+        <div className="mx-auto mb-4 max-w-3xl rounded-md border border-info/40 bg-info/10 p-4 text-sm text-foreground">
+          <div className="font-display font-semibold">
+            Continuing “{resumeSource.name}”
+            {resumeSource.step != null
+              ? ` from step ${resumeSource.step.toLocaleString()}`
+              : " from its latest checkpoint"}
           </div>
-        ) : null}
-        {finetuneSource ? (
-          <div className="max-w-3xl mx-auto mb-4 rounded-lg border border-violet-500/40 bg-violet-500/10 p-4 text-sm text-violet-100">
-            <div className="font-semibold">
-              Fine-tuning from “{finetuneSource.name}”
-              {finetuneSource.step != null
-                ? ` (step ${finetuneSource.step.toLocaleString()})`
-                : " (latest checkpoint)"}
-            </div>
-            <p className="mt-1 text-violet-200/80">
-              This starts a{" "}
-              <span className="font-medium">fresh run</span> (new optimizer, from
-              step 0) with the policy weights initialized from that model. Pick a{" "}
-              <span className="font-medium">dataset</span> to train on and set
-              your training parameters as usual.
-            </p>
-          </div>
-        ) : null}
-        <ConfigurationTab
-          config={trainingConfig}
-          updateConfig={updateConfig}
-          authenticated={authenticated}
-          flavors={flavors}
-          hardwareLoading={hardwareLoading}
-        />
-        {needsUpload ? (
-          <div className="max-w-3xl mx-auto mt-6">
-            <LocalDatasetCloudNotice
-              repoId={datasetRepoId}
-              sizeBytes={datasetSizeBytes}
-              offline={offline}
-              uploading={uploading}
-              errorMessage={uploadError}
-            />
-          </div>
-        ) : null}
-        <div className="max-w-3xl mx-auto mt-6 flex flex-col items-end gap-2">
-          {resumeStepError ? (
-            <p className="text-sm text-red-400">{resumeStepError}</p>
-          ) : null}
-          {(() => {
-            const startButton = (
-              <Button
-                onClick={handleStart}
-                disabled={startDisabled}
-                size="lg"
-                className="bg-green-500 hover:bg-green-600 text-white font-semibold px-6"
-              >
-                {uploading ? (
-                  <>
-                    <Loader2 className="w-5 h-5 mr-2 animate-spin" /> Uploading…
-                  </>
-                ) : isStarting ? (
-                  <>
-                    <Loader2 className="w-5 h-5 mr-2 animate-spin" /> Starting…
-                  </>
-                ) : (
-                  <>
-                    <Play className="w-5 h-5 mr-2" />{" "}
-                    {resumeSource
-                      ? "Continue Training"
-                      : finetuneSource
-                        ? "Start Fine-tuning"
-                        : needsUpload
-                          ? "Upload & start training"
-                          : "Start Training"}
-                  </>
-                )}
-              </Button>
-            );
-            // Native `title` doesn't fire reliably on disabled buttons across
-            // browsers — and since Radix's tooltip relies on pointer events
-            // that a disabled button swallows, wrap in a span so the trigger
-            // still receives hover/focus.
-            if (!startTooltip) return startButton;
-            return (
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <span tabIndex={0}>{startButton}</span>
-                </TooltipTrigger>
-                <TooltipContent>{startTooltip}</TooltipContent>
-              </Tooltip>
-            );
-          })()}
+          <p className="mt-1 text-muted-foreground">
+            The dataset, policy, batch size, and optimizer are inherited from
+            the checkpoint — only{" "}
+            <span className="font-medium text-foreground">Steps</span> applies
+            here. Set it above the resumed step to train further (prefilled to{" "}
+            {trainingConfig.steps.toLocaleString()}).
+          </p>
         </div>
+      ) : null}
+      {finetuneSource ? (
+        <div className="mx-auto mb-4 max-w-3xl rounded-md border border-info/40 bg-info/10 p-4 text-sm text-foreground">
+          <div className="font-display font-semibold">
+            Fine-tuning from “{finetuneSource.name}”
+            {finetuneSource.step != null
+              ? ` (step ${finetuneSource.step.toLocaleString()})`
+              : " (latest checkpoint)"}
+          </div>
+          <p className="mt-1 text-muted-foreground">
+            This starts a{" "}
+            <span className="font-medium text-foreground">fresh run</span> (new
+            optimizer, from step 0) with the policy weights initialized from
+            that model. Pick a{" "}
+            <span className="font-medium text-foreground">dataset</span> to
+            train on and set your training parameters as usual.
+          </p>
+        </div>
+      ) : null}
+      <ConfigurationTab
+        config={trainingConfig}
+        updateConfig={updateConfig}
+        authenticated={authenticated}
+        flavors={flavors}
+        hardwareLoading={hardwareLoading}
+      />
+      {needsUpload ? (
+        <div className="mx-auto mt-6 max-w-3xl">
+          <LocalDatasetCloudNotice
+            repoId={datasetRepoId}
+            sizeBytes={datasetSizeBytes}
+            offline={offline}
+            uploading={uploading}
+            errorMessage={uploadError}
+          />
+        </div>
+      ) : null}
+      <div className="mx-auto mt-6 flex max-w-3xl flex-col items-end gap-2">
+        {resumeStepError ? (
+          <p className="text-sm text-destructive">{resumeStepError}</p>
+        ) : null}
+        {(() => {
+          const startButton = (
+            <Button
+              onClick={handleStart}
+              disabled={startDisabled}
+              size="lg"
+              variant="brand"
+              className="px-6"
+            >
+              {uploading ? (
+                <>
+                  <Loader2 className="mr-2 h-5 w-5 animate-spin" /> Uploading…
+                </>
+              ) : isStarting ? (
+                <>
+                  <Loader2 className="mr-2 h-5 w-5 animate-spin" /> Starting…
+                </>
+              ) : (
+                <>
+                  <Play className="mr-2 h-5 w-5" />{" "}
+                  {resumeSource
+                    ? "Continue training"
+                    : finetuneSource
+                      ? "Start fine-tuning"
+                      : needsUpload
+                        ? "Upload & start training"
+                        : "Start training"}
+                </>
+              )}
+            </Button>
+          );
+          // Native `title` doesn't fire reliably on disabled buttons across
+          // browsers — and since Radix's tooltip relies on pointer events
+          // that a disabled button swallows, wrap in a span so the trigger
+          // still receives hover/focus.
+          if (!startTooltip) return startButton;
+          return (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <span tabIndex={0}>{startButton}</span>
+              </TooltipTrigger>
+              <TooltipContent>{startTooltip}</TooltipContent>
+            </Tooltip>
+          );
+        })()}
       </div>
 
       {policyExtra && (
@@ -639,7 +648,7 @@ const ConfigurationMode: React.FC = () => {
           installHint={policyExtra.installHint}
         />
       )}
-    </div>
+    </AppShell>
   );
 };
 
@@ -808,110 +817,91 @@ const MonitoringMode: React.FC<{ jobId: string }> = ({ jobId }) => {
 
   if (error && !job) {
     return (
-      <div className="min-h-screen bg-slate-900 text-white p-4">
-        <div className="max-w-7xl mx-auto space-y-4">
-          <Button
-            variant="ghost"
-            onClick={() => navigate("/")}
-            className="text-slate-400"
-          >
-            <ArrowLeft className="w-4 h-4 mr-2" /> Back to Jobs
-          </Button>
-          <p className="text-red-300">
-            Couldn't load job {jobId}: {error}
-          </p>
-        </div>
-      </div>
+      <AppShell back={{ to: "/", label: "jobs" }}>
+        <p className="text-destructive">
+          Couldn't load job {jobId}: {error}
+        </p>
+      </AppShell>
     );
   }
 
   if (!job) {
     return (
-      <div className="min-h-screen bg-slate-900 text-white p-4">
-        <div className="max-w-7xl mx-auto flex items-center justify-center py-24 text-slate-400">
-          <Loader2 className="w-6 h-6 animate-spin mr-3" /> Loading job…
+      <AppShell back={{ to: "/", label: "jobs" }}>
+        <div className="flex items-center justify-center py-24 text-muted-foreground">
+          <Loader2 className="mr-3 h-6 w-6 animate-spin" /> Loading job…
         </div>
-      </div>
+      </AppShell>
     );
   }
 
   const isRunning = job.state === "running";
+  const statusPhase: SessionPhase = isRunning
+    ? "running"
+    : job.state === "done"
+      ? "idle"
+      : "setup";
 
   return (
-    <div className="min-h-screen bg-slate-900 text-white p-4">
-      <div className="max-w-7xl mx-auto space-y-6">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <Button
-              variant="ghost"
-              onClick={() => navigate("/")}
-              className="text-slate-400 hover:text-white"
-            >
-              <ArrowLeft className="w-4 h-4 mr-2" /> Jobs
-            </Button>
-            <div>
-              <div className="flex items-center gap-2">
-                <h1 className="text-xl font-semibold text-white">
-                  {jobDisplayName(job)}
-                </h1>
-                {job.runner === "hf_cloud" ? (
-                  <span className="text-xs px-2 py-0.5 rounded bg-amber-900/40 text-amber-200 border border-amber-700">
-                    HF · {job.hf_flavor ?? "cloud"}
-                  </span>
-                ) : (
-                  <span className="text-xs px-2 py-0.5 rounded bg-slate-700 text-slate-200 border border-slate-600">
-                    Local
-                  </span>
-                )}
-                {job.runner === "hf_cloud" &&
-                  job.hf_repo_id &&
-                  job.state === "done" && (
-                    <a
-                      href={`https://huggingface.co/${job.hf_repo_id}`}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="text-xs text-amber-300 hover:text-amber-200 underline"
-                    >
-                      View on Hub ↗
-                    </a>
-                  )}
-                {job.wandb_run_url && (
-                  <a
-                    href={job.wandb_run_url}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="text-xs text-yellow-300 hover:text-yellow-200 underline"
-                  >
-                    View on W&B ↗
-                  </a>
-                )}
-              </div>
-              {/* When aliased, keep the immutable run id visible as subtext. */}
-              {job.display_name ? (
-                <p className="text-[11px] text-slate-500">{job.id}</p>
-              ) : null}
-              <p className="text-xs text-slate-400">
-                {job.state}
-                {job.error_message ? ` — ${job.error_message}` : ""}
-              </p>
-            </div>
+    <AppShell
+      back={{ to: "/", label: "jobs" }}
+      status={<StatusPill phase={statusPhase} label={job.state} />}
+      actions={
+        isRunning ? (
+          <Button onClick={handleStop} variant="destructive" size="sm">
+            <Square className="mr-2 h-4 w-4" /> Stop
+          </Button>
+        ) : (
+          <Button onClick={handleDelete} variant="ghost" size="sm">
+            <Trash2 className="mr-2 h-4 w-4" /> Delete
+          </Button>
+        )
+      }
+    >
+      <div className="space-y-6">
+        <div>
+          <div className="flex flex-wrap items-center gap-2">
+            <h1 className="font-mono text-xl font-bold text-foreground">
+              {jobDisplayName(job)}
+            </h1>
+            {job.runner === "hf_cloud" ? (
+              <Badge variant="warn">HF · {job.hf_flavor ?? "cloud"}</Badge>
+            ) : (
+              <Badge variant="outline">Local</Badge>
+            )}
+            {job.runner === "hf_cloud" &&
+              job.hf_repo_id &&
+              job.state === "done" && (
+                <a
+                  href={`https://huggingface.co/${job.hf_repo_id}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="font-mono text-xs text-info underline underline-offset-2"
+                >
+                  View on Hub ↗
+                </a>
+              )}
+            {job.wandb_run_url && (
+              <a
+                href={job.wandb_run_url}
+                target="_blank"
+                rel="noreferrer"
+                className="font-mono text-xs text-info underline underline-offset-2"
+              >
+                View on W&B ↗
+              </a>
+            )}
           </div>
-          {isRunning ? (
-            <Button
-              onClick={handleStop}
-              className="bg-red-500 hover:bg-red-600 text-white"
-            >
-              <Square className="w-4 h-4 mr-2" /> Stop
-            </Button>
-          ) : (
-            <Button
-              onClick={handleDelete}
-              variant="ghost"
-              className="text-slate-400 hover:text-white"
-            >
-              <Trash2 className="w-4 h-4 mr-2" /> Delete
-            </Button>
-          )}
+          {/* When aliased, keep the immutable run id visible as subtext. */}
+          {job.display_name ? (
+            <p className="mt-1 font-mono text-[11px] text-muted-foreground">
+              {job.id}
+            </p>
+          ) : null}
+          <p className="mt-1 font-mono text-xs text-muted-foreground">
+            {job.state}
+            {job.error_message ? ` — ${job.error_message}` : ""}
+          </p>
         </div>
 
         <MonitoringStats
@@ -920,12 +910,12 @@ const MonitoringMode: React.FC<{ jobId: string }> = ({ jobId }) => {
           getProgressPercentage={getProgressPercentage}
           formatTime={formatTime}
         />
-        <div className="bg-slate-800/40 border border-slate-700 rounded-lg p-4 flex items-center gap-3">
-          <span className="text-sm font-semibold text-slate-300">
+        <Card variant="flat" className="flex items-center gap-3 p-4">
+          <span className="font-display text-sm font-semibold text-foreground">
             Run inference
           </span>
           {checkpoints.length === 0 ? (
-            <span className="text-xs text-slate-500">
+            <span className="text-xs text-muted-foreground">
               No checkpoints yet — wait for the first save.
             </span>
           ) : (
@@ -938,14 +928,13 @@ const MonitoringMode: React.FC<{ jobId: string }> = ({ jobId }) => {
               <Button
                 onClick={() => setInferenceModalOpen(true)}
                 disabled={selectedStep == null}
-                className="bg-green-500 hover:bg-green-600 text-white"
               >
-                <Play className="w-4 h-4 mr-2" />
+                <Play className="mr-2 h-4 w-4" />
                 Run on robot
               </Button>
             </>
           )}
-        </div>
+        </Card>
         <InferenceModal
           open={inferenceModalOpen}
           onOpenChange={setInferenceModalOpen}
@@ -955,7 +944,7 @@ const MonitoringMode: React.FC<{ jobId: string }> = ({ jobId }) => {
         />
         <TrainingLogs logs={logs} logContainerRef={logContainerRef} />
       </div>
-    </div>
+    </AppShell>
   );
 };
 
