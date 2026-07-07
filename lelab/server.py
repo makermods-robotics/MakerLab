@@ -745,6 +745,37 @@ async def create_training_job(req: Request):
                 f"step ({cfg.resume_from_step}) to continue training."
             ),
         )
+    # Local preflight (belt-and-braces), the mirror of the cloud
+    # DatasetNotOnHubError guard: a LOCAL run with no --dataset.root makes
+    # lerobot auto-download the dataset from the Hub at start. When the Hub is
+    # offline (HF_HUB_OFFLINE) that download can't happen — it hangs or dies
+    # with a raw traceback — so reject up front with an actionable message
+    # instead of starting a doomed job. Purely offline flag + local filesystem
+    # check; no network call (no repo_exists/whoami). A RESUME run inherits its
+    # dataset via config_path and doesn't re-download, but dataset_repo_id is a
+    # required field so we can't distinguish resume by its absence; the guard is
+    # a no-op on resume anyway because the resumed dataset is by definition
+    # already local (it was trained on locally before), so is_dataset_available_
+    # locally returns True and nothing is blocked.
+    runner = body.target.runner if body.target is not None else "local"
+    if runner == "local" and cfg.dataset_repo_id and hf_hub_offline():
+        from .datasets import is_dataset_available_locally
+
+        if not is_dataset_available_locally(cfg.dataset_repo_id):
+            # 400 (matching this endpoint's other preflight rejections — the
+            # resume-steps guard above and the ValueError->400 below), NOT 409:
+            # startTrainingJob (jobsApi.ts) rewrites EVERY 409 into "Another
+            # training is already running", which would mask this message. 400
+            # lets FastAPI's `detail` reach the toast verbatim.
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Dataset '{cfg.dataset_repo_id}' isn't available locally and the "
+                    "Hub is offline (HF_HUB_OFFLINE) — it can't be downloaded for a "
+                    "local run. Start LeLab without --offline (or with Hub access) to "
+                    "fetch it, or record/obtain the dataset locally first."
+                ),
+            )
     try:
         record = job_registry.start(body.config, body.target)
     except JobAlreadyRunningError as exc:

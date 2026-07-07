@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 import pyarrow.parquet as pq
+from huggingface_hub import try_to_load_from_cache
 from huggingface_hub.errors import HfHubHTTPError
 
 from .utils.config import validate_dataset_name
@@ -91,6 +92,62 @@ def _is_dataset_dir(path: Path) -> bool:
         return (path / "meta" / "info.json").is_file()
     except OSError:
         return False
+
+
+def is_dataset_available_locally(repo_id: str) -> bool:
+    """True if lerobot could train on `repo_id` WITHOUT a Hub download.
+
+    Filesystem-only (no network), so it's safe to call when the Hub is offline.
+    We are deliberately conservative — only return False when the dataset is
+    absent from BOTH cache layouts — because a false "not available" would
+    wrongly block a run on a dataset that's actually present.
+
+    Two layouts have to be covered, both confirmed live:
+
+    * FLAT layout — locally recorded/materialized datasets live directly at
+      ``<lerobot_home>/<repo_id>/`` (recognized by ``meta/info.json``). This is
+      where recording, merging, and `list_local_datasets` put things.
+    * HF HUB SNAPSHOT cache — a dataset downloaded from the Hub lands as
+      ``datasets--<namespace>--<name>/snapshots/<rev>/`` under a ``hub/`` cache,
+      NOT in the flat layout. lerobot's ``LeRobotDataset._download`` (no
+      ``--dataset.root``) snapshots into ``$HF_LEROBOT_HOME/hub`` — i.e.
+      ``<lerobot_home>/hub`` — while a plain ``huggingface_hub`` download lands
+      in the default ``~/.cache/huggingface/hub``. Both have been observed in
+      the wild, so we probe BOTH cache dirs. lerobot resolves this via
+      huggingface_hub's own cache, so we ask huggingface_hub whether
+      ``meta/info.json`` is already cached. ``try_to_load_from_cache`` returns a
+      real path (str) when the file is cached, and ``None`` / the
+      ``_CACHED_NO_EXIST`` sentinel (a non-str object) otherwise — both of the
+      latter mean "not usable offline" here.
+    """
+    # FLAT layout: locally recorded / materialized dataset.
+    if _is_dataset_dir(_lerobot_cache_root() / repo_id):
+        return True
+
+    # HF hub snapshot cache: a previously downloaded Hub dataset. Purely a
+    # cache lookup — no network even when a token is present. Probe both the
+    # lerobot hub cache (where lelab's own local runs auto-download) and the
+    # default hub cache (where a manual `huggingface-cli download` would land).
+    # `None` (default) tells try_to_load_from_cache to use the default cache.
+    lerobot_hub_cache = _lerobot_cache_root() / "hub"
+    for cache_dir in (str(lerobot_hub_cache), None):
+        try:
+            cached = try_to_load_from_cache(
+                repo_id,
+                filename="meta/info.json",
+                repo_type="dataset",
+                cache_dir=cache_dir,
+            )
+        except Exception as exc:
+            # A cache-probe failure is not evidence of absence; degrade to
+            # "assume present" so we never wrongly block a run on an internal
+            # error (conservative: a false "not available" is the bad outcome).
+            logger.info("try_to_load_from_cache(%s) failed: %s", repo_id, exc)
+            return True
+        if isinstance(cached, str):
+            return True
+
+    return False
 
 
 def _dataset_has_episodes(path: Path) -> bool:
