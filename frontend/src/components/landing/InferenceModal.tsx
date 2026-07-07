@@ -55,7 +55,7 @@ const CameraThumbnail: React.FC<{
         autoPlay
         muted
         playsInline
-        className="w-32 h-24 object-cover rounded border border-gray-700 bg-black"
+        className="w-32 h-24 object-cover rounded border border-border bg-secondary"
       />
     );
   }
@@ -63,14 +63,14 @@ const CameraThumbnail: React.FC<{
     return (
       <BackendCameraStream
         cameraIndex={cameraIndex}
-        className="w-32 h-24 object-cover rounded border border-gray-700 bg-black"
+        className="w-32 h-24 object-cover rounded border border-border bg-secondary"
       />
     );
   }
   return (
-    <div className="w-32 h-24 bg-gray-800 rounded border border-gray-700 flex flex-col items-center justify-center">
-      <VideoOff className="w-5 h-5 text-gray-500 mb-1" />
-      <span className="text-[10px] text-gray-500">
+    <div className="w-32 h-24 bg-secondary rounded border border-border flex flex-col items-center justify-center">
+      <VideoOff className="w-5 h-5 text-muted-foreground mb-1" />
+      <span className="text-[10px] text-muted-foreground">
         {paused ? "Released" : "No preview"}
       </span>
     </div>
@@ -419,37 +419,37 @@ const InferenceModal: React.FC<Props> = ({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="bg-gray-900 border-gray-800 text-white sm:max-w-[600px] p-8 max-h-[90vh] overflow-y-auto">
+      <DialogContent className="sm:max-w-[600px] p-8 max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <div className="flex justify-center items-center mb-4">
-            <div className="w-8 h-8 bg-green-500 rounded-full flex items-center justify-center">
-              <Play className="w-4 h-4 text-white" />
+            <div className="w-8 h-8 bg-primary rounded-full flex items-center justify-center">
+              <Play className="w-4 h-4 text-primary-foreground" />
             </div>
           </div>
-          <DialogTitle className="text-white text-center text-2xl font-bold">
-            Configure Inference
+          <DialogTitle className="text-center text-xl">
+            Configure inference
           </DialogTitle>
         </DialogHeader>
 
         <div className="space-y-6 py-4">
-          <DialogDescription className="text-gray-400 text-base leading-relaxed text-center">
+          <DialogDescription className="text-base leading-relaxed text-center">
             Pick a checkpoint and confirm hardware. The selected policy will
             drive the follower autonomously for the configured duration.
           </DialogDescription>
 
           <div className="space-y-4">
-            <h3 className="text-lg font-semibold text-white border-b border-gray-700 pb-2">
-              Robot Configuration
+            <h3 className="text-lg font-semibold border-b border-border pb-2">
+              Robot configuration
             </h3>
             {!robot ? (
-              <Alert className="bg-amber-900/40 border-amber-700 text-amber-100">
+              <Alert className="bg-warn/10 border-warn/50 text-warn">
                 <AlertTriangle className="h-4 w-4" />
                 <AlertDescription>
                   Select and configure a robot on the Landing page first.
                 </AlertDescription>
               </Alert>
             ) : !robot.is_clean ? (
-              <Alert className="bg-amber-900/40 border-amber-700 text-amber-100">
+              <Alert className="bg-warn/10 border-warn/50 text-warn">
                 <AlertTriangle className="h-4 w-4" />
                 <AlertDescription>
                   <strong>{robot.name}</strong> is missing a calibration.
@@ -458,8 +458,8 @@ const InferenceModal: React.FC<Props> = ({
               </Alert>
             ) : (
               <div className="flex items-center gap-2 text-sm">
-                <CheckCircle className="w-4 h-4 text-green-400" />
-                <span className="text-slate-200">
+                <CheckCircle className="w-4 h-4 text-ok" />
+                <span className="text-foreground">
                   Running on <strong>{robot.name}</strong>
                   {isBimanual ? " (bimanual — both followers)" : ""}
                 </span>
@@ -468,11 +468,11 @@ const InferenceModal: React.FC<Props> = ({
           </div>
 
           <div className="space-y-4">
-            <h3 className="text-lg font-semibold text-white border-b border-gray-700 pb-2">
+            <h3 className="text-lg font-semibold border-b border-border pb-2">
               Checkpoint
             </h3>
             {checkpoints.length === 0 ? (
-              <Alert className="bg-amber-900/40 border-amber-700 text-amber-100">
+              <Alert className="bg-warn/10 border-warn/50 text-warn">
                 <AlertTriangle className="h-4 w-4" />
                 <AlertDescription>
                   No checkpoints available for this job yet.
@@ -486,7 +486,7 @@ const InferenceModal: React.FC<Props> = ({
               />
             )}
             {robotCheckpointArmMismatch ? (
-              <Alert className="bg-amber-900/40 border-amber-700 text-amber-100">
+              <Alert className="bg-warn/10 border-warn/50 text-warn">
                 <AlertTriangle className="h-4 w-4" />
                 <AlertDescription>
                   {checkpointIsBimanual ? (
@@ -512,30 +512,25 @@ const InferenceModal: React.FC<Props> = ({
           </div>
 
           <div className="space-y-4">
-            <h3 className="text-lg font-semibold text-white border-b border-gray-700 pb-2">
+            <h3 className="text-lg font-semibold border-b border-border pb-2">
               Run parameters
             </h3>
             {policyConfig?.requires_task ? (
               <div className="space-y-2">
-                <Label htmlFor="task" className="text-sm font-medium text-gray-300">
-                  Task description
-                </Label>
+                <Label htmlFor="task">Task description</Label>
                 <Input
                   id="task"
                   value={task}
                   onChange={(e) => setTask(e.target.value)}
                   placeholder="e.g., pick up the red block"
-                  className="bg-gray-800 border-gray-700 text-white"
                 />
-                <p className="text-xs text-gray-500">
+                <p className="text-xs text-muted-foreground">
                   This policy is language-conditioned ({policyConfig.policy_type}).
                 </p>
               </div>
             ) : null}
             <div className="space-y-2">
-              <Label htmlFor="durationS" className="text-sm font-medium text-gray-300">
-                Max duration (seconds)
-              </Label>
+              <Label htmlFor="durationS">Max duration (seconds)</Label>
               <NumberInput
                 id="durationS"
                 min={1}
@@ -543,34 +538,33 @@ const InferenceModal: React.FC<Props> = ({
                 onChange={(v) => {
                   if (v !== undefined) setDurationS(v);
                 }}
-                className="bg-gray-800 border-gray-700 text-white"
               />
             </div>
           </div>
 
           <div className="space-y-4">
-            <h3 className="text-lg font-semibold text-white border-b border-gray-700 pb-2">
+            <h3 className="text-lg font-semibold border-b border-border pb-2">
               Cameras
             </h3>
             {policyConfigLoading ? (
-              <div className="flex items-center gap-2 text-sm text-slate-400">
+              <div className="flex items-center gap-2 text-sm text-muted-foreground">
                 <Loader2 className="w-4 h-4 animate-spin" />
                 Reading policy config…
               </div>
             ) : policyConfigError ? (
-              <Alert className="bg-red-900/40 border-red-700 text-red-100">
+              <Alert className="bg-destructive/10 border-destructive/50 text-destructive">
                 <AlertTriangle className="h-4 w-4" />
                 <AlertDescription>
                   Couldn't load policy config: {policyConfigError}
                 </AlertDescription>
               </Alert>
             ) : !policyConfig ? null : cameraMap.length === 0 ? (
-              <p className="text-xs text-gray-500">
+              <p className="text-xs text-muted-foreground">
                 This policy doesn't use cameras.
               </p>
             ) : (
               <div className="space-y-3">
-                <p className="text-xs text-gray-500">
+                <p className="text-xs text-muted-foreground">
                   Bind a physical camera to each name the policy was trained
                   with. Resolution comes from the checkpoint.
                 </p>
@@ -584,10 +578,8 @@ const InferenceModal: React.FC<Props> = ({
                   return (
                     <div key={m.requestKey} className="flex items-center gap-3">
                       <div className="flex-1">
-                        <Label className="text-sm font-medium text-gray-200">
-                          {m.display}
-                        </Label>
-                        <p className="text-xs text-gray-500">
+                        <Label>{m.display}</Label>
+                        <p className="text-xs text-muted-foreground">
                           {dims.width}×{dims.height}
                         </p>
                       </div>
@@ -595,12 +587,12 @@ const InferenceModal: React.FC<Props> = ({
                         value={value != null ? String(value) : undefined}
                         onValueChange={(v) => onCameraBindingChange(m.requestKey, v)}
                       >
-                        <SelectTrigger className="bg-gray-800 border-gray-700 text-white w-56">
+                        <SelectTrigger className="w-56">
                           <SelectValue placeholder="Select a camera" />
                         </SelectTrigger>
-                        <SelectContent className="bg-gray-900 border-gray-700 text-white">
+                        <SelectContent>
                           {availableCameras.length === 0 ? (
-                            <div className="px-2 py-1.5 text-xs text-gray-500">
+                            <div className="px-2 py-1.5 text-xs text-muted-foreground">
                               No cameras detected
                             </div>
                           ) : (
@@ -631,15 +623,16 @@ const InferenceModal: React.FC<Props> = ({
             <Button
               onClick={handleStart}
               disabled={!canStart}
-              className="w-full sm:w-auto bg-green-500 hover:bg-green-600 text-white px-10 py-6 text-lg disabled:opacity-40 disabled:cursor-not-allowed"
+              variant="brand"
+              className="w-full sm:w-auto px-10 py-6 text-lg"
             >
               <Play className="w-5 h-5 mr-2" />
-              {submitting ? "Starting…" : "Start Inference"}
+              {submitting ? "Starting…" : "Start inference"}
             </Button>
             <Button
               onClick={() => onOpenChange(false)}
               variant="outline"
-              className="w-full sm:w-auto border-gray-500 hover:border-gray-200 px-10 py-6 text-lg text-zinc-500 bg-zinc-900 hover:bg-zinc-800"
+              className="w-full sm:w-auto px-10 py-6 text-lg"
             >
               Cancel
             </Button>

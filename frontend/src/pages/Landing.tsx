@@ -2,8 +2,10 @@ import React, { useState, useRef, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { ChevronsUpDown, GitMerge, Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
+import { Eyebrow } from "@/components/ui/eyebrow";
+import { AppShell } from "@/components/shell/AppShell";
 import { useToast } from "@/hooks/use-toast";
-import LandingTopBar from "@/components/landing/LandingTopBar";
 import Footer from "@/components/Footer";
 import RobotConfigManager from "@/components/landing/RobotConfigManager";
 import RecordingModal from "@/components/landing/RecordingModal";
@@ -313,16 +315,22 @@ const Landing = () => {
   };
 
   return (
-    <div
-      className="min-h-screen bg-black text-white pb-16"
-      style={{ ["--makerlab-topbar-h" as string]: "48px" }}
-    >
-      <LandingTopBar />
+    <AppShell showAuthChip fullBleed>
+      <section className="grid-bg border-b border-border">
+        <div className="mx-auto max-w-[1440px] px-4 py-10">
+          <Eyebrow>[ SO-101 · leader + follower ]</Eyebrow>
+          <h1 className="mt-3 text-4xl">Teach, record, and train your robot</h1>
+          <p className="mt-2 max-w-[60ch] font-mono text-xs text-muted-foreground">
+            calibrate the arms · teleoperate to record demonstrations · train a
+            policy — all from the browser
+          </p>
+        </div>
+      </section>
 
       {/* Scrolls with the page (user preference) — only the slim top bar stays
           sticky; the card row previously pinned itself below it. */}
-      <div className="bg-black border-b border-gray-800">
-        <div className="mx-auto max-w-7xl px-4 py-4 grid gap-4 grid-cols-1 lg:grid-cols-[1.2fr_2fr]">
+      <div className="border-b border-border">
+        <div className="mx-auto max-w-[1440px] px-4 py-4 grid gap-4 grid-cols-1 lg:grid-cols-[1.2fr_2fr]">
           <RobotConfigManager
             records={records}
             selectedName={selectedName}
@@ -336,10 +344,8 @@ const Landing = () => {
             deleteRobot={deleteRobot}
           />
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            <div className="bg-gray-800 rounded-lg border border-gray-700 p-3 flex flex-col gap-2">
-              <h3 className="font-semibold text-lg text-center h-10 flex items-center justify-center">
-                Dataset
-              </h3>
+            <Card variant="flat" className="p-3 flex flex-col gap-2">
+              <Eyebrow>[ Dataset ]</Eyebrow>
               <div className="flex items-center gap-2">
                 <div className="flex-1 min-w-0">
                   <DatasetPicker
@@ -352,12 +358,12 @@ const Landing = () => {
                     onUploaded={() => refreshDatasets()}
                   >
                     <Button
-                      variant="outline"
+                      variant="secondary"
                       role="combobox"
-                      className="w-full justify-between bg-gray-800 border-gray-600 text-white hover:bg-gray-700"
+                      className="w-full justify-between font-normal"
                     >
                       <span
-                        className={`truncate ${selectedDataset ? "text-white" : "text-gray-300"}`}
+                        className={`truncate ${selectedDataset ? "text-foreground" : "text-muted-foreground"}`}
                       >
                         {datasetsLoading
                           ? "Loading datasets…"
@@ -368,10 +374,10 @@ const Landing = () => {
                   </DatasetPicker>
                 </div>
                 <Button
-                  variant="outline"
+                  variant="secondary"
                   size="sm"
                   onClick={() => setShowCreateDatasetDialog(true)}
-                  className="h-8 shrink-0 border-gray-600 bg-gray-800 text-white hover:bg-gray-700 hover:text-white"
+                  className="h-8 shrink-0"
                 >
                   <Plus className="w-3.5 h-3.5 mr-1.5" />
                   New dataset
@@ -392,15 +398,13 @@ const Landing = () => {
               <button
                 type="button"
                 onClick={() => setShowMergeDialog(true)}
-                className="self-start text-xs text-gray-400 hover:text-white transition-colors inline-flex items-center gap-1"
+                className="self-start text-xs text-muted-foreground hover:text-foreground transition-colors inline-flex items-center gap-1"
               >
                 <GitMerge className="h-3.5 w-3.5" /> Merge datasets…
               </button>
-            </div>
-            <div className="bg-gray-800 rounded-lg border border-gray-700 p-3 flex flex-col gap-2">
-              <h3 className="font-semibold text-lg text-center h-10 flex items-center justify-center">
-                Create a model
-              </h3>
+            </Card>
+            <Card variant="flat" className="p-3 flex flex-col gap-2">
+              <Eyebrow>[ Models ]</Eyebrow>
               {/* Stable = tested on our hardware (see POLICY_TYPE_OPTIONS).
                   Untested types stay selectable, just visually subdued. */}
               <div className="grid grid-cols-2 gap-2">
@@ -422,7 +426,7 @@ const Landing = () => {
                         onClick={() => handleTrainingClick(policy.value)}
                         disabled={!selectedDataset || unavailable}
                         size="sm"
-                        className="w-full bg-green-500 hover:bg-green-600 text-white px-2"
+                        className="w-full px-2"
                       >
                         <span className="truncate">{policy.label}</span>
                       </Button>
@@ -430,7 +434,7 @@ const Landing = () => {
                   );
                 })}
               </div>
-              <p className="text-xs text-gray-500 mt-1">
+              <p className="text-xs text-muted-foreground mt-1">
                 Untested in MakerLab — use at your own risk
               </p>
               <div className="grid grid-cols-3 gap-2">
@@ -450,8 +454,8 @@ const Landing = () => {
                         onClick={() => handleTrainingClick(policy.value)}
                         disabled={!selectedDataset || unavailable}
                         size="sm"
-                        variant="outline"
-                        className="w-full border-gray-600 bg-gray-900/40 text-gray-400 hover:bg-gray-700 hover:text-white px-2"
+                        variant="secondary"
+                        className="w-full px-2"
                       >
                         <span className="truncate">{policy.label}</span>
                       </Button>
@@ -460,16 +464,18 @@ const Landing = () => {
                 })}
               </div>
               {!selectedDataset && (
-                <p className="text-xs text-gray-500">Select a dataset first.</p>
+                <p className="text-xs text-muted-foreground">
+                  Select a dataset first.
+                </p>
               )}
-            </div>
+            </Card>
           </div>
         </div>
       </div>
 
-      <main className="mx-auto max-w-7xl px-4 py-6">
+      <div className="mx-auto max-w-[1440px] px-4 py-6">
         <JobsSection />
-      </main>
+      </div>
 
       <Footer />
 
@@ -497,23 +503,21 @@ const Landing = () => {
         open={pendingDeleteDataset !== null}
         onOpenChange={(o) => !o && setPendingDeleteDataset(null)}
       >
-        <AlertDialogContent className="bg-gray-900 border-gray-800 text-white">
+        <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>
               Delete "{pendingDeleteDataset?.repo_id}"?
             </AlertDialogTitle>
-            <AlertDialogDescription className="text-gray-400">
+            <AlertDialogDescription>
               This permanently removes the dataset from local disk — including
               all recorded episodes and videos. You can't undo this.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel className="border-gray-600 bg-transparent text-gray-200 hover:bg-gray-800 hover:text-white">
-              Cancel
-            </AlertDialogCancel>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
               onClick={confirmDeleteDataset}
-              className="bg-red-500 hover:bg-red-600 text-white"
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
             >
               Delete
             </AlertDialogAction>
@@ -542,7 +546,7 @@ const Landing = () => {
         onStart={handleStartRecording}
         releaseStreamsRef={releaseStreamsRef}
       />
-    </div>
+    </AppShell>
   );
 };
 

@@ -1,6 +1,8 @@
 import React, { useState } from "react";
 import { Pencil, Plus, Settings, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
+import { Eyebrow } from "@/components/ui/eyebrow";
 import { Input } from "@/components/ui/input";
 import {
   Tooltip,
@@ -91,10 +93,8 @@ const RobotTile: React.FC<RobotTileProps> = ({
     ].some(Boolean);
 
   return (
-    <div className="bg-gray-800 rounded-lg border border-gray-700 p-3 flex flex-col gap-2 relative">
-      <h3 className="font-semibold text-lg text-center h-10 flex items-center justify-center">
-        Robot arm configuration
-      </h3>
+    <Card variant="flat" className="p-3 flex flex-col gap-2 relative">
+      <Eyebrow>[ Robot ]</Eyebrow>
       {/* Layout filter. Not a mutator — a record's mode is immutable. Picking
           a side only changes which robots the dropdown lists; the active side
           mirrors the selected robot's layout (selection is the source of
@@ -102,7 +102,7 @@ const RobotTile: React.FC<RobotTileProps> = ({
       <div
         role="radiogroup"
         aria-label="Filter by arm layout"
-        className="grid grid-cols-2 gap-1 rounded-md border border-gray-700 bg-gray-900 p-1"
+        className="grid grid-cols-2 gap-1 rounded-md border border-border bg-secondary p-1"
       >
         {MODE_FILTERS.map((opt) => {
           const active = modeFilter === opt.value;
@@ -116,8 +116,8 @@ const RobotTile: React.FC<RobotTileProps> = ({
               className={cn(
                 "rounded px-3 py-1.5 text-xs font-medium transition-colors",
                 active
-                  ? "bg-gray-700 text-white"
-                  : "text-gray-400 hover:text-gray-200"
+                  ? "bg-card text-foreground shadow-1"
+                  : "text-muted-foreground hover:text-foreground"
               )}
             >
               {opt.label}
@@ -137,11 +137,11 @@ const RobotTile: React.FC<RobotTileProps> = ({
           />
         </div>
         <Button
-          variant="outline"
+          variant="secondary"
           size="sm"
           onClick={() => setCreateOpen(true)}
           disabled={isLoading}
-          className="h-8 shrink-0 border-gray-600 bg-gray-900 text-white hover:bg-gray-700 hover:text-white"
+          className="h-8 shrink-0"
         >
           <Plus className="w-3.5 h-3.5 mr-1.5" />
           New robot
@@ -149,7 +149,7 @@ const RobotTile: React.FC<RobotTileProps> = ({
         {status && (
           <p
             className={`text-xs truncate shrink-0 ${
-              robot!.is_clean ? "text-green-400" : "text-amber-400"
+              robot!.is_clean ? "text-ok" : "text-warn"
             }`}
           >
             {status}
@@ -162,7 +162,7 @@ const RobotTile: React.FC<RobotTileProps> = ({
                 <Button
                   size="icon"
                   variant="ghost"
-                  className="h-8 w-8 text-gray-300 hover:text-white"
+                  className="h-8 w-8"
                   onClick={openRename}
                   aria-label="Rename robot"
                 >
@@ -176,7 +176,7 @@ const RobotTile: React.FC<RobotTileProps> = ({
                 <Button
                   size="icon"
                   variant="ghost"
-                  className="h-8 w-8 text-gray-300 hover:text-white"
+                  className="h-8 w-8"
                   onClick={() => onConfigure(robot.name)}
                   aria-label="Configure"
                 >
@@ -190,7 +190,7 @@ const RobotTile: React.FC<RobotTileProps> = ({
                 <Button
                   size="icon"
                   variant="ghost"
-                  className="h-8 w-8 text-red-400 hover:text-red-300 hover:bg-red-900/20"
+                  className="h-8 w-8 text-destructive hover:bg-destructive/10 hover:text-destructive"
                   onClick={() => setConfirmDelete(true)}
                   aria-label="Delete robot"
                 >
@@ -210,11 +210,8 @@ const RobotTile: React.FC<RobotTileProps> = ({
               <Button
                 onClick={() => onTeleop(robot)}
                 disabled={teleopDisabled}
-                className={`w-full ${
-                  teleopDisabled
-                    ? "bg-red-500/30 hover:bg-red-500/30 text-red-200 cursor-not-allowed"
-                    : "bg-yellow-500 hover:bg-yellow-600 text-white"
-                }`}
+                variant={teleopDisabled ? "secondary" : "brand"}
+                className="w-full"
               >
                 Teleoperation
               </Button>
@@ -236,10 +233,10 @@ const RobotTile: React.FC<RobotTileProps> = ({
 
       {robot && (
         <Dialog open={renameOpen} onOpenChange={setRenameOpen}>
-          <DialogContent className="bg-gray-900 border-gray-800 text-white">
+          <DialogContent>
             <DialogHeader>
               <DialogTitle>Rename robot config</DialogTitle>
-              <DialogDescription className="text-gray-400">
+              <DialogDescription>
                 Renames the saved robot config only. Calibration files are not
                 affected and stay reusable.
               </DialogDescription>
@@ -255,18 +252,12 @@ const RobotTile: React.FC<RobotTileProps> = ({
               }}
               autoFocus
               placeholder="New name"
-              className="bg-gray-800 border-gray-700 text-white"
             />
             <DialogFooter className="flex gap-2 justify-end">
-              <Button
-                variant="outline"
-                className="border-gray-600 text-gray-700 dark:text-gray-300"
-                onClick={() => setRenameOpen(false)}
-              >
+              <Button variant="outline" onClick={() => setRenameOpen(false)}>
                 Cancel
               </Button>
               <Button
-                className="bg-yellow-500 hover:bg-yellow-600 text-white"
                 disabled={renaming || !renameValue.trim() || renameValue.trim() === robot.name}
                 onClick={submitRename}
               >
@@ -279,31 +270,27 @@ const RobotTile: React.FC<RobotTileProps> = ({
 
       {robot && (
         <Dialog open={confirmDelete} onOpenChange={setConfirmDelete}>
-          <DialogContent className="bg-gray-900 border-gray-800 text-white">
+          <DialogContent>
             <DialogHeader>
               <DialogTitle>Delete robot "{robot.name}"?</DialogTitle>
-              <DialogDescription className="text-gray-400">
+              <DialogDescription>
                 This permanently deletes the saved robot config — you'd have to
                 create and configure it again.
               </DialogDescription>
             </DialogHeader>
             {hasAssignments && (
-              <p className="text-sm text-amber-400">
+              <p className="text-sm text-warn">
                 This robot has ports and calibrations assigned: those
                 assignments will be removed. The calibration files themselves
                 are kept in the library and stay reusable.
               </p>
             )}
             <DialogFooter className="flex gap-2 justify-end">
-              <Button
-                variant="outline"
-                className="border-gray-600 text-gray-700 dark:text-gray-300"
-                onClick={() => setConfirmDelete(false)}
-              >
+              <Button variant="outline" onClick={() => setConfirmDelete(false)}>
                 Cancel
               </Button>
               <Button
-                className="bg-red-500 hover:bg-red-600 text-white"
+                variant="destructive"
                 onClick={async () => {
                   setConfirmDelete(false);
                   await onDelete(robot.name);
@@ -315,7 +302,7 @@ const RobotTile: React.FC<RobotTileProps> = ({
           </DialogContent>
         </Dialog>
       )}
-    </div>
+    </Card>
   );
 };
 

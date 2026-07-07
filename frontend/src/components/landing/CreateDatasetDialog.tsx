@@ -64,10 +64,10 @@ const CreateDatasetDialog: React.FC<CreateDatasetDialogProps> = ({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="bg-gray-800 border-gray-700 text-white sm:max-w-md">
+      <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle className="text-white">Create a new dataset</DialogTitle>
-          <DialogDescription className="text-gray-400">
+          <DialogTitle>Create a new dataset</DialogTitle>
+          <DialogDescription>
             Name the dataset you're about to record. You'll set the task and
             episode count in the next step.
           </DialogDescription>
@@ -80,9 +80,7 @@ const CreateDatasetDialog: React.FC<CreateDatasetDialogProps> = ({
           className="space-y-4"
         >
           <div>
-            <Label htmlFor="new-dataset-name" className="text-gray-300">
-              Name
-            </Label>
+            <Label htmlFor="new-dataset-name">Name</Label>
             <Input
               id="new-dataset-name"
               autoFocus
@@ -92,15 +90,15 @@ const CreateDatasetDialog: React.FC<CreateDatasetDialogProps> = ({
               }
               placeholder="my_dataset"
               aria-invalid={nameError !== null || matchesExisting}
-              className="mt-1 bg-gray-900 border-gray-600 text-white aria-[invalid=true]:border-red-500/70"
+              className="mt-1 aria-[invalid=true]:border-destructive"
             />
             {matchesExisting ? (
-              <p className="mt-1 text-xs text-red-400">
+              <p className="mt-1 text-xs text-destructive">
                 A dataset with this name already exists.
               </p>
             ) : (
               nameError && (
-                <p className="mt-1 text-xs text-red-400">{nameError}</p>
+                <p className="mt-1 text-xs text-destructive">{nameError}</p>
               )
             )}
           </div>
@@ -109,15 +107,10 @@ const CreateDatasetDialog: React.FC<CreateDatasetDialogProps> = ({
               type="button"
               variant="outline"
               onClick={() => onOpenChange(false)}
-              className="bg-transparent border-gray-600 text-white hover:bg-gray-700 hover:text-white"
             >
               Cancel
             </Button>
-            <Button
-              type="submit"
-              disabled={!canCreate}
-              className="bg-green-500 hover:bg-green-600 text-white"
-            >
+            <Button type="submit" disabled={!canCreate} variant="brand">
               <Plus className="w-4 h-4 mr-2" /> Create
             </Button>
           </DialogFooter>

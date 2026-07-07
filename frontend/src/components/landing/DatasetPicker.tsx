@@ -93,7 +93,7 @@ const RowUploadButton: React.FC<{
   if (uploading) {
     return (
       <span
-        className="ml-2 flex shrink-0 items-center gap-1 text-xs text-gray-400"
+        className="ml-2 flex shrink-0 items-center gap-1 text-xs text-muted-foreground"
         // Don't let a click on the status count as selecting the row.
         onMouseDown={(e) => {
           e.preventDefault();
@@ -112,7 +112,7 @@ const RowUploadButton: React.FC<{
       <button
         type="button"
         aria-label={`Upload ${repoId} to Hub`}
-        className="ml-2 shrink-0 text-teal-600 hover:text-teal-500 dark:text-teal-400 dark:hover:text-teal-300"
+        className="ml-2 shrink-0 text-info hover:text-info/80"
         // Stop cmdk from treating the click as a selection of the row, but
         // don't preventDefault — the wrapping PopoverTrigger skips its
         // toggle when the child's click event is defaultPrevented.
@@ -190,15 +190,14 @@ const DatasetPicker: React.FC<DatasetPickerProps> = ({
       key={d.repo_id}
       value={d.repo_id}
       onSelect={() => handlePick(d)}
-      className="text-white aria-selected:bg-gray-700"
     >
       <span className="flex-1 truncate">{d.repo_id}</span>
       {/* In the Hugging Face section, "on Hub" is implied by placement — the
           useful signal for a "both" row is that a local working copy exists. */}
       {d.source === "both" && (
-        <span className="text-xs text-gray-400 mr-2">local copy</span>
+        <span className="text-xs text-muted-foreground mr-2">local copy</span>
       )}
-      {d.private && <span className="text-xs text-amber-400">private</span>}
+      {d.private && <span className="text-xs text-warn">private</span>}
       {/* Upload to Hub — local rows only (a "both" row is already on the Hub).
           Opens the same confirm popover the info card uses; the row shows a
           live "Uploading…" state while the background push runs. */}
@@ -215,7 +214,7 @@ const DatasetPicker: React.FC<DatasetPickerProps> = ({
               ? "Delete local copy — the Hub copy stays"
               : "Delete dataset"
           }
-          className="ml-2 shrink-0 text-gray-500 hover:text-red-400"
+          className="ml-2 shrink-0 text-muted-foreground hover:text-destructive"
           // stop cmdk from treating the click as a selection of the row
           onMouseDown={(e) => {
             e.preventDefault();
@@ -236,11 +235,8 @@ const DatasetPicker: React.FC<DatasetPickerProps> = ({
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>{children}</PopoverTrigger>
-      <PopoverContent
-        className="w-[320px] p-0 bg-gray-800 border-gray-700 text-white"
-        align="end"
-      >
-        <Command className="bg-gray-800">
+      <PopoverContent className="w-[320px] p-0" align="end">
+        <Command>
           <CommandInput
             placeholder="Search, type a new name, or org/name…"
             value={query}
@@ -257,11 +253,10 @@ const DatasetPicker: React.FC<DatasetPickerProps> = ({
                 handleOpenCustom();
               }
             }}
-            className="text-white"
           />
           <CommandList>
             {datasets.length === 0 && !canCreate && !canOpenCustom && (
-              <CommandEmpty className="py-4 text-sm text-gray-400 text-center">
+              <CommandEmpty className="py-4 text-sm text-muted-foreground text-center">
                 {loading
                   ? "Loading datasets…"
                   : "No datasets yet. Type a name to create one."}
@@ -282,7 +277,6 @@ const DatasetPicker: React.FC<DatasetPickerProps> = ({
                 <CommandItem
                   value={`__open__${trimmed}`}
                   onSelect={handleOpenCustom}
-                  className="text-white aria-selected:bg-gray-700"
                 >
                   <ExternalLink className="mr-2 h-4 w-4" />
                   Open &quot;{trimmed}&quot; in viewer

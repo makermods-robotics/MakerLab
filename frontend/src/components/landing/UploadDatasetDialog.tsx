@@ -70,10 +70,7 @@ const UploadDatasetDialog: React.FC<{
   return (
     <Popover open={popoverOpen} onOpenChange={setPopoverOpen}>
       <PopoverTrigger asChild>{children}</PopoverTrigger>
-      <PopoverContent
-        align={align}
-        className="w-72 border-gray-700 bg-gray-900 text-xs text-gray-200"
-      >
+      <PopoverContent align={align} className="w-72 text-xs">
         <div className="space-y-3">
           <div className="flex items-start gap-2">
             <Checkbox
@@ -84,10 +81,10 @@ const UploadDatasetDialog: React.FC<{
             />
             <Label
               htmlFor={`hub-upload-private-${repoId}`}
-              className="cursor-pointer font-normal leading-snug text-gray-300"
+              className="cursor-pointer font-normal leading-snug text-foreground normal-case tracking-normal"
             >
               Private dataset
-              <span className="mt-0.5 block text-gray-500">
+              <span className="mt-0.5 block text-muted-foreground">
                 Recordings include your camera footage.
               </span>
             </Label>
@@ -95,7 +92,7 @@ const UploadDatasetDialog: React.FC<{
           <div className="space-y-1">
             <Label
               htmlFor={`hub-upload-tags-${repoId}`}
-              className="font-normal text-gray-400"
+              className="font-normal text-muted-foreground normal-case tracking-normal"
             >
               Tags (optional, comma-separated)
             </Label>
@@ -104,14 +101,14 @@ const UploadDatasetDialog: React.FC<{
               value={tagsInput}
               onChange={(e) => setTagsInput(e.target.value)}
               placeholder="robotics, manipulation"
-              className="h-7 border-gray-600 bg-gray-800 text-xs text-white"
+              className="h-7 text-xs"
             />
           </div>
           <Button
             size="sm"
             onClick={handleUpload}
             disabled={starting}
-            className="h-7 w-full gap-1 bg-blue-500 text-xs text-white hover:bg-blue-600"
+            className="h-7 w-full gap-1 text-xs"
           >
             {starting ? (
               <>

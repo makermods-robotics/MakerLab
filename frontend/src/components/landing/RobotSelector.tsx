@@ -51,13 +51,18 @@ const RobotSelector: React.FC<RobotSelectorProps> = ({
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
         <Button
-          variant="outline"
+          variant="secondary"
           role="combobox"
           aria-expanded={open}
           disabled={isLoading}
-          className="w-full justify-between bg-gray-900 border-gray-700 text-white hover:bg-gray-700 hover:text-white font-normal"
+          className="w-full justify-between font-normal"
         >
-          <span className={cn("truncate", selectedName ? "" : "text-gray-400")}>
+          <span
+            className={cn(
+              "truncate",
+              selectedName ? "" : "text-muted-foreground"
+            )}
+          >
             {isLoading
               ? "Loading..."
               : selectedName ?? "Select a robot or create a new one"}
@@ -66,20 +71,19 @@ const RobotSelector: React.FC<RobotSelectorProps> = ({
         </Button>
       </PopoverTrigger>
       <PopoverContent
-        className="p-0 bg-gray-800 border-gray-700 text-white"
+        className="p-0"
         style={{ width: "var(--radix-popover-trigger-width)" }}
         align="start"
       >
-        <Command className="bg-gray-800">
+        <Command>
           <CommandInput
             placeholder="Search robots..."
             value={query}
             onValueChange={setQuery}
-            className="text-white"
           />
           <CommandList>
             {availableNames.length === 0 && (
-              <CommandEmpty className="py-4 text-sm text-gray-400 text-center">
+              <CommandEmpty className="py-4 text-sm text-muted-foreground text-center">
                 No {MODE_LABEL[defaultMode]} robots yet — use “New robot”.
               </CommandEmpty>
             )}
@@ -90,7 +94,6 @@ const RobotSelector: React.FC<RobotSelectorProps> = ({
                     key={name}
                     value={name}
                     onSelect={() => handlePickExisting(name)}
-                    className="text-white aria-selected:bg-gray-700"
                   >
                     <Check
                       className={cn(
