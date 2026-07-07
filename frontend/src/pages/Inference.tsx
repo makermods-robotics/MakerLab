@@ -1,8 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { ArrowLeft, Loader2, Square } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import Logo from "@/components/Logo";
+import { Loader2, Square } from "lucide-react";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { useApi } from "@/contexts/ApiContext";
 import { useToast } from "@/hooks/use-toast";
 import {
@@ -15,6 +14,11 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import { AppShell } from "@/components/shell/AppShell";
+import { Card } from "@/components/ui/card";
+import { Eyebrow } from "@/components/ui/eyebrow";
+import { StatusPill, type SessionPhase } from "@/components/ui/status-pill";
+import { cn } from "@/lib/utils";
 import {
   InferenceStatus,
   getInferenceStatus,
@@ -128,9 +132,11 @@ const Inference: React.FC = () => {
 
   if (!status) {
     return (
-      <div className="min-h-screen bg-black text-white flex items-center justify-center">
-        <Loader2 className="w-6 h-6 animate-spin mr-3" /> Connecting to inference…
-      </div>
+      <AppShell fullBleed back={{ to: "/" }}>
+        <div className="grid-bg flex min-h-[calc(100vh-52px)] items-center justify-center px-4 py-8 text-foreground">
+          <Loader2 className="mr-3 h-6 w-6 animate-spin" /> Connecting to inference…
+        </div>
+      </AppShell>
     );
   }
 
@@ -145,112 +151,84 @@ const Inference: React.FC = () => {
     isRunning && duration > 0
       ? Math.min(100, (rolloutElapsed / duration) * 100)
       : 0;
-  const pillLabel = isSettingUp
-    ? "SETTING UP"
+  const pillPhase: SessionPhase = isSettingUp
+    ? "setup"
     : isRunning
-    ? "RUNNING"
-    : "FINISHED";
+    ? "running"
+    : "idle";
+  const pillLabel = isSettingUp ? "setting up" : isRunning ? "running" : "finished";
   const timerSeconds = isRunning ? rolloutElapsed : setupElapsed;
 
   return (
-    <div className="min-h-screen bg-black text-white flex flex-col p-4 sm:p-6 lg:p-8">
-      <div className="flex items-center gap-4 mb-8">
+    <AppShell
+      fullBleed
+      back={{ to: "/" }}
+      status={<StatusPill phase={pillPhase} label={pillLabel} />}
+      actions={
         <Button
-          variant="ghost"
-          size="icon"
-          onClick={() => navigate("/")}
-          className="text-slate-400 hover:bg-slate-800 hover:text-white rounded-lg"
+          onClick={() => setShowStopConfirm(true)}
+          disabled={!status.inference_active}
+          variant="destructive"
+          size="sm"
         >
-          <ArrowLeft className="w-5 h-5" />
+          <Square className="w-4 h-4 mr-2" />
+          Stop
         </Button>
-        <Logo />
-        <h1 className="font-bold text-white text-2xl">Inference</h1>
-      </div>
+      }
+    >
+      <div className="grid-bg flex min-h-[calc(100vh-52px)] items-center justify-center px-4 py-8">
+        <Card variant="notch" className="w-full max-w-md p-8">
+          <Eyebrow>[ inference run ]</Eyebrow>
 
-      <div className="flex-1 flex items-center justify-center">
-        <div className="bg-gray-900 rounded-lg border border-gray-700 p-8 w-full max-w-xl">
-          <div className="text-center mb-6">
-            <div
-              className={`inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-bold tracking-widest ${
-                isSettingUp
-                  ? "bg-amber-500/15 text-amber-300"
-                  : "bg-green-500/15 text-green-300"
-              }`}
-            >
-              <span
-                className={`w-2 h-2 rounded-full ${
-                  isSettingUp ? "bg-amber-500" : "bg-green-500"
-                } animate-pulse`}
-              />
-              {pillLabel}
-            </div>
-          </div>
-
-          <div className="text-center mb-4">
-            <div
-              className={`text-7xl font-mono font-bold leading-none ${
-                isSettingUp ? "text-amber-400" : "text-green-400"
-              }`}
-            >
+          <div className="mt-8 text-center">
+            <div className="font-mono text-6xl font-bold leading-none text-foreground">
               {formatTime(timerSeconds)}
             </div>
-            <div className="text-sm text-gray-500 mt-2">
+            <div className="mt-2 font-mono text-sm text-muted-foreground">
               {isSettingUp
                 ? "Loading policy & connecting hardware…"
                 : `/ ${formatTime(duration)}`}
             </div>
           </div>
 
-          <div className="w-full bg-gray-800 rounded-full h-1.5 mb-8">
+          <div className="mt-6 h-1 w-full bg-secondary">
             <div
-              className={`h-1.5 rounded-full transition-all duration-500 ${
-                isSettingUp
-                  ? "bg-amber-500/40 animate-pulse w-full"
-                  : "bg-green-500"
-              }`}
+              className={cn(
+                "h-1 transition-all duration-500",
+                isSettingUp ? "w-full animate-pulse bg-primary/40" : "bg-primary"
+              )}
               style={isSettingUp ? undefined : { width: `${pct}%` }}
             />
           </div>
 
-          <div className="text-xs text-slate-500 break-all mb-6">
+          <div className="mt-6 break-all font-mono text-xs text-muted-foreground">
             policy: {status.policy_ref ?? "(unknown)"}
           </div>
-
-          <Button
-            onClick={() => setShowStopConfirm(true)}
-            disabled={!status.inference_active}
-            className="w-full bg-red-500 hover:bg-red-600 text-white font-semibold py-6 text-lg disabled:opacity-50"
-          >
-            <Square className="w-5 h-5 mr-2" />
-            Stop
-          </Button>
-        </div>
+        </Card>
       </div>
 
       <AlertDialog open={showStopConfirm} onOpenChange={setShowStopConfirm}>
-        <AlertDialogContent className="bg-gray-900 border-gray-700 text-white">
+        <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Stop inference?</AlertDialogTitle>
-            <AlertDialogDescription className="text-gray-400">
+            <AlertDialogDescription>
               The follower eases back to the pose it started the run in, then
               releases torque and goes limp. You can launch another run from the
               job tile.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel className="bg-gray-800 border-gray-700 text-white hover:bg-gray-700">
-              Keep running
-            </AlertDialogCancel>
+            <AlertDialogCancel>Keep running</AlertDialogCancel>
             <AlertDialogAction
               onClick={handleStop}
-              className="bg-red-500 hover:bg-red-600 text-white"
+              className={buttonVariants({ variant: "destructive" })}
             >
               Stop
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-    </div>
+    </AppShell>
   );
 };
 
