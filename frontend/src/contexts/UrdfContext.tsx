@@ -7,7 +7,7 @@ import React, {
   useRef,
   useEffect,
 } from "react";
-import { toast } from "sonner";
+import { toast } from "@/components/ui/sonner";
 import { UrdfProcessor, readUrdfFileContent } from "@/lib/UrdfDragAndDrop";
 import { UrdfFileModel } from "@/lib/types";
 import { RobotAnimationConfig } from "@/lib/types";
