@@ -1,6 +1,8 @@
 import React from "react";
 import { useNavigate, useLocation } from "react-router-dom";
 import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
+import { AppShell } from "@/components/shell/AppShell";
 import { ArrowRight, CheckCircle, Trash2 } from "lucide-react";
 import { useSelectedDataset } from "@/hooks/useSelectedDataset";
 
@@ -42,54 +44,54 @@ const Upload = () => {
 
   if (discardedEmpty) {
     return (
-      <div className="min-h-screen bg-black text-white flex items-center justify-center p-8">
-        <div className="max-w-md w-full text-center space-y-6">
-          <div className="flex justify-center">
-            <Trash2 className="w-12 h-12 text-gray-500" />
-          </div>
-          <div className="space-y-2">
-            <h1 className="text-2xl font-bold">No episodes were recorded</h1>
-            <p className="text-gray-400">
-              Nothing was saved — the empty dataset was discarded so it doesn't
-              take up disk space.
-            </p>
-          </div>
-          <Button
-            onClick={goHome}
-            className="bg-blue-500 hover:bg-blue-600 text-white"
-          >
-            Go to home page
-            <ArrowRight className="w-4 h-4 ml-2" />
-          </Button>
+      <AppShell fullBleed>
+        <div className="grid-bg flex min-h-[calc(100vh-52px)] items-center justify-center px-4 py-8">
+          <Card className="w-full max-w-md space-y-6 p-8 text-center">
+            <div className="flex justify-center">
+              <Trash2 className="h-12 w-12 text-muted-foreground" />
+            </div>
+            <div className="space-y-2">
+              <h1 className="text-2xl">No episodes were recorded</h1>
+              <p className="text-muted-foreground">
+                Nothing was saved — the empty dataset was discarded so it doesn't
+                take up disk space.
+              </p>
+            </div>
+            <Button onClick={goHome} variant="brand">
+              Go to home page
+              <ArrowRight className="w-4 h-4 ml-2" />
+            </Button>
+          </Card>
         </div>
-      </div>
+      </AppShell>
     );
   }
 
   return (
-    <div className="min-h-screen bg-black text-white flex items-center justify-center p-8">
-      <div className="max-w-md w-full text-center space-y-6">
-        <div className="flex justify-center">
-          <CheckCircle className="w-12 h-12 text-green-500" />
-        </div>
-        <div className="space-y-2">
-          <h1 className="text-2xl font-bold">Dataset saved locally</h1>
-          {repoId && (
-            <p className="font-mono text-sm text-gray-400 break-all">{repoId}</p>
-          )}
-          <p className="text-gray-400">
-            Review it and upload it to the Hub from the home page.
-          </p>
-        </div>
-        <Button
-          onClick={goHome}
-          className="bg-blue-500 hover:bg-blue-600 text-white"
-        >
-          Go to home page
-          <ArrowRight className="w-4 h-4 ml-2" />
-        </Button>
+    <AppShell fullBleed>
+      <div className="grid-bg flex min-h-[calc(100vh-52px)] items-center justify-center px-4 py-8">
+        <Card className="w-full max-w-md space-y-6 p-8 text-center">
+          <div className="flex justify-center">
+            <CheckCircle className="h-12 w-12 text-ok" />
+          </div>
+          <div className="space-y-2">
+            <h1 className="text-2xl">Dataset saved locally</h1>
+            {repoId && (
+              <p className="break-all font-mono text-sm text-muted-foreground">
+                {repoId}
+              </p>
+            )}
+            <p className="text-muted-foreground">
+              Review it and upload it to the Hub from the home page.
+            </p>
+          </div>
+          <Button onClick={goHome} variant="brand">
+            Go to home page
+            <ArrowRight className="w-4 h-4 ml-2" />
+          </Button>
+        </Card>
       </div>
-    </div>
+    </AppShell>
   );
 };
 

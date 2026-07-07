@@ -34,6 +34,11 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import { AppShell } from "@/components/shell/AppShell";
+import { Card } from "@/components/ui/card";
+import { Eyebrow } from "@/components/ui/eyebrow";
+import { StatusPill, type SessionPhase } from "@/components/ui/status-pill";
+import { buttonVariants } from "@/components/ui/button";
 
 interface RecordingConfig {
   leader_port: string;
@@ -495,26 +500,34 @@ const Recording = () => {
 
   if (!recordingConfig) {
     return (
-      <div className="min-h-screen bg-black text-white flex items-center justify-center">
-        <div className="text-center">
-          <p className="text-lg">No recording configuration found.</p>
-          <Button onClick={() => navigate("/")} className="mt-4">
-            Return to Home
-          </Button>
+      <AppShell fullBleed>
+        <div className="grid-bg flex min-h-[calc(100vh-52px)] items-center justify-center px-4 py-8">
+          <div className="text-center">
+            <p className="text-lg text-foreground">
+              No recording configuration found.
+            </p>
+            <Button onClick={() => navigate("/")} variant="brand" className="mt-4">
+              Return to home
+            </Button>
+          </div>
         </div>
-      </div>
+      </AppShell>
     );
   }
 
   // Show loading state while waiting for backend status
   if (!backendStatus) {
     return (
-      <div className="min-h-screen bg-black text-white flex items-center justify-center">
-        <div className="text-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-red-500 mx-auto mb-4"></div>
-          <p className="text-lg">Connecting to recording session...</p>
+      <AppShell fullBleed>
+        <div className="grid-bg flex min-h-[calc(100vh-52px)] items-center justify-center px-4 py-8">
+          <div className="text-center">
+            <div className="mx-auto mb-4 h-12 w-12 animate-spin rounded-full border-b-2 border-primary"></div>
+            <p className="text-lg text-foreground">
+              Connecting to recording session…
+            </p>
+          </div>
         </div>
-      </div>
+      </AppShell>
     );
   }
 
@@ -536,110 +549,112 @@ const Recording = () => {
 
   const sessionElapsedTime = backendStatus.session_elapsed_seconds || 0;
 
-  const getStatusText = () => {
-    if (currentPhase === "recording") return `RECORDING EPISODE ${currentEpisode}`;
-    if (currentPhase === "resetting") return "RESET — GET READY";
-    if (currentPhase === "preparing") return "PREPARING SESSION";
-    return "SESSION COMPLETE";
-  };
-
-  const phaseColor =
+  const pillPhase: SessionPhase =
     currentPhase === "recording"
-      ? { dot: "bg-red-500", pill: "bg-red-500/15 text-red-300", timer: "text-green-400", bar: "bg-green-500", button: "bg-green-500 hover:bg-green-600" }
+      ? "recording"
       : currentPhase === "resetting"
-      ? { dot: "bg-orange-500", pill: "bg-orange-500/15 text-orange-300", timer: "text-orange-400", bar: "bg-orange-500", button: "bg-orange-500 hover:bg-orange-600" }
-      : { dot: "bg-gray-500", pill: "bg-gray-500/15 text-gray-300", timer: "text-gray-400", bar: "bg-gray-500", button: "bg-gray-500" };
+      ? "resetting"
+      : currentPhase === "preparing"
+      ? "setup"
+      : "idle";
+
+  const statusLabel =
+    currentPhase === "recording"
+      ? `recording · ep ${currentEpisode}/${totalEpisodes}`
+      : currentPhase === "resetting"
+      ? "reset · get ready"
+      : currentPhase === "preparing"
+      ? "preparing session"
+      : "session complete";
 
   const primaryLabel =
     currentPhase === "recording"
-      ? "End Episode"
+      ? "End episode"
       : currentPhase === "resetting"
-      ? "Start Next Episode"
+      ? "Start next episode"
       : "Advance";
 
   const PrimaryIcon = currentPhase === "recording" ? SkipForward : Play;
 
   return (
-    <div className="min-h-screen bg-black text-white p-8">
-      <div className="max-w-2xl mx-auto">
-        <div className="mb-8 flex">
-          <Button
-            onClick={requestStopRecording}
-            disabled={!backendStatus.available_controls.stop_recording}
-            className="ml-auto bg-red-500 hover:bg-red-600 text-white flex-shrink-0"
-          >
-            Stop
-          </Button>
+    <AppShell
+      fullBleed
+      status={
+        <div role="status" aria-live="polite">
+          <StatusPill
+            phase={pillPhase}
+            label={statusLabel}
+            pulse={currentPhase !== "completed"}
+          />
         </div>
-
-        <div className="bg-gray-900 rounded-lg border border-gray-700 p-8">
-          <div className="flex justify-end items-center gap-4 mb-6 text-sm text-gray-400">
-            <span aria-label={`Episode ${currentEpisode} of ${totalEpisodes}`}>
-              Episode <span className="text-white font-semibold">{currentEpisode}</span> / {totalEpisodes}
-            </span>
-            <span className="font-mono" aria-label={`Total session time ${formatTime(sessionElapsedTime)}`}>
-              {formatTime(sessionElapsedTime)}
-            </span>
-            <Button
-              variant="ghost"
-              size="icon"
-              onClick={toggleMute}
-              aria-label={muted ? "Unmute" : "Mute"}
-              className="h-8 w-8 text-gray-400 hover:text-white hover:bg-gray-800"
-            >
-              {muted ? <VolumeX className="w-5 h-5" /> : <Volume2 className="w-5 h-5" />}
-            </Button>
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="h-8 w-8 text-gray-400 hover:text-white hover:bg-gray-800"
-                  aria-label="More actions"
-                >
-                  <MoreHorizontal className="w-5 h-5" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent
-                align="end"
-                onCloseAutoFocus={(e) => e.preventDefault()}
-                className="bg-gray-900 border-gray-700 text-white"
+      }
+      actions={
+        <Button
+          onClick={requestStopRecording}
+          disabled={!backendStatus.available_controls.stop_recording}
+          variant="destructive"
+          size="sm"
+        >
+          Stop
+        </Button>
+      }
+    >
+      <div className="grid-bg flex min-h-[calc(100vh-52px)] items-center justify-center px-4 py-8">
+        <Card variant="notch" className="w-full max-w-md p-8">
+          <div className="flex items-center justify-between gap-4">
+            <Eyebrow>
+              [ episode {String(currentEpisode).padStart(2, "0")} ·{" "}
+              {recordingConfig.dataset_repo_id} ]
+            </Eyebrow>
+            <div className="flex items-center gap-1">
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={toggleMute}
+                aria-label={muted ? "Unmute" : "Mute"}
+                className="h-8 w-8"
               >
-                <DropdownMenuItem
-                  onClick={handleRerecordEpisode}
-                  disabled={!backendStatus.available_controls.rerecord_episode}
-                  className="focus:bg-gray-800 focus:text-white"
+                {muted ? <VolumeX className="w-5 h-5" /> : <Volume2 className="w-5 h-5" />}
+              </Button>
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-8 w-8"
+                    aria-label="More actions"
+                  >
+                    <MoreHorizontal className="w-5 h-5" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent
+                  align="end"
+                  onCloseAutoFocus={(e) => e.preventDefault()}
                 >
-                  <RotateCcw className="w-4 h-4 mr-2" />
-                  Re-record episode
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          </div>
-
-          <div className="text-center mb-6">
-            <div
-              role="status"
-              aria-live="polite"
-              className={`inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-bold tracking-widest ${phaseColor.pill}`}
-            >
-              <span className={`w-2 h-2 rounded-full ${phaseColor.dot} ${currentPhase !== "completed" ? "animate-pulse" : ""}`} />
-              {getStatusText()}
+                  <DropdownMenuItem
+                    onClick={handleRerecordEpisode}
+                    disabled={!backendStatus.available_controls.rerecord_episode}
+                  >
+                    <RotateCcw className="w-4 h-4 mr-2" />
+                    Re-record episode
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
             </div>
           </div>
 
-          <div className="text-center mb-4">
-            <div className={`text-7xl font-mono font-bold leading-none ${phaseColor.timer}`}>
+          <div className="mt-8 text-center">
+            <div className="font-mono text-6xl font-bold leading-none text-foreground">
               {formatTime(phaseElapsedTime)}
             </div>
-            <div className="text-sm text-gray-500 mt-2">
+            <div className="mt-2 font-mono text-sm text-muted-foreground">
               / {formatTime(phaseTimeLimit)}
             </div>
           </div>
 
-          <div className="w-full bg-gray-800 rounded-full h-1.5 mb-8">
+          <div className="mt-6 h-1 w-full bg-secondary">
             <div
-              className={`h-1.5 rounded-full transition-all duration-500 ${phaseColor.bar}`}
+              className="h-1 bg-primary transition-all duration-500"
               style={{
                 width: `${Math.min((phaseElapsedTime / phaseTimeLimit) * 100, 100)}%`,
               }}
@@ -653,46 +668,60 @@ const Recording = () => {
               optimisticPhase !== null ||
               currentPhase === "completed"
             }
-            className={`w-full text-white font-semibold py-6 text-lg disabled:opacity-50 ${phaseColor.button}`}
+            variant="brand"
+            className="mt-8 w-full py-6 text-base"
           >
             <PrimaryIcon className="w-5 h-5 mr-2" />
             {primaryLabel}
-            {currentPhase !== "completed" && (
-              <span className="ml-3 px-2 py-0.5 rounded text-xs font-mono bg-black/30 text-white/70">SPACE / →</span>
-            )}
           </Button>
 
+          {currentPhase !== "completed" && (
+            <div className="mt-3 text-center font-mono text-xs text-muted-foreground">
+              [ space / → ] {primaryLabel.toLowerCase()}
+            </div>
+          )}
+
+          <div className="mt-6 flex items-center justify-center gap-4 font-mono text-xs text-muted-foreground">
+            <span aria-label={`Episode ${currentEpisode} of ${totalEpisodes}`}>
+              ep <span className="text-foreground">{currentEpisode}</span> /{" "}
+              {totalEpisodes}
+            </span>
+            <span
+              aria-label={`Total session time ${formatTime(sessionElapsedTime)}`}
+            >
+              {formatTime(sessionElapsedTime)}
+            </span>
+          </div>
+
           {currentPhase === "completed" && (
-            <p className="text-center text-sm text-gray-400 mt-6">
+            <p className="mt-6 text-center text-sm text-muted-foreground">
               Recording complete — redirecting to upload…
             </p>
           )}
-        </div>
+        </Card>
       </div>
 
       <AlertDialog open={showStopConfirm} onOpenChange={setShowStopConfirm}>
-        <AlertDialogContent className="bg-gray-900 border-gray-700 text-white">
+        <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Stop recording?</AlertDialogTitle>
-            <AlertDialogDescription className="text-gray-400">
+            <AlertDialogDescription>
               Saved episodes are kept. The arm returns to its starting position, then goes limp, and
               you'll be taken to the upload page.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel className="bg-gray-800 border-gray-700 text-white hover:bg-gray-700">
-              Keep recording
-            </AlertDialogCancel>
+            <AlertDialogCancel>Keep recording</AlertDialogCancel>
             <AlertDialogAction
               onClick={confirmStopRecording}
-              className="bg-red-500 hover:bg-red-600 text-white"
+              className={buttonVariants({ variant: "destructive" })}
             >
               Stop
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-    </div>
+    </AppShell>
   );
 };
 
