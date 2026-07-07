@@ -4,9 +4,12 @@ import {
   ChevronDown,
   ExternalLink,
   Loader2,
+  Lock,
   Pencil,
   Settings2,
+  Trash2,
   Upload as UploadIcon,
+  X,
 } from "lucide-react";
 import {
   Collapsible,
@@ -156,13 +159,24 @@ const useCanEditHub = (repoId: string): boolean => {
   );
 };
 
+/** Org/required tags the backend's `with_lelab_tag` always re-adds on save, so
+ * they can't actually be dropped. Shown as locked, non-removable chips so the
+ * UI never implies the user can remove them. Matched case-insensitively. */
+const REQUIRED_TAGS = ["makermods", "openbooth", "LeLab"];
+const isRequiredTag = (t: string): boolean =>
+  REQUIRED_TAGS.some((r) => r.toLowerCase() === t.toLowerCase());
+
 /**
- * Post-upload Hub settings editor: a popover (Settings gear trigger) with a
- * Public|Private visibility toggle and a comma-separated tags editor, both
- * pre-filled from the live Hub settings (`/datasets/hub-settings`). Visibility
- * and tags save independently — each MUTATES the live repo, so each has its own
- * Save/loading state, success toast, and inline error. On success the parent's
- * status/tags refresh via `onChanged`.
+ * Post-upload Hub settings editor: a popover (labeled "Visibility & tags"
+ * trigger) with a Public|Private visibility toggle and a chip-based tags editor,
+ * both pre-filled from the live Hub settings (`/datasets/hub-settings`).
+ * Visibility and tags save independently — each MUTATES the live repo, so each
+ * has its own Save/loading state, success toast, and inline error. On success
+ * the parent's status/tags refresh via `onChanged`.
+ *
+ * Tags render as removable pills; the org/required tags (makermods, openbooth,
+ * LeLab) render as locked, non-removable pills since the backend always re-adds
+ * them. A text input adds a new tag on Enter or comma.
  *
  * Only rendered for datasets whose namespace the user can write to (see
  * useCanEditHub) — the same gate DatasetPicker uses for uploads.
@@ -182,8 +196,9 @@ const HubSettingsEditor: React.FC<{
   const [savingVisibility, setSavingVisibility] = useState(false);
   const [visibilityError, setVisibilityError] = useState<string | null>(null);
 
-  const [tagsInput, setTagsInput] = useState("");
-  const [initialTags, setInitialTags] = useState("");
+  const [tags, setTags] = useState<string[]>([]);
+  const [initialTags, setInitialTags] = useState<string[]>([]);
+  const [newTag, setNewTag] = useState("");
   const [savingTags, setSavingTags] = useState(false);
   const [tagsError, setTagsError] = useState<string | null>(null);
 
@@ -200,9 +215,9 @@ const HubSettingsEditor: React.FC<{
       .then((data) => {
         setIsPrivate(data.private);
         setInitialPrivate(data.private);
-        const joined = data.tags.join(", ");
-        setTagsInput(joined);
-        setInitialTags(joined);
+        setTags(data.tags);
+        setInitialTags(data.tags);
+        setNewTag("");
         setLoading(false);
       })
       .catch((e) => {
@@ -247,18 +262,39 @@ const HubSettingsEditor: React.FC<{
     }
   };
 
+  // Add `newTag` (or any comma-joined batch) as chip(s), de-duplicated
+  // case-insensitively against what's already present. Clears the input.
+  const commitNewTag = () => {
+    const parsed = newTag
+      .split(",")
+      .map((t) => t.trim())
+      .filter((t) => t.length > 0);
+    if (parsed.length > 0) {
+      setTags((prev) => {
+        const next = [...prev];
+        for (const t of parsed) {
+          if (!next.some((e) => e.toLowerCase() === t.toLowerCase())) {
+            next.push(t);
+          }
+        }
+        return next;
+      });
+    }
+    setNewTag("");
+  };
+
+  const removeTag = (tag: string) => {
+    setTags((prev) => prev.filter((t) => t !== tag));
+  };
+
   const saveTags = async () => {
     setSavingTags(true);
     setTagsError(null);
     try {
-      const tags = tagsInput
-        .split(",")
-        .map((t) => t.trim())
-        .filter((t) => t.length > 0);
       const res = await setDatasetTags(baseUrl, fetchWithHeaders, repoId, tags);
-      const joined = res.tags.join(", ");
-      setTagsInput(joined);
-      setInitialTags(joined);
+      setTags(res.tags);
+      setInitialTags(res.tags);
+      setNewTag("");
       toast({ title: "Tags updated", description: repoId });
       onChanged?.();
     } catch (e) {
@@ -269,18 +305,22 @@ const HubSettingsEditor: React.FC<{
   };
 
   const visibilityChanged = isPrivate !== initialPrivate;
-  const tagsChanged = tagsInput.trim() !== initialTags.trim();
+  // Order-insensitive set comparison — reordering chips isn't a real change.
+  const tagsChanged =
+    tags.length !== initialTags.length ||
+    !tags.every((t) => initialTags.includes(t));
 
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
         <button
           type="button"
-          aria-label="Edit Hub settings"
-          title="Edit Hub settings"
-          className="inline-flex items-center gap-0.5 rounded p-0.5 text-gray-400 hover:text-gray-200"
+          aria-label="Edit visibility and tags on the Hub"
+          title="Edit visibility and tags on the Hub"
+          className="inline-flex items-center gap-1 rounded border border-gray-600 px-1.5 py-0.5 text-xs font-medium text-gray-300 hover:border-gray-500 hover:bg-gray-800 hover:text-gray-100"
         >
-          <Settings2 className="h-3 w-3" />
+          <Settings2 className="h-3 w-3 shrink-0" />
+          Visibility &amp; tags
         </button>
       </PopoverTrigger>
       <PopoverContent
@@ -338,18 +378,70 @@ const HubSettingsEditor: React.FC<{
               </Button>
             </div>
 
-            <div className="space-y-1 border-t border-gray-800 pt-3">
+            <div className="space-y-1.5 border-t border-gray-800 pt-3">
               <Label
                 htmlFor={`hub-edit-tags-${repoId}`}
                 className="font-normal text-gray-400"
               >
-                Tags (comma-separated)
+                Tags
               </Label>
+              {tags.length > 0 && (
+                <div className="flex flex-wrap gap-1">
+                  {tags.map((tag) => {
+                    const required = isRequiredTag(tag);
+                    return required ? (
+                      // Locked org tag: distinct style + lock icon, no remove
+                      // (the backend always re-adds it on save).
+                      <span
+                        key={tag}
+                        title="Always kept — can't be removed"
+                        className="inline-flex items-center gap-1 rounded-full border border-blue-500/40 bg-blue-500/15 px-2 py-0.5 text-xs text-blue-300"
+                      >
+                        <Lock className="h-2.5 w-2.5 shrink-0" />
+                        {tag}
+                      </span>
+                    ) : (
+                      <span
+                        key={tag}
+                        className="inline-flex items-center gap-1 rounded-full border border-gray-600 bg-gray-800 px-2 py-0.5 text-xs text-gray-200"
+                      >
+                        {tag}
+                        <button
+                          type="button"
+                          onClick={() => removeTag(tag)}
+                          aria-label={`Remove tag ${tag}`}
+                          title={`Remove tag ${tag}`}
+                          className="-mr-0.5 rounded-full text-gray-400 hover:text-gray-100"
+                        >
+                          <X className="h-3 w-3" />
+                        </button>
+                      </span>
+                    );
+                  })}
+                </div>
+              )}
               <Input
                 id={`hub-edit-tags-${repoId}`}
-                value={tagsInput}
-                onChange={(e) => setTagsInput(e.target.value)}
-                placeholder="robotics, manipulation"
+                value={newTag}
+                onChange={(e) => setNewTag(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === ",") {
+                    e.preventDefault();
+                    commitNewTag();
+                  } else if (
+                    e.key === "Backspace" &&
+                    newTag === "" &&
+                    tags.length > 0
+                  ) {
+                    // Backspace on an empty input removes the last removable tag.
+                    const last = [...tags]
+                      .reverse()
+                      .find((t) => !isRequiredTag(t));
+                    if (last) removeTag(last);
+                  }
+                }}
+                onBlur={commitNewTag}
+                placeholder="Add a tag, then press Enter"
                 className="h-7 border-gray-600 bg-gray-800 text-xs text-white"
               />
               <p className="leading-snug text-gray-500">
@@ -645,6 +737,14 @@ interface DatasetInfoCardProps {
   /** Called after a successful rename with the new repo id, so the parent can
    * update the selection and refresh the picker list. */
   onRenamed?: (newRepoId: string) => void;
+  /** When true, show a trash affordance for the selected dataset. Mirrors the
+   * old picker-row gate: only local-only datasets (deleting the sole copy of a
+   * not-yet-uploaded dataset). A "both"/hub dataset gets no delete here —
+   * clearing its local cache lives in the "Manage cached datasets" dialog. */
+  canDelete?: boolean;
+  /** Invoked when the user clicks the card's delete affordance. The parent
+   * routes this through its confirm dialog (nothing is deleted inline). */
+  onDelete?: () => void;
 }
 
 /**
@@ -656,6 +756,8 @@ interface DatasetInfoCardProps {
 const DatasetInfoCard: React.FC<DatasetInfoCardProps> = ({
   repoId,
   onRenamed,
+  canDelete = false,
+  onDelete,
 }) => {
   const { baseUrl, fetchWithHeaders } = useApi();
   const [info, setInfo] = useState<DatasetInfo | null>(null);
@@ -717,15 +819,31 @@ const DatasetInfoCard: React.FC<DatasetInfoCardProps> = ({
                 <WarningBadge>No episodes recorded</WarningBadge>
               )}
             </div>
-            <button
-              type="button"
-              onClick={() => setRenameOpen(true)}
-              aria-label="Rename dataset"
-              title="Rename dataset"
-              className="-mr-1 -mt-0.5 shrink-0 rounded p-1 text-gray-500 hover:text-gray-200"
-            >
-              <Pencil className="h-3.5 w-3.5" />
-            </button>
+            <div className="-mr-1 -mt-0.5 flex shrink-0 items-center gap-0.5">
+              <button
+                type="button"
+                onClick={() => setRenameOpen(true)}
+                aria-label="Rename dataset"
+                title="Rename dataset"
+                className="rounded p-1 text-gray-500 hover:text-gray-200"
+              >
+                <Pencil className="h-3.5 w-3.5" />
+              </button>
+              {/* Delete — local-only datasets only (deleting the sole copy of a
+                  not-yet-uploaded dataset). Routed through the parent's confirm
+                  dialog; nothing is deleted inline. */}
+              {canDelete && onDelete && (
+                <button
+                  type="button"
+                  onClick={onDelete}
+                  aria-label="Delete dataset"
+                  title="Delete dataset"
+                  className="rounded p-1 text-gray-500 hover:text-red-400"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </button>
+              )}
+            </div>
           </div>
 
           <Row label="Cameras">

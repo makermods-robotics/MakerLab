@@ -72,6 +72,13 @@ const Landing = () => {
     useState<DatasetItem | null>(null);
   const { selectedDataset, setSelectedDataset } = useSelectedDataset();
 
+  // The DatasetItem for the current selection (if it's in the known list). Used
+  // to gate the info card's delete affordance to local-only datasets and to
+  // route the right item through the confirm dialog. A custom repo opened by id
+  // won't match — no local item, so no card delete, which is correct.
+  const selectedDatasetItem =
+    datasets.find((d) => d.repo_id === selectedDataset) ?? null;
+
   // Recording modal state
   const [showRecordingModal, setShowRecordingModal] = useState(false);
   const [datasetName, setDatasetName] = useState("");
@@ -324,7 +331,7 @@ const Landing = () => {
       {/* Scrolls with the page (user preference) — only the slim top bar stays
           sticky; the card row previously pinned itself below it. */}
       <div className="bg-black border-b border-gray-800">
-        <div className="mx-auto max-w-7xl px-4 py-4 grid gap-4 grid-cols-1 lg:grid-cols-[1.2fr_2fr]">
+        <div className="mx-auto max-w-7xl px-4 py-4 grid gap-4 grid-cols-1 md:grid-cols-2 lg:grid-cols-3">
           <RobotConfigManager
             records={records}
             selectedName={selectedName}
@@ -337,143 +344,147 @@ const Landing = () => {
             renameRobot={renameRobot}
             deleteRobot={deleteRobot}
           />
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            <div className="bg-gray-800 rounded-lg border border-gray-700 p-3 flex flex-col gap-2">
-              <h3 className="font-semibold text-lg text-center h-10 flex items-center justify-center">
-                Dataset
-              </h3>
-              <div className="flex items-center gap-2">
-                <div className="flex-1 min-w-0">
-                  <DatasetPicker
-                    datasets={datasets}
-                    loading={datasetsLoading}
-                    onPickExisting={handlePickExisting}
-                    onOpenCustom={handleOpenCustom}
-                    onCreateNew={handleCreateDataset}
-                    onDelete={handleDeleteDataset}
-                    onUploaded={() => refreshDatasets()}
+          <div className="bg-gray-800 rounded-lg border border-gray-700 p-3 flex flex-col gap-2">
+            <h3 className="font-semibold text-lg text-center h-10 flex items-center justify-center">
+              Dataset
+            </h3>
+            <div className="flex items-center gap-2">
+              <div className="flex-1 min-w-0">
+                <DatasetPicker
+                  datasets={datasets}
+                  loading={datasetsLoading}
+                  onPickExisting={handlePickExisting}
+                  onOpenCustom={handleOpenCustom}
+                  onCreateNew={handleCreateDataset}
+                >
+                  <Button
+                    variant="outline"
+                    role="combobox"
+                    className="w-full justify-between bg-gray-800 border-gray-600 text-white hover:bg-gray-700"
+                  >
+                    <span
+                      className={`truncate ${selectedDataset ? "text-white" : "text-gray-300"}`}
+                    >
+                      {datasetsLoading
+                        ? "Loading datasets…"
+                        : (selectedDataset ?? "Select or create a dataset…")}
+                    </span>
+                    <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                  </Button>
+                </DatasetPicker>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setShowCreateDatasetDialog(true)}
+                className="h-8 shrink-0 border-gray-600 bg-gray-800 text-white hover:bg-gray-700 hover:text-white"
+              >
+                <Plus className="w-3.5 h-3.5 mr-1.5" />
+                New dataset
+              </Button>
+            </div>
+            {selectedDataset && (
+              <DatasetInfoCard
+                repoId={selectedDataset}
+                onRenamed={(newRepoId) => {
+                  // The renamed dir has a new repo id: repoint the selection
+                  // (so the card + training read the new id) and refresh the
+                  // picker list so both reflect it without a manual reload.
+                  setSelectedDataset(newRepoId);
+                  refreshDatasets();
+                }}
+                // Delete is offered only for local-only datasets (deleting the
+                // sole copy). Clicking routes through the confirm dialog.
+                canDelete={selectedDatasetItem?.source === "local"}
+                onDelete={
+                  selectedDatasetItem
+                    ? () => handleDeleteDataset(selectedDatasetItem)
+                    : undefined
+                }
+              />
+            )}
+            <div className="flex items-center gap-4">
+              <button
+                type="button"
+                onClick={() => setShowMergeDialog(true)}
+                className="text-xs text-gray-400 hover:text-white transition-colors inline-flex items-center gap-1"
+              >
+                <GitMerge className="h-3.5 w-3.5" /> Merge datasets…
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowManageCachesDialog(true)}
+                className="text-xs text-gray-400 hover:text-white transition-colors inline-flex items-center gap-1"
+              >
+                <HardDrive className="h-3.5 w-3.5" /> Manage cached datasets…
+              </button>
+            </div>
+          </div>
+          <div className="bg-gray-800 rounded-lg border border-gray-700 p-3 flex flex-col gap-2">
+            <h3 className="font-semibold text-lg text-center h-10 flex items-center justify-center">
+              Create a model
+            </h3>
+            {/* Stable = tested on our hardware (see POLICY_TYPE_OPTIONS).
+                Untested types stay selectable, just visually subdued. */}
+            <div className="grid grid-cols-2 gap-2">
+              {POLICY_TYPE_OPTIONS.filter((p) => p.stable).map((policy) => {
+                const unavailable =
+                  policyAvailability?.[policy.value] === false;
+                return (
+                  // Tooltip lives on a wrapper span: the disabled Button
+                  // gets pointer-events-none, which would swallow `title`.
+                  <span
+                    key={policy.value}
+                    title={
+                      unavailable
+                        ? "Not available in this lerobot version"
+                        : `Train a ${policy.label} model`
+                    }
                   >
                     <Button
-                      variant="outline"
-                      role="combobox"
-                      className="w-full justify-between bg-gray-800 border-gray-600 text-white hover:bg-gray-700"
+                      onClick={() => handleTrainingClick(policy.value)}
+                      disabled={!selectedDataset || unavailable}
+                      size="sm"
+                      className="w-full bg-green-500 hover:bg-green-600 text-white px-2"
                     >
-                      <span
-                        className={`truncate ${selectedDataset ? "text-white" : "text-gray-300"}`}
-                      >
-                        {datasetsLoading
-                          ? "Loading datasets…"
-                          : (selectedDataset ?? "Select or create a dataset…")}
-                      </span>
-                      <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                      <span className="truncate">{policy.label}</span>
                     </Button>
-                  </DatasetPicker>
-                </div>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setShowCreateDatasetDialog(true)}
-                  className="h-8 shrink-0 border-gray-600 bg-gray-800 text-white hover:bg-gray-700 hover:text-white"
-                >
-                  <Plus className="w-3.5 h-3.5 mr-1.5" />
-                  New dataset
-                </Button>
-              </div>
-              {selectedDataset && (
-                <DatasetInfoCard
-                  repoId={selectedDataset}
-                  onRenamed={(newRepoId) => {
-                    // The renamed dir has a new repo id: repoint the selection
-                    // (so the card + training read the new id) and refresh the
-                    // picker list so both reflect it without a manual reload.
-                    setSelectedDataset(newRepoId);
-                    refreshDatasets();
-                  }}
-                />
-              )}
-              <div className="flex items-center gap-4">
-                <button
-                  type="button"
-                  onClick={() => setShowMergeDialog(true)}
-                  className="text-xs text-gray-400 hover:text-white transition-colors inline-flex items-center gap-1"
-                >
-                  <GitMerge className="h-3.5 w-3.5" /> Merge datasets…
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setShowManageCachesDialog(true)}
-                  className="text-xs text-gray-400 hover:text-white transition-colors inline-flex items-center gap-1"
-                >
-                  <HardDrive className="h-3.5 w-3.5" /> Manage cached datasets…
-                </button>
-              </div>
+                  </span>
+                );
+              })}
             </div>
-            <div className="bg-gray-800 rounded-lg border border-gray-700 p-3 flex flex-col gap-2">
-              <h3 className="font-semibold text-lg text-center h-10 flex items-center justify-center">
-                Create a model
-              </h3>
-              {/* Stable = tested on our hardware (see POLICY_TYPE_OPTIONS).
-                  Untested types stay selectable, just visually subdued. */}
-              <div className="grid grid-cols-2 gap-2">
-                {POLICY_TYPE_OPTIONS.filter((p) => p.stable).map((policy) => {
-                  const unavailable =
-                    policyAvailability?.[policy.value] === false;
-                  return (
-                    // Tooltip lives on a wrapper span: the disabled Button
-                    // gets pointer-events-none, which would swallow `title`.
-                    <span
-                      key={policy.value}
-                      title={
-                        unavailable
-                          ? "Not available in this lerobot version"
-                          : `Train a ${policy.label} model`
-                      }
+            <p className="text-xs text-gray-500 mt-1">
+              Untested in LeLab — use at your own risk
+            </p>
+            <div className="grid grid-cols-3 gap-2">
+              {POLICY_TYPE_OPTIONS.filter((p) => !p.stable).map((policy) => {
+                const unavailable =
+                  policyAvailability?.[policy.value] === false;
+                return (
+                  <span
+                    key={policy.value}
+                    title={
+                      unavailable
+                        ? "Not available in this lerobot version"
+                        : `Train a ${policy.label} model — untested in LeLab, use at your own risk`
+                    }
+                  >
+                    <Button
+                      onClick={() => handleTrainingClick(policy.value)}
+                      disabled={!selectedDataset || unavailable}
+                      size="sm"
+                      variant="outline"
+                      className="w-full border-gray-600 bg-gray-900/40 text-gray-400 hover:bg-gray-700 hover:text-white px-2"
                     >
-                      <Button
-                        onClick={() => handleTrainingClick(policy.value)}
-                        disabled={!selectedDataset || unavailable}
-                        size="sm"
-                        className="w-full bg-green-500 hover:bg-green-600 text-white px-2"
-                      >
-                        <span className="truncate">{policy.label}</span>
-                      </Button>
-                    </span>
-                  );
-                })}
-              </div>
-              <p className="text-xs text-gray-500 mt-1">
-                Untested in LeLab — use at your own risk
-              </p>
-              <div className="grid grid-cols-3 gap-2">
-                {POLICY_TYPE_OPTIONS.filter((p) => !p.stable).map((policy) => {
-                  const unavailable =
-                    policyAvailability?.[policy.value] === false;
-                  return (
-                    <span
-                      key={policy.value}
-                      title={
-                        unavailable
-                          ? "Not available in this lerobot version"
-                          : `Train a ${policy.label} model — untested in LeLab, use at your own risk`
-                      }
-                    >
-                      <Button
-                        onClick={() => handleTrainingClick(policy.value)}
-                        disabled={!selectedDataset || unavailable}
-                        size="sm"
-                        variant="outline"
-                        className="w-full border-gray-600 bg-gray-900/40 text-gray-400 hover:bg-gray-700 hover:text-white px-2"
-                      >
-                        <span className="truncate">{policy.label}</span>
-                      </Button>
-                    </span>
-                  );
-                })}
-              </div>
-              {!selectedDataset && (
-                <p className="text-xs text-gray-500">Select a dataset first.</p>
-              )}
+                      <span className="truncate">{policy.label}</span>
+                    </Button>
+                  </span>
+                );
+              })}
             </div>
+            {!selectedDataset && (
+              <p className="text-xs text-gray-500">Select a dataset first.</p>
+            )}
           </div>
         </div>
       </div>
