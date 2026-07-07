@@ -66,7 +66,7 @@ const formatBytes = (bytes: number): string => {
 const WarningBadge: React.FC<{ children: React.ReactNode }> = ({
   children,
 }) => (
-  <span className="inline-flex items-center gap-1 rounded border border-red-500/40 bg-red-500/15 px-1.5 py-0.5 text-xs font-medium text-red-400">
+  <span className="inline-flex items-center gap-1 rounded border border-destructive/40 bg-destructive/15 px-1.5 py-0.5 text-xs font-medium text-destructive">
     <AlertTriangle className="h-3 w-3 shrink-0" />
     {children}
   </span>
@@ -77,8 +77,8 @@ const Row: React.FC<{ label: string; children: React.ReactNode }> = ({
   children,
 }) => (
   <div className="flex items-baseline gap-2">
-    <span className="w-14 shrink-0 text-gray-500">{label}</span>
-    <span className="min-w-0 flex-1 text-gray-300">{children}</span>
+    <span className="w-14 shrink-0 text-muted-foreground">{label}</span>
+    <span className="min-w-0 flex-1 text-foreground">{children}</span>
   </div>
 );
 
@@ -98,7 +98,9 @@ const TaskList: React.FC<{ tasks: DatasetTask[] }> = ({ tasks }) => {
           {task}
         </span>
         {num_episodes > 0 && (
-          <span className="shrink-0 text-gray-500">· {num_episodes} ep</span>
+          <span className="shrink-0 text-muted-foreground">
+            · {num_episodes} ep
+          </span>
         )}
       </span>
     );
@@ -106,10 +108,10 @@ const TaskList: React.FC<{ tasks: DatasetTask[] }> = ({ tasks }) => {
 
   return (
     <Collapsible open={open} onOpenChange={setOpen}>
-      <CollapsibleTrigger className="flex items-center gap-1 text-gray-300 hover:text-gray-100">
+      <CollapsibleTrigger className="flex items-center gap-1 text-foreground hover:text-foreground/80">
         {tasks.length} tasks
         <ChevronDown
-          className={`h-3 w-3 text-gray-500 transition-transform ${open ? "rotate-180" : ""}`}
+          className={`h-3 w-3 text-muted-foreground transition-transform ${open ? "rotate-180" : ""}`}
         />
       </CollapsibleTrigger>
       <CollapsibleContent>
@@ -119,7 +121,7 @@ const TaskList: React.FC<{ tasks: DatasetTask[] }> = ({ tasks }) => {
               <span className="min-w-0 flex-1 truncate" title={task}>
                 {task}
               </span>
-              <span className="shrink-0 text-gray-500">
+              <span className="shrink-0 text-muted-foreground">
                 {num_episodes} ep
               </span>
             </li>
@@ -210,7 +212,7 @@ const HubSyncRow: React.FC<{ repoId: string }> = ({ repoId }) => {
 
   if (uploading) {
     return (
-      <div className="flex items-center gap-1.5 text-gray-400">
+      <div className="flex items-center gap-1.5 text-muted-foreground">
         <Loader2 className="h-3 w-3 animate-spin" />
         <span>Uploading to Hub…</span>
       </div>
@@ -219,14 +221,14 @@ const HubSyncRow: React.FC<{ repoId: string }> = ({ repoId }) => {
 
   if (status === "on_hub") {
     return (
-      <div className="flex items-center gap-1.5 text-gray-500">
+      <div className="flex items-center gap-1.5 text-muted-foreground">
         <span>On Hub</span>
         {hubUrl && (
           <a
             href={hubUrl}
             target="_blank"
             rel="noopener noreferrer"
-            className="inline-flex items-center gap-0.5 text-gray-400 hover:text-gray-200"
+            className="inline-flex items-center gap-0.5 text-muted-foreground hover:text-foreground"
           >
             <ExternalLink className="h-3 w-3" />
           </a>
@@ -239,14 +241,14 @@ const HubSyncRow: React.FC<{ repoId: string }> = ({ repoId }) => {
   // the endpoint is a safe upsert and reports auth failures gracefully.
   return (
     <div className="flex items-center justify-between gap-2">
-      <span className="text-gray-500">
+      <span className="text-muted-foreground">
         {status === "local_only" ? "Local only" : "Hub status unknown"}
       </span>
       <UploadDatasetDialog repoId={repoId} start={start}>
         <Button
           size="sm"
           variant="outline"
-          className="h-6 gap-1 border-teal-500/50 px-2 text-xs text-teal-700 dark:text-teal-300 hover:bg-teal-500/10"
+          className="h-6 gap-1 border-info/50 px-2 text-xs text-info hover:bg-info/10"
         >
           <UploadIcon className="h-3 w-3" />
           Upload to Hub
@@ -324,17 +326,17 @@ const RenameDatasetDialog: React.FC<{
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="bg-gray-900 border-gray-800 text-white">
+      <DialogContent>
         <DialogHeader>
           <DialogTitle>Rename dataset</DialogTitle>
-          <DialogDescription className="text-gray-400">
+          <DialogDescription>
             Renames the local dataset directory. If this dataset has a copy on
             the Hub, the Hub copy keeps its old name.
           </DialogDescription>
         </DialogHeader>
         <div className="flex items-center gap-1">
           {namespace && (
-            <span className="shrink-0 font-mono text-sm text-gray-500">
+            <span className="shrink-0 font-mono text-sm text-muted-foreground">
               {namespace}/
             </span>
           )}
@@ -352,22 +354,16 @@ const RenameDatasetDialog: React.FC<{
             }}
             autoFocus
             placeholder="New name"
-            className="bg-gray-800 border-gray-700 text-white"
           />
         </div>
         {(error ?? validationError) && (
-          <p className="text-sm text-red-400">{error ?? validationError}</p>
+          <p className="text-sm text-destructive">{error ?? validationError}</p>
         )}
         <DialogFooter className="flex gap-2 justify-end">
-          <Button
-            variant="outline"
-            className="border-gray-600 bg-transparent text-gray-200 hover:bg-gray-800 hover:text-white"
-            onClick={() => onOpenChange(false)}
-          >
+          <Button variant="outline" onClick={() => onOpenChange(false)}>
             Cancel
           </Button>
           <Button
-            className="bg-blue-600 hover:bg-blue-700 text-white"
             disabled={
               renaming || trimmed === "" || unchanged || validationError !== null
             }
@@ -423,17 +419,17 @@ const DatasetInfoCard: React.FC<DatasetInfoCardProps> = ({
   }, [baseUrl, fetchWithHeaders, repoId]);
 
   return (
-    <div className="rounded-md border border-gray-700 bg-gray-900/60 px-3 py-2 text-xs">
+    <div className="rounded-md border border-border bg-secondary px-3 py-2 text-xs">
       {loading && (
         <div className="animate-pulse space-y-2 py-0.5" aria-label="Loading dataset details">
-          <div className="h-3 w-3/4 rounded bg-gray-700" />
-          <div className="h-3 w-1/2 rounded bg-gray-700" />
-          <div className="h-3 w-2/3 rounded bg-gray-700" />
+          <div className="h-3 w-3/4 rounded bg-muted" />
+          <div className="h-3 w-1/2 rounded bg-muted" />
+          <div className="h-3 w-2/3 rounded bg-muted" />
         </div>
       )}
 
       {!loading && error && (
-        <p className="text-gray-500">
+        <p className="text-muted-foreground">
           {error.notLocal
             ? "Not in the local cache — details are only available for downloaded datasets."
             : "Couldn't load dataset details."}
@@ -443,7 +439,7 @@ const DatasetInfoCard: React.FC<DatasetInfoCardProps> = ({
       {!loading && info && (
         <div className="space-y-1.5">
           <div className="flex items-start justify-between gap-2">
-            <div className="flex flex-wrap items-center gap-2 font-medium text-gray-200">
+            <div className="flex flex-wrap items-center gap-2 font-medium text-foreground">
               <span>
                 {info.total_episodes} episode
                 {info.total_episodes === 1 ? "" : "s"}
@@ -463,7 +459,7 @@ const DatasetInfoCard: React.FC<DatasetInfoCardProps> = ({
               onClick={() => setRenameOpen(true)}
               aria-label="Rename dataset"
               title="Rename dataset"
-              className="-mr-1 -mt-0.5 shrink-0 rounded p-1 text-gray-500 hover:text-gray-200"
+              className="-mr-1 -mt-0.5 shrink-0 rounded p-1 text-muted-foreground hover:text-foreground"
             >
               <Pencil className="h-3.5 w-3.5" />
             </button>
@@ -489,7 +485,7 @@ const DatasetInfoCard: React.FC<DatasetInfoCardProps> = ({
 
           <Row label="Size">{formatBytes(info.size_bytes)}</Row>
 
-          <div className="mt-1.5 border-t border-gray-800 pt-1.5">
+          <div className="mt-1.5 border-t border-border pt-1.5">
             <HubSyncRow repoId={repoId} />
           </div>
 

@@ -105,18 +105,20 @@ const DeleteHubModelDialog: React.FC<{
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="bg-gray-900 border-gray-800 text-white">
+      <DialogContent>
         <DialogHeader>
-          <DialogTitle className="text-red-400">Delete model repo</DialogTitle>
-          <DialogDescription className="text-gray-400">
+          <DialogTitle className="text-destructive">
+            Delete model repo
+          </DialogTitle>
+          <DialogDescription>
             This permanently deletes the model repository and its files from the
             Hugging Face Hub. This cannot be undone.
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-2">
-          <p className="text-sm text-gray-300">
+          <p className="text-sm text-foreground">
             Type{" "}
-            <code className="rounded bg-gray-800 px-1 py-0.5 font-mono text-xs text-red-300">
+            <code className="rounded bg-secondary px-1 py-0.5 font-mono text-xs text-destructive">
               {repoId}
             </code>{" "}
             to confirm.
@@ -137,20 +139,16 @@ const DeleteHubModelDialog: React.FC<{
             autoComplete="off"
             spellCheck={false}
             placeholder={repoId}
-            className="bg-gray-800 border-gray-700 text-white font-mono"
+            className="font-mono"
           />
         </div>
-        {error && <p className="text-sm text-red-400">{error}</p>}
+        {error && <p className="text-sm text-destructive">{error}</p>}
         <DialogFooter className="flex gap-2 justify-end">
-          <Button
-            variant="outline"
-            className="border-gray-600 bg-transparent text-gray-200 hover:bg-gray-800 hover:text-white"
-            onClick={() => onOpenChange(false)}
-          >
+          <Button variant="outline" onClick={() => onOpenChange(false)}>
             Cancel
           </Button>
           <Button
-            className="bg-red-600 hover:bg-red-700 text-white"
+            variant="destructive"
             disabled={!confirmed || deleting}
             onClick={doDelete}
           >
@@ -186,12 +184,13 @@ const HubModelCard: React.FC<Props> = ({ model, onDeleted, onAction }) => {
 
   return (
     <Card
+      variant="flat"
       onClick={() => window.open(url, "_blank", "noopener,noreferrer")}
-      className="bg-slate-800/50 border-slate-700 rounded-xl cursor-pointer hover:border-slate-500 transition-colors"
+      className="rounded-xl cursor-pointer hover:border-input transition-colors"
     >
       <CardContent className="p-4 space-y-3">
         <div className="flex items-start justify-between gap-2">
-          <div className="flex items-center gap-1.5 text-xs font-semibold text-sky-400">
+          <div className="flex items-center gap-1.5 text-xs font-semibold text-info">
             <Upload className="w-3.5 h-3.5" />
             Uploaded
           </div>
@@ -200,7 +199,7 @@ const HubModelCard: React.FC<Props> = ({ model, onDeleted, onAction }) => {
               variant="ghost"
               size="icon"
               asChild
-              className="h-7 w-7 text-slate-400 hover:text-white"
+              className="h-7 w-7"
               aria-label="View on Hub"
             >
               <a
@@ -215,7 +214,7 @@ const HubModelCard: React.FC<Props> = ({ model, onDeleted, onAction }) => {
             <Button
               variant="ghost"
               size="icon"
-              className="h-7 w-7 text-slate-400 hover:text-red-400"
+              className="h-7 w-7 hover:text-destructive"
               aria-label="Delete model repo"
               onClick={(e) => {
                 e.stopPropagation();
@@ -228,15 +227,15 @@ const HubModelCard: React.FC<Props> = ({ model, onDeleted, onAction }) => {
         </div>
         <div>
           <div
-            className="text-white font-semibold truncate flex items-center gap-1.5"
+            className="text-foreground font-semibold truncate flex items-center gap-1.5"
             title={model.repo_id}
           >
             {model.private ? (
-              <Lock className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+              <Lock className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
             ) : null}
             <span className="truncate">{shortName}</span>
           </div>
-          <div className="text-xs text-slate-400 truncate" title={model.repo_id}>
+          <div className="font-mono text-xs text-muted-foreground truncate" title={model.repo_id}>
             {model.repo_id} · updated {relativeTime(model.last_modified)}
           </div>
         </div>
@@ -250,7 +249,7 @@ const HubModelCard: React.FC<Props> = ({ model, onDeleted, onAction }) => {
               size="icon"
               onClick={(e) => runAction(e, "inference")}
               disabled={acting !== null}
-              className="h-8 w-8 bg-green-500 hover:bg-green-600 text-white"
+              className="h-8 w-8"
               aria-label="Run inference with this model"
               title="Run inference"
             >
@@ -261,7 +260,7 @@ const HubModelCard: React.FC<Props> = ({ model, onDeleted, onAction }) => {
               variant="outline"
               onClick={(e) => runAction(e, "finetune")}
               disabled={acting !== null}
-              className="h-8 gap-1 border-violet-500/50 text-violet-700 dark:text-violet-300 hover:bg-violet-500/10"
+              className="h-8 gap-1 border-info/50 text-info hover:bg-info/10"
               aria-label="Fine-tune a new run from this model's weights"
               title="Fine-tune a new run from this model's weights"
             >

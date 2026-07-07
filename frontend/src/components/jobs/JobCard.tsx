@@ -61,12 +61,12 @@ const statePresentation: Record<
     Icon: React.ComponentType<{ className?: string }>;
   }
 > = {
-  running: { label: "Running", color: "text-green-400", Icon: Loader2 },
-  done: { label: "Done", color: "text-slate-400", Icon: CheckCircle2 },
-  failed: { label: "Failed", color: "text-red-400", Icon: XCircle },
+  running: { label: "Running", color: "text-ok", Icon: Loader2 },
+  done: { label: "Done", color: "text-muted-foreground", Icon: CheckCircle2 },
+  failed: { label: "Failed", color: "text-destructive", Icon: XCircle },
   interrupted: {
     label: "Interrupted",
-    color: "text-amber-400",
+    color: "text-warn",
     Icon: AlertTriangle,
   },
 };
@@ -421,11 +421,12 @@ const JobCard: React.FC<Props> = ({
 
   return (
     <Card
+      variant="flat"
       onClick={() => {
         if (!isImported) navigate(`/training/${job.id}`);
       }}
-      className={`bg-slate-800/50 border-slate-700 rounded-xl transition-colors ${
-        isImported ? "" : "cursor-pointer hover:border-slate-500"
+      className={`rounded-xl transition-colors ${
+        isImported ? "" : "cursor-pointer hover:border-input"
       }`}
     >
       <CardContent className="p-4 space-y-3">
@@ -441,7 +442,7 @@ const JobCard: React.FC<Props> = ({
             </div>
             {isHubImport ? (
               <div
-                className="flex items-center gap-1 text-[11px] font-medium text-sky-400"
+                className="flex items-center gap-1 text-[11px] font-medium text-info"
                 title="Imported from a Hugging Face Hub repo"
               >
                 <Upload className="w-3 h-3" />
@@ -454,7 +455,7 @@ const JobCard: React.FC<Props> = ({
               variant="ghost"
               size="icon"
               onClick={openRename}
-              className="h-7 w-7 text-slate-400 hover:text-white"
+              className="h-7 w-7"
               aria-label="Rename model"
               title="Rename"
             >
@@ -465,7 +466,7 @@ const JobCard: React.FC<Props> = ({
                 variant="ghost"
                 size="icon"
                 asChild
-                className="h-7 w-7 text-slate-400 hover:text-white"
+                className="h-7 w-7"
                 aria-label="Open Hub job page"
               >
                 <a
@@ -487,8 +488,8 @@ const JobCard: React.FC<Props> = ({
                 variant="ghost"
                 size="icon"
                 onClick={handleAction}
-                className={`h-7 w-7 text-slate-400 ${
-                  isRunning ? "hover:text-white" : "hover:text-red-400"
+                className={`h-7 w-7 ${
+                  isRunning ? "" : "hover:text-destructive"
                 }`}
                 aria-label={isRunning ? "Stop job" : "Delete job"}
               >
@@ -503,7 +504,7 @@ const JobCard: React.FC<Props> = ({
         </div>
         <div>
           <div
-            className="text-white font-semibold truncate"
+            className="text-foreground font-semibold truncate"
             title={displayName}
           >
             {displayName}
@@ -512,7 +513,7 @@ const JobCard: React.FC<Props> = ({
               trainings (imported models already show their repo id / path in
               the subtitle below). */}
           {!isImported && job.display_name ? (
-            <div className="text-[11px] text-slate-500 truncate" title={job.id}>
+            <div className="font-mono text-[11px] text-muted-foreground truncate" title={job.id}>
               {job.id}
             </div>
           ) : null}
@@ -521,7 +522,7 @@ const JobCard: React.FC<Props> = ({
               visible. The leading LRM keeps the path's first "/" from being
               bidi-reordered to the wrong end. */}
           <div
-            className="text-xs text-slate-400 truncate"
+            className="font-mono text-xs text-muted-foreground truncate"
             title={subtitle}
             style={
               isImported ? { direction: "rtl", textAlign: "left" } : undefined
@@ -531,12 +532,12 @@ const JobCard: React.FC<Props> = ({
           </div>
         </div>
         {showProgressBar ? (
-          <div className="relative h-5 w-full overflow-hidden rounded-md bg-slate-900 border border-slate-700">
+          <div className="relative h-5 w-full overflow-hidden rounded-md bg-secondary border border-border">
             <div
-              className="h-full bg-gradient-to-r from-blue-500 to-sky-400 transition-[width] duration-500"
+              className="h-full bg-primary transition-[width] duration-500"
               style={{ width: `${progressPct}%` }}
             />
-            <div className="absolute inset-0 flex items-center justify-center text-xs font-semibold text-white tabular-nums drop-shadow">
+            <div className="absolute inset-0 flex items-center justify-center text-xs font-semibold text-foreground tabular-nums">
               {isStarting ? "Training starting…" : `${progressPct.toFixed(1)}%`}
             </div>
           </div>
@@ -551,7 +552,7 @@ const JobCard: React.FC<Props> = ({
             <Button
               size="icon"
               onClick={handlePlay}
-              className="h-8 w-8 bg-green-500 hover:bg-green-600 text-white"
+              className="h-8 w-8"
               aria-label="Run inference with this checkpoint"
             >
               <Play className="w-4 h-4" />
@@ -561,7 +562,7 @@ const JobCard: React.FC<Props> = ({
                 size="sm"
                 variant="outline"
                 onClick={handleContinue}
-                className="h-8 gap-1 border-sky-500/50 text-sky-700 dark:text-sky-300 hover:bg-sky-500/10"
+                className="h-8 gap-1 border-info/50 text-info hover:bg-info/10"
                 aria-label="Continue training from this checkpoint"
               >
                 <FastForward className="w-3.5 h-3.5" /> Continue
@@ -572,7 +573,7 @@ const JobCard: React.FC<Props> = ({
                 size="sm"
                 variant="outline"
                 onClick={handleResumeCloud}
-                className="h-8 gap-1 border-sky-500/50 text-sky-700 dark:text-sky-300 hover:bg-sky-500/10"
+                className="h-8 gap-1 border-info/50 text-info hover:bg-info/10"
                 aria-label="Resume this cloud run from its last checkpoint"
                 title="Resume: launch a new cloud job continuing from this checkpoint"
               >
@@ -584,7 +585,7 @@ const JobCard: React.FC<Props> = ({
                 size="sm"
                 variant="outline"
                 onClick={handleFinetune}
-                className="h-8 gap-1 border-violet-500/50 text-violet-700 dark:text-violet-300 hover:bg-violet-500/10"
+                className="h-8 gap-1 border-info/50 text-info hover:bg-info/10"
                 aria-label="Fine-tune a new run from this model's weights"
                 title="Fine-tune a new run from this model's weights"
               >
@@ -596,7 +597,7 @@ const JobCard: React.FC<Props> = ({
                 size="sm"
                 variant="outline"
                 onClick={handleDownload}
-                className="h-8 gap-1 border-slate-500/50 text-slate-700 dark:text-slate-300 hover:bg-slate-500/10"
+                className="h-8 gap-1"
                 aria-label="Download this checkpoint"
                 title="Download this checkpoint"
               >
@@ -613,7 +614,7 @@ const JobCard: React.FC<Props> = ({
               e.stopPropagation();
               setExtraDialogOpen(true);
             }}
-            className="h-8 gap-1.5 border-amber-500/50 text-amber-700 dark:text-amber-300 hover:bg-amber-500/10"
+            className="h-8 gap-1.5 border-warn/50 text-warn hover:bg-warn/10"
           >
             <Download className="w-3.5 h-3.5" /> Install{" "}
             {missingExtra.installTarget}
@@ -621,16 +622,13 @@ const JobCard: React.FC<Props> = ({
         ) : null}
       </CardContent>
       <Dialog open={renameOpen} onOpenChange={setRenameOpen}>
-        <DialogContent
-          className="bg-slate-900 border-slate-800 text-white"
-          onClick={(e) => e.stopPropagation()}
-        >
+        <DialogContent onClick={(e) => e.stopPropagation()}>
           <DialogHeader>
             <DialogTitle>Rename model</DialogTitle>
-            <DialogDescription className="text-slate-400">
+            <DialogDescription>
               Sets a display name only — the underlying{" "}
               {isImported && job.hf_repo_id ? "Hub repo" : "run"} (
-              <span className="font-mono text-slate-300">
+              <span className="font-mono text-foreground">
                 {isImported ? importedSource : job.id}
               </span>
               ) is not moved or changed.
@@ -650,19 +648,15 @@ const JobCard: React.FC<Props> = ({
             }}
             autoFocus
             placeholder="New name"
-            className="bg-slate-800 border-slate-700 text-white"
           />
-          {renameError && <p className="text-sm text-red-400">{renameError}</p>}
+          {renameError && (
+            <p className="text-sm text-destructive">{renameError}</p>
+          )}
           <DialogFooter className="flex gap-2 justify-end">
-            <Button
-              variant="outline"
-              className="border-slate-600 text-slate-700 dark:text-slate-300"
-              onClick={() => setRenameOpen(false)}
-            >
+            <Button variant="outline" onClick={() => setRenameOpen(false)}>
               Cancel
             </Button>
             <Button
-              className="bg-blue-600 hover:bg-blue-700 text-white"
               disabled={
                 renaming ||
                 !renameValue.trim() ||

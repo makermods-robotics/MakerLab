@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for lelab.teleoperate — request schema and status handlers."""
+"""Tests for makerlab.teleoperate — request schema and status handlers."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ import pytest
 def test_teleoperate_request_rejects_missing_fields() -> None:
     from pydantic import ValidationError
 
-    from lelab.teleoperate import TeleoperateRequest
+    from makerlab.teleoperate import TeleoperateRequest
 
     with pytest.raises(ValidationError):
         TeleoperateRequest()
@@ -29,7 +29,7 @@ def test_teleoperate_request_rejects_missing_fields() -> None:
 
 def test_teleoperate_request_defaults_to_single_arm() -> None:
     """A single-arm request omits the bimanual fields; they default safely."""
-    from lelab.teleoperate import TeleoperateRequest
+    from makerlab.teleoperate import TeleoperateRequest
 
     req = TeleoperateRequest(
         leader_port="/dev/l",
@@ -43,21 +43,21 @@ def test_teleoperate_request_defaults_to_single_arm() -> None:
 
 
 def test_handle_teleoperation_status_returns_dict() -> None:
-    from lelab.teleoperate import handle_teleoperation_status
+    from makerlab.teleoperate import handle_teleoperation_status
 
     result = handle_teleoperation_status()
     assert isinstance(result, dict)
 
 
 def test_handle_get_joint_positions_returns_dict_when_idle() -> None:
-    from lelab.teleoperate import handle_get_joint_positions
+    from makerlab.teleoperate import handle_get_joint_positions
 
     result = handle_get_joint_positions()
     assert isinstance(result, dict)
 
 
 def test_get_joint_positions_from_robot_uses_provided_object() -> None:
-    from lelab.teleoperate import get_joint_positions_from_robot
+    from makerlab.teleoperate import get_joint_positions_from_robot
     from tests.mocks import FakeRobot
 
     robot = FakeRobot()
@@ -74,7 +74,7 @@ def test_start_teleoperation_reports_connection_failure(
     empty teleop screen) and reset state so a retry isn't blocked. Previously
     the connect ran in a worker thread and the handler always claimed success.
     """
-    import lelab.teleoperate as teleop
+    import makerlab.teleoperate as teleop
 
     monkeypatch.setattr(teleop, "teleoperation_active", False)
     monkeypatch.setattr(teleop, "setup_calibration_files", lambda leader, follower: ("leader", "follower"))
@@ -117,7 +117,7 @@ def test_start_teleoperation_disconnects_follower_when_leader_fails(
     """The partial-connect path: if the follower connects but the leader then
     fails, the follower must be disconnected so its serial port is released.
     """
-    import lelab.teleoperate as teleop
+    import makerlab.teleoperate as teleop
 
     monkeypatch.setattr(teleop, "teleoperation_active", False)
     monkeypatch.setattr(teleop, "setup_calibration_files", lambda leader, follower: ("leader", "follower"))
@@ -189,7 +189,7 @@ class _FakeArm:
 
 
 def test_force_disable_torque_disables_every_motor() -> None:
-    from lelab.teleoperate import force_disable_torque
+    from makerlab.teleoperate import force_disable_torque
 
     bus = _FakeBus()
     problems = force_disable_torque(_FakeArm(bus), "follower arm")
@@ -205,7 +205,7 @@ def test_force_disable_torque_reports_failed_motor_and_port() -> None:
     problem message must be unmistakable: it names the port and warns that
     torque may still be enabled (the arm stays rigid until power is pulled).
     """
-    from lelab.teleoperate import force_disable_torque
+    from makerlab.teleoperate import force_disable_torque
 
     bus = _FakeBus(port="COM_FOLLOWER", failing=("elbow_flex",))
     problems = force_disable_torque(_FakeArm(bus), "follower arm")
@@ -219,7 +219,7 @@ def test_force_disable_torque_reports_failed_motor_and_port() -> None:
 
 
 def test_force_disable_torque_handles_bimanual_and_none() -> None:
-    from lelab.teleoperate import force_disable_torque
+    from makerlab.teleoperate import force_disable_torque
 
     class _BiDevice:
         def __init__(self) -> None:
@@ -243,7 +243,7 @@ def test_stop_teleoperation_surfaces_cleanup_error(
     """When the worker's cleanup could not release an arm, the stop response
     must carry a warning instead of claiming a clean disconnect.
     """
-    import lelab.teleoperate as teleop
+    import makerlab.teleoperate as teleop
 
     monkeypatch.setattr(teleop, "teleoperation_active", True)
     monkeypatch.setattr(teleop, "teleoperation_thread", None)
@@ -278,7 +278,7 @@ def test_hold_torque_release_grace_cut_short_by_release_request() -> None:
     import threading
     import time
 
-    from lelab.teleoperate import hold_torque_release_grace
+    from makerlab.teleoperate import hold_torque_release_grace
 
     release_now = threading.Event()
     release_now.set()
@@ -290,7 +290,7 @@ def test_hold_torque_release_grace_cut_short_by_release_request() -> None:
 def test_hold_torque_release_grace_elapses_without_release_request() -> None:
     import threading
 
-    from lelab.teleoperate import hold_torque_release_grace
+    from makerlab.teleoperate import hold_torque_release_grace
 
     assert hold_torque_release_grace(threading.Event(), grace_s=0.01) is False
 
@@ -301,7 +301,7 @@ def test_stop_teleoperation_enters_release_return(monkeypatch: pytest.MonkeyPatc
     arm goes back to its starting position and that a second Stop releases it
     now. There is no timed hold anymore — same behavior as the auto-cal stop.
     """
-    import lelab.teleoperate as teleop
+    import makerlab.teleoperate as teleop
 
     worker = _FakeWorker()
     monkeypatch.setattr(teleop, "teleoperation_active", True)
@@ -326,7 +326,7 @@ def test_second_stop_during_grace_releases_now(monkeypatch: pytest.MonkeyPatch) 
     """
     import threading
 
-    import lelab.teleoperate as teleop
+    import makerlab.teleoperate as teleop
 
     worker = _FakeWorker()
     release_now = threading.Event()
@@ -348,7 +348,7 @@ def test_second_stop_during_grace_surfaces_cleanup_error(
 ) -> None:
     import threading
 
-    import lelab.teleoperate as teleop
+    import makerlab.teleoperate as teleop
 
     monkeypatch.setattr(teleop, "teleoperation_active", False)
     monkeypatch.setattr(teleop, "teleoperation_thread", _FakeWorker())
@@ -369,7 +369,7 @@ def test_finish_pending_release_cuts_grace_short(monkeypatch: pytest.MonkeyPatch
     """
     import threading
 
-    import lelab.teleoperate as teleop
+    import makerlab.teleoperate as teleop
 
     worker = _FakeWorker()
     release_now = threading.Event()
@@ -391,7 +391,7 @@ def test_finish_pending_release_leaves_live_session_alone(
     """
     import threading
 
-    import lelab.teleoperate as teleop
+    import makerlab.teleoperate as teleop
 
     worker = _FakeWorker()
     release_now = threading.Event()
@@ -405,7 +405,7 @@ def test_finish_pending_release_leaves_live_session_alone(
 
 
 def test_finish_pending_release_noop_when_idle(monkeypatch: pytest.MonkeyPatch) -> None:
-    import lelab.teleoperate as teleop
+    import makerlab.teleoperate as teleop
 
     monkeypatch.setattr(teleop, "teleoperation_thread", None)
     assert teleop.finish_pending_release() is True
@@ -416,7 +416,7 @@ def test_teleoperation_status_reports_releasing(monkeypatch: pytest.MonkeyPatch)
     energized and going home (releasing) rather than pretending the session
     is fully over.
     """
-    import lelab.teleoperate as teleop
+    import makerlab.teleoperate as teleop
 
     monkeypatch.setattr(teleop, "teleoperation_active", False)
     monkeypatch.setattr(teleop, "releasing", True)
@@ -429,12 +429,12 @@ def test_teleoperation_status_reports_releasing(monkeypatch: pytest.MonkeyPatch)
 
 
 # ---------------------------------------------------------------------------
-# Rest-pose return (lelab.rest_pose) and its stop-path integration
+# Rest-pose return (makerlab.rest_pose) and its stop-path integration
 # ---------------------------------------------------------------------------
 
 
 class _RestBus:
-    """Bus double for rest-pose capture/return (lelab.rest_pose)."""
+    """Bus double for rest-pose capture/return (makerlab.rest_pose)."""
 
     _MOTORS = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"]
 
@@ -480,8 +480,8 @@ class _RestClock:
 
 @pytest.fixture
 def rest_clock(monkeypatch: pytest.MonkeyPatch) -> _RestClock:
-    """Drive lelab.rest_pose's time off a simulated clock (no real sleeps)."""
-    import lelab.rest_pose as rest_pose
+    """Drive makerlab.rest_pose's time off a simulated clock (no real sleeps)."""
+    import makerlab.rest_pose as rest_pose
 
     clock = _RestClock()
     monkeypatch.setattr(rest_pose.time, "sleep", clock.sleep)
@@ -492,7 +492,7 @@ def rest_clock(monkeypatch: pytest.MonkeyPatch) -> _RestClock:
 def test_capture_rest_pose_reads_raw_ticks() -> None:
     """Raw Present_Position is captured as-is: teleoperation never rewrites
     Homing_Offset mid-session, so raw ticks are directly replayable later."""
-    from lelab.rest_pose import capture_rest_pose
+    from makerlab.rest_pose import capture_rest_pose
 
     bus = _RestBus(positions={"shoulder_pan": 123, "gripper": 90})
     assert capture_rest_pose(bus) == {"shoulder_pan": 123, "gripper": 90}
@@ -504,7 +504,7 @@ def test_capture_rest_pose_reads_raw_ticks() -> None:
 def test_return_to_rest_pose_arrives_and_writes_gentle_goals(rest_clock: _RestClock) -> None:
     """The return writes a gentle profile speed then the captured goals, and
     reports 'returned' once every motor is within tolerance."""
-    import lelab.rest_pose as rest_pose
+    import makerlab.rest_pose as rest_pose
 
     targets = {"shoulder_pan": 1000, "shoulder_lift": 1005}
     bus = _RestBus(positions={"shoulder_pan": 1000, "shoulder_lift": 1000})
@@ -531,7 +531,7 @@ def test_return_to_rest_pose_arrives_and_writes_gentle_goals(rest_clock: _RestCl
 def test_return_to_rest_pose_stalls_without_progress(rest_clock: _RestClock) -> None:
     """Positions that never move toward the target must end in a stall (and
     fall through to the release) instead of looping to the ceiling."""
-    from lelab.rest_pose import return_to_rest_pose
+    from makerlab.rest_pose import return_to_rest_pose
 
     bus = _RestBus(positions={"shoulder_pan": 1000})
     arrived, reason = return_to_rest_pose(bus, {"shoulder_pan": 2000})
@@ -539,7 +539,7 @@ def test_return_to_rest_pose_stalls_without_progress(rest_clock: _RestClock) -> 
     assert arrived is False
     assert reason.startswith("stalled")
     assert "shoulder_pan=1000" in reason  # the culprit and its distance are named
-    import lelab.rest_pose as rest_pose
+    import makerlab.rest_pose as rest_pose
 
     assert rest_clock.now < rest_pose.RETURN_CEILING_S  # stall beat the ceiling
 
@@ -548,7 +548,7 @@ def test_return_to_rest_pose_reports_settled_short_motor(rest_clock: _RestClock)
     """A motor that stops moving (Moving == 0) while still far from target is
     NOT a successful return — bench symptom: 'the starting position was not
     right'. It must be reported as its own 'settled' outcome with the deltas."""
-    from lelab.rest_pose import return_to_rest_pose
+    from makerlab.rest_pose import return_to_rest_pose
 
     bus = _RestBus(positions={"shoulder_pan": 1000}, moving=0)
     arrived, reason = return_to_rest_pose(bus, {"shoulder_pan": 2000})
@@ -563,7 +563,7 @@ def test_return_to_rest_pose_cut_short_by_abort(rest_clock: _RestClock) -> None:
     return immediately so the release can run right away."""
     import threading
 
-    from lelab.rest_pose import return_to_rest_pose
+    from makerlab.rest_pose import return_to_rest_pose
 
     abort = threading.Event()
     abort.set()
@@ -575,7 +575,7 @@ def test_return_to_rest_pose_cut_short_by_abort(rest_clock: _RestClock) -> None:
 
 
 def test_return_to_rest_pose_without_pose_is_a_noop() -> None:
-    from lelab.rest_pose import return_to_rest_pose
+    from makerlab.rest_pose import return_to_rest_pose
 
     bus = _RestBus()
     assert return_to_rest_pose(bus, {}) == (False, "no-pose")
@@ -590,7 +590,7 @@ def _assert_speed_cap_restored(bus: _RestBus, targets: dict[str, int]) -> None:
 
 
 def test_return_restores_speed_cap_on_stall(rest_clock: _RestClock) -> None:
-    from lelab.rest_pose import return_to_rest_pose
+    from makerlab.rest_pose import return_to_rest_pose
 
     bus = _RestBus(positions={"shoulder_pan": 1000})
     arrived, reason = return_to_rest_pose(bus, {"shoulder_pan": 2000})
@@ -600,7 +600,7 @@ def test_return_restores_speed_cap_on_stall(rest_clock: _RestClock) -> None:
 
 
 def test_return_restores_speed_cap_on_settled(rest_clock: _RestClock) -> None:
-    from lelab.rest_pose import return_to_rest_pose
+    from makerlab.rest_pose import return_to_rest_pose
 
     bus = _RestBus(positions={"shoulder_pan": 1000}, moving=0)
     arrived, reason = return_to_rest_pose(bus, {"shoulder_pan": 2000})
@@ -613,7 +613,7 @@ def test_return_restores_speed_cap_on_settled(rest_clock: _RestClock) -> None:
 def test_return_restores_speed_cap_on_cut_short(rest_clock: _RestClock) -> None:
     import threading
 
-    from lelab.rest_pose import return_to_rest_pose
+    from makerlab.rest_pose import return_to_rest_pose
 
     abort = threading.Event()
     abort.set()
@@ -631,7 +631,7 @@ def test_return_restores_speed_cap_on_ceiling(
 ) -> None:
     """Force the pathological ceiling exit (positions creep just enough to
     never stall) and check the cap is still zeroed on the way out."""
-    import lelab.rest_pose as rest_pose
+    import makerlab.rest_pose as rest_pose
 
     bus = _RestBus(positions={"shoulder_pan": 1000})
     original_sync_read = bus.sync_read
@@ -652,7 +652,7 @@ def test_return_restores_speed_cap_on_ceiling(
 def test_return_restores_speed_cap_on_failed_start(rest_clock: _RestClock) -> None:
     """A comm-error while writing the goals may have already stamped the
     gentle cap on some motors — the best-effort zeroing must still run."""
-    from lelab.rest_pose import return_to_rest_pose
+    from makerlab.rest_pose import return_to_rest_pose
 
     bus = _RestBus(positions={"shoulder_pan": 1000})
 
@@ -670,7 +670,7 @@ def test_return_restores_speed_cap_on_failed_start(rest_clock: _RestClock) -> No
 def test_return_speed_cap_restore_failure_never_raises(rest_clock: _RestClock) -> None:
     """The zeroing is best-effort: a dead bus at restore time must not raise —
     the caller's torque release has to run no matter what."""
-    from lelab.rest_pose import return_to_rest_pose
+    from makerlab.rest_pose import return_to_rest_pose
 
     targets = {"shoulder_pan": 1000}
     bus = _RestBus(positions={"shoulder_pan": 1000})
@@ -695,7 +695,7 @@ def test_return_followers_to_rest_covers_every_follower_bus(
     the list — it is human-held with torque off)."""
     import threading
 
-    import lelab.teleoperate as teleop
+    import makerlab.teleoperate as teleop
 
     calls: list[tuple] = []
     lock = threading.Lock()
@@ -728,7 +728,7 @@ def test_return_followers_run_concurrently_not_sequentially(
     its return, and the barrier would time out."""
     import threading
 
-    import lelab.teleoperate as teleop
+    import makerlab.teleoperate as teleop
 
     started = threading.Barrier(2, timeout=5.0)
     both_started = threading.Event()
@@ -756,7 +756,7 @@ def test_return_followers_wrapper_waits_for_all_arms(
     not left running."""
     import threading
 
-    import lelab.teleoperate as teleop
+    import makerlab.teleoperate as teleop
 
     finished = {"busL": False, "busR": False}
     fast_arm_done = threading.Event()
@@ -798,7 +798,7 @@ def test_return_followers_one_arm_failing_does_not_block_other(
     arm's return from completing."""
     import threading
 
-    import lelab.teleoperate as teleop
+    import makerlab.teleoperate as teleop
 
     completed: set = set()
     lock = threading.Lock()
@@ -824,7 +824,7 @@ def test_return_followers_abort_stops_every_arm(
     — each sees the same event set and bails out promptly."""
     import threading
 
-    import lelab.teleoperate as teleop
+    import makerlab.teleoperate as teleop
 
     seen_set: list[bool] = []
     lock = threading.Lock()
@@ -849,7 +849,7 @@ def test_return_followers_single_arm_still_returns(
     (one thread, joined) — same observable outcome as before."""
     import threading
 
-    import lelab.teleoperate as teleop
+    import makerlab.teleoperate as teleop
 
     calls: list[tuple] = []
 
@@ -872,7 +872,7 @@ def test_start_clears_stale_release_state_from_previous_double_stop(
     until the server restarts."""
     import threading
 
-    import lelab.teleoperate as teleop
+    import makerlab.teleoperate as teleop
 
     stale = threading.Event()
     stale.set()
@@ -934,7 +934,7 @@ class _CurrentBus:
 def test_power_telemetry_tracks_peak_and_mean() -> None:
     """Peaks/means in mA (6.5 mA per register LSB) give the objective A/B for
     the motor-power cap; the summary names the Torque_Limit that was active."""
-    import lelab.teleoperate as teleop
+    import makerlab.teleoperate as teleop
 
     telemetry = teleop.PowerTelemetry()
     bus = _CurrentBus([{"shoulder_pan": 100, "gripper": 20}, {"shoulder_pan": 40, "gripper": 60}])
@@ -951,7 +951,7 @@ def test_power_telemetry_tracks_peak_and_mean() -> None:
 
 
 def test_power_telemetry_prefixes_bimanual_and_survives_bus_errors() -> None:
-    import lelab.teleoperate as teleop
+    import makerlab.teleoperate as teleop
 
     telemetry = teleop.PowerTelemetry()
     telemetry.sample(_CurrentBus([{"gripper": 10}]), prefix="left_")
@@ -961,6 +961,6 @@ def test_power_telemetry_prefixes_bimanual_and_survives_bus_errors() -> None:
 
 
 def test_power_telemetry_summary_none_without_samples() -> None:
-    import lelab.teleoperate as teleop
+    import makerlab.teleoperate as teleop
 
     assert teleop.PowerTelemetry().summary(100) is None

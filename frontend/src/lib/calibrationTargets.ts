@@ -26,8 +26,8 @@ const TARGETS_BY_DEVICE_TYPE: Record<string, Record<string, number>> = {
 
 // Continuous full-turn joints. Official lerobot-calibrate excludes these from
 // the range sweep and hardcodes 0-4095 (lerobot so_follower.py/so_leader.py
-// calibrate()); the lelab backend mirrors that (FULL_TURN_MOTORS in
-// lelab/calibrate.py). They must NOT be swept — rolling past the encoder wrap
+// calibrate()); the makerlab backend mirrors that (FULL_TURN_MOTORS in
+// makerlab/calibrate.py). They must NOT be swept — rolling past the encoder wrap
 // used to trip the discontinuity check — so their checkmark is always green.
 const FULL_TURN_MOTORS = new Set(["wrist_roll"]);
 

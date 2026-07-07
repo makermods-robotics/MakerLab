@@ -19,7 +19,7 @@ import json
 
 import pytest
 
-from lelab import update
+from makerlab import update
 
 
 @pytest.fixture(autouse=True)

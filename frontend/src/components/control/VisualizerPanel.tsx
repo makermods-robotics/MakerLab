@@ -1,8 +1,7 @@
 import React from "react";
-import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 import UrdfViewer from "../UrdfViewer";
-import Logo from "@/components/Logo";
 
 interface VisualizerPanelProps {
   onGoBack: () => void;
@@ -14,7 +13,6 @@ interface VisualizerPanelProps {
 }
 
 const VisualizerPanel: React.FC<VisualizerPanelProps> = ({
-  onGoBack,
   className,
   bimanual = false,
   rightSlot,
@@ -22,49 +20,44 @@ const VisualizerPanel: React.FC<VisualizerPanelProps> = ({
   return (
     <div
       className={cn(
-        "w-full p-2 sm:p-4 space-y-4 lg:space-y-0 lg:space-x-4 flex flex-col lg:flex-row",
+        "flex w-full flex-col gap-4 p-3 sm:p-4 lg:flex-row",
         className
       )}
     >
-      <div className="bg-gray-900 rounded-lg p-4 flex-1 flex flex-col">
-        <div className="flex items-center gap-4 mb-4">
-          <Logo iconOnly={true} />
-          <div className="w-px h-6 bg-gray-700" />
-          <h2 className="text-xl font-medium text-gray-200">Teleoperation</h2>
-          <Button
-            onClick={onGoBack}
-            className="ml-auto bg-red-500 hover:bg-red-600 text-white flex-shrink-0"
-          >
-            Done
-          </Button>
+      <Card variant="flat" className="flex flex-1 flex-col overflow-hidden p-4">
+        <div className="mb-4 flex items-center justify-between gap-4">
+          <div>
+            <div className="eyebrow">[ Control ]</div>
+            <h2 className="mt-2 text-xl">Teleoperation</h2>
+          </div>
         </div>
         {/* No standing torque warning here: stops are graceful (the arm
             drives back to its session-start pose before torque releases) and
             the stop toast explains the behavior at the moment it happens.
             Only error stops release in place. */}
         {bimanual ? (
-          <div className="flex-1 flex flex-col sm:flex-row gap-2 min-h-[50vh] lg:min-h-0">
-            <div className="flex-1 flex flex-col">
-              <span className="text-xs text-gray-400 mb-1">Left arm</span>
-              <div className="flex-1 bg-black rounded border border-gray-800 min-h-[25vh]">
+          <div className="flex min-h-[50vh] flex-1 flex-col gap-3 sm:flex-row lg:min-h-0">
+            <div className="flex flex-1 flex-col">
+              <span className="mb-2 font-mono text-xs text-muted-foreground">Left arm</span>
+              <Card variant="flat" className="min-h-[25vh] flex-1 overflow-hidden">
                 <UrdfViewer jointsKey="joints" />
-              </div>
+              </Card>
             </div>
-            <div className="flex-1 flex flex-col">
-              <span className="text-xs text-gray-400 mb-1">Right arm</span>
-              <div className="flex-1 bg-black rounded border border-gray-800 min-h-[25vh]">
+            <div className="flex flex-1 flex-col">
+              <span className="mb-2 font-mono text-xs text-muted-foreground">Right arm</span>
+              <Card variant="flat" className="min-h-[25vh] flex-1 overflow-hidden">
                 <UrdfViewer jointsKey="joints_right" />
-              </div>
+              </Card>
             </div>
           </div>
         ) : (
-          <div className="flex-1 bg-black rounded border border-gray-800 min-h-[50vh] lg:min-h-0">
+          <Card variant="flat" className="min-h-[50vh] flex-1 overflow-hidden lg:min-h-0">
             <UrdfViewer />
-          </div>
+          </Card>
         )}
-      </div>
+      </Card>
       {rightSlot && (
-        <div className="lg:w-96 flex flex-col">{rightSlot}</div>
+        <div className="flex flex-col lg:w-96">{rightSlot}</div>
       )}
     </div>
   );

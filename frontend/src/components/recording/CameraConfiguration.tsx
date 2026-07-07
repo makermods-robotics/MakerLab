@@ -200,26 +200,24 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
 
   return (
     <div className="space-y-4">
-      <h3 className="text-lg font-semibold text-white border-b border-gray-700 pb-2">
-        Camera Configuration
+      <h3 className="text-lg font-semibold text-foreground border-b border-border pb-2">
+        Camera configuration
       </h3>
 
       {/* Add Camera Section */}
-      <div className="bg-gray-800/50 rounded-lg p-4 space-y-4">
-        <h4 className="text-md font-medium text-gray-300">Add Camera</h4>
+      <div className="rounded-lg border border-border bg-secondary p-4 space-y-4">
+        <h4 className="text-md font-medium text-muted-foreground">Add camera</h4>
 
         <div className="space-y-2">
           <div className="flex items-center justify-between">
-            <Label className="text-sm font-medium text-gray-300">
-              Available Cameras
-            </Label>
+            <Label>Available cameras</Label>
             <Button
               type="button"
               variant="ghost"
               size="icon"
               onClick={() => refreshCameras()}
               disabled={isLoadingCameras}
-              className="h-6 w-6 text-gray-400 hover:text-white"
+              className="h-6 w-6"
               title="Rescan for cameras (e.g. after plugging in a new USB camera)"
               aria-label="Rescan for cameras"
             >
@@ -233,14 +231,14 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
             onValueChange={setSelectedCameraIndex}
             disabled={isLoadingCameras}
           >
-            <SelectTrigger className="bg-gray-800 border-gray-700 text-white">
+            <SelectTrigger>
               <SelectValue
                 placeholder={
                   isLoadingCameras ? "Loading cameras..." : "Select camera"
                 }
               />
             </SelectTrigger>
-            <SelectContent className="bg-gray-800 border-gray-700">
+            <SelectContent>
               {availableCameras.map((camera) => {
                 const alreadyAdded = cameras.some(
                   (cam) =>
@@ -251,12 +249,11 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
                   <SelectItem
                     key={camera.index}
                     value={camera.index.toString()}
-                    className="text-white hover:bg-gray-700"
                     disabled={!camera.available || alreadyAdded}
                   >
                     <div className="flex flex-col">
                       <span className="font-medium">{camera.name}</span>
-                      <span className="text-xs text-gray-400">
+                      <span className="font-mono text-xs text-muted-foreground">
                         Index {camera.index}
                         {alreadyAdded && " · already added"}
                       </span>
@@ -272,7 +269,7 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
             confirmation happens alongside it. */}
         {selectedCamera && (
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div className="bg-gray-900 rounded-lg border border-gray-700 overflow-hidden">
+            <div className="rounded-lg border border-border bg-card overflow-hidden">
               <CameraStreamBox
                 deviceId={selectedCamera.deviceId}
                 cameraIndex={selectedCamera.index}
@@ -282,24 +279,20 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
 
             <div className="flex flex-col justify-center gap-4">
               <div className="space-y-2">
-                <Label className="text-sm font-medium text-gray-300">
-                  Camera Name
-                </Label>
+                <Label>Camera name</Label>
                 <Input
                   value={cameraName}
                   onChange={(e) => setCameraName(e.target.value)}
                   placeholder="e.g., workspace_cam"
-                  className="bg-gray-800 border-gray-700 text-white"
                 />
               </div>
 
               <Button
                 onClick={addCamera}
-                className="bg-blue-500 hover:bg-blue-600 text-white"
                 disabled={!selectedCameraIndex || !cameraName.trim()}
               >
                 <Plus className="w-4 h-4 mr-2" />
-                Add Camera
+                Add camera
               </Button>
             </div>
           </div>
@@ -309,8 +302,8 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
       {/* Configured Cameras */}
       {cameras.length > 0 && (
         <div className="space-y-4">
-          <h4 className="text-md font-medium text-gray-300">
-            Configured Cameras ({cameras.length})
+          <h4 className="text-md font-medium text-muted-foreground">
+            Configured cameras ({cameras.length})
           </h4>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-2 gap-4">
@@ -328,8 +321,8 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
       )}
 
       {cameras.length === 0 && (
-        <div className="text-center py-8 text-gray-500">
-          <Camera className="w-12 h-12 mx-auto mb-4 text-gray-600" />
+        <div className="text-center py-8 text-muted-foreground">
+          <Camera className="w-12 h-12 mx-auto mb-4 text-muted-foreground" />
           <p>No cameras configured. Add a camera to get started.</p>
         </div>
       )}
@@ -364,7 +357,7 @@ const CameraStreamBox: React.FC<CameraStreamBoxProps> = ({
   // BackendCameraStream owns its own failure/retry UI — no error latch here.
   const showMjpeg = !paused && !deviceId && cameraIndex !== undefined;
   return (
-    <div className="aspect-[4/3] bg-gray-800 relative">
+    <div className="aspect-[4/3] bg-secondary relative">
       {showVideo ? (
         <video
           ref={videoRef}
@@ -380,8 +373,8 @@ const CameraStreamBox: React.FC<CameraStreamBoxProps> = ({
         />
       ) : (
         <div className="w-full h-full flex flex-col items-center justify-center">
-          <VideoOff className="w-8 h-8 text-gray-500 mb-2" />
-          <span className="text-gray-500 text-sm">
+          <VideoOff className="w-8 h-8 text-muted-foreground mb-2" />
+          <span className="text-muted-foreground text-sm">
             {paused
               ? "Preview paused"
               : deviceId
@@ -408,7 +401,7 @@ const CameraPreview: React.FC<CameraPreviewProps> = ({
   onUpdate,
 }) => {
   return (
-    <div className="bg-gray-900 rounded-lg border border-gray-700 overflow-hidden">
+    <div className="bg-card rounded-lg border border-border overflow-hidden">
       <CameraStreamBox
         deviceId={camera.device_id}
         cameraIndex={camera.camera_index}
@@ -418,12 +411,12 @@ const CameraPreview: React.FC<CameraPreviewProps> = ({
       {/* Camera Info */}
       <div className="p-3 space-y-2">
         <div className="flex items-center justify-between">
-          <h5 className="font-medium text-white truncate">{camera.name}</h5>
+          <h5 className="font-medium text-foreground truncate">{camera.name}</h5>
           <Button
             onClick={onRemove}
             size="sm"
             variant="ghost"
-            className="text-red-400 hover:text-red-300 hover:bg-red-900/20 p-1"
+            className="text-destructive hover:text-destructive p-1"
             aria-label="Remove camera"
           >
             <Trash2 className="w-4 h-4" />
@@ -431,12 +424,12 @@ const CameraPreview: React.FC<CameraPreviewProps> = ({
         </div>
 
         <Collapsible>
-          <CollapsibleTrigger className="group flex items-center gap-1.5 text-xs font-medium text-gray-300 hover:text-white transition-colors">
+          <CollapsibleTrigger className="group flex items-center gap-1.5 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors">
             <ChevronRight className="w-3.5 h-3.5 transition-transform group-data-[state=open]:rotate-90" />
             Configuration
           </CollapsibleTrigger>
           <CollapsibleContent className="pt-2 space-y-2">
-            <div className="grid grid-cols-1 gap-2 text-xs text-gray-400">
+            <div className="grid grid-cols-1 gap-2 font-mono text-xs text-muted-foreground">
               <div className="flex items-center gap-2">
                 <span className="w-16">Resolution:</span>
                 <div className="flex items-center gap-1">
@@ -445,7 +438,7 @@ const CameraPreview: React.FC<CameraPreviewProps> = ({
                     onChange={(v) => {
                       if (v !== undefined) onUpdate({ width: v });
                     }}
-                    className="bg-gray-800 border-gray-700 text-white text-xs h-6 px-2 w-16"
+                    className="text-xs h-6 px-2 w-16"
                     min="320"
                     max="1920"
                   />
@@ -455,7 +448,7 @@ const CameraPreview: React.FC<CameraPreviewProps> = ({
                     onChange={(v) => {
                       if (v !== undefined) onUpdate({ height: v });
                     }}
-                    className="bg-gray-800 border-gray-700 text-white text-xs h-6 px-2 w-16"
+                    className="text-xs h-6 px-2 w-16"
                     min="240"
                     max="1080"
                   />
@@ -468,7 +461,7 @@ const CameraPreview: React.FC<CameraPreviewProps> = ({
                   onChange={(v) => {
                     if (v !== undefined) onUpdate({ fps: v });
                   }}
-                  className="bg-gray-800 border-gray-700 text-white text-xs h-6 px-2 w-16"
+                  className="text-xs h-6 px-2 w-16"
                   min="10"
                   max="60"
                 />
@@ -481,22 +474,15 @@ const CameraPreview: React.FC<CameraPreviewProps> = ({
                     onUpdate({ fourcc: v === FOURCC_AUTO ? undefined : v })
                   }
                 >
-                  <SelectTrigger className="bg-gray-800 border-gray-700 text-white text-xs h-6 px-2 w-28">
+                  <SelectTrigger className="text-xs h-6 px-2 w-28">
                     <SelectValue />
                   </SelectTrigger>
-                  <SelectContent className="bg-gray-800 border-gray-700">
-                    <SelectItem
-                      value={FOURCC_AUTO}
-                      className="text-white hover:bg-gray-700 text-xs"
-                    >
+                  <SelectContent>
+                    <SelectItem value={FOURCC_AUTO} className="text-xs">
                       Auto
                     </SelectItem>
                     {FOURCC_OPTIONS.map((code) => (
-                      <SelectItem
-                        key={code}
-                        value={code}
-                        className="text-white hover:bg-gray-700 text-xs"
-                      >
+                      <SelectItem key={code} value={code} className="text-xs">
                         {code}
                       </SelectItem>
                     ))}
@@ -511,33 +497,26 @@ const CameraPreview: React.FC<CameraPreviewProps> = ({
                     onUpdate({ backend: v === BACKEND_DEFAULT ? undefined : v })
                   }
                 >
-                  <SelectTrigger className="bg-gray-800 border-gray-700 text-white text-xs h-6 px-2 w-28">
+                  <SelectTrigger className="text-xs h-6 px-2 w-28">
                     <SelectValue />
                   </SelectTrigger>
-                  <SelectContent className="bg-gray-800 border-gray-700">
-                    <SelectItem
-                      value={BACKEND_DEFAULT}
-                      className="text-white hover:bg-gray-700 text-xs"
-                    >
+                  <SelectContent>
+                    <SelectItem value={BACKEND_DEFAULT} className="text-xs">
                       Default
                     </SelectItem>
                     {BACKEND_OPTIONS.map((name) => (
-                      <SelectItem
-                        key={name}
-                        value={name}
-                        className="text-white hover:bg-gray-700 text-xs"
-                      >
+                      <SelectItem key={name} value={name} className="text-xs">
                         {name}
                       </SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
               </div>
-              <p className="text-[10px] text-gray-500 leading-tight">
+              <p className="text-[10px] text-muted-foreground leading-tight">
                 Overriding the backend can reorder camera indices on macOS.
               </p>
             </div>
-            <div className="text-xs text-gray-500">
+            <div className="font-mono text-xs text-muted-foreground">
               Type: {camera.type} | Device:{" "}
               {camera.device_id?.substring(0, 10)}...
             </div>

@@ -352,28 +352,28 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
           onValueChange={setSelected}
           disabled={empty}
         >
-          <SelectTrigger className="h-8 flex-1 bg-slate-800 border-slate-700 text-white">
+          <SelectTrigger className="h-8 flex-1 font-mono">
             <SelectValue
               placeholder={empty ? "No saved configs" : "Select a config"}
             />
           </SelectTrigger>
-          <SelectContent className="bg-slate-800 border-slate-700 text-white">
+          <SelectContent>
             {configs.map((c) => {
               // The counterpart same-side slot's config stays selectable now:
               // picking it swaps the two slots' assignments (see assignToRobot).
               const usedByOtherArm =
                 !!excludeConfig && c.name === excludeConfig;
               return (
-                <SelectItem key={c.name} value={c.name} className="text-white">
+                <SelectItem key={c.name} value={c.name} className="font-mono">
                   <span className="flex items-center gap-2">
                     {c.name}
                     {c.name === assignedConfig && (
-                      <span className="text-[10px] uppercase tracking-wide text-green-400 border border-green-500/40 rounded px-1">
+                      <span className="text-[10px] uppercase tracking-wide text-ok border border-ok/40 rounded px-1">
                         in use
                       </span>
                     )}
                     {usedByOtherArm && (
-                      <span className="text-[10px] uppercase tracking-wide text-amber-400 border border-amber-500/40 rounded px-1">
+                      <span className="text-[10px] uppercase tracking-wide text-warn border border-warn/40 rounded px-1">
                         other arm
                       </span>
                     )}
@@ -387,7 +387,7 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
         <Button
           size="icon"
           variant="ghost"
-          className="h-8 w-8 text-slate-300 hover:text-white"
+          className="h-8 w-8 text-muted-foreground hover:text-foreground"
           disabled={!selected}
           onClick={() => selected && download(selected)}
           aria-label="Download selected config"
@@ -398,7 +398,7 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
         <Button
           size="icon"
           variant="ghost"
-          className="h-8 w-8 text-slate-300 hover:text-white"
+          className="h-8 w-8 text-muted-foreground hover:text-foreground"
           disabled={!selected}
           onClick={openRename}
           aria-label="Rename selected config"
@@ -409,7 +409,7 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
         <Button
           size="icon"
           variant="ghost"
-          className="h-8 w-8 text-slate-300 hover:text-red-400"
+          className="h-8 w-8 text-muted-foreground hover:text-destructive"
           disabled={!selected}
           onClick={() => selected && setPendingDelete(selected)}
           aria-label="Delete selected config"
@@ -429,8 +429,8 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
       {canAssign && (
         <Button
           size="sm"
-          variant="outline"
-          className="w-full h-7 border-blue-500/50 text-blue-700 hover:text-blue-800 dark:text-blue-300 hover:bg-blue-900/20 dark:hover:text-blue-200"
+          variant="secondary"
+          className="w-full h-7"
           disabled={assigning}
           onClick={assignToRobot}
         >
@@ -443,10 +443,10 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
       )}
 
       <Dialog open={renameOpen} onOpenChange={setRenameOpen}>
-        <DialogContent className="bg-slate-900 border-slate-800 text-white">
+        <DialogContent>
           <DialogHeader>
             <DialogTitle>Rename config</DialogTitle>
-            <DialogDescription className="text-slate-400">
+            <DialogDescription>
               Renames the calibration file. Robots using it are updated
               automatically. Won't overwrite an existing name.
             </DialogDescription>
@@ -465,19 +465,16 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
             }}
             autoFocus
             placeholder="New name"
-            className="bg-slate-800 border-slate-700 text-white"
+            className="font-mono"
           />
-          {renameError && <p className="text-sm text-red-400">{renameError}</p>}
+          {renameError && (
+            <p className="text-sm text-destructive">{renameError}</p>
+          )}
           <DialogFooter className="flex gap-2 justify-end">
-            <Button
-              variant="outline"
-              className="border-slate-600 text-slate-700 dark:text-slate-300"
-              onClick={() => setRenameOpen(false)}
-            >
+            <Button variant="secondary" onClick={() => setRenameOpen(false)}>
               Cancel
             </Button>
             <Button
-              className="bg-blue-600 hover:bg-blue-700 text-white"
               disabled={
                 renaming ||
                 !renameValue.trim() ||
@@ -495,27 +492,20 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
         open={pendingDelete !== null}
         onOpenChange={(o) => !o && setPendingDelete(null)}
       >
-        <DialogContent className="bg-slate-900 border-slate-800 text-white">
+        <DialogContent>
           <DialogHeader>
             <DialogTitle>Delete config "{pendingDelete}"?</DialogTitle>
-            <DialogDescription className="text-slate-400">
+            <DialogDescription>
               This permanently deletes the calibration file — you'd have to
               recalibrate the arm to recreate it. Any robot using it will need
               calibration before its next use.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter className="flex gap-2 justify-end">
-            <Button
-              variant="outline"
-              className="border-slate-600 text-slate-700 dark:text-slate-300"
-              onClick={() => setPendingDelete(null)}
-            >
+            <Button variant="secondary" onClick={() => setPendingDelete(null)}>
               Cancel
             </Button>
-            <Button
-              className="bg-red-600 hover:bg-red-700 text-white"
-              onClick={confirmDelete}
-            >
+            <Button variant="destructive" onClick={confirmDelete}>
               Delete
             </Button>
           </DialogFooter>

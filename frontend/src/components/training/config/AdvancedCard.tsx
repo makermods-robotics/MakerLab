@@ -16,9 +16,7 @@ import { ConfigComponentProps } from '../types';
 import { useApi } from '@/contexts/ApiContext';
 
 const SectionHeading: React.FC<{ children: React.ReactNode }> = ({ children }) => (
-  <h4 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
-    {children}
-  </h4>
+  <h4 className="eyebrow">{children}</h4>
 );
 
 interface OptimizerDefaults {
@@ -87,7 +85,7 @@ const AdvancedCard: React.FC<ConfigComponentProps> = ({ config, updateConfig }) 
     : null;
 
   return (
-    <Card className="bg-slate-800/50 border-slate-700 rounded-xl">
+    <Card>
       <CardHeader
         role="button"
         tabIndex={0}
@@ -99,14 +97,14 @@ const AdvancedCard: React.FC<ConfigComponentProps> = ({ config, updateConfig }) 
             setExpanded((v) => !v);
           }
         }}
-        className="cursor-pointer select-none flex flex-row items-center justify-between"
+        className="flex cursor-pointer select-none flex-row items-center justify-between"
       >
-        <span className="text-white font-semibold">Advanced</span>
-        <span className="flex items-center gap-1 text-slate-400 text-sm">
+        <span className="font-display font-semibold text-foreground">Advanced</span>
+        <span className="flex items-center gap-1 text-sm text-muted-foreground">
           {expanded ? (
-            <ChevronDown className="w-4 h-4" />
+            <ChevronDown className="h-4 w-4" />
           ) : (
-            <ChevronRight className="w-4 h-4" />
+            <ChevronRight className="h-4 w-4" />
           )}
           {expanded ? 'Hide' : 'Show'}
         </span>
@@ -122,64 +120,57 @@ const AdvancedCard: React.FC<ConfigComponentProps> = ({ config, updateConfig }) 
                 id="policy_use_amp"
                 checked={config.policy_use_amp}
                 onCheckedChange={(checked) => updateConfig('policy_use_amp', checked)}
-                className="data-[state=checked]:bg-green-500"
               />
-              <Label htmlFor="policy_use_amp" className="text-slate-300">
-                Use Automatic Mixed Precision
+              <Label htmlFor="policy_use_amp">
+                Use automatic mixed precision
               </Label>
             </div>
           </section>
 
-          <Separator className="bg-slate-700" />
+          <Separator className="bg-border" />
 
           {/* Training */}
           <section className="space-y-4">
             <SectionHeading>Training</SectionHeading>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
               <div>
-                <Label htmlFor="seed" className="text-slate-300">
-                  Random Seed
-                </Label>
+                <Label htmlFor="seed">Random seed</Label>
                 <NumberInput
                   id="seed"
                   value={config.seed}
                   onChange={(v) => updateConfig('seed', v)}
-                  className="bg-slate-900 border-slate-600 text-white rounded-lg"
+                  className="mt-1"
                 />
               </div>
               <div>
-                <Label htmlFor="num_workers" className="text-slate-300">
-                  Number of Workers
-                </Label>
+                <Label htmlFor="num_workers">Number of workers</Label>
                 <NumberInput
                   id="num_workers"
                   value={config.num_workers}
                   onChange={(v) => {
                     if (v !== undefined) updateConfig('num_workers', v);
                   }}
-                  className="bg-slate-900 border-slate-600 text-white rounded-lg"
+                  className="mt-1"
                 />
               </div>
             </div>
           </section>
 
-          <Separator className="bg-slate-700" />
+          <Separator className="bg-border" />
 
           {/* Optimizer */}
           <section className="space-y-4">
             <SectionHeading>Optimizer</SectionHeading>
             <div>
-              <Label htmlFor="optimizer_type" className="text-slate-300">
-                Optimizer
-              </Label>
+              <Label htmlFor="optimizer_type">Optimizer</Label>
               <Select
                 value={config.optimizer_type || 'adam'}
                 onValueChange={(value) => updateConfig('optimizer_type', value)}
               >
-                <SelectTrigger id="optimizer_type" className="bg-slate-900 border-slate-600 text-white rounded-lg">
+                <SelectTrigger id="optimizer_type" className="mt-1">
                   <SelectValue />
                 </SelectTrigger>
-                <SelectContent className="bg-slate-800 border-slate-600 text-white">
+                <SelectContent>
                   <SelectItem value="adam">Adam</SelectItem>
                   <SelectItem value="adamw">AdamW</SelectItem>
                   <SelectItem value="sgd">SGD</SelectItem>
@@ -187,16 +178,14 @@ const AdvancedCard: React.FC<ConfigComponentProps> = ({ config, updateConfig }) 
                 </SelectContent>
               </Select>
               {defaultOptimizerLabel && (
-                <p className="text-xs text-slate-500 mt-1">
+                <p className="mt-1 text-xs text-muted-foreground">
                   Policy default: {defaultOptimizerLabel}
                 </p>
               )}
             </div>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
               <div>
-                <Label htmlFor="optimizer_lr" className="text-slate-300">
-                  Learning Rate
-                </Label>
+                <Label htmlFor="optimizer_lr">Learning rate</Label>
                 <NumberInput
                   id="optimizer_lr"
                   integer={false}
@@ -204,13 +193,11 @@ const AdvancedCard: React.FC<ConfigComponentProps> = ({ config, updateConfig }) 
                   value={config.optimizer_lr}
                   onChange={(v) => updateConfig('optimizer_lr', v)}
                   placeholder={lrPlaceholder}
-                  className="bg-slate-900 border-slate-600 text-white rounded-lg"
+                  className="mt-1"
                 />
               </div>
               <div>
-                <Label htmlFor="optimizer_weight_decay" className="text-slate-300">
-                  Weight Decay
-                </Label>
+                <Label htmlFor="optimizer_weight_decay">Weight decay</Label>
                 <NumberInput
                   id="optimizer_weight_decay"
                   integer={false}
@@ -218,13 +205,11 @@ const AdvancedCard: React.FC<ConfigComponentProps> = ({ config, updateConfig }) 
                   value={config.optimizer_weight_decay}
                   onChange={(v) => updateConfig('optimizer_weight_decay', v)}
                   placeholder={wdPlaceholder}
-                  className="bg-slate-900 border-slate-600 text-white rounded-lg"
+                  className="mt-1"
                 />
               </div>
               <div>
-                <Label htmlFor="optimizer_grad_clip_norm" className="text-slate-300">
-                  Gradient Clipping
-                </Label>
+                <Label htmlFor="optimizer_grad_clip_norm">Gradient clipping</Label>
                 <NumberInput
                   id="optimizer_grad_clip_norm"
                   integer={false}
@@ -232,56 +217,52 @@ const AdvancedCard: React.FC<ConfigComponentProps> = ({ config, updateConfig }) 
                   value={config.optimizer_grad_clip_norm}
                   onChange={(v) => updateConfig('optimizer_grad_clip_norm', v)}
                   placeholder={gradPlaceholder}
-                  className="bg-slate-900 border-slate-600 text-white rounded-lg"
+                  className="mt-1"
                 />
               </div>
             </div>
           </section>
 
-          <Separator className="bg-slate-700" />
+          <Separator className="bg-border" />
 
           {/* Logging & Checkpointing */}
           <section className="space-y-4">
-            <SectionHeading>Logging & Checkpointing</SectionHeading>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <SectionHeading>Logging &amp; checkpointing</SectionHeading>
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
               <div>
-                <Label htmlFor="log_freq" className="text-slate-300">
-                  Log Frequency
-                </Label>
+                <Label htmlFor="log_freq">Log frequency</Label>
                 <NumberInput
                   id="log_freq"
                   value={config.log_freq}
                   onChange={(v) => {
                     if (v !== undefined) updateConfig('log_freq', v);
                   }}
-                  className="bg-slate-900 border-slate-600 text-white rounded-lg"
+                  className="mt-1"
                 />
                 {config.steps > 0 && config.log_freq > config.steps && (
-                  <p className="text-xs text-amber-400 mt-1">
-                    ⚠ Logging every {config.log_freq} steps exceeds the{' '}
+                  <p className="mt-1 text-xs text-warn">
+                    Logging every {config.log_freq} steps exceeds the{' '}
                     {config.steps}-step run — no metrics will be logged.
                   </p>
                 )}
-                <p className="text-xs text-slate-500 mt-1">
+                <p className="mt-1 text-xs text-muted-foreground">
                   Steps between logged loss/lr points. Lower = higher-resolution
                   charts (each point is a window average), but more log volume.
                 </p>
               </div>
               <div>
-                <Label htmlFor="save_freq" className="text-slate-300">
-                  Save Frequency
-                </Label>
+                <Label htmlFor="save_freq">Save frequency</Label>
                 <NumberInput
                   id="save_freq"
                   value={config.save_freq}
                   onChange={(v) => {
                     if (v !== undefined) updateConfig('save_freq', v);
                   }}
-                  className="bg-slate-900 border-slate-600 text-white rounded-lg"
+                  className="mt-1"
                 />
                 {config.steps > 0 && config.save_freq > config.steps && (
-                  <p className="text-xs text-amber-400 mt-1">
-                    ⚠ Saving every {config.save_freq} steps exceeds the{' '}
+                  <p className="mt-1 text-xs text-warn">
+                    Saving every {config.save_freq} steps exceeds the{' '}
                     {config.steps}-step run — no checkpoint will be saved.
                   </p>
                 )}
@@ -292,26 +273,20 @@ const AdvancedCard: React.FC<ConfigComponentProps> = ({ config, updateConfig }) 
                 id="save_checkpoint"
                 checked={config.save_checkpoint}
                 onCheckedChange={(checked) => updateConfig('save_checkpoint', checked)}
-                className="data-[state=checked]:bg-green-500"
               />
-              <Label htmlFor="save_checkpoint" className="text-slate-300">
-                Save Checkpoints
-              </Label>
+              <Label htmlFor="save_checkpoint">Save checkpoints</Label>
             </div>
             <div className="flex items-center space-x-3">
               <Switch
                 id="resume"
                 checked={config.resume}
                 onCheckedChange={(checked) => updateConfig('resume', checked)}
-                className="data-[state=checked]:bg-green-500"
               />
-              <Label htmlFor="resume" className="text-slate-300">
-                Resume from Checkpoint
-              </Label>
+              <Label htmlFor="resume">Resume from checkpoint</Label>
             </div>
           </section>
 
-          <Separator className="bg-slate-700" />
+          <Separator className="bg-border" />
 
           {/* Misc */}
           <section className="space-y-4">
@@ -323,10 +298,9 @@ const AdvancedCard: React.FC<ConfigComponentProps> = ({ config, updateConfig }) 
                 onCheckedChange={(checked) =>
                   updateConfig('use_policy_training_preset', checked)
                 }
-                className="data-[state=checked]:bg-green-500"
               />
-              <Label htmlFor="use_policy_training_preset" className="text-slate-300">
-                Use Policy Training Preset
+              <Label htmlFor="use_policy_training_preset">
+                Use policy training preset
               </Label>
             </div>
           </section>

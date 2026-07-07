@@ -33,15 +33,15 @@ const links = [
 
 const Footer: React.FC = () => {
   return (
-    <footer className="fixed inset-x-0 bottom-0 z-30 border-t border-gray-800 bg-black/95">
-      <div className="mx-auto flex max-w-7xl flex-col items-center justify-between gap-3 px-4 py-4 text-sm text-gray-400 sm:flex-row">
+    <footer className="border-t border-border">
+      <div className="mx-auto flex max-w-[1440px] flex-col items-center justify-between gap-3 px-4 py-4 font-mono text-xs text-muted-foreground sm:flex-row">
         <span>
           Powered by{" "}
           <a
             href="https://github.com/huggingface/lerobot"
             target="_blank"
             rel="noopener noreferrer"
-            className="font-medium text-gray-200 hover:text-white"
+            className="font-medium text-foreground hover:text-foreground/80"
           >
             LeRobot
           </a>
@@ -53,7 +53,7 @@ const Footer: React.FC = () => {
               href={href}
               target="_blank"
               rel="noopener noreferrer"
-              className="flex items-center gap-1.5 text-gray-400 hover:text-white"
+              className="flex items-center gap-1.5 text-muted-foreground hover:text-foreground"
             >
               <Icon className="h-4 w-4" />
               <span>{label}</span>

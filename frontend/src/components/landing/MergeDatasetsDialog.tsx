@@ -131,12 +131,12 @@ const MergeDatasetsDialog: React.FC<Props> = ({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="bg-slate-800 border-slate-700 text-white max-w-lg">
+      <DialogContent className="max-w-lg">
         <DialogHeader>
-          <DialogTitle className="flex items-center gap-2 text-white">
+          <DialogTitle className="flex items-center gap-2">
             <GitMerge className="w-5 h-5" /> Merge datasets
           </DialogTitle>
-          <DialogDescription className="text-slate-400">
+          <DialogDescription>
             Combine episodes from two or more datasets into a new one. Sources
             must share the same robot, fps, and cameras.
           </DialogDescription>
@@ -145,19 +145,17 @@ const MergeDatasetsDialog: React.FC<Props> = ({
         {state === "idle" ? (
           <div className="space-y-4">
             <div>
-              <Label className="text-slate-300">
-                Sources ({selected.size} selected)
-              </Label>
-              <div className="mt-1 max-h-56 overflow-auto rounded-md border border-slate-700 divide-y divide-slate-700/60">
+              <Label>Sources ({selected.size} selected)</Label>
+              <div className="mt-1 max-h-56 overflow-auto rounded-md border border-border divide-y divide-border">
                 {datasets.length === 0 ? (
-                  <p className="p-3 text-sm text-slate-500">
+                  <p className="p-3 text-sm text-muted-foreground">
                     No datasets found.
                   </p>
                 ) : (
                   datasets.map((d) => (
                     <label
                       key={d.repo_id}
-                      className="flex items-center gap-2 p-2 hover:bg-slate-700/40 cursor-pointer text-sm"
+                      className="flex items-center gap-2 p-2 hover:bg-accent cursor-pointer text-sm"
                     >
                       <Checkbox
                         checked={selected.has(d.repo_id)}
@@ -170,29 +168,27 @@ const MergeDatasetsDialog: React.FC<Props> = ({
               </div>
             </div>
             <div>
-              <Label htmlFor="merge-output" className="text-slate-300">
-                Output dataset name
-              </Label>
+              <Label htmlFor="merge-output">Output dataset name</Label>
               <Input
                 id="merge-output"
                 value={output}
                 onChange={(e) => setOutput(e.target.value)}
                 placeholder="user/merged_dataset"
                 aria-invalid={outputError !== null}
-                className="mt-1 bg-slate-900 border-slate-600 text-white aria-[invalid=true]:border-red-500/70"
+                className="mt-1 aria-[invalid=true]:border-destructive"
               />
               {outputError && (
-                <p className="mt-1 text-xs text-red-400">{outputError}</p>
+                <p className="mt-1 text-xs text-destructive">{outputError}</p>
               )}
             </div>
             {startError ? (
-              <p className="text-sm text-red-300">{startError}</p>
+              <p className="text-sm text-destructive">{startError}</p>
             ) : null}
             <div className="flex justify-end">
               <Button
                 onClick={handleMerge}
                 disabled={!canMerge || starting}
-                className="bg-green-500 hover:bg-green-600 text-white"
+                variant="brand"
               >
                 {starting ? (
                   <>
@@ -209,45 +205,38 @@ const MergeDatasetsDialog: React.FC<Props> = ({
           </div>
         ) : (
           <div className="space-y-3">
-            <div className="flex items-center gap-2 text-sm text-slate-200">
+            <div className="flex items-center gap-2 text-sm text-foreground">
               {state === "running" ? (
                 <>
-                  <Loader2 className="w-4 h-4 animate-spin text-sky-400" />
+                  <Loader2 className="w-4 h-4 animate-spin text-info" />
                   Merging into{" "}
-                  <code className="text-sky-300">{status?.output_repo_id}</code>
-                  …
+                  <code className="text-info">{status?.output_repo_id}</code>…
                 </>
               ) : state === "done" ? (
                 <>
-                  <CheckCircle2 className="w-4 h-4 text-green-400" />
+                  <CheckCircle2 className="w-4 h-4 text-ok" />
                   Created{" "}
-                  <code className="text-green-300">
-                    {status?.output_repo_id}
-                  </code>
+                  <code className="text-ok">{status?.output_repo_id}</code>
                 </>
               ) : (
                 <>
-                  <XCircle className="w-4 h-4 text-red-400" /> Merge failed
+                  <XCircle className="w-4 h-4 text-destructive" /> Merge failed
                 </>
               )}
             </div>
             <div
               ref={logBoxRef}
-              className="max-h-56 overflow-auto rounded-md border border-slate-700 bg-slate-900 p-2 font-mono text-xs text-slate-300 whitespace-pre-wrap"
+              className="max-h-56 overflow-auto rounded-md border border-border bg-secondary p-2 font-mono text-xs text-foreground whitespace-pre-wrap"
             >
               {(status?.logs ?? []).map((l, i) => (
                 <div key={i}>{l.message}</div>
               ))}
             </div>
             {status?.error ? (
-              <p className="text-sm text-red-300">{status.error}</p>
+              <p className="text-sm text-destructive">{status.error}</p>
             ) : null}
             <div className="flex justify-end">
-              <Button
-                variant="outline"
-                className="text-slate-900 dark:text-slate-100"
-                onClick={() => onOpenChange(false)}
-              >
+              <Button variant="outline" onClick={() => onOpenChange(false)}>
                 {state === "done" ? "Done" : "Close"}
               </Button>
             </div>

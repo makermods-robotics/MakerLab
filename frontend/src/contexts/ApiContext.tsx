@@ -8,7 +8,7 @@ interface ApiContextType {
 
 const ApiContext = createContext<ApiContextType | undefined>(undefined);
 
-const STORAGE_KEY = "lelab.apiBaseUrl";
+const STORAGE_KEY = "makerlab.apiBaseUrl";
 const DEFAULT_LOCALHOST = "http://localhost:8000";
 
 // In production the backend serves the UI, so the page origin is the API. In

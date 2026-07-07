@@ -2,6 +2,7 @@ import React from "react";
 import { VideoOff } from "lucide-react";
 import { useCameraStream } from "@/hooks/useCameraStream";
 import BackendCameraStream from "@/components/BackendCameraStream";
+import { Card } from "@/components/ui/card";
 
 interface CameraFeedProps {
   /** Browser deviceId to stream. Empty string renders the "no camera" state. */
@@ -27,36 +28,36 @@ const CameraFeed: React.FC<CameraFeedProps> = ({
   const showMjpeg = !showVideo && !deviceId && cameraIndex !== undefined;
 
   return (
-    <div className="bg-gray-900 rounded-lg border border-gray-700 overflow-hidden">
-      <div className="aspect-[4/3] bg-gray-800 relative">
+    <Card variant="flat" className="overflow-hidden">
+      <div className="relative aspect-[4/3] bg-muted">
         {showVideo ? (
           <video
             ref={videoRef}
             autoPlay
             muted
             playsInline
-            className="w-full h-full object-cover"
+            className="h-full w-full object-cover"
           />
         ) : showMjpeg ? (
           <BackendCameraStream
             cameraIndex={cameraIndex}
-            className="w-full h-full object-cover"
+            className="h-full w-full object-cover"
           />
         ) : (
-          <div className="w-full h-full flex flex-col items-center justify-center">
-            <VideoOff className="w-8 h-8 text-gray-500 mb-2" />
-            <span className="text-gray-500 text-sm">
+          <div className="flex h-full w-full flex-col items-center justify-center">
+            <VideoOff className="mb-2 h-8 w-8 text-muted-foreground" />
+            <span className="text-sm text-muted-foreground">
               {deviceId ? "Preview failed" : "No camera selected"}
             </span>
           </div>
         )}
       </div>
       {label && (
-        <div className="p-2 text-sm text-gray-300 truncate border-t border-gray-800">
+        <div className="truncate border-t border-border p-2 font-mono text-sm text-muted-foreground">
           {label}
         </div>
       )}
-    </div>
+    </Card>
   );
 };
 

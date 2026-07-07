@@ -26,7 +26,7 @@ export interface RobotRecord {
   is_clean: boolean;
 }
 
-const SELECTED_KEY = "lelab.selectedRobot";
+const SELECTED_KEY = "makerlab.selectedRobot";
 
 const readSelected = (): string | null => {
   try {

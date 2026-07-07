@@ -450,15 +450,15 @@ const JobsSection: React.FC = () => {
           filtering the models column too, so behavior is unchanged. */}
       <div className="space-y-6">
         <div className="flex items-center justify-between gap-3">
-          <h2 className="text-lg font-semibold text-white">Jobs</h2>
+          <h2 className="text-lg font-semibold text-foreground">Jobs</h2>
           <div className="flex items-center gap-2">
             <div className="relative">
-              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400 pointer-events-none" />
+              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground pointer-events-none" />
               <Input
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 placeholder="Search jobs"
-                className="h-8 w-48 sm:w-60 pl-8 bg-slate-800/50 border-slate-700 text-sm text-white placeholder:text-slate-500"
+                className="h-8 w-48 sm:w-60 pl-8 text-sm"
                 aria-label="Search jobs"
               />
             </div>
@@ -466,7 +466,7 @@ const JobsSection: React.FC = () => {
               variant="ghost"
               size="icon"
               onClick={refresh}
-              className="h-7 w-7 text-slate-400 hover:text-white"
+              className="h-7 w-7"
               aria-label="Refresh jobs"
             >
               <RefreshCw className="w-4 h-4" />
@@ -475,19 +475,19 @@ const JobsSection: React.FC = () => {
         </div>
 
         {error ? (
-          <p className="text-sm text-red-300">
+          <p className="text-sm text-destructive">
             Couldn't load local jobs: {error}
           </p>
         ) : null}
 
         <Collapsible defaultOpen>
-          <CollapsibleTrigger className="group flex items-center gap-1.5 text-sm font-semibold uppercase tracking-wide text-slate-400 hover:text-white transition-colors">
+          <CollapsibleTrigger className="group flex items-center gap-1.5 text-sm font-semibold uppercase tracking-wide text-muted-foreground hover:text-foreground transition-colors">
             <ChevronRight className="w-3.5 h-3.5 transition-transform group-data-[state=open]:rotate-90" />
             Local jobs ({localActive.length})
           </CollapsibleTrigger>
           <CollapsibleContent className="pt-3">
             {localActive.length === 0 ? (
-              <p className="text-sm text-slate-500">
+              <p className="text-sm text-muted-foreground">
                 {query
                   ? "No local jobs match your search."
                   : "No active local jobs. Start one from the Training page."}
@@ -510,28 +510,28 @@ const JobsSection: React.FC = () => {
           </CollapsibleContent>
         </Collapsible>
 
-        <div className="border-t border-slate-700" />
+        <div className="border-t border-border" />
 
         <Collapsible defaultOpen>
-          <CollapsibleTrigger className="group flex items-center gap-1.5 text-sm font-semibold uppercase tracking-wide text-slate-400 hover:text-white transition-colors">
+          <CollapsibleTrigger className="group flex items-center gap-1.5 text-sm font-semibold uppercase tracking-wide text-muted-foreground hover:text-foreground transition-colors">
             <ChevronRight className="w-3.5 h-3.5 transition-transform group-data-[state=open]:rotate-90" />
             Online jobs ({trackedCloudActive.length + untrackedHubActive.length})
           </CollapsibleTrigger>
           <CollapsibleContent className="pt-3">
             {hubError ? (
-              <p className="text-sm text-red-300">
+              <p className="text-sm text-destructive">
                 Couldn't load cloud jobs: {hubError}
               </p>
             ) : !hubAuthenticated && trackedCloudJobs.length === 0 ? (
-              <p className="text-sm text-slate-500">
+              <p className="text-sm text-muted-foreground">
                 Sign in with Hugging Face to see your cloud jobs.
               </p>
             ) : (
               <div className="space-y-3">
                 {hubAuthenticated && !hubJobsPermission ? (
-                  <p className="text-sm text-amber-300/80">
+                  <p className="text-sm text-warn">
                     Your Hugging Face token is missing the{" "}
-                    <code className="text-amber-200">job.read</code> permission,
+                    <code className="font-mono">job.read</code> permission,
                     so cloud jobs can't be listed. Uploaded models still appear
                     under Models.
                   </p>
@@ -539,7 +539,7 @@ const JobsSection: React.FC = () => {
                 {trackedCloudActive.length === 0 &&
                 untrackedHubActive.length === 0 ? (
                   hubAuthenticated && !hubJobsPermission ? null : (
-                    <p className="text-sm text-slate-500">
+                    <p className="text-sm text-muted-foreground">
                       {query
                         ? "No online jobs match your search."
                         : "No active cloud jobs."}
@@ -573,7 +573,7 @@ const JobsSection: React.FC = () => {
 
         {untrackedCount > 0 ? (
           <Collapsible>
-            <CollapsibleTrigger className="group flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-slate-400 hover:text-white transition-colors">
+            <CollapsibleTrigger className="group flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground hover:text-foreground transition-colors">
               <ChevronRight className="w-3.5 h-3.5 transition-transform group-data-[state=open]:rotate-90" />
               Untracked ({untrackedCount})
             </CollapsibleTrigger>
@@ -619,7 +619,7 @@ const JobsSection: React.FC = () => {
           is always visible. */}
       <div className="space-y-6">
         <div className="flex items-center justify-between gap-3">
-          <h2 className="text-lg font-semibold text-white">
+          <h2 className="text-lg font-semibold text-foreground">
             Models
             {importedJobs.length + untrackedHubModels.length > 0
               ? ` (${importedJobs.length + untrackedHubModels.length})`
@@ -629,14 +629,14 @@ const JobsSection: React.FC = () => {
             variant="outline"
             size="sm"
             onClick={() => setImportModalOpen(true)}
-            className="h-8 border-slate-700 bg-slate-800/50 text-slate-200 hover:text-white"
+            className="h-8"
           >
             <Download className="w-3.5 h-3.5 mr-1.5" />
             Import model
           </Button>
         </div>
         {importedJobs.length === 0 && untrackedHubModels.length === 0 ? (
-          <p className="text-sm text-slate-500">
+          <p className="text-sm text-muted-foreground">
             {query
               ? "No models match your search."
               : "No models yet. Use Import model to add one from the Hub or a local folder."}

@@ -2,6 +2,9 @@ import React, { useCallback, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import VisualizerPanel from "@/components/control/VisualizerPanel";
 import TeleopCameraPanel from "@/components/control/TeleopCameraPanel";
+import { AppShell } from "@/components/shell/AppShell";
+import { Button } from "@/components/ui/button";
+import { StatusPill } from "@/components/ui/status-pill";
 import { useToast } from "@/hooks/use-toast";
 import { useApi } from "@/contexts/ApiContext";
 import { useRobots } from "@/hooks/useRobots";
@@ -86,7 +89,7 @@ const TeleoperationPage = () => {
   useEffect(() => {
     const handlePageHide = () => {
       try {
-        sessionStorage.setItem("lelab:teleop-stopped", "1");
+        sessionStorage.setItem("makerlab:teleop-stopped", "1");
       } catch {
         /* sessionStorage may be unavailable; the stop below still runs */
       }
@@ -109,8 +112,17 @@ const TeleoperationPage = () => {
   };
 
   return (
-    <div className="min-h-screen bg-black flex items-center justify-center p-2 sm:p-4">
-      <div className="w-full h-[95vh] flex">
+    <AppShell
+      fullBleed
+      logoLink={false}
+      status={<StatusPill phase="running" label="Teleoperating" />}
+      actions={
+        <Button variant="secondary" onClick={handleGoBack}>
+          Done
+        </Button>
+      }
+    >
+      <div className="flex h-[calc(100vh-52px)] w-full">
         <VisualizerPanel
           onGoBack={handleGoBack}
           className="lg:w-full"
@@ -118,7 +130,7 @@ const TeleoperationPage = () => {
           rightSlot={<TeleopCameraPanel />}
         />
       </div>
-    </div>
+    </AppShell>
   );
 };
 

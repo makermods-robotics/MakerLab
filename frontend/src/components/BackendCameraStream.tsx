@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { VideoOff, RefreshCw } from "lucide-react";
 import { useApi } from "@/contexts/ApiContext";
+import { cn } from "@/lib/utils";
 
 interface BackendCameraStreamProps {
   /** cv2 camera index on the server (CameraConfig.camera_index). */
@@ -115,15 +116,18 @@ const BackendCameraStream: React.FC<BackendCameraStreamProps> = ({
       <button
         type="button"
         onClick={retryNow}
-        className={`${className ?? ""} flex flex-col items-center justify-center gap-1 bg-gray-800 text-gray-500 cursor-pointer`}
+        className={cn(
+          className,
+          "flex cursor-pointer flex-col items-center justify-center gap-1 bg-muted text-muted-foreground"
+        )}
         title="Click to retry now"
       >
-        <VideoOff className="w-5 h-5" />
-        <span className="text-[10px] leading-tight text-center px-1">
+        <VideoOff className="h-5 w-5" />
+        <span className="px-1 text-center text-[10px] leading-tight">
           {reason ?? "Preview failed"}
         </span>
-        <span className="flex items-center gap-1 text-[10px] text-gray-600">
-          <RefreshCw className="w-3 h-3" /> retrying…
+        <span className="flex items-center gap-1 text-[10px] text-muted-foreground/70">
+          <RefreshCw className="h-3 w-3" /> retrying...
         </span>
       </button>
     );

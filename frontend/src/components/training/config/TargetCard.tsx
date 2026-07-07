@@ -8,6 +8,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { cn } from "@/lib/utils";
 import { ConfigComponentProps } from "../types";
 import { RunnerFlavor } from "@/lib/jobsApi";
 
@@ -47,24 +48,25 @@ const TargetCard: React.FC<TargetCardProps> = ({
   };
 
   return (
-    <Card className="bg-slate-800/50 border-slate-700 rounded-xl">
+    <Card>
       <CardHeader>
-        <CardTitle className="text-white">Compute target</CardTitle>
+        <CardTitle>Compute target</CardTitle>
       </CardHeader>
       <CardContent className="space-y-3">
         <div>
-          <Label className="text-slate-300">Run training on</Label>
-          <div className="flex rounded-md border border-slate-600 overflow-hidden text-sm mt-1 w-fit">
+          <Label>Run training on</Label>
+          <div className="mt-1 flex w-fit overflow-hidden rounded-sm border border-input text-sm">
             {(["local", "hf_cloud"] as const).map((r) => (
               <button
                 key={r}
                 type="button"
                 onClick={() => setRunner(r)}
-                className={`px-4 py-1.5 transition-colors ${
+                className={cn(
+                  "px-4 py-1.5 transition-colors",
                   target.runner === r
-                    ? "bg-blue-600 text-white"
-                    : "bg-slate-900 text-slate-400 hover:text-white"
-                }`}
+                    ? "bg-primary text-primary-foreground"
+                    : "bg-secondary text-muted-foreground hover:text-foreground",
+                )}
               >
                 {r === "local" ? "Local — your machine" : "Hugging Face Cloud"}
               </button>
@@ -74,45 +76,40 @@ const TargetCard: React.FC<TargetCardProps> = ({
 
         {target.runner === "local" ? (
           <div>
-            <Label htmlFor="policy_device" className="text-slate-300">
-              Device
-            </Label>
+            <Label htmlFor="policy_device">Device</Label>
             <Select
               value={config.policy_device === "cpu" ? "cpu" : "auto"}
               onValueChange={(value) => updateConfig("policy_device", value)}
             >
-              <SelectTrigger
-                id="policy_device"
-                className="bg-slate-900 border-slate-600 text-white rounded-lg mt-1"
-              >
+              <SelectTrigger id="policy_device" className="mt-1">
                 <SelectValue />
               </SelectTrigger>
-              <SelectContent className="bg-slate-800 border-slate-600 text-white">
+              <SelectContent>
                 <SelectItem value="auto">
                   Automatic (use GPU if available)
                 </SelectItem>
                 <SelectItem value="cpu">CPU</SelectItem>
               </SelectContent>
             </Select>
-            <p className="text-xs text-slate-500 mt-1">
+            <p className="mt-1 text-xs text-muted-foreground">
               lerobot auto-detects your GPU (CUDA/MPS); only CPU is forced.
             </p>
           </div>
         ) : (
           <div>
-            <Label className="text-slate-300">Hardware</Label>
+            <Label>Hardware</Label>
             <Select
               value={target.flavor ?? ""}
               onValueChange={(flavor) =>
                 updateConfig("target", { runner: "hf_cloud", flavor })
               }
             >
-              <SelectTrigger className="bg-slate-900 border-slate-600 text-white rounded-lg mt-1">
+              <SelectTrigger className="mt-1">
                 <SelectValue
                   placeholder={loading ? "Loading…" : "Select hardware"}
                 />
               </SelectTrigger>
-              <SelectContent className="bg-slate-800 border-slate-600 text-white">
+              <SelectContent>
                 {flavors.map((f) => (
                   <SelectItem
                     key={f.name}
@@ -121,7 +118,7 @@ const TargetCard: React.FC<TargetCardProps> = ({
                   >
                     {formatFlavorLine(f)}
                     {!authenticated && (
-                      <span className="text-amber-300 ml-2 text-xs">
+                      <span className="ml-2 text-xs text-warn">
                         log in to HF
                       </span>
                     )}
@@ -129,7 +126,7 @@ const TargetCard: React.FC<TargetCardProps> = ({
                 ))}
               </SelectContent>
             </Select>
-            <p className="text-xs text-slate-500 mt-1">
+            <p className="mt-1 text-xs text-muted-foreground">
               Cost shown is per running hour. Final policy uploads to your HF
               account when training completes.
             </p>

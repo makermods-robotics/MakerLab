@@ -11,15 +11,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for lelab.identify — touch-to-identify port finder (hardware mocked)."""
+"""Tests for makerlab.identify — touch-to-identify port finder (hardware mocked)."""
 
 from __future__ import annotations
 
 import pytest
 from fastapi.testclient import TestClient
 
-from lelab import identify
-from lelab.identify import swing_detected
+from makerlab import identify
+from makerlab.identify import swing_detected
 
 # ---------------------------------------------------------------------------
 # swing_detected: the pure both-directions decision
@@ -170,7 +170,7 @@ async def test_identify_defaults_to_detected_ports_and_dedupes(
 
 def test_identify_endpoint_success(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        "lelab.identify._identify_arm_sync",
+        "makerlab.identify._identify_arm_sync",
         lambda ports: {
             "success": True,
             "port": ports[-1],
@@ -189,9 +189,9 @@ def test_identify_endpoint_success(client: TestClient, monkeypatch: pytest.Monke
 def test_identify_endpoint_defaults_to_all_detected_ports(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("lelab.identify.find_available_ports", lambda: ["/dev/fakeA"])
+    monkeypatch.setattr("makerlab.identify.find_available_ports", lambda: ["/dev/fakeA"])
     monkeypatch.setattr(
-        "lelab.identify._identify_arm_sync",
+        "makerlab.identify._identify_arm_sync",
         lambda ports: {"success": True, "port": ports[0], "message": "ok", "skipped": []},
     )
     response = client.post("/identify-arm", json={})
@@ -205,7 +205,7 @@ def test_identify_endpoint_reports_hardware_failure(
     def boom(ports: list[str]) -> dict:
         raise RuntimeError("serial exploded")
 
-    monkeypatch.setattr("lelab.identify._identify_arm_sync", boom)
+    monkeypatch.setattr("makerlab.identify._identify_arm_sync", boom)
 
     response = client.post("/identify-arm", json={"ports": ["/dev/fake"]})
     # Logical failures stay HTTP 200 with success=False (like wiggle).

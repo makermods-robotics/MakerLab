@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { useRobots } from "@/hooks/useRobots";
@@ -39,9 +40,12 @@ const TeleopCameraPanel: React.FC = () => {
   }));
 
   return (
-    <div className="bg-gray-900 rounded-lg p-4 flex flex-col gap-4 h-full">
+    <Card variant="flat" className="flex h-full flex-col gap-4 p-4">
       <div className="flex items-center justify-between">
-        <h2 className="text-xl font-medium text-gray-200">Cameras</h2>
+        <div>
+          <div className="eyebrow">[ Video ]</div>
+          <h2 className="mt-2 text-xl">Cameras</h2>
+        </div>
         <div className="flex items-center gap-2">
           {enabled && feeds.length > 0 && (
             <Button
@@ -49,14 +53,14 @@ const TeleopCameraPanel: React.FC = () => {
               variant="ghost"
               size="icon"
               onClick={() => setReloadKey((k) => k + 1)}
-              className="h-9 w-9 text-gray-400 hover:text-white flex-shrink-0"
+              className="h-9 w-9 flex-shrink-0 text-muted-foreground"
               title="Retry camera feeds (e.g. after reconnecting a camera)"
               aria-label="Retry camera feeds"
             >
-              <RefreshCw className="w-4 h-4" />
+              <RefreshCw className="h-4 w-4" />
             </Button>
           )}
-          <Label htmlFor="teleop-camera-toggle" className="text-sm text-gray-400">
+          <Label htmlFor="teleop-camera-toggle" className="text-sm">
             {enabled ? "On" : "Off"}
           </Label>
           <Switch
@@ -80,18 +84,18 @@ const TeleopCameraPanel: React.FC = () => {
             ))}
           </div>
         ) : (
-          <p className="text-sm text-gray-500">
+          <p className="text-sm text-muted-foreground">
             {robotsLoading
               ? "Loading robot..."
               : "No cameras configured for this robot. Add them during calibration to see live feeds here."}
           </p>
         )
       ) : (
-        <p className="text-sm text-gray-500">
+        <p className="text-sm text-muted-foreground">
           Turn on to watch your cameras while you teleoperate.
         </p>
       )}
-    </div>
+    </Card>
   );
 };
 

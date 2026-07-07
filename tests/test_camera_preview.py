@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for lelab.camera_preview — shared MJPEG previews of backend cameras.
+"""Tests for makerlab.camera_preview — shared MJPEG previews of backend cameras.
 
 Everything runs against a fake cv2.VideoCapture: no real camera is ever opened
 (on macOS a real open would pop a permission dialog and stall the run).
@@ -23,11 +23,11 @@ import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
-import lelab.camera_preview as camera_preview
-import lelab.record as record
-import lelab.server as server_mod
-import lelab.teleoperate as teleoperate
-from lelab.camera_preview import CameraOpenError, CameraPreviewManager
+import makerlab.camera_preview as camera_preview
+import makerlab.record as record
+import makerlab.server as server_mod
+import makerlab.teleoperate as teleoperate
+from makerlab.camera_preview import CameraOpenError, CameraPreviewManager
 
 
 class FakeVideoCapture:
@@ -62,7 +62,7 @@ class FailingVideoCapture(FakeVideoCapture):
 
 @pytest.fixture
 def fake_captures(monkeypatch: pytest.MonkeyPatch) -> list[FakeVideoCapture]:
-    """Patch cv2.VideoCapture (as seen by lelab.camera_preview) with a fake
+    """Patch cv2.VideoCapture (as seen by makerlab.camera_preview) with a fake
     factory; returns the list of instances it constructed."""
     instances: list[FakeVideoCapture] = []
 

@@ -57,7 +57,7 @@ export interface TrainingConfig {
 // landing page's "Create a model" card (one button per type, short `label`);
 // the training config then shows it frozen using the full `display` name.
 // `stable` = tested on our hardware (user decision 2026-07-03) — a statement
-// about what we've validated in LeLab, not about upstream lerobot quality.
+// about what we've validated in MakerLab, not about upstream lerobot quality.
 // Unstable types stay selectable; the landing card just subdues them.
 export const POLICY_TYPE_OPTIONS: {
   value: string;

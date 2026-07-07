@@ -16,12 +16,12 @@ const TrainingExtraGate: React.FC<Props> = ({ installHint }) => {
   const install = useInstallExtra("system/training-extra");
 
   return (
-    <div className="max-w-3xl mx-auto">
-      <Card className="bg-slate-800/50 border-slate-700 rounded-xl">
+    <div className="mx-auto max-w-3xl">
+      <Card>
         <CardHeader>
-          <CardTitle className="flex items-center gap-3 text-white">
+          <CardTitle className="flex items-center gap-3">
             <InstallTitleIcon state={install.state} />
-            {installTitle(install.state, "Training Extra Not Installed")}
+            {installTitle(install.state, "Training extra not installed")}
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -34,11 +34,11 @@ const TrainingExtraGate: React.FC<Props> = ({ installHint }) => {
             onRetry={install.handleRetry}
             installHint={installHint}
             packageName="accelerate"
-            idleTitle="Training Extra Not Installed"
+            idleTitle="Training extra not installed"
             idleDescription={
               <>
                 Training requires the{" "}
-                <code className="px-1 py-0.5 rounded bg-slate-900 text-sky-300">
+                <code className="rounded-sm bg-secondary px-1 py-0.5 font-mono text-info">
                   accelerate
                 </code>{" "}
                 package, which isn't installed in this environment. Install it

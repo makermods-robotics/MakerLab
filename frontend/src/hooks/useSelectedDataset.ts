@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 
-const KEY = "lelab.selectedDataset";
+const KEY = "makerlab.selectedDataset";
 
 /**
  * The dataset chosen on the home page, persisted so it's the single source of
