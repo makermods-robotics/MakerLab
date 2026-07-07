@@ -1,7 +1,8 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { StatNumber } from "@/components/ui/stat-number";
 import { TrainingStatus } from "../types";
-import { CheckCircle, Activity, Clock } from "lucide-react";
+import { CheckCircle, Activity } from "lucide-react";
 import { useApi } from "@/contexts/ApiContext";
 import { getJobMetricsHistory } from "@/lib/jobsApi";
 import {
@@ -135,9 +136,6 @@ const MonitoringStats: React.FC<MonitoringStatsProps> = ({
   // "Training starting…" instead of a misleading 0/0 0% reading.
   const isStarting =
     trainingStatus.training_active && trainingStatus.total_steps === 0;
-  const stepLabel = isStarting
-    ? "Training starting…"
-    : `${trainingStatus.current_step.toLocaleString()} / ${trainingStatus.total_steps.toLocaleString()}`;
   const etaLabel =
     trainingStatus.eta_seconds != null
       ? formatTime(trainingStatus.eta_seconds)
@@ -145,49 +143,47 @@ const MonitoringStats: React.FC<MonitoringStatsProps> = ({
 
   return (
     <div className="space-y-6">
-      <Card className="bg-slate-800/50 border-slate-700 rounded-xl">
+      <Card>
         <CardContent className="p-6">
-          <div className="flex items-baseline justify-between mb-3">
-            <div className="flex items-center gap-3">
-              <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-blue-500/20 text-blue-400">
-                <Activity className="w-5 h-5" />
-              </div>
-              <div>
-                <h3 className="text-sm text-slate-400">Progress</h3>
-                <div className="text-base font-semibold text-white">
-                  {stepLabel}
-                </div>
-              </div>
-            </div>
-            <div className="flex items-center gap-2 text-slate-300">
-              <Clock className="w-4 h-4 text-purple-400" />
-              <span className="text-sm">
-                ETA <span className="font-semibold text-white">{etaLabel}</span>
-              </span>
-            </div>
+          <div className="flex flex-wrap items-end justify-between gap-6">
+            <StatNumber
+              label="step"
+              value={
+                isStarting
+                  ? "starting…"
+                  : trainingStatus.current_step.toLocaleString()
+              }
+              sublabel={
+                isStarting
+                  ? "training starting"
+                  : `of ${trainingStatus.total_steps.toLocaleString()} steps`
+              }
+              accent
+            />
+            <StatNumber label="eta" value={etaLabel} />
           </div>
-          <div className="relative h-8 w-full overflow-hidden rounded-md bg-slate-900 border border-slate-700">
+          <div className="mt-4 h-1 w-full overflow-hidden rounded-sm bg-secondary">
             <div
-              className="h-full bg-gradient-to-r from-blue-500 to-sky-400 transition-[width] duration-500"
+              className="h-full bg-primary transition-[width] duration-500"
               style={{ width: `${progress}%` }}
             />
-            <div className="absolute inset-0 flex items-center justify-center font-semibold text-white text-sm tabular-nums drop-shadow">
-              {isStarting ? "warming up…" : `${progress.toFixed(1)}%`}
-            </div>
           </div>
+          <p className="mt-2 font-mono text-[10px] tabular-nums text-muted-foreground">
+            {isStarting ? "warming up…" : `${progress.toFixed(1)}%`}
+          </p>
         </CardContent>
       </Card>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <Card className="bg-slate-800/50 border-slate-700 rounded-xl">
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+        <Card>
           <CardHeader className="pb-2">
-            <CardTitle className="flex items-center gap-3 text-white text-base">
-              <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-green-500/20 text-green-400">
-                <CheckCircle className="w-4 h-4" />
+            <CardTitle className="flex items-center gap-3 text-base text-foreground">
+              <div className="flex h-8 w-8 items-center justify-center rounded-md bg-secondary text-muted-foreground">
+                <CheckCircle className="h-4 w-4" />
               </div>
               <span>
                 Loss{" "}
-                <span className="text-slate-400 text-sm font-normal">
+                <span className="font-mono text-sm font-normal text-muted-foreground">
                   ({trainingStatus.current_loss?.toFixed(4) ?? "—"})
                 </span>
               </span>
@@ -196,7 +192,7 @@ const MonitoringStats: React.FC<MonitoringStatsProps> = ({
           <CardContent className="pt-0">
             <div className="h-48">
               {lossHistory.length === 0 ? (
-                <div className="flex h-full items-center justify-center text-slate-500 text-sm">
+                <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
                   Waiting for first metric tick…
                 </div>
               ) : (
@@ -243,15 +239,15 @@ const MonitoringStats: React.FC<MonitoringStatsProps> = ({
           </CardContent>
         </Card>
 
-        <Card className="bg-slate-800/50 border-slate-700 rounded-xl">
+        <Card>
           <CardHeader className="pb-2">
-            <CardTitle className="flex items-center gap-3 text-white text-base">
-              <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-orange-500/20 text-orange-400">
-                <Activity className="w-4 h-4" />
+            <CardTitle className="flex items-center gap-3 text-base text-foreground">
+              <div className="flex h-8 w-8 items-center justify-center rounded-md bg-secondary text-muted-foreground">
+                <Activity className="h-4 w-4" />
               </div>
               <span>
-                Learning Rate{" "}
-                <span className="text-slate-400 text-sm font-normal">
+                Learning rate{" "}
+                <span className="font-mono text-sm font-normal text-muted-foreground">
                   ({trainingStatus.current_lr?.toExponential(2) ?? "—"})
                 </span>
               </span>
@@ -260,7 +256,7 @@ const MonitoringStats: React.FC<MonitoringStatsProps> = ({
           <CardContent className="pt-0">
             <div className="h-48">
               {lrHistory.length === 0 ? (
-                <div className="flex h-full items-center justify-center text-slate-500 text-sm">
+                <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
                   Waiting for first metric tick…
                 </div>
               ) : (

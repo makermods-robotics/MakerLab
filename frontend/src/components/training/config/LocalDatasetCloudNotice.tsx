@@ -47,18 +47,20 @@ const LocalDatasetCloudNotice: React.FC<LocalDatasetCloudNoticeProps> = ({
 
   if (offline) {
     return (
-      <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-4 text-sm text-amber-100">
+      <div className="rounded-md border border-warn/40 bg-warn/10 p-4 text-sm text-foreground">
         <div className="flex items-start gap-2">
-          <WifiOff className="w-4 h-4 mt-0.5 shrink-0 text-amber-300" />
+          <WifiOff className="mt-0.5 h-4 w-4 shrink-0 text-warn" />
           <div>
-            <div className="font-semibold">
+            <div className="font-display font-semibold">
               This dataset is only on this machine
             </div>
-            <p className="mt-1 text-amber-200/80">
+            <p className="mt-1 text-muted-foreground">
               Hugging Face Cloud trains from the Hub, but the server is in
-              offline mode (<code className="text-amber-100">HF_HUB_OFFLINE</code>
-              ), so <span className="font-medium">{repoId}</span> can't be
-              uploaded. Switch off offline mode, or run this training locally.
+              offline mode (
+              <code className="font-mono text-foreground">HF_HUB_OFFLINE</code>
+              ), so <span className="font-medium text-foreground">{repoId}</span>{" "}
+              can't be uploaded. Switch off offline mode, or run this training
+              locally.
             </p>
           </div>
         </div>
@@ -67,31 +69,31 @@ const LocalDatasetCloudNotice: React.FC<LocalDatasetCloudNoticeProps> = ({
   }
 
   return (
-    <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-4 text-sm text-amber-100">
+    <div className="rounded-md border border-warn/40 bg-warn/10 p-4 text-sm text-foreground">
       <div className="flex items-start gap-2">
-        <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0 text-amber-300" />
+        <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-warn" />
         <div className="w-full">
-          <div className="font-semibold">
+          <div className="font-display font-semibold">
             This dataset is only on this machine
           </div>
-          <p className="mt-1 text-amber-200/80">
+          <p className="mt-1 text-muted-foreground">
             Hugging Face Cloud trains from the Hub, so{" "}
-            <span className="font-medium">{repoId}</span>
+            <span className="font-medium text-foreground">{repoId}</span>
             {sizeLabel ? ` (~${sizeLabel})` : ""} will be uploaded as a{" "}
-            <span className="font-medium">private</span> dataset before training
-            starts.
+            <span className="font-medium text-foreground">private</span> dataset
+            before training starts.
           </p>
           {uploading ? (
-            <p className="mt-2 flex items-center gap-2 text-amber-100">
-              <Loader2 className="w-4 h-4 animate-spin" />
+            <p className="mt-2 flex items-center gap-2 text-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" />
               Uploading to the Hub… this can take a few minutes for large
               datasets.
             </p>
           ) : errorMessage ? (
-            <p className="mt-2 text-red-300">{errorMessage}</p>
+            <p className="mt-2 text-destructive">{errorMessage}</p>
           ) : (
-            <p className="mt-2 flex items-center gap-2 text-amber-200/70">
-              <UploadCloud className="w-4 h-4" />
+            <p className="mt-2 flex items-center gap-2 text-muted-foreground">
+              <UploadCloud className="h-4 w-4" />
               Use “Upload &amp; start training” below to upload, then launch.
             </p>
           )}
