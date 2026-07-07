@@ -268,18 +268,21 @@ _ROBOT_LIST_FIELDS = ("cameras",)
 
 # Follower motor power, as a percentage of full torque (see lelab/motor_power.py
 # for how it's written to the servos). Bounded below because under ~10% the arm
-# can't reliably hold its own weight; 100 = stock behavior.
+# can't reliably hold its own weight; 100 = full/stock torque. Default = the
+# auto-calibration torque level (feetech_autocal DEFAULT_TORQUE_LIMIT 380 ÷
+# _TORQUE_LIMIT_PER_PERCENT 10 = 38%), so a fresh robot operates at the same
+# conservative torque autocal uses rather than at full power.
 MOTOR_POWER_MIN = 10
 MOTOR_POWER_MAX = 100
-DEFAULT_MOTOR_POWER = 100
+DEFAULT_MOTOR_POWER = 38
 
 
 def clamp_motor_power(value: object) -> int:
     """Coerce a motor_power value to a safe integer percent in [10, 100].
 
-    Anything non-numeric (including bool, a subclass of int) falls back to full
-    power — the register's own power-on default — rather than raising, so a
-    corrupted record can never block a session start.
+    Anything non-numeric (including bool, a subclass of int) falls back to
+    DEFAULT_MOTOR_POWER rather than raising, so a corrupted record can never
+    block a session start.
     """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return DEFAULT_MOTOR_POWER

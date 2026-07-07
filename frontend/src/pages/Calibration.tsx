@@ -3,7 +3,6 @@ import { useNavigate, useLocation } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
-import { Input } from "@/components/ui/input";
 import {
   Select,
   SelectContent,
@@ -170,15 +169,11 @@ const Calibration = () => {
     ? assignedConfig
     : ((isBimanual ? `${robotName}_${arm}` : robotName) ?? "");
 
-  // Editable "save as" name (all modes) so one robot can own multiple named
-  // calibrations instead of overwriting. Blank falls back to the default. The
-  // field re-syncs to the default whenever the target side changes (device/arm
-  // switch, robot load, or a just-saved calibration reassigning the robot).
-  const [configNameInput, setConfigNameInput] = useState("");
-  useEffect(() => {
-    setConfigNameInput(defaultConfigName);
-  }, [defaultConfigName]);
-  const calibrationConfigName = configNameInput.trim() || defaultConfigName;
+  // No name is chosen in the UI. Calibration always saves to the robot's own
+  // default config name for this slot and silently replaces it (see overwrite
+  // below). To keep an old calibration under a different name, the user renames
+  // it afterward via the existing per-side rename feature.
+  const calibrationConfigName = defaultConfigName;
 
   // Bumped when a calibration completes so the per-side CalibrationLibrary
   // dropdowns re-fetch and surface any newly-named file.
@@ -222,7 +217,6 @@ const Calibration = () => {
         return String(field);
     }
   };
-  const [overwritePromptOpen, setOverwritePromptOpen] = useState(false);
   const [wiggling, setWiggling] = useState(false);
   // Touch-to-identify: watching every port for a hand-moved shoulder-pan swing.
   const [detecting, setDetecting] = useState(false);
@@ -246,31 +240,19 @@ const Calibration = () => {
     releasedLabel: string | null;
     swapPort: string | null;
   } | null>(null);
-  const [autoCalPromptOpen, setAutoCalPromptOpen] = useState(false);
-  const [autoCal, setAutoCal] = useState<{
-    active: boolean;
-    status: string;
-    message: string;
-    error: string | null;
-    logs: string[];
-  }>({ active: false, status: "idle", message: "", error: null, logs: [] });
-
-  // --- Concurrent multi-arm auto-calibration (opt-in) ---
-  // A separate flow from single-arm auto-cal: the user picks 1-4 arm slots and
-  // every one's hands-off auto-cal subprocess runs at the SAME TIME, each on its
-  // own port. Single-arm auto-cal and the manual flow are untouched.
+  // --- Concurrent multi-arm auto-calibration ---
+  // Auto-calibration IS the multi-arm flow: the main "Auto-calibrate" button
+  // opens this picker, where the user ticks 1-4 arm slots and every one's
+  // hands-off auto-cal subprocess runs at the SAME TIME, each on its own port.
+  // The manual step-by-step flow is untouched and stays available separately.
   const [batchAutoCalOpen, setBatchAutoCalOpen] = useState(false);
   const [batchAutoCalPromptOpen, setBatchAutoCalPromptOpen] = useState(false);
-  const [batchOverwriteAll, setBatchOverwriteAll] = useState(false);
-  // Which arm slots are ticked, plus each slot's port + save-as name.
+  // Which arm slots are ticked. Each slot's port comes straight from its
+  // assignment on the robot record; each slot's save name is the robot's own
+  // default config for that slot (no per-arm name input).
   const [batchSelected, setBatchSelected] = useState<Record<string, boolean>>(
     {},
   );
-  // Only the save-as name is collected per arm; each arm's port comes straight
-  // from its assignment on the robot record (set in the per-arm flow above).
-  const [batchInputs, setBatchInputs] = useState<
-    Record<string, { configName: string }>
-  >({});
   const [batchAutoCal, setBatchAutoCal] = useState<BatchAutoCalStatus>({
     active: false,
     arms: [],
@@ -348,27 +330,6 @@ const Calibration = () => {
           ],
     [isBimanual],
   );
-
-  // Seed each slot's save-as name from the robot record: the in-use config, else
-  // a per-arm "<robot>_<arm>" suggestion (matching the single-arm default).
-  // Ports are NOT seeded here — the batch consumes each arm's assigned port
-  // directly from the record (see slotPort), so there's a single source of truth.
-  useEffect(() => {
-    if (!robot) return;
-    setBatchInputs((prev) => {
-      const next: Record<string, { configName: string }> = {};
-      for (const slot of armSlots) {
-        const assigned = (robot[slot.cfgField] as string) || "";
-        const suggested = isBimanual
-          ? `${robotName}_${slot.arm}`
-          : (robotName ?? "");
-        next[slot.key] = prev[slot.key] ?? {
-          configName: assigned || suggested,
-        };
-      }
-      return next;
-    });
-  }, [robot, armSlots, isBimanual, robotName]);
 
   const fetchRobot = useCallback(async (): Promise<RobotRecord | null> => {
     if (!robotName) return null;
@@ -702,105 +663,6 @@ const Calibration = () => {
     persistPort(nextPort);
   };
 
-  // Resume the auto-cal panel if a run is in progress (e.g. page reload).
-  useEffect(() => {
-    (async () => {
-      try {
-        const res = await fetchWithHeaders(
-          `${baseUrl}/auto-calibration-status`,
-        );
-        const data = await res.json();
-        setAutoCal(data);
-      } catch {
-        // ignore
-      }
-    })();
-  }, [baseUrl, fetchWithHeaders]);
-
-  // Poll auto-cal status + logs while a run is active.
-  useEffect(() => {
-    if (!autoCal.active) return;
-    const id = setInterval(async () => {
-      try {
-        const res = await fetchWithHeaders(
-          `${baseUrl}/auto-calibration-status`,
-        );
-        const data = await res.json();
-        setAutoCal(data);
-        if (!data.active) {
-          if (data.status === "completed") {
-            toast({ title: "Auto-calibration complete" });
-            setCalibReloadToken((t) => t + 1);
-            fetchRobot();
-          } else if (data.status === "failed") {
-            toast({
-              title: "Auto-calibration failed",
-              description: data.error || "See the log.",
-              variant: "destructive",
-            });
-          }
-        }
-      } catch {
-        // transient; keep polling
-      }
-    }, 600);
-    return () => clearInterval(id);
-  }, [autoCal.active, baseUrl, fetchWithHeaders, fetchRobot, toast]);
-
-  const startAutoCalibration = async () => {
-    setAutoCalPromptOpen(false);
-    if (!robotName || !port) return;
-    try {
-      const res = await fetchWithHeaders(`${baseUrl}/start-auto-calibration`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          device_type: deviceType,
-          port,
-          config_file: calibrationConfigName,
-          robot_name: robotName,
-          arm,
-        }),
-      });
-      const data = await res.json();
-      if (data.success) {
-        setAutoCal({
-          active: true,
-          status: "running",
-          message: "",
-          error: null,
-          logs: [],
-        });
-        toast({
-          title: "Auto-calibration started",
-          description: "The arm is moving — keep the workspace clear.",
-        });
-      } else {
-        toast({
-          title: "Couldn't start auto-calibration",
-          description: data.message,
-          variant: "destructive",
-        });
-      }
-    } catch (e) {
-      toast({
-        title: "Couldn't start auto-calibration",
-        description: String(e),
-        variant: "destructive",
-      });
-    }
-  };
-
-  const stopAutoCalibration = async () => {
-    try {
-      await fetchWithHeaders(`${baseUrl}/stop-auto-calibration`, {
-        method: "POST",
-      });
-    } catch (e) {
-      console.error("Failed to stop auto-calibration:", e);
-    }
-  };
-
   // --- Concurrent multi-arm auto-calibration ---
 
   // Each arm's port as designated on the robot record (assigned in the per-arm
@@ -881,7 +743,7 @@ const Calibration = () => {
     return () => clearInterval(id);
   }, [batchAutoCal.active, baseUrl, fetchWithHeaders, fetchRobot, toast]);
 
-  const startBatchAutoCalibration = async (overwrite = false) => {
+  const startBatchAutoCalibration = async () => {
     setBatchAutoCalPromptOpen(false);
     if (!robotName) return;
     const slots = selectedBatchSlots;
@@ -915,11 +777,13 @@ const Calibration = () => {
       return;
     }
 
+    // Each arm saves to its own default name: the in-use config for that slot,
+    // else a per-arm "<robot>_<arm>" (bimanual) / "<robot>" suggestion.
     const arms = slots.map((s) => ({
       device_type: s.device,
       port: slotPort(s),
       config_file:
-        (batchInputs[s.key]?.configName || "").trim() ||
+        ((robot?.[s.cfgField] as string) || "").trim() ||
         (isBimanual ? `${robotName}_${s.arm}` : robotName || ""),
       arm: s.arm,
     }));
@@ -930,7 +794,10 @@ const Calibration = () => {
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ robot_name: robotName, overwrite, arms }),
+          // Each arm saves to its own default name, so replacing that arm's
+          // existing calibration is the expected outcome — overwrite is always
+          // on and the old name-taken confirmation is gone.
+          body: JSON.stringify({ robot_name: robotName, overwrite: true, arms }),
         },
       );
       const data = await res.json();
@@ -947,10 +814,6 @@ const Calibration = () => {
           title: `Auto-calibration started on ${data.launched ?? arms.length} arm(s)`,
           description: "The arms are moving — keep the workspace clear.",
         });
-      } else if (data.code === "name_taken") {
-        // One or more names already exist — confirm before overwriting all.
-        setBatchOverwriteAll(true);
-        setBatchAutoCalPromptOpen(true);
       } else {
         toast({
           title: "Couldn't start auto-calibration",
@@ -977,7 +840,7 @@ const Calibration = () => {
     }
   };
 
-  const handleStartCalibration = async (overwrite = false) => {
+  const handleStartCalibration = async () => {
     if (!robotName) {
       toast({
         title: "No robot selected",
@@ -1001,7 +864,11 @@ const Calibration = () => {
       port: port,
       config_file: calibrationConfigName,
       robot_name: robotName,
-      overwrite,
+      // The name is always the robot's own default for this slot, so replacing
+      // its existing calibration is the expected outcome — overwrite is always
+      // on and the old name-taken confirmation prompt is gone. To keep the old
+      // calibration, rename it afterward via the per-side rename feature.
+      overwrite: true,
       arm,
     };
 
@@ -1019,16 +886,11 @@ const Calibration = () => {
       const result = await response.json();
 
       if (result.success) {
-        setOverwritePromptOpen(false);
         toast({
           title: "Calibration Started",
           description: `Calibration started for ${deviceType}`,
         });
         setIsPolling(true);
-      } else if (result.code === "name_taken") {
-        // Existing config of the same name — confirm before overwriting.
-        calibrationActiveRef.current = false;
-        setOverwritePromptOpen(true);
       } else {
         calibrationActiveRef.current = false;
         toast({
@@ -1274,18 +1136,42 @@ const Calibration = () => {
   );
 
   // --- Motor power (per-robot, persisted) -------------------------------
-  // Local slider position while dragging; persisted to the robot record on
-  // release so we don't fire a POST per pixel. Applied to the follower's
-  // motors at the start of each teleop/record/inference session.
-  const [powerDraft, setPowerDraft] = useState(100);
+  // The backend stores/applies motor_power as a PERCENT of full torque
+  // (10-100; see lelab/utils/config.py clamp_motor_power). The servo actually
+  // scales torque via its RAM Torque_Limit register on a 0-1000 scale, and
+  // apply_motor_power writes `percent * _TORQUE_LIMIT_PER_PERCENT` to it (see
+  // lelab/motor_power.py, _TORQUE_LIMIT_PER_PERCENT = 10). The UI below is
+  // expressed in those RAW register units — same scale as autocal's
+  // DEFAULT_TORQUE_LIMIT = 380 (lelab/vendor/feetech_autocal/
+  // calibration_defaults.py) — so operators can reason in one vocabulary.
+  // This is a DISPLAY/units change only: we convert raw<->percent at the edges
+  // and still persist a percent, so clamp_motor_power / torque_limit_from_percent
+  // / the apply path are untouched.
+  const TORQUE_LIMIT_PER_PERCENT = 10; // must match lelab/motor_power.py
+  const MOTOR_POWER_MIN_PERCENT = 10; // must match lelab/utils/config.py
+  const MOTOR_POWER_MAX_PERCENT = 100; // must match lelab/utils/config.py
+  const TORQUE_LIMIT_MIN = MOTOR_POWER_MIN_PERCENT * TORQUE_LIMIT_PER_PERCENT; // 100
+  const TORQUE_LIMIT_MAX = MOTOR_POWER_MAX_PERCENT * TORQUE_LIMIT_PER_PERCENT; // 1000
+  // Autocal's operating torque, shown as a reference marker only. NOT applied
+  // as the default here — changing the persisted default would be a torque
+  // (safety) behavior change; see config.py DEFAULT_MOTOR_POWER.
+  const DEFAULT_TORQUE_LIMIT_REF = 380; // lelab/vendor/.../calibration_defaults.py
+
+  // Local slider position (in PERCENT) while dragging; persisted to the robot
+  // record on release so we don't fire a POST per pixel. Applied to the
+  // follower's motors at the start of each teleop/record/inference session.
+  // Fallback matches backend DEFAULT_MOTOR_POWER (38% = Torque_Limit 380).
+  const [powerDraft, setPowerDraft] = useState(38);
   useEffect(() => {
-    setPowerDraft(robot?.motor_power ?? 100);
+    setPowerDraft(robot?.motor_power ?? 38);
   }, [robot?.motor_power]);
+
+  // Slider is in raw Torque_Limit units; convert to the percent the draft holds.
+  const torqueLimitDraft = Math.round(powerDraft) * TORQUE_LIMIT_PER_PERCENT;
 
   const commitMotorPower = useCallback(async () => {
     if (!robotName || !robot) return;
-    // powerDraft may be fractional when the slider is geared in decivolts;
-    // persist the nearest integer percent, clamped to the backend's 10-100.
+    // Persist the nearest integer percent, clamped to the backend's 10-100.
     const percentInt = Math.min(100, Math.max(10, Math.round(powerDraft)));
     if (percentInt === robot.motor_power) return;
     try {
@@ -1305,46 +1191,6 @@ const Calibration = () => {
       console.error("Failed to save motor power:", e);
     }
   }, [robotName, robot, powerDraft, baseUrl, fetchWithHeaders]);
-
-  // One-shot supply-voltage reading (a REAL measured voltage from the servos'
-  // Present_Voltage register — distinct from the motor-power torque fraction).
-  // Read once per port selection, never polled: the backend connects, reads,
-  // and releases the port immediately so calibration/teleop can grab it.
-  const [voltage, setVoltage] = useState<number | null>(null);
-  useEffect(() => {
-    setVoltage(null);
-    if (!port) return;
-    // Don't touch the serial port while a calibration session may hold it.
-    if (calibrationStatus.calibration_active || autoCal.active) return;
-    let cancelled = false;
-    (async () => {
-      try {
-        const res = await fetchWithHeaders(
-          `${baseUrl}/supply-voltage?port=${encodeURIComponent(port)}`,
-        );
-        const data = await res.json();
-        if (!cancelled && data.success && typeof data.voltage === "number") {
-          setVoltage(data.voltage);
-        }
-      } catch {
-        // Informational only — leave the reading blank on failure.
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-    // Re-read only when the port changes; the active flags are read at fire
-    // time but must not re-trigger a read when a session ends.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [port, baseUrl, fetchWithHeaders]);
-
-  // Slider gearing: with a supply reading, the slider steps in 0.1 V of the
-  // computed drive-voltage ceiling (decivolt units: min = 10% floor, max =
-  // full supply, step = 1 dv). Without a reading, plain 1% steps.
-  const supplyDv =
-    voltage != null && voltage > 0 ? Math.round(voltage * 10) : null;
-  const powerDv =
-    supplyDv != null ? Math.round((supplyDv * powerDraft) / 100) : null;
 
   const getStatusDisplay = () => {
     switch (calibrationStatus.status) {
@@ -1548,7 +1394,7 @@ const Calibration = () => {
                     disabled={
                       !port ||
                       calibrationStatus.calibration_active ||
-                      autoCal.active
+                      batchAutoCal.active
                     }
                     title="Clear port — release it without assigning another"
                     aria-label="Clear port"
@@ -1579,7 +1425,7 @@ const Calibration = () => {
                       detecting ||
                       wiggling ||
                       calibrationStatus.calibration_active ||
-                      autoCal.active
+                      batchAutoCal.active
                     }
                     title="Identify by hand: swing the arm's base left and right"
                     className="w-32 shrink-0 border-slate-600 hover:border-emerald-500 text-slate-400 hover:text-emerald-400 bg-slate-700 hover:bg-slate-600"
@@ -1606,7 +1452,7 @@ const Calibration = () => {
                       wiggling ||
                       detecting ||
                       calibrationStatus.calibration_active ||
-                      autoCal.active
+                      batchAutoCal.active
                     }
                     title="Move the gripper on this port to see which arm it is"
                     className="w-32 shrink-0 border-slate-600 hover:border-yellow-500 text-slate-400 hover:text-yellow-400 bg-slate-700 hover:bg-slate-600"
@@ -1615,8 +1461,8 @@ const Calibration = () => {
                     {wiggling ? "Wiggling…" : "Wiggle"}
                   </Button>
                   <p className="flex-1 min-w-[200px] text-xs text-slate-400">
-                    Legacy: drives the gripper ±200 ticks to confirm a port —
-                    prefer Detect when possible.
+                    Confirms an arm is on this port — briefly drives its gripper
+                    so you can see which arm responds.
                   </p>
                 </div>
                 {detecting && (
@@ -1625,33 +1471,6 @@ const Calibration = () => {
                     sees the motion will be assigned to this arm.
                   </p>
                 )}
-              </div>
-
-              <div className="space-y-2">
-                <Label
-                  htmlFor="configName"
-                  className="text-sm font-medium text-slate-300"
-                >
-                  Calibration name
-                </Label>
-                <Input
-                  id="configName"
-                  value={configNameInput}
-                  onChange={(e) => setConfigNameInput(e.target.value)}
-                  placeholder={defaultConfigName}
-                  disabled={
-                    calibrationStatus.calibration_active || autoCal.active
-                  }
-                  className="bg-slate-700 border-slate-600 text-white rounded-md"
-                />
-                <p className="text-xs text-slate-500">
-                  Saves as{" "}
-                  <span className="font-mono text-slate-400">
-                    {calibrationConfigName || "…"}
-                  </span>
-                  . Change it to keep the current calibration and save a new one
-                  instead of overwriting.
-                </p>
               </div>
 
               <Separator className="bg-slate-700" />
@@ -1675,26 +1494,19 @@ const Calibration = () => {
                     <Square className="w-5 h-5 mr-2" />
                     Stop all auto-calibration
                   </Button>
-                ) : autoCal.active ? (
-                  <Button
-                    onClick={stopAutoCalibration}
-                    variant="destructive"
-                    className="w-full rounded-full py-6 text-lg"
-                  >
-                    <Square className="w-5 h-5 mr-2" />
-                    Stop auto-calibration
-                  </Button>
                 ) : (
                   // Auto-calibrate is the default calibration mode: it's the
-                  // prominent primary action. Manual step-by-step calibration
-                  // stays fully available as the secondary button below — a user
-                  // who wants it just clicks it, but landing here nudges toward
-                  // the hands-off auto flow.
+                  // prominent primary action and opens the multi-arm picker
+                  // below (single-arm robots see just their leader+follower
+                  // slots there). Manual step-by-step calibration stays fully
+                  // available as the secondary button — a user who wants it just
+                  // clicks it, but landing here nudges toward the hands-off auto
+                  // flow.
                   <>
                     <Button
-                      onClick={() => setAutoCalPromptOpen(true)}
+                      onClick={() => setBatchAutoCalOpen(true)}
                       className="w-full bg-purple-600 hover:bg-purple-700 text-white rounded-full py-6 text-lg"
-                      disabled={!robotName || !deviceType || !portDetected}
+                      disabled={!robotName}
                     >
                       <Wand2 className="w-5 h-5 mr-2" />
                       Auto-calibrate
@@ -1707,21 +1519,6 @@ const Calibration = () => {
                     >
                       <Play className="w-5 h-5 mr-2" />
                       Calibrate manually
-                    </Button>
-                    {/* Opt-in concurrent multi-arm auto-cal: distinct from the
-                        single-arm flow above — several arms run at once, each on
-                        its own port, with independent (partial-success)
-                        outcomes. */}
-                    <Button
-                      onClick={() => setBatchAutoCalOpen((v) => !v)}
-                      variant="ghost"
-                      disabled={!robotName}
-                      className="w-full text-slate-400 hover:text-purple-300 hover:bg-purple-900/10 rounded-full py-4"
-                    >
-                      <Wand2 className="w-4 h-4 mr-2" />
-                      {batchAutoCalOpen
-                        ? "Hide multi-arm auto-calibration"
-                        : "Auto-calibrate multiple arms at once"}
                     </Button>
                   </>
                 )}
@@ -1739,14 +1536,13 @@ const Calibration = () => {
                           calibration <strong>at the same time</strong> on its
                           assigned port — one arm failing doesn't stop the
                           others. Ports come from each arm's assignment above;
-                          an arm with no port yet can't be picked.
+                          an arm with no port yet can't be picked. Each arm
+                          replaces its own existing calibration; rename any of
+                          them afterward from the calibration list below.
                         </p>
                         <div className="space-y-2">
                           {armSlots.map((slot) => {
                             const selected = !!batchSelected[slot.key];
-                            const input = batchInputs[slot.key] ?? {
-                              configName: "",
-                            };
                             const assignedPort = slotPort(slot);
                             const hasPort = !!assignedPort;
                             // Distinguish "never assigned" from "assigned but
@@ -1794,42 +1590,28 @@ const Calibration = () => {
                                         : "no port — assign above"}
                                   </span>
                                 </label>
-                                {selected && hasPort && (
-                                  <div className="mt-2">
-                                    <Input
-                                      value={input.configName}
-                                      onChange={(e) =>
-                                        setBatchInputs((prev) => ({
-                                          ...prev,
-                                          [slot.key]: {
-                                            ...(prev[slot.key] ?? {
-                                              configName: "",
-                                            }),
-                                            configName: e.target.value,
-                                          },
-                                        }))
-                                      }
-                                      placeholder="Save as…"
-                                      className="bg-slate-700 border-slate-600 text-white text-xs h-8"
-                                    />
-                                  </div>
-                                )}
                               </div>
                             );
                           })}
                         </div>
-                        <Button
-                          onClick={() => {
-                            setBatchOverwriteAll(false);
-                            setBatchAutoCalPromptOpen(true);
-                          }}
-                          disabled={selectedBatchSlots.length === 0}
-                          className="w-full bg-purple-600 hover:bg-purple-700 text-white rounded-full py-4"
-                        >
-                          <Wand2 className="w-4 h-4 mr-2" />
-                          Auto-calibrate {selectedBatchSlots.length || 0} arm
-                          {selectedBatchSlots.length === 1 ? "" : "s"}
-                        </Button>
+                        <div className="flex gap-2">
+                          <Button
+                            onClick={() => setBatchAutoCalPromptOpen(true)}
+                            disabled={selectedBatchSlots.length === 0}
+                            className="flex-1 bg-purple-600 hover:bg-purple-700 text-white rounded-full py-4"
+                          >
+                            <Wand2 className="w-4 h-4 mr-2" />
+                            Auto-calibrate {selectedBatchSlots.length || 0} arm
+                            {selectedBatchSlots.length === 1 ? "" : "s"}
+                          </Button>
+                          <Button
+                            onClick={() => setBatchAutoCalOpen(false)}
+                            variant="outline"
+                            className="shrink-0 border-slate-600 text-slate-300 hover:text-slate-100 rounded-full py-4"
+                          >
+                            Cancel
+                          </Button>
+                        </div>
                       </>
                     ) : (
                       <p className="text-xs text-slate-400">
@@ -1898,59 +1680,45 @@ const Calibration = () => {
                         htmlFor="motorPower"
                         className="text-sm font-medium text-slate-300 shrink-0"
                       >
-                        Motor power
+                        Motor torque limit
                       </Label>
                       <input
                         id="motorPower"
                         type="range"
-                        min={supplyDv != null ? Math.round(supplyDv * 0.1) : 10}
-                        max={supplyDv ?? 100}
-                        step={1}
-                        value={powerDv ?? powerDraft}
+                        min={TORQUE_LIMIT_MIN}
+                        max={TORQUE_LIMIT_MAX}
+                        step={TORQUE_LIMIT_PER_PERCENT}
+                        value={torqueLimitDraft}
                         onChange={(e) => {
-                          const v = Number(e.target.value);
+                          // Slider is in raw Torque_Limit units; store as percent.
                           setPowerDraft(
-                            supplyDv != null ? (v / supplyDv) * 100 : v,
+                            Number(e.target.value) / TORQUE_LIMIT_PER_PERCENT,
                           );
                         }}
                         onPointerUp={commitMotorPower}
                         onKeyUp={commitMotorPower}
                         onBlur={commitMotorPower}
+                        list="motorTorqueTicks"
                         className="flex-1 h-1.5 accent-blue-500 cursor-pointer"
-                        aria-label="Motor power"
+                        aria-label="Motor torque limit (Torque_Limit register, 0-1000 scale)"
                       />
-                      {powerDv != null ? (
-                        <span
-                          className="font-mono text-right leading-tight shrink-0"
-                          title="Approximate maximum average drive voltage: supply × power setting."
-                        >
-                          <span className="block text-sm text-slate-200">
-                            ≈ {(powerDv / 10).toFixed(1)} V
-                          </span>
-                          <span className="block text-[11px] text-slate-500">
-                            {Math.round(powerDraft)}%
-                          </span>
-                        </span>
-                      ) : (
-                        <span className="text-sm font-mono text-slate-200 w-12 text-right shrink-0">
-                          {Math.round(powerDraft)}%
-                        </span>
-                      )}
+                      <datalist id="motorTorqueTicks">
+                        {/* Autocal's operating torque, as a reference tick. */}
+                        <option value={DEFAULT_TORQUE_LIMIT_REF} />
+                      </datalist>
+                      <span className="text-sm font-mono text-slate-200 w-12 text-right shrink-0">
+                        {torqueLimitDraft}
+                      </span>
                     </div>
                     <div className="flex items-start justify-between gap-2 text-xs text-slate-500">
                       <span>
-                        Lower = gentler movements and weaker grip; below 10% the
-                        arm can't hold its own weight. Resets to the saved value
-                        each session.
+                        Raw servo{" "}
+                        <code className="text-slate-400">Torque_Limit</code>{" "}
+                        (0–1000 scale). Lower = gentler movements and weaker grip;
+                        below {TORQUE_LIMIT_MIN} the arm can't hold its own weight.
+                        Autocal drives at {DEFAULT_TORQUE_LIMIT_REF}. Resets to the
+                        saved value each session.
                       </span>
-                      {voltage != null && (
-                        <span
-                          className="font-mono text-slate-400 shrink-0"
-                          title="Measured servo bus supply voltage on the selected port"
-                        >
-                          Supply: {voltage.toFixed(1)}V
-                        </span>
-                      )}
                     </div>
                   </div>
                 )}
@@ -1959,9 +1727,9 @@ const Calibration = () => {
                     which surprises novices (the arm is deliberately floppy).
                     Auto-cal needs no standing warning — it ends gracefully
                     (fold on completion, freeze + return-to-start on Stop) and
-                    its pre-start confirmation dialog carries the safety
-                    guidance. */}
-                {calibrationStatus.calibration_active && !autoCal.active && (
+                    the multi-arm pre-start confirmation dialog carries the
+                    safety guidance. */}
+                {calibrationStatus.calibration_active && (
                   <Alert className="bg-amber-900/40 border-amber-700 text-amber-100">
                     <AlertTriangle className="h-4 w-4" />
                     <AlertDescription>
@@ -1973,61 +1741,7 @@ const Calibration = () => {
                   </Alert>
                 )}
 
-                {autoCal.logs.length > 0 && autoCal.status !== "idle" && (
-                  <div className="bg-slate-900 rounded border border-slate-700 p-2 max-h-40 overflow-auto text-xs font-mono text-slate-300 whitespace-pre-wrap">
-                    {autoCal.status === "completed" && (
-                      <div className="text-green-400 mb-1">
-                        ✓ Auto-calibration complete
-                      </div>
-                    )}
-                    {(autoCal.status === "failed" ||
-                      autoCal.status === "stopped") && (
-                      <div className="text-red-400 mb-1">
-                        {autoCal.status === "stopped"
-                          ? "Stopped"
-                          : `Failed: ${autoCal.error ?? ""}`}
-                      </div>
-                    )}
-                    {autoCal.logs.slice(-120).map((line, i) => (
-                      <div key={i}>{line}</div>
-                    ))}
-                  </div>
-                )}
               </div>
-
-              <Dialog
-                open={autoCalPromptOpen}
-                onOpenChange={setAutoCalPromptOpen}
-              >
-                <DialogContent className="bg-slate-900 border-slate-800 text-white">
-                  <DialogHeader>
-                    <DialogTitle>
-                      Auto-calibrate — the arm will move
-                    </DialogTitle>
-                    <DialogDescription className="text-slate-400">
-                      The arm will <strong>move on its own under power</strong>{" "}
-                      to find each joint's range. Clear the workspace and keep
-                      hands away. This will save/replace the calibration{" "}
-                      <strong>"{calibrationConfigName}"</strong>.
-                    </DialogDescription>
-                  </DialogHeader>
-                  <DialogFooter className="flex gap-2 justify-end">
-                    <Button
-                      variant="outline"
-                      className="border-slate-600 text-slate-700 dark:text-slate-300"
-                      onClick={() => setAutoCalPromptOpen(false)}
-                    >
-                      Cancel
-                    </Button>
-                    <Button
-                      className="bg-purple-600 hover:bg-purple-700 text-white"
-                      onClick={startAutoCalibration}
-                    >
-                      Start auto-calibration
-                    </Button>
-                  </DialogFooter>
-                </DialogContent>
-              </Dialog>
 
               <Dialog
                 open={batchAutoCalPromptOpen}
@@ -2036,26 +1750,15 @@ const Calibration = () => {
                 <DialogContent className="bg-slate-900 border-slate-800 text-white">
                   <DialogHeader>
                     <DialogTitle>
-                      {batchOverwriteAll
-                        ? "Overwrite existing calibrations?"
-                        : "Auto-calibrate multiple arms — they will move"}
+                      Auto-calibrate multiple arms — they will move
                     </DialogTitle>
                     <DialogDescription className="text-slate-400">
-                      {batchOverwriteAll ? (
-                        <>
-                          One or more of the selected names already exist.
-                          Continuing will <strong>replace</strong> them when each
-                          arm completes.
-                        </>
-                      ) : (
-                        <>
-                          {selectedBatchSlots.length} arm
-                          {selectedBatchSlots.length === 1 ? "" : "s"} will{" "}
-                          <strong>move on their own under power</strong> at the
-                          same time to find each joint's range. Clear the
-                          workspace and keep hands away from every arm.
-                        </>
-                      )}
+                      {selectedBatchSlots.length} arm
+                      {selectedBatchSlots.length === 1 ? "" : "s"} will{" "}
+                      <strong>move on their own under power</strong> at the same
+                      time to find each joint's range. Clear the workspace and
+                      keep hands away from every arm. Each arm replaces its own
+                      existing calibration.
                     </DialogDescription>
                   </DialogHeader>
                   <DialogFooter className="flex gap-2 justify-end">
@@ -2068,45 +1771,9 @@ const Calibration = () => {
                     </Button>
                     <Button
                       className="bg-purple-600 hover:bg-purple-700 text-white"
-                      onClick={() =>
-                        startBatchAutoCalibration(batchOverwriteAll)
-                      }
+                      onClick={() => startBatchAutoCalibration()}
                     >
-                      {batchOverwriteAll
-                        ? "Overwrite and start"
-                        : "Start auto-calibration"}
-                    </Button>
-                  </DialogFooter>
-                </DialogContent>
-              </Dialog>
-
-              <Dialog
-                open={overwritePromptOpen}
-                onOpenChange={setOverwritePromptOpen}
-              >
-                <DialogContent className="bg-slate-900 border-slate-800 text-white">
-                  <DialogHeader>
-                    <DialogTitle>Overwrite existing calibration?</DialogTitle>
-                    <DialogDescription className="text-slate-400">
-                      A calibration named "{calibrationConfigName}" already
-                      exists for this side. Continuing will replace its data
-                      when calibration completes. To keep it, cancel and
-                      download or rename it first.
-                    </DialogDescription>
-                  </DialogHeader>
-                  <DialogFooter className="flex gap-2 justify-end">
-                    <Button
-                      variant="outline"
-                      className="border-slate-600 text-slate-700 dark:text-slate-300"
-                      onClick={() => setOverwritePromptOpen(false)}
-                    >
-                      Cancel
-                    </Button>
-                    <Button
-                      className="bg-red-500 hover:bg-red-600 text-white"
-                      onClick={() => handleStartCalibration(true)}
-                    >
-                      Overwrite & calibrate
+                      Start auto-calibration
                     </Button>
                   </DialogFooter>
                 </DialogContent>
