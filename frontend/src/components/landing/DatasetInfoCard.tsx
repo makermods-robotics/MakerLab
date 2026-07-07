@@ -5,6 +5,7 @@ import {
   ExternalLink,
   Loader2,
   Pencil,
+  Settings2,
   Upload as UploadIcon,
 } from "lucide-react";
 import {
@@ -21,20 +22,31 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { useToast } from "@/hooks/use-toast";
 import { useApi } from "@/contexts/ApiContext";
+import { useHfAuth } from "@/contexts/HfAuthContext";
 import { ApiError } from "@/lib/apiClient";
 import { validateDatasetName } from "@/lib/datasetName";
 import UploadDatasetDialog from "@/components/landing/UploadDatasetDialog";
+import VisibilityToggle from "@/components/landing/VisibilityToggle";
 import { useDatasetUpload } from "@/hooks/useDatasetUpload";
 import {
   DatasetInfo,
   DatasetTask,
   HubStatusValue,
+  getDatasetHubSettings,
   getDatasetHubStatus,
   getDatasetInfo,
   renameDataset,
+  setDatasetTags,
+  setDatasetVisibility,
 } from "@/lib/replayApi";
 
 /** 16723 -> "16.7k", 950 -> "950" */
@@ -130,6 +142,243 @@ const TaskList: React.FC<{ tasks: DatasetTask[] }> = ({ tasks }) => {
   );
 };
 
+/** True when the logged-in user can write to `repoId`'s namespace, so the Hub
+ * settings editor should be offered. A bare repo id (no "/") lives under the
+ * user's own account, always writable. Mirrors DatasetPicker's upload gate:
+ * case-insensitive, false while loading / unauthenticated. */
+const useCanEditHub = (repoId: string): boolean => {
+  const { auth } = useHfAuth();
+  if (auth.status !== "authenticated") return false;
+  const ns = repoId.includes("/") ? repoId.split("/")[0] : auth.username;
+  if (ns == null) return false;
+  return auth.writableNamespaces.some(
+    (n) => n.toLowerCase() === ns.toLowerCase(),
+  );
+};
+
+/**
+ * Post-upload Hub settings editor: a popover (Settings gear trigger) with a
+ * Public|Private visibility toggle and a comma-separated tags editor, both
+ * pre-filled from the live Hub settings (`/datasets/hub-settings`). Visibility
+ * and tags save independently — each MUTATES the live repo, so each has its own
+ * Save/loading state, success toast, and inline error. On success the parent's
+ * status/tags refresh via `onChanged`.
+ *
+ * Only rendered for datasets whose namespace the user can write to (see
+ * useCanEditHub) — the same gate DatasetPicker uses for uploads.
+ */
+const HubSettingsEditor: React.FC<{
+  repoId: string;
+  onChanged?: () => void;
+}> = ({ repoId, onChanged }) => {
+  const { baseUrl, fetchWithHeaders } = useApi();
+  const { toast } = useToast();
+  const [open, setOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  const [isPrivate, setIsPrivate] = useState(false);
+  const [initialPrivate, setInitialPrivate] = useState(false);
+  const [savingVisibility, setSavingVisibility] = useState(false);
+  const [visibilityError, setVisibilityError] = useState<string | null>(null);
+
+  const [tagsInput, setTagsInput] = useState("");
+  const [initialTags, setInitialTags] = useState("");
+  const [savingTags, setSavingTags] = useState(false);
+  const [tagsError, setTagsError] = useState<string | null>(null);
+
+  // (Re)load the live settings each time the popover opens, so the fields
+  // always reflect what's actually on the Hub (incl. a change made elsewhere).
+  useEffect(() => {
+    if (!open) return;
+    const controller = new AbortController();
+    setLoading(true);
+    setLoadError(null);
+    setVisibilityError(null);
+    setTagsError(null);
+    getDatasetHubSettings(baseUrl, fetchWithHeaders, repoId, controller.signal)
+      .then((data) => {
+        setIsPrivate(data.private);
+        setInitialPrivate(data.private);
+        const joined = data.tags.join(", ");
+        setTagsInput(joined);
+        setInitialTags(joined);
+        setLoading(false);
+      })
+      .catch((e) => {
+        if (controller.signal.aborted) return;
+        setLoadError(
+          e instanceof ApiError && e.detail
+            ? e.detail
+            : "Couldn't load Hub settings.",
+        );
+        setLoading(false);
+      });
+    return () => controller.abort();
+  }, [open, baseUrl, fetchWithHeaders, repoId]);
+
+  const errText = (e: unknown): string =>
+    e instanceof ApiError && e.detail
+      ? e.detail
+      : e instanceof Error
+        ? e.message
+        : String(e);
+
+  const saveVisibility = async () => {
+    setSavingVisibility(true);
+    setVisibilityError(null);
+    try {
+      const res = await setDatasetVisibility(
+        baseUrl,
+        fetchWithHeaders,
+        repoId,
+        isPrivate,
+      );
+      setInitialPrivate(res.private);
+      toast({
+        title: "Visibility updated",
+        description: `${repoId} is now ${res.private ? "private" : "public"}.`,
+      });
+      onChanged?.();
+    } catch (e) {
+      setVisibilityError(errText(e));
+    } finally {
+      setSavingVisibility(false);
+    }
+  };
+
+  const saveTags = async () => {
+    setSavingTags(true);
+    setTagsError(null);
+    try {
+      const tags = tagsInput
+        .split(",")
+        .map((t) => t.trim())
+        .filter((t) => t.length > 0);
+      const res = await setDatasetTags(baseUrl, fetchWithHeaders, repoId, tags);
+      const joined = res.tags.join(", ");
+      setTagsInput(joined);
+      setInitialTags(joined);
+      toast({ title: "Tags updated", description: repoId });
+      onChanged?.();
+    } catch (e) {
+      setTagsError(errText(e));
+    } finally {
+      setSavingTags(false);
+    }
+  };
+
+  const visibilityChanged = isPrivate !== initialPrivate;
+  const tagsChanged = tagsInput.trim() !== initialTags.trim();
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          aria-label="Edit Hub settings"
+          title="Edit Hub settings"
+          className="inline-flex items-center gap-0.5 rounded p-0.5 text-gray-400 hover:text-gray-200"
+        >
+          <Settings2 className="h-3 w-3" />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent
+        align="end"
+        className="w-72 border-gray-700 bg-gray-900 text-xs text-gray-200"
+        // Same cmdk-guard rationale as UploadDatasetDialog: stop clicks from
+        // bubbling to a CommandItem row that would select/close the picker.
+        onClick={(e) => e.stopPropagation()}
+        onPointerDown={(e) => e.stopPropagation()}
+      >
+        {loading ? (
+          <div className="flex items-center gap-1.5 text-gray-400">
+            <Loader2 className="h-3 w-3 animate-spin" />
+            <span>Loading Hub settings…</span>
+          </div>
+        ) : loadError ? (
+          <p className="text-red-400">{loadError}</p>
+        ) : (
+          <div className="space-y-3">
+            <div className="space-y-1.5">
+              <Label
+                id={`hub-edit-visibility-${repoId}`}
+                className="font-normal text-gray-400"
+              >
+                Visibility
+              </Label>
+              <VisibilityToggle
+                value={isPrivate}
+                onChange={setIsPrivate}
+                idBase={`hub-edit-visibility-${repoId}`}
+                disabled={savingVisibility}
+              />
+              <p className="leading-snug text-gray-500">
+                {isPrivate
+                  ? "Only you can see this dataset."
+                  : "Anyone can see this dataset — recordings include your camera footage."}
+              </p>
+              {visibilityError && (
+                <p className="text-red-400">{visibilityError}</p>
+              )}
+              <Button
+                size="sm"
+                onClick={saveVisibility}
+                disabled={savingVisibility || !visibilityChanged}
+                className="h-7 w-full gap-1 bg-blue-500 text-xs text-white hover:bg-blue-600"
+              >
+                {savingVisibility ? (
+                  <>
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                    Saving…
+                  </>
+                ) : (
+                  "Save visibility"
+                )}
+              </Button>
+            </div>
+
+            <div className="space-y-1 border-t border-gray-800 pt-3">
+              <Label
+                htmlFor={`hub-edit-tags-${repoId}`}
+                className="font-normal text-gray-400"
+              >
+                Tags (comma-separated)
+              </Label>
+              <Input
+                id={`hub-edit-tags-${repoId}`}
+                value={tagsInput}
+                onChange={(e) => setTagsInput(e.target.value)}
+                placeholder="robotics, manipulation"
+                className="h-7 border-gray-600 bg-gray-800 text-xs text-white"
+              />
+              <p className="leading-snug text-gray-500">
+                The makermods, openbooth, and LeLab tags are always kept.
+              </p>
+              {tagsError && <p className="text-red-400">{tagsError}</p>}
+              <Button
+                size="sm"
+                onClick={saveTags}
+                disabled={savingTags || !tagsChanged}
+                className="h-7 w-full gap-1 bg-blue-500 text-xs text-white hover:bg-blue-600"
+              >
+                {savingTags ? (
+                  <>
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                    Saving…
+                  </>
+                ) : (
+                  "Save tags"
+                )}
+              </Button>
+            </div>
+          </div>
+        )}
+      </PopoverContent>
+    </Popover>
+  );
+};
+
 /**
  * Hub sync line for the info card: a muted status ("Local only" / "On Hub")
  * plus, when the dataset isn't confirmed on the Hub, an "Upload to Hub" button
@@ -146,6 +395,10 @@ const HubSyncRow: React.FC<{ repoId: string }> = ({ repoId }) => {
   const { toast } = useToast();
   const [status, setStatus] = useState<HubStatusValue>("unknown");
   const [hubUrl, setHubUrl] = useState<string | null>(null);
+  // Bumped after a visibility/tags edit to re-run the status fetch (the backend
+  // invalidates its hub-status cache on a change, so this re-reads fresh).
+  const [refreshKey, setRefreshKey] = useState(0);
+  const canEdit = useCanEditHub(repoId);
 
   const { uploading, start } = useDatasetUpload({
     repoId,
@@ -206,7 +459,7 @@ const HubSyncRow: React.FC<{ repoId: string }> = ({ repoId }) => {
         if (!controller.signal.aborted) setStatus("unknown");
       });
     return () => controller.abort();
-  }, [baseUrl, fetchWithHeaders, repoId]);
+  }, [baseUrl, fetchWithHeaders, repoId, refreshKey]);
 
   if (uploading) {
     return (
@@ -230,6 +483,12 @@ const HubSyncRow: React.FC<{ repoId: string }> = ({ repoId }) => {
           >
             <ExternalLink className="h-3 w-3" />
           </a>
+        )}
+        {canEdit && (
+          <HubSettingsEditor
+            repoId={repoId}
+            onChanged={() => setRefreshKey((k) => k + 1)}
+          />
         )}
       </div>
     );

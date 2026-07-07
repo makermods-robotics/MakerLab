@@ -1,8 +1,9 @@
 import React, { useState } from "react";
-import { Globe, Loader2, Lock, Upload as UploadIcon } from "lucide-react";
+import { Loader2, Upload as UploadIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import VisibilityToggle from "@/components/landing/VisibilityToggle";
 import {
   Popover,
   PopoverContent,
@@ -93,40 +94,11 @@ const UploadDatasetDialog: React.FC<{
             >
               Visibility
             </Label>
-            <div
-              role="radiogroup"
-              aria-labelledby={`hub-upload-visibility-${repoId}`}
-              className="flex rounded-md border border-gray-700 bg-gray-800 p-0.5"
-            >
-              <button
-                type="button"
-                role="radio"
-                aria-checked={!isPrivate}
-                onClick={() => setIsPrivate(false)}
-                className={`flex flex-1 items-center justify-center gap-1.5 rounded px-2 py-1 text-xs font-medium transition-colors ${
-                  !isPrivate
-                    ? "bg-gray-600 text-white"
-                    : "text-gray-400 hover:text-gray-200"
-                }`}
-              >
-                <Globe className="h-3 w-3" />
-                Public
-              </button>
-              <button
-                type="button"
-                role="radio"
-                aria-checked={isPrivate}
-                onClick={() => setIsPrivate(true)}
-                className={`flex flex-1 items-center justify-center gap-1.5 rounded px-2 py-1 text-xs font-medium transition-colors ${
-                  isPrivate
-                    ? "bg-gray-600 text-white"
-                    : "text-gray-400 hover:text-gray-200"
-                }`}
-              >
-                <Lock className="h-3 w-3" />
-                Private
-              </button>
-            </div>
+            <VisibilityToggle
+              value={isPrivate}
+              onChange={setIsPrivate}
+              idBase={`hub-upload-visibility-${repoId}`}
+            />
             <p className="leading-snug text-gray-500">
               {isPrivate
                 ? "Only you can see this dataset."

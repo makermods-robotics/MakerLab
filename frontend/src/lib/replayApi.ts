@@ -78,6 +78,69 @@ export async function getDatasetHubStatus(
   );
 }
 
+/** Current Hub-side visibility + tags for a dataset already on the Hub, used to
+ * pre-fill the post-upload editor. `tags` is the live card `tags:` list (org
+ * tags included). */
+export interface HubSettings {
+  repo_id: string;
+  private: boolean;
+  tags: string[];
+}
+
+/** Read the current visibility + tags of a Hub dataset. Throws ApiError (400
+ * offline, 403 no read/write access, 502 Hub failure) with the backend message
+ * in `.detail`. */
+export async function getDatasetHubSettings(
+  baseUrl: string,
+  fetcher: Fetcher,
+  repoId: string,
+  signal?: AbortSignal,
+): Promise<HubSettings> {
+  return apiRequest<HubSettings>(
+    baseUrl,
+    fetcher,
+    `/datasets/hub-settings?repo_id=${encodeURIComponent(repoId)}`,
+    { signal, action: "Hub settings" },
+  );
+}
+
+/** Flip a Hub dataset's visibility (public <-> private). MUTATES the live repo.
+ * Throws ApiError (400 offline, 403 no write access, 502 Hub failure) with the
+ * backend message in `.detail`. */
+export async function setDatasetVisibility(
+  baseUrl: string,
+  fetcher: Fetcher,
+  repoId: string,
+  isPrivate: boolean,
+  signal?: AbortSignal,
+): Promise<{ repo_id: string; private: boolean }> {
+  return apiRequest(baseUrl, fetcher, "/datasets/visibility", {
+    method: "POST",
+    body: { repo_id: repoId, private: isPrivate },
+    action: "Set visibility",
+    signal,
+  });
+}
+
+/** Replace a Hub dataset card's `tags:`. The backend re-adds the required org
+ * tags, so the returned list may include tags beyond the ones passed. MUTATES
+ * the live card. Throws ApiError (400 offline, 403 no write access, 502 Hub
+ * failure) with the backend message in `.detail`. */
+export async function setDatasetTags(
+  baseUrl: string,
+  fetcher: Fetcher,
+  repoId: string,
+  tags: string[],
+  signal?: AbortSignal,
+): Promise<{ repo_id: string; tags: string[] }> {
+  return apiRequest(baseUrl, fetcher, "/datasets/tags", {
+    method: "POST",
+    body: { repo_id: repoId, tags },
+    action: "Set tags",
+    signal,
+  });
+}
+
 export type UploadState = "idle" | "running" | "done" | "error";
 
 /** Live status of the single background upload. `dataset_url` is set once
