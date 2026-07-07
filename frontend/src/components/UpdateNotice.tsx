@@ -13,6 +13,8 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Card, CardContent } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { useApi } from "@/contexts/ApiContext";
 import { useToast } from "@/hooks/use-toast";
@@ -43,12 +45,12 @@ const UpdateNotice = () => {
     try {
       await navigator.clipboard.writeText(status.update_command);
       toast({
-        title: "Copied",
+        title: "copied",
         description: "Update command copied to clipboard.",
       });
     } catch {
       toast({
-        title: "Copy failed",
+        title: "copy failed",
         description: "Select and copy the command manually.",
         variant: "destructive",
       });
@@ -65,19 +67,19 @@ const UpdateNotice = () => {
       const body: { success: boolean; message: string; output: string } =
         await r.json();
       if (body.success) {
-        toast({ title: "Updated", description: body.message });
+        toast({ title: "updated", description: body.message });
         dismiss(false);
       } else {
         setOutput(body.output || body.message);
         toast({
-          title: "Update failed",
+          title: "update failed",
           description: body.message,
           variant: "destructive",
         });
       }
     } catch (e) {
       toast({
-        title: "Update failed",
+        title: "update failed",
         description: e instanceof Error ? e.message : String(e),
         variant: "destructive",
       });
@@ -94,18 +96,18 @@ const UpdateNotice = () => {
       }}
     >
       <DialogContent
-        className="bg-slate-800 border-slate-700 text-white max-w-lg"
+        className="max-w-lg border-border bg-card text-card-foreground"
         onOpenAutoFocus={(e) => e.preventDefault()}
       >
         <DialogHeader>
-          <DialogTitle className="flex items-center gap-3 text-white">
-            <Sparkles className="w-5 h-5 text-amber-400" />
+          <DialogTitle className="flex items-center gap-3 text-foreground">
+            <Sparkles className="h-5 w-5 text-brand" />
             MakerLab update available
           </DialogTitle>
-          <DialogDescription className="text-slate-300">
-            You're {behind} 😱.
+          <DialogDescription className="text-muted-foreground">
+            You're {behind}.
             <br />
-            Update to get the latest fixes and features 🤗.
+            Update to get the latest fixes and features.
             {status.compare_url && (
               <>
                 {" "}
@@ -113,9 +115,9 @@ const UpdateNotice = () => {
                   href={status.compare_url}
                   target="_blank"
                   rel="noreferrer"
-                  className="text-sky-300 underline hover:text-sky-200"
+                  className="text-info underline underline-offset-4 hover:opacity-80"
                 >
-                  See what changed
+                  see what changed
                 </a>
                 .
               </>
@@ -124,62 +126,63 @@ const UpdateNotice = () => {
         </DialogHeader>
 
         <div className="space-y-4">
+          <Badge variant="outline">{behind}</Badge>
           <Collapsible>
-            <CollapsibleTrigger className="group flex items-center gap-1.5 text-xs font-medium text-slate-300 hover:text-white transition-colors">
-              <ChevronRight className="w-3.5 h-3.5 transition-transform group-data-[state=open]:rotate-90" />
-              Or update manually
+            <CollapsibleTrigger className="group flex items-center gap-1.5 font-display text-xs font-semibold text-muted-foreground transition-colors hover:text-foreground">
+              <ChevronRight className="h-3.5 w-3.5 transition-transform group-data-[state=open]:rotate-90" />
+              update manually
             </CollapsibleTrigger>
             <CollapsibleContent className="pt-2">
-              <div className="flex items-start gap-2">
-                <code className="min-w-0 flex-1 px-2 py-1.5 rounded bg-slate-900 text-sky-300 text-xs break-all whitespace-pre-wrap">
-                  {status.update_command}
-                </code>
-                <Button
-                  variant="outline"
-                  size="icon"
-                  onClick={copyCommand}
-                  title="Copy command"
-                  className="shrink-0 bg-slate-900 border-slate-600 text-white hover:bg-slate-700"
-                >
-                  <Copy className="w-4 h-4" />
-                </Button>
-              </div>
+              <Card variant="flat">
+                <CardContent className="flex items-start gap-2 p-3">
+                  <code className="min-w-0 flex-1 whitespace-pre-wrap break-all font-mono text-xs text-info">
+                    {status.update_command}
+                  </code>
+                  <Button
+                    variant="secondary"
+                    size="icon"
+                    onClick={copyCommand}
+                    title="copy command"
+                    className="shrink-0"
+                  >
+                    <Copy className="h-4 w-4" />
+                  </Button>
+                </CardContent>
+              </Card>
             </CollapsibleContent>
           </Collapsible>
 
           {output && (
-            <pre className="max-h-40 overflow-auto rounded bg-slate-900 p-2 text-xs text-slate-300 whitespace-pre-wrap">
+            <pre className="max-h-40 overflow-auto rounded-md border border-border bg-primary p-3 font-mono text-xs text-primary-foreground whitespace-pre-wrap">
               {output}
             </pre>
           )}
 
           <div className="flex items-center justify-between gap-3 pt-1">
-            <label className="flex items-center gap-2 text-sm text-slate-300">
+            <label className="flex items-center gap-2 text-sm text-muted-foreground">
               <Checkbox
                 checked={dontAsk}
                 onCheckedChange={(v) => setDontAsk(v === true)}
-                className="border-slate-300 data-[state=checked]:bg-slate-300 data-[state=checked]:text-slate-900"
               />
-              Don't ask me again
+              don't ask me again
             </label>
             <div className="flex items-center gap-2">
               <Button
                 variant="ghost"
                 onClick={() => dismiss(dontAsk)}
                 disabled={updating}
-                className="text-slate-300 hover:bg-slate-700 hover:text-white"
               >
-                Later
+                later
               </Button>
               {status.can_auto_update && (
                 <Button onClick={runUpdate} disabled={updating}>
                   {updating ? (
                     <>
-                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                      Updating…
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                      updating…
                     </>
                   ) : (
-                    "Update now"
+                    "update now"
                   )}
                 </Button>
               )}
