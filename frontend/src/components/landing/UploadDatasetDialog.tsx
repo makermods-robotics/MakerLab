@@ -1,7 +1,6 @@
 import React, { useState } from "react";
-import { Loader2, Upload as UploadIcon } from "lucide-react";
+import { Globe, Loader2, Lock, Upload as UploadIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -73,24 +72,66 @@ const UploadDatasetDialog: React.FC<{
       <PopoverContent
         align={align}
         className="w-72 border-gray-700 bg-gray-900 text-xs text-gray-200"
+        // This popover is portaled to the body, but React synthetic events
+        // still bubble through the React tree to the cmdk CommandItem that
+        // renders our trigger (see DatasetPicker). cmdk's CommandItem selects
+        // the row on click, so a click on any control in here (the
+        // Public/Private toggle buttons, the Tags input, the Upload button)
+        // would otherwise select the dataset and close the picker. Stop the
+        // click (and pointer-down) from reaching cmdk. We only stopPropagation
+        // — never preventDefault — so focusing the input and the buttons' own
+        // handlers keep working. Radix's own outside-click / Escape close is
+        // driven by events *outside* this content, so it's unaffected.
+        onClick={(e) => e.stopPropagation()}
+        onPointerDown={(e) => e.stopPropagation()}
       >
         <div className="space-y-3">
-          <div className="flex items-start gap-2">
-            <Checkbox
-              id={`hub-upload-private-${repoId}`}
-              checked={isPrivate}
-              onCheckedChange={(c) => setIsPrivate(c as boolean)}
-              className="mt-0.5"
-            />
+          <div className="space-y-1.5">
             <Label
-              htmlFor={`hub-upload-private-${repoId}`}
-              className="cursor-pointer font-normal leading-snug text-gray-300"
+              id={`hub-upload-visibility-${repoId}`}
+              className="font-normal text-gray-400"
             >
-              Private dataset
-              <span className="mt-0.5 block text-gray-500">
-                Recordings include your camera footage.
-              </span>
+              Visibility
             </Label>
+            <div
+              role="radiogroup"
+              aria-labelledby={`hub-upload-visibility-${repoId}`}
+              className="flex rounded-md border border-gray-700 bg-gray-800 p-0.5"
+            >
+              <button
+                type="button"
+                role="radio"
+                aria-checked={!isPrivate}
+                onClick={() => setIsPrivate(false)}
+                className={`flex flex-1 items-center justify-center gap-1.5 rounded px-2 py-1 text-xs font-medium transition-colors ${
+                  !isPrivate
+                    ? "bg-gray-600 text-white"
+                    : "text-gray-400 hover:text-gray-200"
+                }`}
+              >
+                <Globe className="h-3 w-3" />
+                Public
+              </button>
+              <button
+                type="button"
+                role="radio"
+                aria-checked={isPrivate}
+                onClick={() => setIsPrivate(true)}
+                className={`flex flex-1 items-center justify-center gap-1.5 rounded px-2 py-1 text-xs font-medium transition-colors ${
+                  isPrivate
+                    ? "bg-gray-600 text-white"
+                    : "text-gray-400 hover:text-gray-200"
+                }`}
+              >
+                <Lock className="h-3 w-3" />
+                Private
+              </button>
+            </div>
+            <p className="leading-snug text-gray-500">
+              {isPrivate
+                ? "Only you can see this dataset."
+                : "Anyone can see this dataset — recordings include your camera footage."}
+            </p>
           </div>
           <div className="space-y-1">
             <Label
