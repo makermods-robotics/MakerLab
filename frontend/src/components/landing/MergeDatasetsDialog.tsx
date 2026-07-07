@@ -157,13 +157,14 @@ const MergeDatasetsDialog: React.FC<Props> = ({
                   datasets.map((d) => (
                     <label
                       key={d.repo_id}
-                      className="flex items-center gap-2 p-2 hover:bg-slate-700/40 cursor-pointer text-sm"
+                      className="flex items-start gap-2 p-2 hover:bg-slate-700/40 cursor-pointer text-sm"
                     >
                       <Checkbox
+                        className="shrink-0 mt-0.5"
                         checked={selected.has(d.repo_id)}
                         onCheckedChange={() => toggle(d.repo_id)}
                       />
-                      <span className="truncate">{d.repo_id}</span>
+                      <span className="min-w-0 break-all">{d.repo_id}</span>
                     </label>
                   ))
                 )}
