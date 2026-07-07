@@ -158,9 +158,9 @@ const ManageCachesDialog: React.FC<Props> = ({
                 return (
                   <div
                     key={d.repo_id}
-                    className="flex items-center gap-2 p-2 text-sm"
+                    className="flex items-start gap-2 p-2 text-sm"
                   >
-                    <span className="flex-1 truncate">{d.repo_id}</span>
+                    <span className="min-w-0 flex-1 break-all">{d.repo_id}</span>
                     {size != null && (
                       <span className="shrink-0 text-xs text-slate-400">
                         {formatBytes(size)}

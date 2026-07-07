@@ -225,10 +225,12 @@ const DatasetPicker: React.FC<DatasetPickerProps> = ({
       key={d.repo_id}
       value={d.repo_id}
       onSelect={() => handlePick(d)}
-      className="text-white aria-selected:bg-gray-700"
+      className="items-start text-white aria-selected:bg-gray-700"
     >
-      <span className="flex-1 truncate">{d.repo_id}</span>
-      {d.private && <span className="text-xs text-amber-400">private</span>}
+      <span className="min-w-0 flex-1 break-all">{d.repo_id}</span>
+      {d.private && (
+        <span className="shrink-0 text-xs text-amber-400">private</span>
+      )}
       {/* Upload to Hub — local rows only (a "both" row is already on the Hub).
           Opens the same confirm popover the info card uses; the row shows a
           live "Uploading…" state while the background push runs. */}

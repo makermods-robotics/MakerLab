@@ -12,6 +12,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { validateDatasetName } from "@/lib/datasetName";
+import { useHfAuth } from "@/contexts/HfAuthContext";
 
 interface CreateDatasetDialogProps {
   open: boolean;
@@ -38,6 +39,12 @@ const CreateDatasetDialog: React.FC<CreateDatasetDialogProps> = ({
 }) => {
   const [name, setName] = useState("");
 
+  // The namespace (`<hf_username>/`) is prepended downstream at record start,
+  // so surface it here as a live hint. Only meaningful when the user hasn't
+  // typed their own "namespace/name" and we know who they are.
+  const { auth } = useHfAuth();
+  const username = auth.status === "authenticated" ? auth.username : null;
+
   React.useEffect(() => {
     if (open) setName("");
   }, [open]);
@@ -55,6 +62,13 @@ const CreateDatasetDialog: React.FC<CreateDatasetDialogProps> = ({
   });
   const nameError = trimmed === "" ? null : validateDatasetName(trimmed);
   const canCreate = trimmed !== "" && nameError === null && !matchesExisting;
+
+  // Live preview of the resulting repo id. Only shown when we know the
+  // namespace and the user hasn't already typed their own "namespace/name"
+  // (a "/" means they're supplying the namespace themselves — don't double
+  // it up). Falls back to the placeholder while the field is empty.
+  const showNamespaceHint = username !== null && !trimmed.includes("/");
+  const previewName = trimmed === "" ? "my_dataset" : trimmed;
 
   const handleConfirm = () => {
     if (!canCreate) return;
@@ -98,9 +112,16 @@ const CreateDatasetDialog: React.FC<CreateDatasetDialogProps> = ({
               <p className="mt-1 text-xs text-red-400">
                 A dataset with this name already exists.
               </p>
+            ) : nameError ? (
+              <p className="mt-1 text-xs text-red-400">{nameError}</p>
             ) : (
-              nameError && (
-                <p className="mt-1 text-xs text-red-400">{nameError}</p>
+              showNamespaceHint && (
+                <p className="mt-1 text-xs text-gray-400">
+                  Creates{" "}
+                  <span className="font-mono text-gray-300">
+                    {username}/{previewName}
+                  </span>
+                </p>
               )
             )}
           </div>

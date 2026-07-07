@@ -517,8 +517,12 @@ const Landing = () => {
       >
         <AlertDialogContent className="bg-gray-900 border-gray-800 text-white">
           <AlertDialogHeader>
-            <AlertDialogTitle>
-              Delete "{pendingDeleteDataset?.repo_id}"?
+            <AlertDialogTitle className="break-words">
+              Delete "
+              <span className="break-all">
+                {pendingDeleteDataset?.repo_id}
+              </span>
+              "?
             </AlertDialogTitle>
             <AlertDialogDescription className="text-gray-400">
               This permanently removes the dataset from local disk — including
