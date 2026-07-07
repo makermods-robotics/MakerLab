@@ -444,7 +444,7 @@ const ConfigurationMode: React.FC = () => {
     if (needsUpload) {
       setUploadError(null);
       setIsStarting(true);
-      const err = await startUpload([], true /* private */);
+      const err = await startUpload([], false /* public: LeLab uploads are public by default */);
       if (err) {
         setUploadError(err);
         setIsStarting(false);

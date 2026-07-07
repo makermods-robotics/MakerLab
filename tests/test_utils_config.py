@@ -717,24 +717,40 @@ def test_bimanual_base_id_uses_valid_name_else_default() -> None:
     assert bimanual_base_id("../escape") == DEFAULT_BIMANUAL_BASE
 
 
-def test_with_lelab_tag_appends_to_existing_tags() -> None:
-    from lelab.utils.config import LELAB_TAG, with_lelab_tag
+def test_with_lelab_tag_appends_required_tags_to_existing() -> None:
+    from lelab.utils.config import REQUIRED_HUB_TAGS, with_lelab_tag
 
-    assert with_lelab_tag(["robotics", "lerobot"]) == ["robotics", "lerobot", LELAB_TAG]
+    # Caller tags come first, then every required tag in order.
+    assert with_lelab_tag(["robotics", "lerobot"]) == ["robotics", "lerobot", *REQUIRED_HUB_TAGS]
 
 
 def test_with_lelab_tag_handles_none_and_empty() -> None:
-    from lelab.utils.config import LELAB_TAG, with_lelab_tag
+    from lelab.utils.config import REQUIRED_HUB_TAGS, with_lelab_tag
 
-    assert with_lelab_tag(None) == [LELAB_TAG]
-    assert with_lelab_tag([]) == [LELAB_TAG]
+    assert with_lelab_tag(None) == list(REQUIRED_HUB_TAGS)
+    assert with_lelab_tag([]) == list(REQUIRED_HUB_TAGS)
 
 
 def test_with_lelab_tag_dedupes() -> None:
     from lelab.utils.config import LELAB_TAG, with_lelab_tag
 
-    # Caller-supplied LeLab is not duplicated, and order is preserved.
-    assert with_lelab_tag(["robotics", LELAB_TAG, "lerobot"]) == ["robotics", LELAB_TAG, "lerobot"]
+    # Caller-supplied required tags are not duplicated, and order is preserved.
+    out = with_lelab_tag(["robotics", LELAB_TAG, "lerobot", "makermods"])
+    # No tag appears twice.
+    assert len(out) == len(set(out))
+    # The caller's positions for already-present tags are preserved.
+    assert out[:4] == ["robotics", LELAB_TAG, "lerobot", "makermods"]
+
+
+def test_with_lelab_tag_always_includes_makermods_and_openbooth() -> None:
+    """The core requirement: every Hub push through this funnel carries the
+    org/product tags, regardless of what the caller supplies (or omits)."""
+    from lelab.utils.config import with_lelab_tag
+
+    for caller in (None, [], ["robotics"], ["makermods"], ["openbooth", "x"]):
+        out = with_lelab_tag(caller)
+        assert "makermods" in out
+        assert "openbooth" in out
 
 
 def test_clear_config_references_unassigns_matching_records(tmp_lerobot_home: Path) -> None:

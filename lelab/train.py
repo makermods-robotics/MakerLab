@@ -23,7 +23,23 @@ import re
 import torch
 from pydantic import BaseModel
 
+from lelab.utils.config import REQUIRED_HUB_TAGS
+
 _SLUG_RE = re.compile(r"[^a-zA-Z0-9._-]+")
+
+
+def _policy_hub_flags() -> list[str]:
+    """CLI flags making a pushed policy PUBLIC and carrying the required Hub tags.
+
+    LeRobot exposes `--policy.private` and `--policy.tags` (draccus fields on
+    PreTrainedConfig). `private false` maps to `create_repo(private=False)`;
+    `--policy.tags '[...]'` is merged into the model-card metadata (unioned with
+    lerobot's own robotics/lerobot/<model-type> defaults). Emitted only when the
+    caller is actually pushing the policy. The tag list is passed as a single
+    draccus-parsable argv token (no spaces).
+    """
+    tag_list = "[" + ",".join(REQUIRED_HUB_TAGS) + "]"
+    return ["--policy.private", "false", "--policy.tags", tag_list]
 
 
 def _resolve_device(device: str | None) -> str:
@@ -180,6 +196,9 @@ def build_training_command(
         cmd.extend(["--policy.push_to_hub", "true" if request.policy_push_to_hub else "false"])
         if request.policy_push_to_hub and request.policy_repo_id:
             cmd.extend(["--policy.repo_id", request.policy_repo_id])
+        if request.policy_push_to_hub:
+            # Public + required Hub tags, same global default as datasets.
+            cmd.extend(_policy_hub_flags())
         if request.job_name:
             cmd.extend(["--job_name", request.job_name])
         return cmd
@@ -219,6 +238,9 @@ def build_training_command(
     cmd.extend(["--policy.push_to_hub", "true" if request.policy_push_to_hub else "false"])
     if request.policy_push_to_hub and request.policy_repo_id:
         cmd.extend(["--policy.repo_id", request.policy_repo_id])
+    if request.policy_push_to_hub:
+        # Public + required Hub tags, same global default as datasets.
+        cmd.extend(_policy_hub_flags())
 
     # Logging / checkpointing
     cmd.extend(["--log_freq", str(request.log_freq)])

@@ -128,6 +128,30 @@ def test_push_to_hub_emits_repo_id_only_when_enabled() -> None:
     )
     assert _arg_value(on, "--policy.push_to_hub") == "true"
     assert _arg_value(on, "--policy.repo_id") == "me/x"
+    # A pushed policy is public and carries the required Hub tags.
+    assert _arg_value(on, "--policy.private") == "false"
+    assert _arg_value(on, "--policy.tags") == "[makermods,openbooth,LeLab]"
+    # When not pushing, no privacy/tags flags are emitted.
+    assert "--policy.private" not in off
+    assert "--policy.tags" not in off
+
+
+def test_resume_push_to_hub_emits_public_and_tags() -> None:
+    """The resume branch must also make a pushed policy public + tagged."""
+    from lelab.train import TrainingRequest, build_training_command
+
+    req = TrainingRequest(
+        dataset_repo_id="x",
+        resume=True,
+        config_path="/runs/abc/checkpoints/5000/pretrained_model/train_config.json",
+        policy_push_to_hub=True,
+        policy_repo_id="me/x",
+    )
+    cmd = build_training_command(req, "/tmp/new")
+
+    assert _arg_value(cmd, "--policy.push_to_hub") == "true"
+    assert _arg_value(cmd, "--policy.private") == "false"
+    assert _arg_value(cmd, "--policy.tags") == "[makermods,openbooth,LeLab]"
 
 
 def test_seed_omitted_when_none() -> None:

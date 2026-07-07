@@ -640,14 +640,17 @@ class HfCloudJobRunner:
             # — same behaviour as before.
             return
 
-        self._log_line(f"[upload] dataset {repo_id} not on Hub; pushing local copy (private)...")
+        self._log_line(f"[upload] dataset {repo_id} not on Hub; pushing local copy (public)...")
         from lerobot.datasets import LeRobotDataset
 
         try:
-            # Private by default: a dataset the user only had locally shouldn't
-            # be silently made public by an implicit cloud-run upload. Mirrors
-            # the browser upload-then-train flow (which also uploads private).
-            LeRobotDataset(repo_id).push_to_hub(tags=with_lelab_tag(None), private=True)
+            # Public by default: LeLab's global policy is that datasets it pushes
+            # to the Hub are public and carry the required org/product tags (see
+            # with_lelab_tag / REQUIRED_HUB_TAGS). This implicit cloud-run upload
+            # follows that same default so all LeLab-produced datasets are
+            # discoverable. (This intentionally reverses the earlier private
+            # default — an implicit upload of a local-only dataset is now public.)
+            LeRobotDataset(repo_id).push_to_hub(tags=with_lelab_tag(None), private=False)
         except Exception as exc:
             msg = f"Failed to upload local dataset {repo_id} to Hub: {exc}"
             self._log_line(f"[upload] {msg}")

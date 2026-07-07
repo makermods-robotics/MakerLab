@@ -64,12 +64,26 @@ DISMISSED_HUB_JOBS_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/dismi
 # query the Hub for LeLab-produced datasets and compute usage metrics.
 LELAB_TAG = "LeLab"
 
+# Tags injected onto EVERY dataset (and, where the trainer supports it, every
+# policy) pushed to the Hub from LeLab. These are the org/product tags used to
+# discover MakerMods / OpenBooth artifacts on the Hub. LELAB_TAG is kept too so
+# existing LeLab usage queries keep working. This list is the single source of
+# truth — add to it here rather than sprinkling literals at push sites.
+REQUIRED_HUB_TAGS = ["makermods", "openbooth", LELAB_TAG]
+
 
 def with_lelab_tag(tags: list[str] | None) -> list[str]:
-    """Return `tags` with LELAB_TAG appended (deduped, order preserved)."""
+    """Return `tags` with the REQUIRED_HUB_TAGS appended (deduped, order preserved).
+
+    Despite the historical name, this appends every tag in REQUIRED_HUB_TAGS
+    (currently "makermods", "openbooth", and LELAB_TAG), so every Hub push made
+    through this funnel carries the org/product tags. Caller-supplied tags come
+    first and are never duplicated.
+    """
     out = list(tags or [])
-    if LELAB_TAG not in out:
-        out.append(LELAB_TAG)
+    for tag in REQUIRED_HUB_TAGS:
+        if tag not in out:
+            out.append(tag)
     return out
 
 

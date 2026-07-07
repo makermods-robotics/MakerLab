@@ -35,7 +35,7 @@ const UploadDatasetDialog: React.FC<{
 }> = ({ repoId, start, children, align = "end" }) => {
   const { toast } = useToast();
   const [popoverOpen, setPopoverOpen] = useState(false);
-  const [isPrivate, setIsPrivate] = useState(true);
+  const [isPrivate, setIsPrivate] = useState(false);
   const [tagsInput, setTagsInput] = useState("");
   const [starting, setStarting] = useState(false);
 
