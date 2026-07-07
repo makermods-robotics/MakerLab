@@ -75,6 +75,23 @@ def tmp_lerobot_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return cache
 
 
+@pytest.fixture(autouse=True)
+def _reset_hub_listing_caches() -> Iterator[None]:
+    """Clear the short-TTL Hub-listing caches (/datasets and /jobs/hub) before
+    each test so cached results from one test never leak into the next. Both
+    caches are module-global and process-lived, so without this a test that
+    populates them would make a later test see stale data instead of its own
+    mocked Hub response."""
+    import lelab.datasets as _ds
+    import lelab.server as _srv
+
+    _ds.invalidate_dataset_listing_cache()
+    _srv.invalidate_hub_jobs_cache()
+    yield
+    _ds.invalidate_dataset_listing_cache()
+    _srv.invalidate_hub_jobs_cache()
+
+
 @pytest.fixture
 def mock_lerobot_record(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     """Patch `lerobot.record.record` so no real recording loop runs.

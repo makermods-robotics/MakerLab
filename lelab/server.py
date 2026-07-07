@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import asyncio
+import concurrent.futures
 import contextlib
 import io
 import json
@@ -28,6 +29,7 @@ import zipfile
 from pathlib import Path
 from typing import Any, Literal
 
+import httpx
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -583,6 +585,50 @@ def datasets_hub_status(repo_id: str):
     return dataset_browser.get_hub_status(repo_id)
 
 
+@app.get("/datasets/hub-settings")
+def datasets_hub_settings(repo_id: str):
+    """Current Hub-side visibility + tags for a dataset, for pre-filling the
+    post-upload editor. Returns ``{repo_id, private, tags}``. 400 offline;
+    403/502 on a Hub failure. repo_id is a query param (repo ids contain '/')."""
+    try:
+        return dataset_browser.get_hub_settings(repo_id)
+    except dataset_browser.DatasetHubEditError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.message) from exc
+
+
+class DatasetVisibilityBody(BaseModel):
+    repo_id: str
+    private: bool
+
+
+@app.post("/datasets/visibility")
+def datasets_visibility(body: DatasetVisibilityBody):
+    """Flip a Hub dataset's visibility (public <-> private). MUTATES the live
+    repo. 400 offline; 403 when the token can't write the namespace; 502 on any
+    other Hub failure. Invalidates the cached hub-status so the card re-reads."""
+    try:
+        return dataset_browser.set_dataset_visibility(body.repo_id, body.private)
+    except dataset_browser.DatasetHubEditError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.message) from exc
+
+
+class DatasetTagsBody(BaseModel):
+    repo_id: str
+    tags: list[str]
+
+
+@app.post("/datasets/tags")
+def datasets_tags(body: DatasetTagsBody):
+    """Replace a Hub dataset card's ``tags:`` metadata. User tags run through
+    with_lelab_tag first, so the required org tags are never dropped. MUTATES
+    the live card. 400 offline; 403 no write permission; 502 other Hub failure.
+    Returns the final tag list actually written."""
+    try:
+        return dataset_browser.set_dataset_tags(body.repo_id, body.tags)
+    except dataset_browser.DatasetHubEditError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.message) from exc
+
+
 class DatasetRenameBody(BaseModel):
     repo_id: str
     new_name: str
@@ -841,6 +887,61 @@ def _hub_job_stage(ji) -> str:
     return (ji.status.stage or "").upper() if ji.status else ""
 
 
+# Errors a per-author Hub model listing may raise that must degrade to "empty for
+# this author" instead of 500ing /jobs/hub. httpx.HTTPError is the base of
+# ConnectError / TimeoutException / TransportError — what a GFW-killed TLS
+# connection raises — plus HfHubHTTPError for HTTP-status failures and OSError for
+# lower-level socket failures.
+_HUB_MODEL_LISTING_ERRORS = (HfHubHTTPError, httpx.HTTPError, OSError)
+
+# Bounded per-author fan-out for the model listing. Small cap (a handful of
+# authors); 5s per-author budget so a blocked author gives up fast behind the GFW
+# rather than hanging on huggingface_hub's default long timeout, while a merely
+# slow-but-working Hub still succeeds.
+_HUB_MODEL_FANOUT_MAX_WORKERS = 8
+_HUB_MODEL_FANOUT_TIMEOUT_S = 5.0
+
+# Short-TTL cache for the /jobs/hub response. Startup + navigation re-hit this in
+# quick succession; caching avoids re-fanning-out to the (slow/flaky) Hub each
+# time. TTL uses time.monotonic() (app runtime, immune to wall-clock jumps).
+_HUB_JOBS_CACHE_TTL_S = 45.0
+_hub_jobs_cache_lock = threading.Lock()
+_hub_jobs_cache: dict[str, Any] | None = None  # {"at": monotonic, "value": {...}}
+
+
+def invalidate_hub_jobs_cache() -> None:
+    """Drop the cached /jobs/hub response so the next call re-fetches. Called
+    after a Hub model delete so the removal reflects immediately."""
+    global _hub_jobs_cache
+    with _hub_jobs_cache_lock:
+        _hub_jobs_cache = None
+
+
+def _list_author_models(api, author: str) -> list:
+    """All lelab-relevant model repos for one author, as a materialized list.
+
+    Collapses what used to be TWO calls per author (a `filter="lerobot"` call plus
+    an unfiltered fallback) into ONE unfiltered `list_models(author=...)` call,
+    filtering client-side. A repo qualifies if EITHER:
+
+      * it carries the `lerobot` library tag (what push_to_hub stamps), OR
+      * its name matches the lelab run-repo pattern (the "_<timestamp>" suffix) —
+        this pulls in the empty repos a crashed cloud run pre-creates but never
+        tags, which the untracked-cleanup path exists to delete.
+
+    This is the same union the old two-pass code produced, at half the calls.
+    The generator is materialized here (inside the fan-out worker) so the network
+    I/O happens under the per-author timeout budget.
+    """
+    out = []
+    for m in api.list_models(author=author, limit=200, expand=["lastModified", "private", "tags"]):
+        tags = getattr(m, "tags", None) or []
+        name = m.id.split("/", 1)[-1]
+        if "lerobot" in tags or _RUN_REPO_RE.search(name):
+            out.append(m)
+    return out
+
+
 @app.get("/jobs/hub")
 def list_hub_jobs():
     """List the user's HF Cloud compute Jobs and their uploaded LeRobot model
@@ -852,8 +953,17 @@ def list_hub_jobs():
     Declared before `/jobs/{job_id}` so FastAPI's first-match routing doesn't
     treat "hub" as a job id.
     """
+    global _hub_jobs_cache
+
+    now = time.monotonic()
+    with _hub_jobs_cache_lock:
+        if _hub_jobs_cache is not None and (now - _hub_jobs_cache["at"]) < _HUB_JOBS_CACHE_TTL_S:
+            return _hub_jobs_cache["value"]
+
     info = cached_whoami()
     if info is None:
+        # Not cached: unauthenticated is cheap to recompute and self-heals the
+        # moment a token appears.
         return {"authenticated": False, "jobs": [], "models": []}
     api = shared_hf_api()
 
@@ -909,38 +1019,40 @@ def list_hub_jobs():
             }
         )
 
-    for author in authors:
-        # Two passes, unioned + deduped by _add():
-        #
-        # 1. The `lerobot` library tag — lowercase, which is what LeRobot's
-        #    push_to_hub actually stamps (the old `filter="LeRobot"` was both the
-        #    wrong case AND excluded any repo without a tag, so it returned
-        #    NOTHING here — hiding even a successfully-pushed run).
-        # 2. An UNFILTERED author listing restricted to lelab run-repo names
-        #    (the "_<timestamp>" suffix). This is what pulls in the empty repos
-        #    a crashed cloud run pre-creates but never populates (no commit, no
-        #    tags) — the orphans the untracked-cleanup path exists to delete.
-        #    Restricting to the run-repo naming keeps a user's unrelated personal
-        #    models out of the list; those are theirs, not lelab's to surface.
-        #
-        # expand=["lastModified", ...] is requested because the default listing
-        # returns last_modified=None, which would collapse the sort key.
-        try:
-            for m in api.list_models(
-                author=author, filter="lerobot", limit=200, expand=["lastModified", "private"]
-            ):
+    # Fan out the per-author model listing concurrently (bounded pool). Each
+    # author is now ONE unfiltered list_models call, filtered client-side by
+    # _list_author_models (union of the `lerobot` tag and the lelab run-repo
+    # naming) — half the calls of the old two-pass approach, same result set.
+    # Each author's call is guarded so a GFW-killed connection / timeout / slow
+    # author for one author degrades to "no models from that author" instead of
+    # sinking the batch or 500ing the endpoint. Results are deduped by _add() in
+    # author order, preserving the original merge semantics.
+    if authors:
+        max_workers = min(_HUB_MODEL_FANOUT_MAX_WORKERS, len(authors))
+        per_author: list[list | None] = [None] * len(authors)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+            future_to_idx = {
+                pool.submit(_list_author_models, api, author): i for i, author in enumerate(authors)
+            }
+            for future in concurrent.futures.as_completed(future_to_idx):
+                idx = future_to_idx[future]
+                author = authors[idx]
+                try:
+                    per_author[idx] = future.result(timeout=_HUB_MODEL_FANOUT_TIMEOUT_S)
+                except concurrent.futures.TimeoutError:
+                    logger.warning(
+                        "list_models(%s) timed out after %ss", author, _HUB_MODEL_FANOUT_TIMEOUT_S
+                    )
+                except _HUB_MODEL_LISTING_ERRORS as exc:
+                    logger.warning("list_models(%s) failed: %s", author, exc)
+                except Exception as exc:  # noqa: BLE001 - listings are best-effort; never 500
+                    logger.warning("list_models(%s) failed unexpectedly: %s", author, exc)
+        for author_models in per_author:
+            for m in author_models or []:
                 _add(m)
-        except Exception as exc:
-            logger.warning("list_models(%s, tag=lerobot) failed: %s", author, exc)
-        try:
-            for m in api.list_models(author=author, limit=200, expand=["lastModified", "private"]):
-                if _RUN_REPO_RE.search(m.id.split("/", 1)[-1]):
-                    _add(m)
-        except Exception as exc:
-            logger.warning("list_models(%s, unfiltered) failed: %s", author, exc)
     models.sort(key=lambda m: m["last_modified"] or "", reverse=True)
 
-    return {
+    response = {
         "authenticated": True,
         "jobs_permission": jobs_permission,
         "jobs": [
@@ -958,6 +1070,10 @@ def list_hub_jobs():
         ],
         "models": models,
     }
+
+    with _hub_jobs_cache_lock:
+        _hub_jobs_cache = {"at": time.monotonic(), "value": response}
+    return response
 
 
 @app.delete("/jobs/hub/models/{repo_id:path}")
@@ -977,8 +1093,9 @@ def delete_hub_model(repo_id: str):
     - Auth/permission failures (401/403) surface the friendly "token needs
       write access" message.
 
-    The `/jobs/hub` listing is not cached backend-side — it re-queries the Hub
-    on every call — so the frontend just needs to re-fetch after this returns.
+    The `/jobs/hub` listing is cached backend-side for a short TTL; this delete
+    invalidates that cache (see invalidate_hub_jobs_cache) so the removed repo
+    disappears immediately when the frontend re-fetches.
     """
     info = cached_whoami()
     username = info.get("name") if info else None
@@ -1018,6 +1135,9 @@ def delete_hub_model(repo_id: str):
         logger.warning("delete_repo(%s) failed: %s", repo_id, exc)
         raise HTTPException(status_code=502, detail=f"Hub delete failed: {exc}") from exc
 
+    # The listing changed — drop the cached /jobs/hub response so the removed
+    # repo doesn't linger until the TTL expires.
+    invalidate_hub_jobs_cache()
     return {"status": "success", "repo_id": repo_id}
 
 

@@ -30,7 +30,11 @@ from lerobot.scripts.lerobot_record import RecordConfig
 
 from .arm_identity import ArmIdentityError, verify_devices
 from .camera_preview import camera_preview_manager
-from .datasets import _lerobot_cache_root, invalidate_hub_status
+from .datasets import (
+    _lerobot_cache_root,
+    invalidate_dataset_listing_cache,
+    invalidate_hub_status,
+)
 from .motor_power import apply_motor_power, clear_goal_velocity
 from .rest_pose import capture_rest_pose
 from .teleoperate import _device_buses, _return_followers_to_rest, force_disable_torque
@@ -639,6 +643,10 @@ def handle_delete_dataset(request: DatasetInfoRequest) -> dict[str, Any]:
         logger.error(f"Failed to delete dataset {repo_id}: {e}")
         return {"success": False, "message": f"Failed to delete dataset: {e}"}
 
+    # The listing just changed — drop the cached /datasets listing so the delete
+    # reflects immediately instead of after the TTL.
+    invalidate_dataset_listing_cache()
+
     logger.info(f"Deleted dataset directory {target}")
     return {"success": True, "message": f"Deleted {repo_id}"}
 
@@ -702,8 +710,9 @@ def _discard_empty_dataset(repo_id: str, resume: bool) -> bool:
         return False
 
     # Invalidate the cached Hub-existence probe (cheap correctness — the
-    # repo no longer exists here).
+    # repo no longer exists here) and the cached /datasets listing.
     invalidate_hub_status(repo_id)
+    invalidate_dataset_listing_cache()
 
     logger.info(f"Removed empty dataset {repo_id} — no episodes were saved.")
     return True
@@ -807,8 +816,11 @@ class UploadManager:
             logger.info(f"Dataset {repo_id} uploaded successfully to HuggingFace Hub")
 
             # The dataset now exists on the Hub; drop any cached "local_only"
-            # answer so the info card's next hub-status check flips to "On Hub".
+            # answer so the info card's next hub-status check flips to "On Hub",
+            # and drop the cached /datasets listing so the newly-pushed repo
+            # appears immediately.
             invalidate_hub_status(repo_id)
+            invalidate_dataset_listing_cache()
 
             with self._lock:
                 self.state = "done"

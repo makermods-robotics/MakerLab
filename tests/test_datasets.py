@@ -616,3 +616,234 @@ def test_rename_invalidates_hub_status_for_both_ids(tmp_lerobot_home: Path) -> N
 
     called = {c.args[0] for c in inval.call_args_list}
     assert called == {"makermods/before", "makermods/after"}
+
+
+# --- Hub visibility / tags editing (post-upload) ----------------------------
+
+
+def test_set_dataset_visibility_calls_hfapi_with_repo_type() -> None:
+    """set_dataset_visibility drives HfApi.update_repo_settings with the
+    requested private flag and repo_type="dataset"; result echoes the flag."""
+    from lelab import datasets as ds
+
+    _clear_hub_status_cache()
+    fake_api = MagicMock()
+    with (
+        patch("lelab.datasets.shared_hf_api", return_value=fake_api),
+        patch("lelab.datasets.hf_hub_offline", return_value=False),
+        patch("lelab.datasets.invalidate_hub_status") as inval,
+    ):
+        result = ds.set_dataset_visibility("alice/pick", private=True)
+
+    fake_api.update_repo_settings.assert_called_once_with("alice/pick", private=True, repo_type="dataset")
+    assert result == {"repo_id": "alice/pick", "private": True}
+    inval.assert_called_once_with("alice/pick")
+
+
+def test_set_dataset_visibility_public_passes_false() -> None:
+    from lelab import datasets as ds
+
+    fake_api = MagicMock()
+    with (
+        patch("lelab.datasets.shared_hf_api", return_value=fake_api),
+        patch("lelab.datasets.hf_hub_offline", return_value=False),
+        patch("lelab.datasets.invalidate_hub_status"),
+    ):
+        result = ds.set_dataset_visibility("alice/pick", private=False)
+
+    fake_api.update_repo_settings.assert_called_once_with("alice/pick", private=False, repo_type="dataset")
+    assert result["private"] is False
+
+
+def test_set_dataset_visibility_rejected_offline() -> None:
+    """Offline: no HfApi call, a 400 DatasetHubEditError instead."""
+    from lelab import datasets as ds
+
+    fake_api = MagicMock()
+    with (
+        patch("lelab.datasets.shared_hf_api", return_value=fake_api),
+        patch("lelab.datasets.hf_hub_offline", return_value=True),
+        pytest.raises(ds.DatasetHubEditError) as exc,
+    ):
+        ds.set_dataset_visibility("alice/pick", private=True)
+
+    assert exc.value.status == 400
+    fake_api.update_repo_settings.assert_not_called()
+
+
+def test_set_dataset_visibility_maps_permission_error() -> None:
+    """A 403/forbidden Hub failure becomes a 403 DatasetHubEditError."""
+    from lelab import datasets as ds
+
+    fake_api = MagicMock()
+    fake_api.update_repo_settings.side_effect = Exception("403 Forbidden: no write access")
+    with (
+        patch("lelab.datasets.shared_hf_api", return_value=fake_api),
+        patch("lelab.datasets.hf_hub_offline", return_value=False),
+        pytest.raises(ds.DatasetHubEditError) as exc,
+    ):
+        ds.set_dataset_visibility("alice/pick", private=True)
+
+    assert exc.value.status == 403
+
+
+def test_set_dataset_tags_runs_through_with_lelab_tag_before_update() -> None:
+    """User tags are funnelled through with_lelab_tag (so makermods/openbooth/
+    LeLab survive) BEFORE metadata_update, which is called with overwrite=True
+    and repo_type="dataset". The returned tag list is what was written."""
+    from lelab import datasets as ds
+    from lelab.utils.config import REQUIRED_HUB_TAGS
+
+    _clear_hub_status_cache()
+    with (
+        patch("lelab.datasets.hf_hub_offline", return_value=False),
+        patch("lelab.datasets.metadata_update") as meta,
+        patch("lelab.datasets.invalidate_hub_status") as inval,
+    ):
+        result = ds.set_dataset_tags("alice/pick", ["robotics", "so101"])
+
+    meta.assert_called_once()
+    args, kwargs = meta.call_args
+    assert args[0] == "alice/pick"
+    written = args[1]["tags"]
+    assert kwargs["repo_type"] == "dataset"
+    assert kwargs["overwrite"] is True
+    # User tags come first, org tags are appended and never dropped.
+    assert written[:2] == ["robotics", "so101"]
+    for required in REQUIRED_HUB_TAGS:
+        assert required in written
+    assert result["tags"] == written
+    inval.assert_called_once_with("alice/pick")
+
+
+def test_set_dataset_tags_preserves_org_tags_when_user_omits_them() -> None:
+    """Even an empty user tag list still writes the required org tags — an edit
+    can never strip makermods/openbooth/LeLab off the card."""
+    from lelab import datasets as ds
+    from lelab.utils.config import REQUIRED_HUB_TAGS
+
+    with (
+        patch("lelab.datasets.hf_hub_offline", return_value=False),
+        patch("lelab.datasets.metadata_update") as meta,
+        patch("lelab.datasets.invalidate_hub_status"),
+    ):
+        result = ds.set_dataset_tags("alice/pick", [])
+
+    written = meta.call_args.args[1]["tags"]
+    assert set(REQUIRED_HUB_TAGS).issubset(set(written))
+    assert result["tags"] == written
+
+
+def test_set_dataset_tags_rejected_offline() -> None:
+    from lelab import datasets as ds
+
+    with (
+        patch("lelab.datasets.hf_hub_offline", return_value=True),
+        patch("lelab.datasets.metadata_update") as meta,
+        pytest.raises(ds.DatasetHubEditError) as exc,
+    ):
+        ds.set_dataset_tags("alice/pick", ["robotics"])
+
+    assert exc.value.status == 400
+    meta.assert_not_called()
+
+
+def test_set_dataset_tags_maps_auth_error() -> None:
+    """A 401/auth Hub failure maps to a 403 DatasetHubEditError with docs_url."""
+    from lelab import datasets as ds
+
+    with (
+        patch("lelab.datasets.hf_hub_offline", return_value=False),
+        patch(
+            "lelab.datasets.metadata_update",
+            side_effect=Exception("401 you must be authenticated"),
+        ),
+        pytest.raises(ds.DatasetHubEditError) as exc,
+    ):
+        ds.set_dataset_tags("alice/pick", ["robotics"])
+
+    assert exc.value.status == 403
+    assert exc.value.docs_url is not None
+
+
+def test_get_hub_settings_returns_private_and_tags() -> None:
+    from lelab import datasets as ds
+
+    fake_info = MagicMock()
+    fake_info.private = True
+    fake_info.tags = ["robotics", "makermods"]
+    fake_api = MagicMock()
+    fake_api.dataset_info.return_value = fake_info
+    with (
+        patch("lelab.datasets.shared_hf_api", return_value=fake_api),
+        patch("lelab.datasets.hf_hub_offline", return_value=False),
+    ):
+        result = ds.get_hub_settings("alice/pick")
+
+    fake_api.dataset_info.assert_called_once_with("alice/pick")
+    assert result == {"repo_id": "alice/pick", "private": True, "tags": ["robotics", "makermods"]}
+
+
+def test_get_hub_settings_rejected_offline() -> None:
+    from lelab import datasets as ds
+
+    fake_api = MagicMock()
+    with (
+        patch("lelab.datasets.shared_hf_api", return_value=fake_api),
+        patch("lelab.datasets.hf_hub_offline", return_value=True),
+        pytest.raises(ds.DatasetHubEditError) as exc,
+    ):
+        ds.get_hub_settings("alice/pick")
+
+    assert exc.value.status == 400
+    fake_api.dataset_info.assert_not_called()
+
+
+def test_visibility_endpoint(client: TestClient) -> None:
+    with (
+        patch("lelab.datasets.shared_hf_api", return_value=MagicMock()),
+        patch("lelab.datasets.hf_hub_offline", return_value=False),
+        patch("lelab.datasets.invalidate_hub_status"),
+    ):
+        resp = client.post("/datasets/visibility", json={"repo_id": "alice/pick", "private": True})
+    assert resp.status_code == 200
+    assert resp.json() == {"repo_id": "alice/pick", "private": True}
+
+
+def test_visibility_endpoint_offline_400(client: TestClient) -> None:
+    with patch("lelab.datasets.hf_hub_offline", return_value=True):
+        resp = client.post("/datasets/visibility", json={"repo_id": "alice/pick", "private": True})
+    assert resp.status_code == 400
+
+
+def test_tags_endpoint_writes_and_preserves_org_tags(client: TestClient) -> None:
+    from lelab.utils.config import REQUIRED_HUB_TAGS
+
+    with (
+        patch("lelab.datasets.hf_hub_offline", return_value=False),
+        patch("lelab.datasets.metadata_update") as meta,
+        patch("lelab.datasets.invalidate_hub_status"),
+    ):
+        resp = client.post("/datasets/tags", json={"repo_id": "alice/pick", "tags": ["robotics"]})
+    assert resp.status_code == 200
+    written = meta.call_args.args[1]["tags"]
+    for required in REQUIRED_HUB_TAGS:
+        assert required in written
+    assert resp.json()["tags"] == written
+
+
+def test_hub_settings_endpoint(client: TestClient) -> None:
+    fake_info = MagicMock()
+    fake_info.private = False
+    fake_info.tags = ["robotics"]
+    fake_api = MagicMock()
+    fake_api.dataset_info.return_value = fake_info
+    with (
+        patch("lelab.datasets.shared_hf_api", return_value=fake_api),
+        patch("lelab.datasets.hf_hub_offline", return_value=False),
+    ):
+        resp = client.get("/datasets/hub-settings", params={"repo_id": "alice/pick"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["private"] is False
+    assert body["tags"] == ["robotics"]

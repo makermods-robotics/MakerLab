@@ -12,24 +12,47 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import concurrent.futures
 import json
 import logging
 import os
 import threading
+import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pyarrow.parquet as pq
-from huggingface_hub import try_to_load_from_cache
+from huggingface_hub import metadata_update, try_to_load_from_cache
 from huggingface_hub.errors import HfHubHTTPError
 
-from .utils.config import validate_dataset_name
-from .utils.hf_auth import cached_whoami, shared_hf_api
+from .utils.config import validate_dataset_name, with_lelab_tag
+from .utils.hf_auth import cached_whoami, hf_hub_offline, shared_hf_api
 
 logger = logging.getLogger(__name__)
 
 CAMERA_FEATURE_PREFIX = "observation.images."
+
+# Errors a per-author / per-listing Hub call may raise that must NOT bubble up
+# and 500 the endpoint. HfHubHTTPError covers HTTP-status failures; httpx.HTTPError
+# is the base of ConnectError / TimeoutException / TransportError, which is what a
+# GFW-killed TLS connection raises ([SSL: UNEXPECTED_EOF_WHILE_READING]); OSError
+# covers lower-level socket failures. Any of these degrades a listing to
+# "whatever other authors returned" rather than crashing.
+_HUB_LISTING_ERRORS = (HfHubHTTPError, httpx.HTTPError, OSError)
+
+# Cap on the concurrent per-author Hub fan-out. Small: a handful of authors
+# (user + their orgs), and we don't want to hammer the Hub / open dozens of TLS
+# handshakes behind a flaky link.
+_HUB_FANOUT_MAX_WORKERS = 8
+
+# Per-author Hub-call budget. A blocked call (GFW cutting TLS mid-handshake) can
+# otherwise hang on huggingface_hub's default long timeout and stall startup;
+# 5s is generous enough that a merely-slow-but-working Hub still succeeds, short
+# enough that a truly blocked author gives up fast and degrades to empty.
+_HUB_FANOUT_TIMEOUT_S = 5.0
 
 # In-process cache of Hub existence checks, keyed by repo_id. /whoami-v2 and
 # repo-existence lookups hit the network, so the info card fetches this lazily
@@ -48,6 +71,59 @@ def invalidate_hub_status(repo_id: str) -> None:
     the freshly pushed repo)."""
     with _HUB_STATUS_LOCK:
         _HUB_STATUS_CACHE.pop(repo_id, None)
+
+
+# Short-TTL cache of the merged /datasets listing. Startup + navigation re-hit
+# this endpoint in quick succession; without a cache each load re-fans-out to the
+# Hub (slow/flaky behind the GFW). A <=TTL-stale listing is fine; a mutation the
+# user just performed invalidates the cache (see invalidate_dataset_listing_cache)
+# so it reflects immediately. TTL is measured with time.monotonic() — this is
+# app runtime, so a monotonic clock (immune to wall-clock jumps) is the right tool.
+_LISTING_CACHE_TTL_S = 45.0
+_listing_cache_lock = threading.Lock()
+_listing_cache: dict[str, Any] | None = None  # {"at": monotonic, "value": [...]}
+
+
+def invalidate_dataset_listing_cache() -> None:
+    """Drop the cached /datasets listing so the next call re-fetches from the
+    Hub. Called after any mutation that changes the listing — dataset upload,
+    delete, rename, visibility flip, or tag edit — so a change the user just made
+    shows up immediately instead of after the TTL. Mirrors invalidate_hub_status."""
+    global _listing_cache
+    with _listing_cache_lock:
+        _listing_cache = None
+
+
+def _fan_out_hub_authors(authors: list[str], call: Callable[[str], Any]) -> list[Any]:
+    """Run `call(author)` for each author concurrently, gathering the results.
+
+    Each author's call runs in a bounded ThreadPoolExecutor and is guarded so a
+    Hub failure for one author (including a GFW-killed TLS connection, a timeout,
+    or a slow author exceeding the per-call budget) is logged and swallowed — it
+    contributes nothing rather than sinking the whole batch. `call` must return
+    the (already-materialized) result for one author; returns the list of
+    successful results in author order.
+    """
+    if not authors:
+        return []
+
+    results: list[Any] = [None] * len(authors)
+    max_workers = min(_HUB_FANOUT_MAX_WORKERS, len(authors))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+        future_to_idx = {pool.submit(call, author): i for i, author in enumerate(authors)}
+        for future in concurrent.futures.as_completed(future_to_idx):
+            idx = future_to_idx[future]
+            author = authors[idx]
+            try:
+                results[idx] = future.result(timeout=_HUB_FANOUT_TIMEOUT_S)
+            except concurrent.futures.TimeoutError:
+                logger.warning("Hub listing for author %s timed out after %ss", author, _HUB_FANOUT_TIMEOUT_S)
+            except _HUB_LISTING_ERRORS as exc:
+                logger.warning("Hub listing for author %s failed: %s", author, exc)
+            except Exception as exc:  # noqa: BLE001 - listings are best-effort; never 500
+                logger.warning("Hub listing for author %s failed unexpectedly: %s", author, exc)
+
+    return [r for r in results if r is not None]
 
 
 def get_hub_status(repo_id: str) -> dict[str, Any]:
@@ -80,6 +156,114 @@ def get_hub_status(repo_id: str) -> dict[str, Any]:
     with _HUB_STATUS_LOCK:
         _HUB_STATUS_CACHE[repo_id] = status
     return {"repo_id": repo_id, "status": status, "url": url if exists else None}
+
+
+class DatasetHubEditError(Exception):
+    """Raised when a Hub visibility/tags edit can't proceed. `status` is the
+    HTTP status the route should return (400 offline/invalid, 403 no write
+    permission, 502 other Hub failure); `message` is the user-facing reason;
+    `docs_url` (optional) links auth docs for a login failure."""
+
+    def __init__(self, status: int, message: str, docs_url: str | None = None) -> None:
+        super().__init__(message)
+        self.status = status
+        self.message = message
+        self.docs_url = docs_url
+
+
+def _hub_edit_error(exc: Exception) -> DatasetHubEditError:
+    """Map a huggingface_hub exception raised by a visibility/tags mutation to a
+    DatasetHubEditError with a legible message. A 401/auth failure or a 403
+    permission failure becomes a clear "you can't edit this" message; anything
+    else degrades to a generic Hub-failure 502."""
+    from .record import _upload_auth_error
+
+    auth = _upload_auth_error(exc)
+    if auth is not None:
+        return DatasetHubEditError(403, auth["message"], docs_url=auth.get("docs_url"))
+
+    err_text = str(exc).lower()
+    if "403" in err_text or "forbidden" in err_text or "permission" in err_text:
+        return DatasetHubEditError(
+            403,
+            "You don't have permission to change this dataset on the Hub. "
+            "You can only edit datasets in a namespace you can write to.",
+        )
+    return DatasetHubEditError(502, f"The Hub rejected the change: {exc}")
+
+
+def get_hub_settings(repo_id: str) -> dict[str, Any]:
+    """Current Hub-side visibility + tags for a dataset, for pre-filling the
+    editor. Returns ``{"repo_id": ..., "private": bool, "tags": [str, ...]}``.
+
+    Reads ``HfApi().dataset_info(repo_id)`` — the network call is the caller's
+    (the info card fetches it lazily). Raises DatasetHubEditError offline (can't
+    read reliably) or on a Hub failure so the route can surface a clear error.
+    Tags come from the dataset card metadata (``dataset_info(...).tags``); the
+    REQUIRED_HUB_TAGS are not stripped here — the card shows exactly what's live.
+    """
+    if hf_hub_offline():
+        raise DatasetHubEditError(400, "The Hub is offline — dataset settings can't be read right now.")
+    api = shared_hf_api()
+    try:
+        info = api.dataset_info(repo_id)
+    except Exception as exc:
+        logger.info("dataset_info(%s) failed: %s", repo_id, exc)
+        raise _hub_edit_error(exc) from exc
+    return {
+        "repo_id": repo_id,
+        "private": bool(getattr(info, "private", False)),
+        "tags": list(getattr(info, "tags", None) or []),
+    }
+
+
+def set_dataset_visibility(repo_id: str, private: bool) -> dict[str, Any]:
+    """Flip a Hub dataset's visibility (public <-> private).
+
+    Wraps ``HfApi().update_repo_settings(repo_id, private=..., repo_type="dataset")``
+    (this huggingface_hub version has no ``update_repo_visibility``). Refuses
+    offline (can't mutate). Maps auth/permission failures to a clear message.
+    Invalidates the cached Hub-existence answer so the card re-reads settings.
+    """
+    if hf_hub_offline():
+        raise DatasetHubEditError(
+            400, "The Hub is offline — you can't change a dataset's visibility right now."
+        )
+    api = shared_hf_api()
+    try:
+        api.update_repo_settings(repo_id, private=private, repo_type="dataset")
+    except Exception as exc:
+        logger.info("update_repo_settings(%s, private=%s) failed: %s", repo_id, private, exc)
+        raise _hub_edit_error(exc) from exc
+
+    invalidate_hub_status(repo_id)
+    invalidate_dataset_listing_cache()
+    logger.info("Set dataset %s visibility private=%s", repo_id, private)
+    return {"repo_id": repo_id, "private": private}
+
+
+def set_dataset_tags(repo_id: str, tags: list[str]) -> dict[str, Any]:
+    """Replace a Hub dataset card's ``tags:`` metadata.
+
+    User-supplied `tags` are funnelled through ``with_lelab_tag`` FIRST, so the
+    required org/product tags (makermods / openbooth / LeLab) are never dropped
+    by an edit, then written with ``metadata_update(..., overwrite=True)``.
+    Refuses offline. Maps auth/permission failures. Invalidates the cached
+    Hub-existence answer. Returns the final tag list actually written.
+    """
+    if hf_hub_offline():
+        raise DatasetHubEditError(400, "The Hub is offline — you can't edit a dataset's tags right now.")
+    final_tags = with_lelab_tag(tags)
+    try:
+        metadata_update(repo_id, {"tags": final_tags}, repo_type="dataset", overwrite=True)
+    except Exception as exc:
+        logger.info("metadata_update(%s, tags=%s) failed: %s", repo_id, final_tags, exc)
+        raise _hub_edit_error(exc) from exc
+
+    invalidate_hub_status(repo_id)
+    invalidate_dataset_listing_cache()
+    logger.info("Set dataset %s tags -> %s", repo_id, final_tags)
+    return {"repo_id": repo_id, "tags": final_tags}
 
 
 def _lerobot_cache_root() -> Path:
@@ -485,6 +669,7 @@ def rename_local_dataset(repo_id: str, new_name: str) -> str:
     # Hub-existence answers so the next hub-status check re-queries.
     invalidate_hub_status(repo_id)
     invalidate_hub_status(new_repo_id)
+    invalidate_dataset_listing_cache()
 
     logger.info("Renamed dataset directory %s -> %s", src, dst)
     return new_repo_id
@@ -497,23 +682,32 @@ def list_user_datasets() -> list[dict[str, Any]]:
 
     authors = [info["name"]] + [o["name"] for o in info.get("orgs", [])]
     api = shared_hf_api()
+
+    def _one_author(author: str) -> list[dict[str, Any]]:
+        # Materialize the lazy generator HERE, inside the worker, so the network
+        # I/O (and any GFW-killed connection) happens under the fan-out's per-call
+        # timeout budget rather than lazily later while we iterate.
+        rows: list[dict[str, Any]] = []
+        for ds in api.list_datasets(author=author, filter="LeRobot", limit=200):
+            rows.append(
+                {
+                    "repo_id": ds.id,
+                    "last_modified": ds.last_modified.isoformat() if ds.last_modified else None,
+                    "private": bool(getattr(ds, "private", False)),
+                }
+            )
+        return rows
+
+    # Fan out per-author concurrently; each author's errors are guarded so one
+    # blocked/slow author degrades to "the others' results" instead of a 500.
     seen: set[str] = set()
     out: list[dict[str, Any]] = []
-    for author in authors:
-        try:
-            for ds in api.list_datasets(author=author, filter="LeRobot", limit=200):
-                if ds.id in seen:
-                    continue
-                seen.add(ds.id)
-                out.append(
-                    {
-                        "repo_id": ds.id,
-                        "last_modified": ds.last_modified.isoformat() if ds.last_modified else None,
-                        "private": bool(getattr(ds, "private", False)),
-                    }
-                )
-        except HfHubHTTPError as e:
-            logger.warning(f"list_datasets({author}) failed: {e}")
+    for rows in _fan_out_hub_authors(authors, _one_author):
+        for row in rows:
+            if row["repo_id"] in seen:
+                continue
+            seen.add(row["repo_id"])
+            out.append(row)
 
     out.sort(key=lambda d: d["last_modified"] or "", reverse=True)
     return out
@@ -524,7 +718,19 @@ def list_all_datasets() -> list[dict[str, Any]]:
 
     A repo_id present in both lists is collapsed to one entry with
     source="both" and last_modified set to the more recent of the two.
+
+    Result is cached for up to _LISTING_CACHE_TTL_S so repeated startup/nav loads
+    reuse a recent listing instead of re-fanning-out to the (slow/flaky) Hub. A
+    mutation (upload/delete/rename/visibility/tags) invalidates the cache so it
+    reflects immediately — see invalidate_dataset_listing_cache.
     """
+    global _listing_cache
+
+    now = time.monotonic()
+    with _listing_cache_lock:
+        if _listing_cache is not None and (now - _listing_cache["at"]) < _LISTING_CACHE_TTL_S:
+            return _listing_cache["value"]
+
     hub = list_user_datasets()
     local = list_local_datasets()
 
@@ -545,4 +751,7 @@ def list_all_datasets() -> list[dict[str, Any]]:
 
     out = list(merged.values())
     out.sort(key=lambda d: d["last_modified"] or "", reverse=True)
+
+    with _listing_cache_lock:
+        _listing_cache = {"at": time.monotonic(), "value": out}
     return out
