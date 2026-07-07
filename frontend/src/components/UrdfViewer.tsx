@@ -271,15 +271,14 @@ const UrdfViewer: React.FC<UrdfViewerProps> = ({ jointsKey = "joints" }) => {
   return (
     <div
       className={cn(
-        "w-full h-full transition-all duration-300 ease-in-out relative",
-        "bg-gradient-to-br from-gray-900 to-gray-800"
+        "relative h-full w-full bg-card transition-all duration-300 ease-in-out"
       )}
     >
       <div ref={containerRef} className="w-full h-full" />
 
       {/* Joint highlight indicator */}
       {highlightedJoint && (
-        <div className="absolute bottom-4 right-4 bg-black/70 text-white px-3 py-2 rounded-md text-sm font-mono z-10">
+        <div className="absolute bottom-4 right-4 z-10 rounded-md border border-border bg-card/90 px-3 py-2 font-mono text-sm text-foreground">
           Joint: {highlightedJoint}
         </div>
       )}
@@ -290,16 +289,16 @@ const UrdfViewer: React.FC<UrdfViewerProps> = ({ jointsKey = "joints" }) => {
           <div
             className={`flex items-center gap-2 px-3 py-2 rounded-md text-sm font-mono ${
               isWebSocketConnected
-                ? "bg-green-900/70 text-green-300"
-                : "bg-red-900/70 text-red-300"
+                ? "bg-ok/15 text-ok"
+                : "bg-destructive/15 text-destructive"
             }`}
           >
             <div
               className={`w-2 h-2 rounded-full ${
-                isWebSocketConnected ? "bg-green-400" : "bg-red-400"
+                isWebSocketConnected ? "bg-ok" : "bg-destructive"
               }`}
             />
-            {isWebSocketConnected ? "Live Robot Data" : "Disconnected"}
+            {isWebSocketConnected ? "Live robot data" : "Disconnected"}
           </div>
         </div>
       )}
