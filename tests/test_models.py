@@ -196,7 +196,7 @@ def test_list_all_models_merges_local_and_hub(registry) -> None:
     assert by_key["user/hub_model"]["source"] == "hub"
 
 
-def test_list_all_models_collapses_pushed_run_to_both(registry) -> None:
+def test_list_all_models_collapses_pushed_run_to_both(registry, tmp_lerobot_home) -> None:
     """A local run whose hf_repo_id matches a Hub repo → one 'both' entry."""
     from lelab.models import list_all_models
 
@@ -224,7 +224,7 @@ def test_list_all_models_collapses_pushed_run_to_both(registry) -> None:
     assert row["id"] == "pushed_run"
 
 
-def test_list_all_models_degrades_to_local_when_hub_empty(registry) -> None:
+def test_list_all_models_degrades_to_local_when_hub_empty(registry, tmp_lerobot_home) -> None:
     """The hub half is best-effort; an empty/failed hub listing degrades to
     local-only rather than crashing."""
     from lelab.models import list_all_models
@@ -278,7 +278,7 @@ def test_list_hub_models_filters_and_dedupes() -> None:
     assert ids == {"user/act_model", "user/smolvla_ds_2026-01-01_10-00-00"}
 
 
-def test_list_all_models_surfaces_policy_type_from_name_only_tags(registry) -> None:
+def test_list_all_models_surfaces_policy_type_from_name_only_tags(registry, tmp_lerobot_home) -> None:
     """BUG 2 regression: a hub repo named ``act_<stuff>`` carrying only the
     org tags (makermods / LeLab), with NO ``lerobot``/policy-type tag, must
     surface policy_type "act" end-to-end through list_all_models — via the
@@ -321,10 +321,7 @@ def test_list_all_models_infers_pinned_model_policy_type_from_name(registry) -> 
     ):
         result = list_all_models()
 
-    row = next(
-        r for r in result
-        if r.get("id") == "makermods/smolvla_makermods_sock_2026-07-08_01-47-15"
-    )
+    row = next(r for r in result if r.get("id") == "makermods/smolvla_makermods_sock_2026-07-08_01-47-15")
     assert row["source"] == "hub"
     assert row["hf_repo_id"] == "makermods/smolvla_makermods_sock_2026-07-08_01-47-15"
     assert row["saved_custom"] is True
@@ -684,7 +681,7 @@ def test_saved_custom_models_round_trip(custom_models_file: Path) -> None:
     assert not add_saved_custom_model("")  # blank refused
 
 
-def test_list_all_models_includes_pinned_custom(registry) -> None:
+def test_list_all_models_includes_pinned_custom(registry, tmp_lerobot_home) -> None:
     from lelab.models import list_all_models
 
     with (
@@ -967,7 +964,7 @@ def test_hidden_models_corrupt_file_degrades_to_empty(hidden_models_file: Path) 
     assert get_hidden_models() == set()
 
 
-def test_models_listing_filters_hidden_hub_row(registry) -> None:
+def test_models_listing_filters_hidden_hub_row(registry, tmp_lerobot_home) -> None:
     from lelab.models import list_all_models
 
     hub_rows = [{"repo_id": "user/policy", "last_modified": None, "private": False}]
@@ -979,7 +976,7 @@ def test_models_listing_filters_hidden_hub_row(registry) -> None:
     assert result == []
 
 
-def test_models_hidden_filter_runs_after_pin_fold(registry) -> None:
+def test_models_hidden_filter_runs_after_pin_fold(registry, tmp_lerobot_home) -> None:
     """Hidden+pinned stays hidden — the filter runs AFTER the pin fold."""
     from lelab.models import list_all_models
 
