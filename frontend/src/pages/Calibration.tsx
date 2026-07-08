@@ -1883,8 +1883,32 @@ const Calibration = () => {
 
               {robot && (
                 <div className="space-y-2 pt-2">
-                  <div className="text-sm font-medium text-slate-300">
-                    Robot calibration
+                  <div className="flex items-center gap-2 text-sm font-medium text-slate-300">
+                    <span>Robot calibration</span>
+                    {/* One folder per device type — both same-side slots share a
+                        single directory (so101_leader / so101_follower), so a
+                        single leader + follower pair covers single AND bimanual
+                        modes (no per-slot duplication). */}
+                    <Button
+                      size="icon"
+                      variant="ghost"
+                      className="ml-auto h-6 w-6 text-slate-400 hover:text-white"
+                      onClick={() => openCalibrationFolder("teleop")}
+                      aria-label="Open leader calibrations folder"
+                      title="Open leader calibrations folder"
+                    >
+                      <FolderOpen className="w-4 h-4" />
+                    </Button>
+                    <Button
+                      size="icon"
+                      variant="ghost"
+                      className="h-6 w-6 text-slate-400 hover:text-white"
+                      onClick={() => openCalibrationFolder("robot")}
+                      aria-label="Open follower calibrations folder"
+                      title="Open follower calibrations folder"
+                    >
+                      <FolderOpen className="w-4 h-4" />
+                    </Button>
                   </div>
                   {(isBimanual
                     ? // Bimanual: each of the four slots gets the same free-naming
@@ -1959,16 +1983,6 @@ const Calibration = () => {
                           >
                             {row.label}
                           </span>
-                          <Button
-                            size="icon"
-                            variant="ghost"
-                            className="ml-auto h-6 w-6 text-slate-400 hover:text-white"
-                            onClick={() => openCalibrationFolder(row.device)}
-                            aria-label="Open calibration folder"
-                            title="Open calibration folder"
-                          >
-                            <FolderOpen className="w-4 h-4" />
-                          </Button>
                         </div>
                         <CalibrationLibrary
                           device={row.device}
