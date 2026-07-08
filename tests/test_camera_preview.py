@@ -124,6 +124,42 @@ class BlockingReadCapture(FakeVideoCapture):
         return False, None
 
 
+class GatedFrameCapture(FakeVideoCapture):
+    """A capture that opens fine but whose FIRST read() blocks until a gate is set.
+
+    Lets a test hold a camera *inside the open funnel*: the reader opens and
+    publishes open_ok (so open_stream returns), then parks in read() with no
+    frame published yet — so it still owns the turnstile. Once the gate is set,
+    read() returns real frames, the first frame publishes, and the reader leaves
+    the funnel. Subsequent reads return frames immediately.
+    """
+
+    def __init__(self, index: int, backend: int | None = None, gate: threading.Event | None = None) -> None:
+        super().__init__(index, backend)
+        self._gate = gate if gate is not None else threading.Event()
+        self._first = True
+
+    def read(self):
+        if self._first:
+            self._gate.wait()  # holds the funnel until the test releases it
+            self._first = False
+        if not self.opened:
+            return False, None
+        return True, np.zeros((8, 8, 3), dtype=np.uint8)
+
+
+def _wait_until(predicate, timeout: float, interval: float = 0.01) -> bool:
+    """Poll ``predicate`` until true or ``timeout`` lapses. Returns the final
+    value. Bounded (never hangs); used to synchronise on internal manager state
+    instead of sleeping a fixed duration."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(interval)
+    return predicate()
+
+
 @pytest.fixture
 def fake_captures(monkeypatch: pytest.MonkeyPatch) -> list[FakeVideoCapture]:
     """Patch cv2.VideoCapture (as seen by lelab.camera_preview) with a fake
@@ -587,6 +623,150 @@ def test_block_for_recording_custom_reason_surfaces_in_refusal(
 
 
 # ---------------------------------------------------------------------------
+# Open funnel (turnstile): cameras are born ONE AT A TIME. Three tiles mounting
+# at once must not fire three concurrent cv2 opens into a shared USB-2 hub — a
+# reader admits the next open only after the previous camera published its first
+# frame or failed conclusively. The funnel is a best-effort serializer: a holder
+# wedged in its first read() delays the next open by at most the deadline, never
+# forever (fail-open).
+# ---------------------------------------------------------------------------
+
+
+def test_funnel_serializes_two_concurrent_opens(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The second camera's cv2 open must NOT begin until the first has published
+    its first frame. Camera A is held inside the funnel (opened, but its first
+    read() gated), so while it owns the turnstile camera B's reader parks and
+    constructs no cv2 capture. Releasing A's first frame lets B open and stream."""
+    gate_a = threading.Event()
+    captures: list[FakeVideoCapture] = []
+
+    def factory(index: int, backend: int | None = None) -> FakeVideoCapture:
+        # First construction (camera 0) is gated; the rest are healthy.
+        cap = (
+            GatedFrameCapture(index, backend, gate=gate_a)
+            if not captures
+            else FakeVideoCapture(index, backend)
+        )
+        captures.append(cap)
+        return cap
+
+    monkeypatch.setattr(camera_preview.cv2, "VideoCapture", factory)
+    manager = CameraPreviewManager()
+
+    # A opens (open_ok returns) then parks in its gated first read -> owns the
+    # funnel without ever publishing a frame.
+    gen_a = manager.open_stream(0)
+    assert _wait_until(lambda: len(captures) == 1, timeout=2.0)
+
+    # Open B concurrently: its open_stream blocks in _acquire until B's reader
+    # clears the funnel, so drive it from a thread.
+    b_box: dict[str, object] = {}
+
+    def open_b() -> None:
+        try:
+            b_box["gen"] = manager.open_stream(1)
+        except Exception as exc:  # pragma: no cover - surfaced via the assert below
+            b_box["error"] = exc
+
+    tb = threading.Thread(target=open_b, name="open-b")
+    tb.start()
+    try:
+        # B's reader has registered and started (entry in the registry) but must
+        # be parked in the turnstile: no second cv2 capture may exist yet.
+        assert _wait_until(lambda: "1" in manager._captures, timeout=2.0)
+        # Give B ample room to (wrongly) open if the funnel weren't serializing;
+        # it must still be blocked, so this stays False.
+        assert not _wait_until(lambda: len(captures) >= 2, timeout=0.3)
+
+        # Release A's first frame -> A leaves the funnel -> B may now open.
+        gate_a.set()
+        assert _wait_until(lambda: "gen" in b_box, timeout=5.0), b_box.get("error")
+        tb.join(timeout=5.0)
+        assert not tb.is_alive()
+        assert len(captures) == 2  # B opened only after A's first frame
+        assert [c.index for c in captures] == [0, 1]
+
+        gen_b = b_box["gen"]
+        assert b"--frame" in next(gen_a)
+        assert b"--frame" in next(gen_b)
+        gen_b.close()
+    finally:
+        gate_a.set()  # ensure A's reader can never stay wedged
+        tb.join(timeout=5.0)
+        gen_a.close()
+
+
+def test_funnel_fails_open_when_holder_wedged_in_first_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A holder wedged inside its first read() can release nothing — so the funnel
+    must let the next open proceed once the holder's deadline lapses (usurp). The
+    second camera still opens and streams; the delay is bounded by the deadline,
+    never forever."""
+    monkeypatch.setattr(camera_preview, "_FUNNEL_HOLD_DEADLINE", 0.3)
+    gate = threading.Event()  # never set until the finally: A stays wedged
+    captures: list[FakeVideoCapture] = []
+
+    def factory(index: int, backend: int | None = None) -> FakeVideoCapture:
+        # A wedges forever in read() (holds the funnel); B is healthy.
+        cap = (
+            BlockingReadCapture(index, backend, gate=gate)
+            if not captures
+            else FakeVideoCapture(index, backend)
+        )
+        captures.append(cap)
+        return cap
+
+    monkeypatch.setattr(camera_preview.cv2, "VideoCapture", factory)
+    manager = CameraPreviewManager()
+
+    gen_a = manager.open_stream(0)  # opens, then wedges in read() holding the funnel
+    gen_b = None
+    try:
+        assert _wait_until(lambda: len(captures) == 1, timeout=2.0)
+        t0 = time.monotonic()
+        gen_b = manager.open_stream(1)  # blocks until B usurps at the deadline
+        elapsed = time.monotonic() - t0
+        assert b"--frame" in next(gen_b)  # B streams despite A wedged (fail-open)
+        assert len(captures) == 2
+        # Delayed by ~the deadline, not forever and not much beyond it.
+        assert elapsed < 2.0
+    finally:
+        gate.set()  # let the abandoned wedged reader unwind (never hang pytest)
+        if gen_b is not None:
+            gen_b.close()
+        gen_a.close()
+
+
+def test_funnel_failed_first_open_releases_promptly(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed first open (unopenable device) must release the funnel promptly —
+    not hold it for the deadline — so the next camera opens right away. The
+    default (large) deadline is left in place: B opening fast proves the funnel
+    was freed by the failure, not by a deadline usurp."""
+    captures: list[FakeVideoCapture] = []
+
+    def factory(index: int, backend: int | None = None) -> FakeVideoCapture:
+        # A can't open; B is healthy.
+        cap = FailingVideoCapture(index, backend) if not captures else FakeVideoCapture(index, backend)
+        captures.append(cap)
+        return cap
+
+    monkeypatch.setattr(camera_preview.cv2, "VideoCapture", factory)
+    manager = CameraPreviewManager()
+
+    with pytest.raises(CameraOpenError):
+        manager.open_stream(0)  # open fails -> reader leaves the funnel before raising
+
+    t0 = time.monotonic()
+    gen_b = manager.open_stream(1)  # funnel already free -> immediate, no deadline wait
+    assert b"--frame" in next(gen_b)
+    elapsed = time.monotonic() - t0
+    assert elapsed < 5.0  # far below the default _FUNNEL_HOLD_DEADLINE (~17.5s)
+    assert len(captures) == 2
+    assert "0" not in manager._captures  # the failed birth left nothing behind
+    assert "1" in manager._captures  # only B remains registered
+    gen_b.close()
+
+
+# ---------------------------------------------------------------------------
 # camera_id addressing — the unique_id is canonical; the cv2 index is resolved
 # fresh on every capture open
 # ---------------------------------------------------------------------------
@@ -883,5 +1063,3 @@ def test_start_recording_stops_camera_previews(monkeypatch: pytest.MonkeyPatch) 
     # Latched off at start, then lifted on the failed-start path.
     assert calls == ["block_for_recording", "resume_previews"]
     assert record.recording_active is False
-
-

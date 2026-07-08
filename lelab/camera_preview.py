@@ -88,6 +88,35 @@ _FRAME_DEADLINE = 2.5
 # id→index resolution isn't mistaken for a failure.
 _OPEN_TIMEOUT = 15.0
 
+# Open funnel (turnstile) — cameras are opened ONE AT A TIME. Live pages mount up
+# to three preview tiles at once; without this, all three reader threads race into
+# cv2.VideoCapture open + MJPG/size/fps negotiation simultaneously, and on a shared
+# USB-2 hub the concurrent negotiations trip each other — we watched a third camera
+# open "successfully", stream zero frames, wedge, and get abandoned. Steady-state
+# bandwidth is already solved (MJPG forced per capture); the funnel removes the
+# remaining stampede at BIRTH. It lets at most one reader run
+# resolve→open→configure→first-frame at a time; a reader leaves the instant it
+# publishes its first frame (or fails conclusively), so steady-state reads never
+# queue and single-camera opens see an empty funnel and pass immediately.
+#
+# LOAD-BEARING FAIL-OPEN PROPERTY: this is a BEST-EFFORT serializer, deadline-
+# bounded, NEVER a lock held across cv2 I/O. A holder wedged inside its first
+# read() cannot release anything, so a waiter proceeds anyway (usurps) once the
+# holder overruns this deadline. NO failure mode of one camera may permanently gate
+# another — a wedged/slow birth delays the next open by AT MOST this long, never
+# forever.
+#
+# Sized to exceed the slowest *legitimate* admitted birth, so a healthy-but-slow
+# open is never usurped into a concurrent open (which would re-create the very
+# stampede this exists to prevent): a cold id→index resolve can take up to
+# _OPEN_TIMEOUT (it may spawn the enumeration subprocess), then the first frame up
+# to _FRAME_DEADLINE after that. Derived from those two constants rather than a new
+# magic number. Cost of the wide bound: a genuinely wedged holder gates the *next
+# open* for up to this long (the frame-age watchdog still frees any waiting client
+# at _FRAME_DEADLINE) — that is the deliberate price of never usurping a healthy
+# slow birth.
+_FUNNEL_HOLD_DEADLINE = _OPEN_TIMEOUT + _FRAME_DEADLINE
+
 # How long a force-release / last-detach waits for the reader to confirm it
 # released its own capture before abandoning it. Bounds every wait on the
 # request/recording-start path: an alive reader confirms in well under this; a
@@ -230,13 +259,23 @@ class _SharedCapture:
     # -- reader thread (sole cv2 owner) --------------------------------------
 
     def _reader_run(self) -> None:
+        # Enter the open turnstile: cameras are born one at a time so three tiles
+        # mounting at once don't fire three concurrent cv2 opens into a shared
+        # USB-2 hub. This covers resolve+open+configure+FIRST published frame;
+        # deadline-bounded (see _FUNNEL_HOLD_DEADLINE) so a wedged birth can never
+        # permanently gate the next one. Empty funnel = immediate passage.
+        self._manager._enter_funnel(self)
         try:
             index = self._manager._resolve_cv2_index(self.camera_id)
             cap = self._open_cv2(index)
         except CameraOpenError as exc:
-            # Open failed: publish the error so the waiting open_stream can raise
-            # it (→ 503), mark dead, deregister, and confirm "released" (there is
-            # no handle to release). No frame ever streams.
+            # Open failed conclusively: leave the turnstile FIRST (before waking
+            # the waiting open_stream) so the next birth can start the instant
+            # this one is known-dead, not after the deadline. Then publish the
+            # error so the waiting open_stream can raise it (→ 503), mark dead,
+            # deregister, and confirm "released" (there is no handle to release).
+            # No frame ever streams.
+            self._manager._leave_funnel(self)
             with self._cond:
                 self.open_error = exc
                 self.opened = True
@@ -277,6 +316,7 @@ class _SharedCapture:
     def _read_loop(self, cap: cv2.VideoCapture) -> None:
         interval = 1.0 / TARGET_FPS
         failures = 0
+        first_frame_published = False
         try:
             while not self.stop.is_set():
                 started = time.monotonic()
@@ -291,6 +331,12 @@ class _SharedCapture:
                             self.frame_seq += 1
                             self.last_frame_ts = time.monotonic()
                             self._cond.notify_all()
+                        if not first_frame_published:
+                            # This birth is confirmed streaming: hand the open
+                            # turnstile to the next camera. Outside _cond (never
+                            # nest the funnel lock under another) and idempotent.
+                            first_frame_published = True
+                            self._manager._leave_funnel(self)
                 else:
                     failures += 1
                     if failures >= _MAX_READ_FAILURES:
@@ -306,6 +352,11 @@ class _SharedCapture:
                 if remaining > 0 and self.stop.wait(remaining):
                     break
         finally:
+            # Leave the turnstile if we exited before ever publishing (immediate
+            # death, stop-before-first-frame, or a failure streak before the first
+            # frame). Idempotent: a no-op once the first-frame hook above released
+            # it, and a no-op if a deadline usurp already handed it on.
+            self._manager._leave_funnel(self)
             # Alive reader releases its OWN capture (same thread that reads it —
             # never a cross-thread release, so the segfault guard is honored).
             cap.release()
@@ -358,6 +409,18 @@ class CameraPreviewManager:
         # Lets the *next* open give a just-released (possibly still-busy) device
         # one short retry. Guarded by _registry_lock.
         self._last_release: dict[str, float] = {}
+        # Open funnel (turnstile): the reader thread of at most one capture may be
+        # in resolve→open→configure→first-frame at a time, so concurrent births
+        # don't stampede a shared USB-2 hub (see _FUNNEL_HOLD_DEADLINE). Its own
+        # small lock — held ONLY for this bookkeeping, NEVER across cv2 I/O and
+        # never nested under _registry_lock or an entry's _cond, so it is a leaf
+        # in the lock order and the never-hold-two-locks story stands. _holder is
+        # the reader currently owning the turnstile (None when free); _deadline is
+        # the monotonic time past which a waiter usurps a wedged/slow holder.
+        self._funnel_lock = threading.Lock()
+        self._funnel_cond = threading.Condition(self._funnel_lock)
+        self._funnel_holder: _SharedCapture | None = None
+        self._funnel_holder_deadline = 0.0
 
     def open_stream(self, camera_id: str | int):
         """Open (or share) the capture for ``camera_id`` and return a frame generator.
@@ -473,6 +536,10 @@ class CameraPreviewManager:
                     del self._captures[entry.camera_id]
             with entry._cond:
                 entry._cond.notify_all()
+        # A reader still parked in the open turnstile (a birth we force-released
+        # mid-open) has just had its stop set — wake it so it drops out promptly
+        # instead of waiting out the holder deadline. Separate, un-nested lock.
+        self._wake_funnel()
         deadline = time.monotonic() + timeout
         for entry in entries:
             remaining = deadline - time.monotonic()
@@ -559,6 +626,76 @@ class CameraPreviewManager:
             _FRAME_DEADLINE,
         )
 
+    def _enter_funnel(self, entry: "_SharedCapture") -> None:
+        """Admit ``entry``'s reader into the open turnstile, waiting its turn.
+
+        Blocks until the funnel is free OR the current holder overruns its
+        deadline — then this reader claims the turnstile and returns to run its
+        resolve→open→configure→first-frame. See :data:`_FUNNEL_HOLD_DEADLINE` for
+        the load-bearing fail-open contract: this is a best-effort serializer, not
+        a lock held across cv2 I/O, so a holder wedged inside its first ``read()``
+        can delay this open by at most the deadline (a waiter *usurps* it), never
+        forever. The empty-funnel fast path claims the turnstile with no wait, so
+        single-camera opens are latency-identical to before the funnel existed.
+
+        Only ``_funnel_lock`` is held here (across the ``wait`` too, which releases
+        it) — never an entry's ``_cond`` or ``_registry_lock`` and never any cv2
+        call, so the funnel is a leaf in the lock order.
+        """
+        with self._funnel_cond:
+            while True:
+                if entry.stop.is_set():
+                    # Stopped before we ever opened (force-release/detach during
+                    # the birth window): don't claim the turnstile, let the reader
+                    # fall through to its release path. A holder that is stopped
+                    # mid-open instead clears via the read-loop finally.
+                    return
+                now = time.monotonic()
+                if self._funnel_holder is None:
+                    self._funnel_holder = entry
+                    self._funnel_holder_deadline = now + _FUNNEL_HOLD_DEADLINE
+                    return
+                if now >= self._funnel_holder_deadline:
+                    # Holder overran its deadline — presumed wedged/slow inside a
+                    # blocking cv2 call it cannot itself return from. Usurp so a
+                    # hung birth can never gate this open forever (fail-open).
+                    logger.warning(
+                        "Camera %s waited out the open turnstile: holder %s overran %.1fs; proceeding",
+                        entry.camera_id,
+                        self._funnel_holder.camera_id,
+                        _FUNNEL_HOLD_DEADLINE,
+                    )
+                    self._funnel_holder = entry
+                    self._funnel_holder_deadline = now + _FUNNEL_HOLD_DEADLINE
+                    return
+                self._funnel_cond.wait(self._funnel_holder_deadline - now)
+
+    def _leave_funnel(self, entry: "_SharedCapture") -> None:
+        """Release the open turnstile iff ``entry`` still holds it (idempotent).
+
+        Called on EVERY reader exit from the funnel scope: first frame published,
+        open failure, alive-failure streak, stop-before-first-frame, watchdog-
+        driven read-loop exit. A no-op when ``entry`` was already usurped (its
+        deadline lapsed and a waiter took over) or never became holder — so it is
+        safe to call redundantly from both the first-frame hook and the read-loop
+        ``finally``. An *abandoned* holder (a reader wedged in ``read()`` that never
+        returns to run this) is NOT cleared here; the deadline usurp in
+        :meth:`_enter_funnel` covers it. The turnstile is never cross-thread
+        cleaned, consistent with the never-release-across-threads rule.
+        """
+        with self._funnel_cond:
+            if self._funnel_holder is entry:
+                self._funnel_holder = None
+                self._funnel_holder_deadline = 0.0
+                self._funnel_cond.notify_all()
+
+    def _wake_funnel(self) -> None:
+        """Wake readers parked in :meth:`_enter_funnel` so a stop they were just
+        handed (force-release / last-detach) is seen without waiting out the
+        holder deadline. Cheap and idempotent; touches only ``_funnel_lock``."""
+        with self._funnel_cond:
+            self._funnel_cond.notify_all()
+
     def _acquire(self, camera_id: str) -> _SharedCapture:
         with self._registry_lock:
             # Refuse to open (or register) a capture while a recording session
@@ -618,6 +755,10 @@ class CameraPreviewManager:
         # grace lapses rather than joined. Waiting lets a subsequent same-index
         # open find the device actually free instead of transiently busy.
         entry.stop.set()
+        # Wake a reader parked in the open turnstile (last client vanished before
+        # the birth ever produced a frame) so it sees the stop without waiting out
+        # the holder deadline. Un-nested leaf lock.
+        self._wake_funnel()
         with entry._cond:
             entry._cond.notify_all()
         entry.released.wait(_RELEASE_GRACE)
