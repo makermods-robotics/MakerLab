@@ -22,6 +22,7 @@ from __future__ import annotations
 import threading
 import time
 
+import cv2
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
@@ -42,11 +43,31 @@ class FakeVideoCapture:
         self.backend = backend
         self.opened = True
         self.released = False
+        # Property config recording, so tests can assert the preview manager
+        # forces MJPG/size/fps before the first read (the USB-2 bandwidth fix).
+        # ``set`` returns ``set_returns`` — flip it to False to model a device
+        # (e.g. a built-in with no MJPG mode) that rejects the format.
+        self.set_calls: list[tuple[int, float]] = []
+        self.set_returns = True
+        self._props: dict[int, float] = {}
+        # Snapshot of set_calls taken at the first read(), so a test can verify
+        # every property was set BEFORE any frame was pulled.
+        self.sets_before_first_read: list[tuple[int, float]] | None = None
 
     def isOpened(self) -> bool:  # noqa: N802 — cv2's camelCase API
         return self.opened
 
+    def set(self, prop: int, value: float) -> bool:
+        self.set_calls.append((prop, value))
+        self._props[prop] = value
+        return self.set_returns
+
+    def get(self, prop: int) -> float:
+        return self._props.get(prop, 0.0)
+
     def read(self):
+        if self.sets_before_first_read is None:
+            self.sets_before_first_read = list(self.set_calls)
         if not self.opened:
             return False, None
         return True, np.zeros((8, 8, 3), dtype=np.uint8)
@@ -280,6 +301,68 @@ def test_read_failure_streak_force_releases_shared_capture_and_reopens_fresh(
     assert len(captures) == 2  # a brand-new capture, not the dead one
     gen2.close()
     assert captures[1].released
+
+
+# ---------------------------------------------------------------------------
+# Capture format configuration — every preview forces MJPG/640x480@30 before the
+# first read so three USB-2 cameras can coexist (uncompressed ~18 MB/s/camera
+# saturates a ~35 MB/s hub; the starved third camera opens but delivers zero
+# frames). Applied unconditionally; a set() the device rejects is harmless.
+# ---------------------------------------------------------------------------
+
+
+def test_open_configures_mjpg_size_fps_before_first_read(
+    fake_captures: list[FakeVideoCapture],
+) -> None:
+    """A freshly opened preview capture is configured MJPG / 640x480 / 30fps, in
+    lerobot's property order (FOURCC first — it can change the available
+    resolution/FPS — then size, then FPS), BEFORE any frame is read."""
+    manager = CameraPreviewManager()
+    gen = manager.open_stream(0)
+    next(gen)  # force at least one read so sets_before_first_read is captured
+    cap = fake_captures[0]
+
+    assert cap.sets_before_first_read is not None
+    props_in_order = [prop for prop, _ in cap.sets_before_first_read]
+    assert props_in_order == [
+        cv2.CAP_PROP_FOURCC,
+        cv2.CAP_PROP_FRAME_WIDTH,
+        cv2.CAP_PROP_FRAME_HEIGHT,
+        cv2.CAP_PROP_FPS,
+    ]
+    values = dict(cap.sets_before_first_read)
+    assert values[cv2.CAP_PROP_FOURCC] == cv2.VideoWriter_fourcc(*"MJPG")
+    assert values[cv2.CAP_PROP_FRAME_WIDTH] == 640
+    assert values[cv2.CAP_PROP_FRAME_HEIGHT] == 480
+    assert values[cv2.CAP_PROP_FPS] == 30
+
+    gen.close()
+    assert cap.released
+
+
+def test_open_streams_normally_when_format_set_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A capture whose set() returns False (a built-in camera with no MJPG mode)
+    keeps its auto-negotiated format and streams normally — property-set failures
+    must never fail the open."""
+    captures: list[FakeVideoCapture] = []
+
+    def factory(index: int, backend: int | None = None) -> FakeVideoCapture:
+        cap = FakeVideoCapture(index, backend)
+        cap.set_returns = False  # every format set fails, as a real built-in would
+        captures.append(cap)
+        return cap
+
+    monkeypatch.setattr(camera_preview.cv2, "VideoCapture", factory)
+    manager = CameraPreviewManager()
+    gen = manager.open_stream(0)
+    assert b"--frame" in next(gen)  # streams despite every set() returning False
+    # The sets were still attempted (all four), before the first read.
+    assert captures[0].sets_before_first_read is not None
+    assert len(captures[0].sets_before_first_read) == 4
+    gen.close()
+    assert captures[0].released
 
 
 # ---------------------------------------------------------------------------

@@ -113,6 +113,60 @@ _CV2_BACKEND = {
     "Windows": cv2.CAP_DSHOW,
 }.get(platform.system(), cv2.CAP_ANY)
 
+# USB-2 bandwidth constraint — load-bearing tuning, do NOT strip in a refactor.
+# A cv2 capture opened with no format configuration negotiates the camera's
+# default, which for USB webcams is uncompressed YUYV: at 640x480@30 that is
+# ~18 MB/s PER camera. A single USB-2 hub shares only ~35 MB/s, so two live
+# previews saturate the bus and a third camera opens successfully but delivers
+# ZERO frames forever (the frame-age watchdog then correctly reaps it). Forcing
+# in-camera MJPEG (JPEG-compressed, ~10-20x less bandwidth) lets three cameras
+# on one hub coexist. This mirrors the recording path, which already sets
+# fourcc=MJPG via lerobot's OpenCVCamera; on this exact bench machine that same
+# call sequence measurably fixed recording bandwidth.
+_PREVIEW_FOURCC = "MJPG"
+_PREVIEW_WIDTH = 640
+_PREVIEW_HEIGHT = 480
+_PREVIEW_FPS = 30
+
+
+def _configure_preview_capture(cap: cv2.VideoCapture, camera_id: str) -> None:
+    """Force MJPG / 640x480@30 on a freshly opened preview capture, BEFORE its
+    first read. See _PREVIEW_* above for why this is load-bearing (USB-2 hub
+    bandwidth). Applied UNCONDITIONALLY to every preview capture, built-in
+    cameras included: the preview manager is keyed by camera id only and stays
+    config-agnostic (no per-camera fourcc plumbing). A ``set`` the device does
+    not support (e.g. a MacBook built-in with no MJPG mode) returns False and
+    simply leaves that property auto-negotiated — never fatal, so the return
+    values are ignored and a set failure never fails the open.
+
+    Property order mirrors lerobot's OpenCVCamera._configure_capture_settings:
+    FOURCC first (it can change the available resolution/FPS options), then frame
+    size, then FPS. AVFoundation's cv2 backend historically part-ignores FOURCC;
+    that is fine — on this bench the same sequence via lerobot's OpenCVCamera
+    measurably fixed recording bandwidth on this machine.
+    """
+    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*_PREVIEW_FOURCC))
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, _PREVIEW_WIDTH)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, _PREVIEW_HEIGHT)
+    cap.set(cv2.CAP_PROP_FPS, _PREVIEW_FPS)
+    if logger.isEnabledFor(logging.DEBUG):
+        # Decode the negotiated FOURCC int to 4 chars for legibility (same idiom
+        # as lerobot). Handy for bench debugging: shows requested vs. actual.
+        fourcc_int = int(cap.get(cv2.CAP_PROP_FOURCC))
+        negotiated_fourcc = "".join(chr((fourcc_int >> 8 * i) & 0xFF) for i in range(4))
+        logger.debug(
+            "Camera %s preview requested %s/%dx%d@%d; negotiated %s/%dx%d@%.0f",
+            camera_id,
+            _PREVIEW_FOURCC,
+            _PREVIEW_WIDTH,
+            _PREVIEW_HEIGHT,
+            _PREVIEW_FPS,
+            negotiated_fourcc,
+            int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
+            int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
+            cap.get(cv2.CAP_PROP_FPS),
+        )
+
 
 class CameraOpenError(RuntimeError):
     """The requested camera could not be opened."""
@@ -191,6 +245,10 @@ class _SharedCapture:
             self._manager._deregister_if_current(self)
             self.released.set()
             return
+        # Configure format BEFORE the first read (and before publishing open_ok):
+        # forces in-camera MJPEG so three USB-2 cameras can coexist. Never fails
+        # the open — see _configure_preview_capture.
+        _configure_preview_capture(cap, self.camera_id)
         with self._cond:
             self.cap = cap
             self.index = index
