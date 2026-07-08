@@ -28,6 +28,28 @@ export interface StartInferenceRequest {
   checkpoint_state_dim?: number;
 }
 
+// Structured startup sub-phase, mirrored from rollout.py's phase constants.
+// Names which substep a slow startup is in so the UI can say "Downloading
+// model…" / "Connecting to arm…" instead of one opaque spinner. Absent/null
+// when no session has seeded a phase yet.
+export type InferencePhase =
+  | "downloading_model"
+  | "starting"
+  | "loading_policy"
+  | "connecting"
+  | "running"
+  | "stopping"
+  | "stopped"
+  | "error";
+
+// How a finished run turned out (present only on the exited status payload):
+//   ok               — clean exit.
+//   ran_with_warning — the rollout ran but a noisy shutdown/cleanup tripped
+//                      (e.g. torque-disable on a gripper still holding an
+//                      object). NOT a real failure — render amber, not red.
+//   failed           — a real failure (never got going, or crashed mid-run).
+export type InferenceOutcome = "ok" | "ran_with_warning" | "failed";
+
 export interface InferenceStatus {
   inference_active: boolean;
   started_at: number | null;
@@ -37,8 +59,15 @@ export interface InferenceStatus {
   duration_s: number | null;
   policy_ref: string | null;
   log_path: string | null;
+  phase?: InferencePhase | null;
   exited?: boolean;
   exit_code?: number | null;
+  // Present only on the exited payload. `outcome` classifies the run;
+  // `error` is a short snippet mined from the log tail; `hint` is a
+  // plain-language, actionable diagnosis. All null when not applicable.
+  outcome?: InferenceOutcome | null;
+  error?: string | null;
+  hint?: string | null;
 }
 
 export async function startInference(
@@ -72,5 +101,23 @@ export async function getInferenceStatus(
   return apiRequest<InferenceStatus>(baseUrl, fetcher, "/inference-status", {
     signal,
     action: "Get inference status",
+  });
+}
+
+export interface InferenceLog {
+  logs: string;
+  log_path: string | null;
+}
+
+// Tail of the active/most-recent rollout's log file. Read-only + bounded on the
+// server (last ~500 lines); empty `logs` (not an error) before output exists.
+export async function getInferenceLog(
+  baseUrl: string,
+  fetcher: Fetcher,
+  signal?: AbortSignal,
+): Promise<InferenceLog> {
+  return apiRequest<InferenceLog>(baseUrl, fetcher, "/inference-log", {
+    signal,
+    action: "Get inference log",
   });
 }

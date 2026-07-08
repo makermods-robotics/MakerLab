@@ -24,6 +24,7 @@ import {
   playAutoAdvanceWarning,
 } from "@/lib/recordingAudio";
 import { useApi } from "@/contexts/ApiContext";
+import LogPanel from "@/components/LogPanel";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -71,6 +72,13 @@ interface BackendStatus {
   // discarded (see record.py). The post-recording page shows a "nothing was
   // saved" variant when this is set.
   discarded_empty?: boolean;
+  // Terminal error taxonomy for an ended session (see record.py): `outcome`
+  // classifies it, `error` is the caught exception's "Type: message" text,
+  // `hint` a plain-language headline. ran_with_warning = the episodes are
+  // safe and only teardown tripped — styled amber, not as a failure.
+  outcome?: "ok" | "ran_with_warning" | "failed" | null;
+  error?: string | null;
+  hint?: string | null;
   available_controls: {
     stop_recording: boolean;
     exit_early: boolean;
@@ -92,6 +100,7 @@ const Recording = () => {
     null
   );
   const [recordingSessionStarted, setRecordingSessionStarted] = useState(false);
+  const [logs, setLogs] = useState("");
 
   const [optimisticPhase, setOptimisticPhase] = useState<Phase | null>(null);
   const [showStopConfirm, setShowStopConfirm] = useState(false);
@@ -112,6 +121,11 @@ const Recording = () => {
   // the start response), so its warn-but-allow findings arrive via the status
   // poll. Show them once, not on every 1s tick.
   const identityWarningShownRef = useRef(false);
+  // Set once we've captured an ended session with a failure/warning outcome
+  // we're surfacing inline (banner near the log panel, mirroring
+  // Inference.tsx). Freezes further polling so a later tick can't clobber the
+  // outcome/error/hint we're showing.
+  const doneRef = useRef(false);
 
   const toggleMute = useCallback(() => {
     setMutedState((prev) => {
@@ -161,6 +175,9 @@ const Recording = () => {
     if (!recordingSessionStarted) return;
 
     const pollStatus = async () => {
+      // Once we've frozen on an ended-with-issue payload, stop polling: a
+      // later status would drop the outcome/error/hint we're showing.
+      if (doneRef.current) return;
       try {
         const response = await fetchWithHeaders(
           `${baseUrl}/recording-status`
@@ -168,6 +185,18 @@ const Recording = () => {
         if (!response.ok) return;
         const status = await response.json();
         setBackendStatus(status);
+
+        // Pull the recording log tail on the same tick so the panel stays live.
+        // Best-effort: a log fetch failure must not disturb status handling.
+        try {
+          const logRes = await fetchWithHeaders(`${baseUrl}/recording-log`);
+          if (logRes.ok) {
+            const logData = await logRes.json();
+            setLogs(logData.logs ?? "");
+          }
+        } catch {
+          // Ignore; the next tick retries.
+        }
 
         if (status.warning && !identityWarningShownRef.current) {
           identityWarningShownRef.current = true;
@@ -218,6 +247,17 @@ const Recording = () => {
           // safety net as handled so the imminent unmount doesn't POST a
           // spurious /stop-recording against a session that's already gone.
           stoppedRef.current = true;
+          // A real failure or a cleanup-only warning: keep the user here so
+          // the hint + error banner (near the log panel) is readable instead
+          // of bouncing straight to upload. Freeze polling on this payload;
+          // the banner's Continue button navigates on the user's own click.
+          if (
+            status.outcome === "failed" ||
+            status.outcome === "ran_with_warning"
+          ) {
+            doneRef.current = true;
+            return;
+          }
           const datasetInfo = {
             dataset_repo_id:
               status.dataset_repo_id || recordingConfig.dataset_repo_id,
@@ -453,6 +493,26 @@ const Recording = () => {
     await handleStopRecording();
   }, [handleStopRecording]);
 
+  // Leave the frozen outcome banner for the upload page — same datasetInfo the
+  // auto-navigation builds, on the user's own click. The upload page already
+  // handles the zero-saved case (discarded_empty → "nothing was saved").
+  const continueToUpload = useCallback(() => {
+    if (!backendStatus) return;
+    navigate("/upload", {
+      state: {
+        datasetInfo: {
+          dataset_repo_id:
+            backendStatus.dataset_repo_id || recordingConfig.dataset_repo_id,
+          single_task: recordingConfig.single_task,
+          num_episodes: recordingConfig.num_episodes,
+          saved_episodes: backendStatus.saved_episodes || 0,
+          session_elapsed_seconds: backendStatus.session_elapsed_seconds || 0,
+          discarded_empty: backendStatus.discarded_empty || false,
+        },
+      },
+    });
+  }, [backendStatus, recordingConfig, navigate]);
+
   // Re-record is no longer keyboard-driven (the ArrowLeft binding was removed —
   // a back-gesture keystroke shouldn't discard the in-progress episode), so it's
   // reached only via the on-screen dropdown item and doesn't need to sit in the
@@ -536,9 +596,30 @@ const Recording = () => {
 
   const sessionElapsedTime = backendStatus.session_elapsed_seconds || 0;
 
+  // An ended session we froze on to surface its outcome (see the poll): a real
+  // failure (red) or a cleanup-only warning (amber). `ran_with_warning` must
+  // NOT read as the red failed state — the episodes are safe, only teardown
+  // was noisy (mirrors Inference.tsx).
+  const outcome = backendStatus.outcome ?? null;
+  const endedWithIssue =
+    !backendStatus.recording_active &&
+    backendStatus.session_ended === true &&
+    (outcome === "failed" || outcome === "ran_with_warning");
+  const endedWarn = endedWithIssue && outcome === "ran_with_warning";
+
   const getStatusText = () => {
     if (currentPhase === "recording") return `RECORDING EPISODE ${currentEpisode}`;
     if (currentPhase === "resetting") return "RESET — GET READY";
+    // Finer "preparing" substeps (and terminal states) the backend now reports
+    // (record.py). These aren't in the Phase-narrowed set that drives the
+    // recording/resetting colors, so read the raw backend string: they render
+    // with the neutral preparing styling below, but the label names which
+    // substep the startup is actually in.
+    const raw = backendStatus.current_phase;
+    if (raw === "connecting_robot") return "CONNECTING ARM & CAMERAS…";
+    if (raw === "connecting_teleop") return "CONNECTING LEADER ARM…";
+    if (raw === "stopping") return "STOPPING…";
+    if (raw === "error") return "SESSION ERROR — SEE LOG";
     if (currentPhase === "preparing") return "PREPARING SESSION";
     return "SESSION COMPLETE";
   };
@@ -662,11 +743,60 @@ const Recording = () => {
             )}
           </Button>
 
-          {currentPhase === "completed" && (
+          {currentPhase === "completed" && !endedWithIssue && (
             <p className="text-center text-sm text-gray-400 mt-6">
               Recording complete — redirecting to upload…
             </p>
           )}
+
+          {endedWithIssue && (
+            <div
+              className={`mt-6 rounded-lg border p-4 ${
+                endedWarn
+                  ? "border-amber-500/40 bg-amber-500/10"
+                  : "border-red-500/40 bg-red-500/10"
+              }`}
+            >
+              <div
+                className={`flex items-center gap-2 text-sm font-semibold ${
+                  endedWarn ? "text-amber-300" : "text-red-300"
+                }`}
+              >
+                <span
+                  className={`w-2 h-2 rounded-full ${
+                    endedWarn ? "bg-amber-500" : "bg-red-500"
+                  }`}
+                />
+                {endedWarn
+                  ? "Session finished with a cleanup warning — your episodes are safe"
+                  : "Recording session failed"}
+              </div>
+              {backendStatus.hint && (
+                <p
+                  className={`mt-2 text-sm leading-relaxed ${
+                    endedWarn ? "text-amber-100/90" : "text-red-100/90"
+                  }`}
+                >
+                  {backendStatus.hint}
+                </p>
+              )}
+              {backendStatus.error && (
+                <pre className="mt-3 max-h-40 overflow-auto rounded bg-black/40 p-2 text-xs text-slate-300 whitespace-pre-wrap break-words">
+                  {backendStatus.error}
+                </pre>
+              )}
+              <Button
+                onClick={continueToUpload}
+                className="mt-4 w-full bg-slate-700 hover:bg-slate-600 text-white font-semibold"
+              >
+                Continue to upload
+              </Button>
+            </div>
+          )}
+        </div>
+
+        <div className="mt-6">
+          <LogPanel logs={logs} title="Recording log" defaultCollapsed />
         </div>
       </div>
 

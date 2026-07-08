@@ -601,3 +601,311 @@ def test_handle_start_inference_bimanual_builds_bi_so_follower_command(monkeypat
     assert "--robot.calibration_dir=/staging/follower" in cmd
     # Two sub-arms → two seeded newlines (single-arm seeds only one).
     assert captured["stdin"].written == b"\n\n"
+
+
+# ---------------------------------------------------------------------------
+# Startup phase model — the "which substep am I in" status (download / subprocess
+# fully MOCKED; no real inference, no hardware, no port opened).
+# ---------------------------------------------------------------------------
+
+
+def test_status_phase_is_none_when_idle() -> None:
+    """No session has seeded a meta → phase is None (frontend shows nothing)."""
+    from lelab.rollout import handle_inference_status
+
+    result = handle_inference_status()
+    assert result["phase"] is None
+
+
+def test_resolve_policy_path_sets_downloading_model_phase(monkeypatch, tmp_path) -> None:
+    """During the Hub snapshot_download, an active session's phase must read
+    `downloading_model` so the UI can name that (multi-second) wait."""
+    from lelab import rollout
+
+    # Seed a live meta the way handle_start_inference does before the download.
+    monkeypatch.setattr(rollout, "_inference_meta", {"phase": rollout.PHASE_STARTING})
+
+    seen_phase: dict = {}
+
+    def fake_snapshot_download(**kwargs):
+        # Capture the phase *at the moment of download*, not after.
+        seen_phase["phase"] = rollout._inference_meta.get("phase")
+        return str(tmp_path)
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", fake_snapshot_download)
+    rollout._resolve_policy_path("user/repo@root")
+
+    assert seen_phase["phase"] == rollout.PHASE_DOWNLOADING_MODEL
+
+
+def test_resolve_policy_path_local_dir_leaves_phase_untouched(monkeypatch, tmp_path) -> None:
+    """A local checkpoint dir needs no download, so it must NOT flip the phase
+    to downloading_model."""
+    from lelab import rollout
+
+    pretrained = tmp_path / "pretrained_model"
+    pretrained.mkdir()
+    monkeypatch.setattr(rollout, "_inference_meta", {"phase": rollout.PHASE_STARTING})
+
+    rollout._resolve_policy_path(str(pretrained))
+
+    assert rollout._inference_meta["phase"] == rollout.PHASE_STARTING
+
+
+def test_set_phase_noops_without_active_session(monkeypatch) -> None:
+    """A late stdout line arriving after teardown (empty meta) can't resurrect
+    a phase on an empty dict."""
+    from lelab import rollout
+
+    monkeypatch.setattr(rollout, "_inference_meta", {})
+    rollout._set_phase(rollout.PHASE_CONNECTING)
+    assert rollout._inference_meta == {}
+
+
+class _LineFeeder:
+    def __init__(self, lines: list[bytes]) -> None:
+        self._it = iter(lines + [b""])
+
+    def readline(self) -> bytes:
+        return next(self._it)
+
+
+class _NullLog:
+    def write(self, *a) -> None:
+        pass
+
+    def flush(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
+def test_pump_stdout_advances_phases_through_setup(monkeypatch) -> None:
+    """The stdout pump walks loading_policy → connecting → running off the
+    stable lerobot setup lines, then pins running at the rollout marker."""
+    from lelab import rollout
+
+    monkeypatch.setattr(rollout, "_inference_meta", {"phase": rollout.PHASE_STARTING})
+    monkeypatch.setattr(rollout, "_inference_started_at", 0.0)
+    monkeypatch.setattr(rollout, "_inference_rollout_started_at", None)
+
+    phases_seen: list[str] = []
+
+    real_set_phase = rollout._set_phase
+
+    def recording_set_phase(phase: str) -> None:
+        real_set_phase(phase)
+        phases_seen.append(phase)
+
+    monkeypatch.setattr(rollout, "_set_phase", recording_set_phase)
+
+    class _Proc:
+        stdout = _LineFeeder(
+            [
+                b"INFO Loading policy from 'user/repo'...\n",
+                b"INFO Policy loaded: type=act, device=cpu\n",
+                b"INFO Connecting robot (so101_follower)...\n",
+                b"INFO Robot connected: so101_follower\n",
+                b"INFO Rollout setup complete, starting rollout...\n",
+                b"INFO step 0\n",
+            ]
+        )
+
+    rollout._pump_stdout(_Proc(), _NullLog())
+
+    assert phases_seen == [
+        rollout.PHASE_LOADING_POLICY,
+        rollout.PHASE_CONNECTING,
+        rollout.PHASE_RUNNING,
+    ]
+    assert rollout._inference_meta["phase"] == rollout.PHASE_RUNNING
+    # The marker also stamped the rollout-start time.
+    assert rollout._inference_rollout_started_at is not None
+
+
+def test_pump_stdout_does_not_regress_phase_after_marker(monkeypatch) -> None:
+    """A setup-looking line AFTER the rollout marker must not drag a running
+    session back to `connecting`."""
+    from lelab import rollout
+
+    monkeypatch.setattr(rollout, "_inference_meta", {"phase": rollout.PHASE_STARTING})
+    monkeypatch.setattr(rollout, "_inference_started_at", 0.0)
+    monkeypatch.setattr(rollout, "_inference_rollout_started_at", None)
+
+    class _Proc:
+        stdout = _LineFeeder(
+            [
+                b"INFO Rollout setup complete, starting rollout...\n",
+                b"INFO Connecting robot (stray later mention)...\n",
+            ]
+        )
+
+    rollout._pump_stdout(_Proc(), _NullLog())
+    assert rollout._inference_meta["phase"] == rollout.PHASE_RUNNING
+
+
+def test_start_inference_seeds_starting_phase(monkeypatch, tmp_path) -> None:
+    """After a successful start, the meta carries a `starting` phase (the
+    subprocess is up but no setup line has been parsed yet)."""
+    from lelab import rollout
+
+    monkeypatch.setattr(rollout, "setup_follower_calibration_file", lambda cfg: cfg)
+    monkeypatch.setattr(rollout, "_preflight_arm_identity", lambda *a, **k: [])
+    monkeypatch.setattr(rollout, "_preflight_motor_power", lambda *a, **k: [])
+    monkeypatch.setattr(rollout, "_resolve_policy_path", lambda ref: str(tmp_path / "pretrained_model"))
+    monkeypatch.setattr(rollout, "_detect_device", lambda: "cpu")
+
+    class _FakeProc:
+        pid = 4321
+
+        def __init__(self, cmd, **kwargs):
+            import io
+
+            self.stdin = io.BytesIO()
+
+        def poll(self):
+            # Still running — status returns the live (non-terminal) branch.
+            return None
+
+    monkeypatch.setattr(rollout.subprocess, "Popen", _FakeProc)
+    # Don't spawn the real stdout-pump thread (it would try to iterate a
+    # non-existent stdout on the fake proc).
+    monkeypatch.setattr(
+        rollout.threading, "Thread", lambda *a, **k: type("_T", (), {"start": lambda self: None})()
+    )
+
+    result = rollout.handle_start_inference(_stub_request())
+    assert result["success"] is True, result
+    assert rollout._inference_meta["phase"] == rollout.PHASE_STARTING
+
+    status = rollout.handle_inference_status()
+    assert status["phase"] == rollout.PHASE_STARTING
+
+
+def test_stop_inference_sets_stopping_phase(monkeypatch) -> None:
+    """A stop request stamps `stopping` on the meta before terminate/wait, so a
+    racing status poll doesn't report a stale `running`."""
+    from lelab import rollout
+
+    phase_at_terminate: dict = {}
+
+    class _FakeProc:
+        def terminate(self):
+            phase_at_terminate["phase"] = rollout._inference_meta.get("phase")
+
+        def wait(self, timeout=None):
+            return 0
+
+    monkeypatch.setattr(rollout, "inference_active", True)
+    monkeypatch.setattr(rollout, "_inference_proc", _FakeProc())
+    monkeypatch.setattr(rollout, "_inference_meta", {"phase": rollout.PHASE_RUNNING})
+
+    result = rollout.handle_stop_inference()
+    assert result["success"] is True
+    assert phase_at_terminate["phase"] == rollout.PHASE_STOPPING
+
+
+def test_status_finalisation_reports_stopped_on_clean_exit(monkeypatch) -> None:
+    """A subprocess that exited rc=0 finalises to the terminal `stopped` phase."""
+    from lelab import rollout
+
+    class _ExitedProc:
+        returncode = 0
+
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr(rollout, "inference_active", True)
+    monkeypatch.setattr(rollout, "_inference_proc", _ExitedProc())
+    monkeypatch.setattr(rollout, "_inference_started_at", 0.0)
+    monkeypatch.setattr(rollout, "_inference_meta", {"phase": rollout.PHASE_RUNNING})
+
+    result = rollout.handle_inference_status()
+    assert result["exited"] is True
+    assert result["phase"] == rollout.PHASE_STOPPED
+
+
+def test_status_finalisation_reports_error_on_nonzero_exit(monkeypatch) -> None:
+    """A non-zero exit code finalises to the terminal `error` phase."""
+    from lelab import rollout
+
+    class _CrashedProc:
+        returncode = 1
+
+        def poll(self):
+            return 1
+
+    monkeypatch.setattr(rollout, "inference_active", True)
+    monkeypatch.setattr(rollout, "_inference_proc", _CrashedProc())
+    monkeypatch.setattr(rollout, "_inference_started_at", 0.0)
+    monkeypatch.setattr(rollout, "_inference_meta", {"phase": rollout.PHASE_CONNECTING})
+
+    result = rollout.handle_inference_status()
+    assert result["exited"] is True
+    assert result["phase"] == rollout.PHASE_ERROR
+
+
+def test_classify_outcome_ok_warns_and_fails() -> None:
+    from lelab.rollout import _classify_outcome
+
+    # rc 0/None => the run was fine.
+    assert _classify_outcome(0, True, "overload") == "ok"
+    assert _classify_outcome(None, True, None) == "ok"
+    # Non-zero AFTER the rollout started, with a torque-disable/overload on
+    # shutdown => the skill ran; only cleanup tripped.
+    assert _classify_outcome(1, True, "Motor 6 overload, torque_enable failed") == "ran_with_warning"
+    # Never started, or an unrelated error => a real failure.
+    assert _classify_outcome(1, False, "overload") == "failed"
+    assert _classify_outcome(1, True, "could not connect to the arm") == "failed"
+    # A connection lost mid-run (cable bumped while the policy is driving) is a
+    # real failure, not a shutdown/cleanup warning — connection-loss markers are
+    # deliberately excluded from the cleanup set.
+    assert _classify_outcome(1, True, "DeviceNotConnectedError: follower is not connected") == "failed"
+
+
+def test_friendly_hint_maps_common_failures() -> None:
+    from lelab.utils.errors import friendly_hint
+
+    assert "gripper" in (friendly_hint("Motor overload detected") or "").lower()
+    assert "connect" in (friendly_hint("Failed to connect to the follower") or "").lower()
+    assert friendly_hint("some unrecognised traceback") is None
+    assert friendly_hint(None) is None
+
+
+def test_extract_error_from_log_pulls_exception_tail(tmp_path) -> None:
+    from lelab.rollout import _extract_error_from_log
+
+    log = tmp_path / "rollout.log"
+    log.write_text(
+        "INFO starting rollout\n"
+        "Traceback (most recent call last):\n"
+        '  File "x.py", line 1\n'
+        "RuntimeError: gripper overload during shutdown\n",
+        encoding="utf-8",
+    )
+    out = _extract_error_from_log(str(log))
+    assert out is not None and "RuntimeError: gripper overload during shutdown" in out
+    assert _extract_error_from_log(None) is None
+    assert _extract_error_from_log(str(tmp_path / "missing.log")) is None
+
+
+def test_inference_in_use_path_none_when_idle() -> None:
+    """No active inference -> no in-use path (delete guards stay open)."""
+    from lelab import rollout
+
+    assert rollout.inference_in_use_path() is None
+
+
+def test_inference_in_use_path_returns_resolved_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """While a session is active, the accessor exposes the RESOLVED local
+    checkpoint dir captured at start (not the possibly-hub policy_ref)."""
+    from lelab import rollout
+
+    monkeypatch.setattr(rollout, "inference_active", True)
+    monkeypatch.setattr(
+        rollout,
+        "_inference_meta",
+        {"policy_ref": "user/repo@root", "policy_path": "/tmp/ckpt/pretrained_model"},
+    )
+    assert rollout.inference_in_use_path() == "/tmp/ckpt/pretrained_model"

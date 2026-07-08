@@ -47,6 +47,7 @@ from .utils.config import (
     setup_follower_calibration_file,
     stage_bimanual_follower_calibrations,
 )
+from .utils.errors import friendly_hint, is_cleanup_error
 
 logger = logging.getLogger(__name__)
 
@@ -104,9 +105,55 @@ _HUB_ROOT_REF_RE = re.compile(r"^(?P<repo>[^@]+)@root$")
 # load + bus connect + camera connect setup overhead.
 _ROLLOUT_START_MARKER = "Rollout setup complete"
 
+# Structured "which substep am I in" for the startup sequence, surfaced in the
+# /inference-status payload so the UI can name the wait ("Downloading model…",
+# "Connecting to arm…") instead of a single opaque spinner. Ordered:
+#   downloading_model — snapshot_download of a Hub checkpoint (server thread,
+#       BEFORE the subprocess spawns). Skipped for a local checkpoint dir.
+#   starting          — subprocess spawned, before any recognised setup line.
+#   loading_policy    — lerobot's context.py "Loading policy from ..." emitted.
+#   connecting        — lerobot's "Connecting robot ..." emitted (the bus- and
+#       camera-connect window; both open inside robot.connect()).
+#   running           — the rollout main loop has taken over (marker seen).
+#   stopping/stopped/error — terminal, set by stop/status finalisation.
+# There is no `downloading_dataset` phase: the base-strategy rollout command we
+# build passes no --dataset, so build_rollout_context never sets up (or
+# downloads) a dataset. We omit the phase rather than invent one that never
+# fires.
+PHASE_DOWNLOADING_MODEL = "downloading_model"
+PHASE_STARTING = "starting"
+PHASE_LOADING_POLICY = "loading_policy"
+PHASE_CONNECTING = "connecting"
+PHASE_RUNNING = "running"
+PHASE_STOPPING = "stopping"
+PHASE_STOPPED = "stopped"
+PHASE_ERROR = "error"
+
+# Stable lerobot setup log fragments (lerobot/rollout/context.py) that mark the
+# transition into a finer sub-phase. Watched in _pump_stdout. These are plain
+# logger.info messages, not a documented contract — if an upstream bump renames
+# them the phase just stays at its previous (coarser but still correct) value,
+# so a drift degrades gracefully rather than crashing.
+_PHASE_MARKERS: tuple[tuple[str, str], ...] = (
+    ("Loading policy from", PHASE_LOADING_POLICY),
+    ("Connecting robot", PHASE_CONNECTING),
+)
+
+
+def _set_phase(phase: str) -> None:
+    """Record the current startup sub-phase on the shared inference meta.
+
+    Guarded by _state_lock (short critical section). A no-op when no session is
+    active — a late stdout line arriving after teardown can't resurrect a
+    phase on an empty meta dict."""
+    with _state_lock:
+        if _inference_meta:
+            _inference_meta["phase"] = phase
+
 
 def _pump_stdout(proc: subprocess.Popen, log_handle) -> None:
-    """Tee the subprocess's stdout to the log file and watch for the
+    """Tee the subprocess's stdout to the log file, advance the startup
+    sub-phase off recognised lerobot setup lines, and watch for the
     rollout-start marker."""
     global _inference_rollout_started_at
     try:
@@ -120,8 +167,18 @@ def _pump_stdout(proc: subprocess.Popen, log_handle) -> None:
                 log_handle.flush()
             except Exception:
                 pass
+            # Advance to a finer setup sub-phase on the first matching line.
+            # Cheap substring checks; only fires before the rollout marker, so
+            # a later line mentioning "Connecting robot" can't drag a running
+            # session backwards.
+            if _inference_rollout_started_at is None:
+                for fragment, phase in _PHASE_MARKERS:
+                    if fragment in line:
+                        _set_phase(phase)
+                        break
             if _inference_rollout_started_at is None and _ROLLOUT_START_MARKER in line:
                 _inference_rollout_started_at = time.time()
+                _set_phase(PHASE_RUNNING)
                 logger.info(
                     "Inference rollout main loop started after %.1fs of setup",
                     _inference_rollout_started_at - (_inference_started_at or _inference_rollout_started_at),
@@ -159,12 +216,19 @@ def _resolve_policy_path(policy_ref: str) -> str:
     (no checkpoints sub-tree); the full repo is downloaded via
     snapshot_download and its root is returned directly."""
     if Path(policy_ref).is_dir():
+        # A local checkpoint — nothing to fetch, so no downloading_model phase.
         return policy_ref
     from huggingface_hub import snapshot_download
 
+    # A Hub ref: snapshot_download may pull hundreds of MB and block the start
+    # thread for tens of seconds. Announce it so the UI names the wait instead
+    # of showing an opaque spinner. Set only on the download paths (not the
+    # local branch above), and only when a session is live (_set_phase no-ops
+    # otherwise), so this helper stays safe to call from the unit tests.
     m = _HUB_REF_RE.match(policy_ref)
     if m:
         repo_id, step_dir = m.group("repo"), m.group("step_dir")
+        _set_phase(PHASE_DOWNLOADING_MODEL)
         local_root = snapshot_download(
             repo_id=repo_id,
             repo_type="model",
@@ -173,6 +237,7 @@ def _resolve_policy_path(policy_ref: str) -> str:
         return str(Path(local_root) / "checkpoints" / step_dir / "pretrained_model")
     m = _HUB_ROOT_REF_RE.match(policy_ref)
     if m:
+        _set_phase(PHASE_DOWNLOADING_MODEL)
         return snapshot_download(repo_id=m.group("repo"), repo_type="model")
     raise ValueError(f"Unrecognised policy ref: {policy_ref!r}")
 
@@ -326,6 +391,59 @@ def _format_cameras_arg(cameras: dict[str, dict[str, Any]]) -> str:
     return "{" + ", ".join(parts) + "}"
 
 
+# Exception lines at the tail of a Python traceback look like
+# "RuntimeError: ..." or "lerobot.errors.DeviceNotConnectedError: ...".
+_EXC_LINE_RE = re.compile(r"^[A-Za-z_][\w.]*(?:Error|Exception|Interrupt|Timeout|Failure)\b")
+
+
+def _extract_error_from_log(log_path: str | None) -> str | None:
+    """Pull the meaningful error out of a failed rollout's log so the UI can
+    show it directly instead of telling the user to open a file in the cache.
+
+    Subprocess forensics: we only have the log, so we mine the tail for the
+    last traceback exception line + its message body. (Recording/teleop run
+    in-process and will hand the caught exception's text straight to
+    friendly_hint/is_cleanup_error instead — this step is rollout-only.)"""
+    if not log_path:
+        return None
+    try:
+        # Only the tail matters; avoid materializing a multi-MB verbose log.
+        with open(log_path, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            fh.seek(max(0, fh.tell() - 64 * 1024))
+            data = fh.read()
+    except OSError:
+        return None
+    tail = data.decode("utf-8", errors="replace").splitlines()[-50:]
+    # Prefer the last exception line + everything after it (the message body).
+    exc_idx = next((i for i in range(len(tail) - 1, -1, -1) if _EXC_LINE_RE.match(tail[i])), None)
+    if exc_idx is not None:
+        snippet = "\n".join(tail[exc_idx:]).strip()
+    else:
+        non_empty = [ln for ln in tail if ln.strip()]
+        snippet = "\n".join(non_empty[-6:]).strip()
+    snippet = re.sub(r"\n\s*\n+", "\n", snippet)
+    if len(snippet) > 500:
+        snippet = snippet[:500].rstrip() + "…"
+    return snippet or None
+
+
+def _classify_outcome(rc: int | None, rollout_started: bool, error_text: str | None) -> str:
+    """ok | ran_with_warning | failed.
+
+    A non-zero exit *after* the rollout main loop started, where the error is a
+    torque-disable/overload on shutdown, means the skill ran but a motor (usually
+    the loaded gripper) complained during cleanup — that's a warning, not a
+    failure, so the UI shouldn't call a working run "failed". A mid-run
+    disconnect (or a non-zero exit before the loop began) stays a real failure —
+    is_cleanup_error deliberately excludes connection-loss markers."""
+    if not rc:
+        return "ok"
+    if rollout_started and is_cleanup_error(error_text):
+        return "ran_with_warning"
+    return "failed"
+
+
 def _build_rollout_cmd(request: InferenceRequest, policy_path: str, robot_args: list[str]) -> list[str]:
     """Assemble the full `lerobot-rollout` argv from the robot-specific args.
 
@@ -418,6 +536,11 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
             }
         # Claim the slot now so a concurrent caller losing the race sees us.
         inference_active = True
+        # Seed the meta so the phase is visible from the very first status poll
+        # (the download below can take tens of seconds — the UI must be able to
+        # name that wait before the subprocess even exists). Populated fully at
+        # the end of the start path once the subprocess is running.
+        _inference_meta = {"phase": PHASE_STARTING, "policy_ref": request.policy_ref}
 
     # Arm-count guard: reject a single-arm checkpoint on a bimanual robot (and
     # vice versa) BEFORE opening any port or spawning the subprocess, where the
@@ -427,6 +550,7 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
     if mismatch is not None:
         with _state_lock:
             inference_active = False
+            _inference_meta = {}
         return {"success": False, "status_code": 409, "message": mismatch}
 
     is_bimanual = request.mode == "bimanual"
@@ -550,16 +674,46 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
         _inference_proc = proc
         _inference_started_at = time.time()
         _inference_rollout_started_at = None
+        # Rebuild the meta now that the subprocess is up, but carry forward any
+        # phase the just-spawned stdout pump has already advanced to: the pump
+        # thread started above and may have seen "Loading policy…"/"Connecting
+        # robot…"/the rollout marker before we took this lock, so defaulting to
+        # `starting` here could stomp a further-along phase. The download phase
+        # is behind us (the subprocess only spawns after _resolve_policy_path
+        # returned), so `starting` is the correct floor.
+        carried_phase = _inference_meta.get("phase") or PHASE_STARTING
+        if carried_phase == PHASE_DOWNLOADING_MODEL:
+            carried_phase = PHASE_STARTING
         _inference_meta = {
             "policy_ref": request.policy_ref,
+            # The RESOLVED local checkpoint dir (policy_ref can be a Hub ref,
+            # fragile for path comparisons) — read by inference_in_use_path so
+            # models.delete_local_model can refuse deleting it mid-run.
+            "policy_path": policy_path,
             "duration_s": request.duration_s,
             "log_path": str(log_path),
+            "phase": carried_phase,
         }
     logger.info("Inference started: pid=%s policy=%s", proc.pid, policy_path)
     response = {"success": True, "message": "Inference started", "log_path": str(log_path)}
     if identity_warnings:
         response["warning"] = " ".join(identity_warnings)
     return response
+
+
+def inference_in_use_path() -> str | None:
+    """The RESOLVED local policy path the running inference is reading, or None
+    when no inference is active.
+
+    The meta's ``policy_ref`` can be a Hub ref (``user/repo@root``), which is
+    fragile for path comparisons — this is the local directory
+    ``_resolve_policy_path`` returned, captured at start. Guarded by
+    _state_lock (short critical section). Consumed by ``models._model_in_use``
+    so deleting a checkpoint a live inference is reading is refused."""
+    with _state_lock:
+        if not inference_active:
+            return None
+        return _inference_meta.get("policy_path")
 
 
 def handle_stop_inference() -> dict[str, Any]:
@@ -570,6 +724,10 @@ def handle_stop_inference() -> dict[str, Any]:
         if not inference_active or _inference_proc is None:
             return {"success": False, "status_code": 409, "message": "No inference is active"}
         proc = _inference_proc
+        # Surface the stop as its own phase so a status poll racing the
+        # terminate/wait below sees "stopping" rather than a stale "running".
+        if _inference_meta:
+            _inference_meta["phase"] = PHASE_STOPPING
 
     try:
         proc.terminate()
@@ -591,6 +749,50 @@ def handle_stop_inference() -> dict[str, Any]:
     return {"success": True, "message": "Inference stopped"}
 
 
+# Tail cap for the inference-log endpoint: last N lines, bounded so a very long
+# run's log can never be shipped to the browser in full.
+_INFERENCE_LOG_MAX_LINES = 500
+
+
+def _resolve_inference_log_path() -> Path | None:
+    """Path of the current (or most-recent) run's inference log, or None.
+
+    Prefers the active session's `_inference_meta["log_path"]`; when no session
+    is active (or its meta lacks a path), falls back to the newest `*.log` under
+    the inference_logs dir so a just-finished run's log is still viewable."""
+    with _state_lock:
+        meta_path = _inference_meta.get("log_path")
+    if meta_path:
+        p = Path(meta_path)
+        if p.is_file():
+            return p
+    log_dir = Path.home() / ".cache" / "huggingface" / "lerobot" / "inference_logs"
+    try:
+        logs = sorted(log_dir.glob("*.log"), key=lambda p: p.stat().st_mtime)
+    except OSError:
+        return None
+    return logs[-1] if logs else None
+
+
+def handle_inference_log(max_lines: int = _INFERENCE_LOG_MAX_LINES) -> dict[str, Any]:
+    """Return the tail of the active/most-recent inference log.
+
+    Read-only and bounded: at most `max_lines` trailing lines. Never raises —
+    a missing/unreadable log yields empty text, so the route stays 200 even
+    before a run has produced any output."""
+    path = _resolve_inference_log_path()
+    if path is None:
+        return {"logs": "", "log_path": None}
+    try:
+        # A rollout log is small (setup + per-step lines); reading it fully and
+        # slicing the tail is simpler than a seek-from-end and cheap at this size.
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return {"logs": "", "log_path": str(path)}
+    tail = lines[-max_lines:] if max_lines > 0 else lines
+    return {"logs": "\n".join(tail), "log_path": str(path)}
+
+
 def handle_inference_status() -> dict[str, Any]:
     global inference_active, _inference_proc, _inference_started_at
     global _inference_rollout_started_at, _inference_meta
@@ -604,15 +806,32 @@ def handle_inference_status() -> dict[str, Any]:
             finished_meta = _inference_meta
             finished_started = _inference_started_at
             finished_rollout_started = _inference_rollout_started_at
+            # Terminal phase: a clean exit (rc 0, including a stop we asked for)
+            # is `stopped`; any non-zero code is `error`. The prior phase in
+            # `finished_meta` (e.g. "stopping" from a stop request) is
+            # superseded — the subprocess has actually gone now.
+            terminal_phase = PHASE_STOPPED if rc == 0 else PHASE_ERROR
             inference_active = False
             _inference_proc = None
             _inference_started_at = None
             _inference_rollout_started_at = None
             _inference_meta = {}
+            # On a non-zero exit, mine the real error out of the log so the UI
+            # can show it directly (hint + snippet) instead of sending the user
+            # digging through the cache. `outcome` further distinguishes a true
+            # failure from a run that worked but tripped a noisy shutdown/cleanup
+            # warning (see _classify_outcome) so the false-failure isn't reported
+            # as a hard error.
+            error = _extract_error_from_log(finished_meta.get("log_path")) if rc else None
+            outcome = _classify_outcome(rc, finished_rollout_started is not None, error)
             return {
                 "inference_active": False,
                 "exited": True,
                 "exit_code": rc,
+                "outcome": outcome,
+                "error": error,
+                "hint": friendly_hint(error),
+                "phase": terminal_phase,
                 "policy_ref": finished_meta.get("policy_ref"),
                 "duration_s": finished_meta.get("duration_s"),
                 "log_path": finished_meta.get("log_path"),
@@ -632,4 +851,7 @@ def handle_inference_status() -> dict[str, Any]:
             "duration_s": _inference_meta.get("duration_s"),
             "policy_ref": _inference_meta.get("policy_ref"),
             "log_path": _inference_meta.get("log_path"),
+            # None when idle (no session has seeded a meta yet); the frontend
+            # treats an absent phase as "no active startup to narrate".
+            "phase": _inference_meta.get("phase"),
         }

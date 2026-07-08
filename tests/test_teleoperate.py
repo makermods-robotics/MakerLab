@@ -966,3 +966,76 @@ def test_power_telemetry_summary_none_without_samples() -> None:
     import lelab.teleoperate as teleop
 
     assert teleop.PowerTelemetry().summary(100) is None
+
+
+# ---------------------------------------------------------------------------
+# Session error taxonomy — outcome / error / hint in the status payload (the
+# in-process twin of rollout's exited payload; the pure classifier itself is
+# covered in tests/test_record.py). A mid-loop death is "failed"; a user stop
+# whose cleanup alone complained is "ran_with_warning"; a clean stop is "ok".
+# ---------------------------------------------------------------------------
+
+
+def test_teleoperation_status_carries_failed_outcome_with_hint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A session that died mid-loop surfaces outcome/error/hint through the
+    status payload, with the hint mapped from the error text."""
+    import lelab.teleoperate as teleop
+
+    monkeypatch.setattr(teleop, "teleoperation_active", False)
+    monkeypatch.setattr(teleop, "releasing", False)
+    monkeypatch.setattr(teleop, "last_session_outcome", "failed")
+    monkeypatch.setattr(
+        teleop,
+        "last_session_error",
+        "DeviceNotConnectedError: could not connect to the follower arm",
+    )
+
+    status = teleop.handle_teleoperation_status()
+
+    assert status["outcome"] == "failed"
+    assert "could not connect" in status["error"]
+    assert "plugged in" in status["hint"]
+
+
+def test_teleoperation_status_carries_cleanup_warning_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A user stop whose cleanup tripped (gripper overload on torque disable)
+    is ran_with_warning — the session itself ran fine."""
+    import lelab.teleoperate as teleop
+
+    cleanup_text = "TORQUE MAY STILL BE ENABLED on COM_FOLLOWER (follower arm; gripper: Overload)."
+    monkeypatch.setattr(teleop, "teleoperation_active", False)
+    monkeypatch.setattr(teleop, "releasing", False)
+    monkeypatch.setattr(teleop, "last_cleanup_error", cleanup_text)
+    monkeypatch.setattr(teleop, "last_session_outcome", "ran_with_warning")
+    monkeypatch.setattr(teleop, "last_session_error", cleanup_text)
+
+    status = teleop.handle_teleoperation_status()
+
+    assert status["outcome"] == "ran_with_warning"
+    assert "TORQUE MAY STILL BE ENABLED" in status["error"]
+    assert "motor overloaded" in status["hint"].lower()
+    # The existing raw safety field is not regressed by the new taxonomy.
+    assert status["last_cleanup_error"] == cleanup_text
+
+
+def test_teleoperation_status_outcome_none_before_any_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Before any session ends (and after a start clears the fields) the
+    taxonomy keys are present but null — the frontend treats that as no-op."""
+    import lelab.teleoperate as teleop
+
+    monkeypatch.setattr(teleop, "teleoperation_active", False)
+    monkeypatch.setattr(teleop, "releasing", False)
+    monkeypatch.setattr(teleop, "last_session_outcome", None)
+    monkeypatch.setattr(teleop, "last_session_error", None)
+
+    status = teleop.handle_teleoperation_status()
+
+    assert status["outcome"] is None
+    assert status["error"] is None
+    assert status["hint"] is None

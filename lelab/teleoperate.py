@@ -30,6 +30,7 @@ from .camera_preview import camera_preview_manager
 from .motor_power import apply_motor_power, clear_goal_velocity, torque_limit_from_percent
 from .rest_pose import capture_rest_pose, return_to_rest_pose
 from .utils.devices import _force_close_device_resources
+from .utils.errors import classify_outcome, format_exception, friendly_hint
 from .utils.robot_factory import build_bimanual_configs, build_single_configs
 
 logger = logging.getLogger(__name__)
@@ -85,6 +86,18 @@ current_teleop = None
 # may be left energized (rigid). Cleared on start; surfaced in the stop response
 # and the /teleoperation-status payload so the frontend can warn the user.
 last_cleanup_error: str | None = None
+# Terminal error taxonomy of the most recent session (the in-process twin of
+# rollout's exited payload; complements last_cleanup_error, which stays the
+# raw "torque may still be enabled" safety text). `last_session_outcome` is
+# "ok" | "ran_with_warning" | "failed" (None before any session ends);
+# `last_session_error` is the error behind it — the caught loop exception
+# formatted as "Type: message" (the worker's catch site holds the actual
+# exception object; no log forensics), or the cleanup problem text when only
+# teardown tripped. Classified by catch site: a mid-loop exception is a failed
+# session; a user-requested stop whose cleanup complained (e.g. a gripper
+# overload on torque disable) ran fine — a warning. Cleared on start.
+last_session_outcome: str | None = None
+last_session_error: str | None = None
 # Guards the start path; the worker owns disconnect so stop() does not race.
 _state_lock = threading.Lock()
 
@@ -533,7 +546,7 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
     success. Only the teleoperation loop runs in the background thread.
     """
     global teleoperation_active, teleoperation_thread, current_robot, current_teleop, last_cleanup_error
-    global releasing
+    global releasing, last_session_outcome, last_session_error
 
     from . import record as _record, rollout as _rollout
 
@@ -564,6 +577,8 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
         # restarts (regression-tested in tests/test_teleoperate.py).
         teleoperation_active = True
         last_cleanup_error = None
+        last_session_outcome = None
+        last_session_error = None
         releasing = False
         _release_now.clear()
 
@@ -673,9 +688,11 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
 
         def teleoperation_worker():
             global teleoperation_active, current_robot, current_teleop, last_cleanup_error, releasing
+            global last_session_outcome, last_session_error
 
             logger.info("Starting teleoperation loop...")
             stopped_normally = False
+            loop_error: str | None = None
             try:
                 last_broadcast_time = 0
                 last_current_sample_time = 0.0
@@ -726,6 +743,11 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
                 stopped_normally = True
             except Exception as e:
                 logger.error(f"Error during teleoperation loop: {e}")
+                # In-process error taxonomy: this catch site holds the actual
+                # exception object, so format it straight into the status
+                # payload (no log forensics). A mid-loop exception means the
+                # session died on its own — a real failure, classified below.
+                loop_error = format_exception(e)
             finally:
                 telemetry_summary = telemetry.summary(request.motor_power)
                 if telemetry_summary:
@@ -750,6 +772,13 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
                     if error:
                         problems.append(error)
                 last_cleanup_error = " ".join(problems) if problems else None
+                # Catch-site classification: the loop exception (if any) is the
+                # session's error and means "failed" — the loop was cut short.
+                # A user-requested stop (stopped_normally) whose cleanup alone
+                # complained ran fine: "ran_with_warning" with the cleanup text
+                # as the error. A clean stop is "ok".
+                last_session_error = loop_error or last_cleanup_error
+                last_session_outcome = classify_outcome(stopped_normally, last_session_error)
                 logger.info("Teleoperation stopped")
                 teleoperation_active = False
                 releasing = False
@@ -881,5 +910,14 @@ def handle_teleoperation_status() -> dict[str, Any]:
         # Non-None when the last session's cleanup could not release an arm
         # (torque may still be enabled); cleared when a new session starts.
         "last_cleanup_error": last_cleanup_error,
+        # Terminal error taxonomy of the most recent session (in-process twin
+        # of rollout's exited payload): `outcome` classifies it (ok |
+        # ran_with_warning | failed, None before any session ends), `error` is
+        # the text behind it, `hint` a plain-language headline. A mid-loop
+        # death is "failed"; a user stop whose cleanup alone complained is
+        # "ran_with_warning" — the frontend styles it amber, not red.
+        "outcome": last_session_outcome,
+        "error": last_session_error,
+        "hint": friendly_hint(last_session_error),
         "message": message,
     }
