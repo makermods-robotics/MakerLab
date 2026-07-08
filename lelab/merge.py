@@ -28,6 +28,7 @@ import json
 import logging
 import os
 import queue
+import shutil
 import subprocess
 import sys
 import threading
@@ -52,6 +53,55 @@ def _lerobot_cache_root() -> Path:
     return Path(
         os.environ.get("HF_LEROBOT_HOME", "~/.cache/huggingface/lerobot")
     ).expanduser()
+
+
+def _merge_logs_dir() -> Path:
+    """Sibling of lerobot's ``inference_logs/`` (see rollout.py) — where each
+    merge subprocess's teed stdout is persisted so a failure's cause survives
+    the in-memory log queue."""
+    return _lerobot_cache_root() / "merge_logs"
+
+
+def _dir_size(path: Path) -> int:
+    """Total size in bytes of every file under ``path`` (best-effort; skips
+    entries that vanish or can't be stat'd)."""
+    total = 0
+    for entry in path.rglob("*"):
+        with contextlib.suppress(OSError):
+            if entry.is_file():
+                total += entry.stat().st_size
+    return total
+
+
+def _human_size(num_bytes: int) -> str:
+    size = float(num_bytes)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024 or unit == "TB":
+            return f"{size:.0f}{unit}" if unit == "B" else f"{size:.1f}{unit}"
+        size /= 1024
+    return f"{size:.1f}TB"
+
+
+def _cleanup_partial_output(output_root: Path) -> None:
+    """Best-effort remove a partial merge output the current run created, logging
+    what was removed and its size. Never called for a pre-existing directory —
+    the caller checks that first."""
+    try:
+        size = _dir_size(output_root)
+    except OSError:
+        size = 0
+    try:
+        shutil.rmtree(output_root)
+        print(
+            f"Cleaned up partial output {output_root} ({_human_size(size)}).",
+            flush=True,
+        )
+    except OSError as exc:
+        print(
+            f"Warning: could not remove partial output {output_root}: {exc}",
+            flush=True,
+        )
+
 
 logger = logging.getLogger(__name__)
 
@@ -260,6 +310,8 @@ class MergeManager:
         self.output_repo_id: str | None = None
         self.process: subprocess.Popen | None = None
         self.log_queue: queue.Queue[dict[str, Any]] = queue.Queue()
+        self.log_path: str | None = None
+        self._log_handle: Any = None
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
 
@@ -279,6 +331,15 @@ class MergeManager:
                 return {"started": False, "message": name_reason}
             if output in sources:
                 return {"started": False, "message": "Output name must differ from the sources"}
+            if (_lerobot_cache_root() / output).exists():
+                logger.warning("Rejected merge: output %r already exists locally", output)
+                return {
+                    "started": False,
+                    "message": (
+                        f'A dataset named "{output}" already exists locally. '
+                        "Choose a new name, or delete the existing dataset first."
+                    ),
+                }
             problem = _merge_source_problem(sources)
             if problem is not None:
                 logger.warning("Rejected merge: unusable source %s (%s)", sources, problem)
@@ -291,6 +352,10 @@ class MergeManager:
             self.error = None
             self.output_repo_id = output
             self._drain_queue()
+            self._close_log()
+            self.log_path = None
+
+        self._open_log()
 
         cmd = [sys.executable, "-m", "lelab.merge", output, *sources]
         logger.info("Starting dataset merge: %s", " ".join(cmd))
@@ -322,6 +387,7 @@ class MergeManager:
             "state": self.state,
             "error": self.error,
             "output_repo_id": self.output_repo_id,
+            "log_path": self.log_path,
             "logs": logs,
         }
 
@@ -337,6 +403,7 @@ class MergeManager:
             self._enqueue(f"[merge] error reading output: {exc}")
         self.process.wait()
         return_code = self.process.returncode
+        self._close_log()
         with self._lock:
             if return_code == 0:
                 self.state = "done"
@@ -346,11 +413,38 @@ class MergeManager:
                 self.error = f"Merge exited with code {return_code}"
 
     def _enqueue(self, message: str) -> None:
+        # Tee to the persistent log file first (best-effort) so a failure's
+        # cause survives even after the in-memory queue is drained/capped.
+        if self._log_handle is not None:
+            with contextlib.suppress(Exception):
+                self._log_handle.write(message + "\n")
+                self._log_handle.flush()
         # Cap the queue so a chatty subprocess can't grow memory unbounded.
         if self.log_queue.qsize() >= 1000:
             with contextlib.suppress(queue.Empty):
                 self.log_queue.get_nowait()
         self.log_queue.put({"timestamp": time.time(), "message": message})
+
+    def _open_log(self) -> None:
+        """Create ``merge_logs/<ts>.log`` and open it for the current run.
+        Best-effort: a failure to create the log must never abort the merge."""
+        try:
+            log_dir = _merge_logs_dir()
+            log_dir.mkdir(parents=True, exist_ok=True)
+            path = log_dir / f"{int(time.time())}.log"
+            self._log_handle = path.open("w", buffering=1)
+            self.log_path = str(path)
+        except OSError as exc:
+            logger.warning("Could not open merge log file: %s", exc)
+            self._log_handle = None
+            self.log_path = None
+
+    def _close_log(self) -> None:
+        if self._log_handle is not None:
+            with contextlib.suppress(Exception):
+                self._log_handle.flush()
+                self._log_handle.close()
+            self._log_handle = None
 
     def _drain_queue(self) -> None:
         with contextlib.suppress(queue.Empty):
@@ -392,6 +486,14 @@ def _cli_friendly_error(
     fully predict (interrupted downloads, hub-only sources, mid-merge deletes).
     """
     text = str(exc)
+
+    # Output already exists — normally caught by the start() preflight, but a
+    # race (or a residue the cleanup couldn't remove) can still surface it here.
+    if isinstance(exc, FileExistsError) or "File exists" in text:
+        return (
+            "The output dataset already exists locally. Choose a new name, or "
+            "delete the existing dataset first."
+        )
 
     # Type B — a referenced file is missing on disk.
     if isinstance(exc, FileNotFoundError) or "No such file or directory" in text:
@@ -514,6 +616,13 @@ def _run_cli(argv: list[str] | None = None) -> int:
             print(_download_failed_message(repo_id, exc), flush=True)
             return 1
 
+    # If aggregation dies mid-copy it leaves a partial output (e.g. meta/info.json
+    # + videos/ with no completed episodes) that then makes the retry crash with a
+    # raw FileExistsError. Remember whether the output existed BEFORE we started so
+    # we only ever remove residue this run created — never a pre-existing dataset.
+    output_root = cache_root / args.output_repo_id
+    output_pre_existed = output_root.exists()
+
     try:
         aggregate_datasets(
             repo_ids=args.source_repo_ids,
@@ -523,6 +632,8 @@ def _run_cli(argv: list[str] | None = None) -> int:
     except Exception as exc:  # condense lerobot's giant feature-dict dumps
         friendly = _cli_friendly_error(exc, args.source_repo_ids, cache_root)
         print(friendly, flush=True)
+        if not output_pre_existed and output_root.exists():
+            _cleanup_partial_output(output_root)
         return 1
 
     print(f"Done. Created {args.output_repo_id}", flush=True)
