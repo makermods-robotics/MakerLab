@@ -19,6 +19,9 @@ Everything runs against a fake cv2.VideoCapture: no real camera is ever opened
 
 from __future__ import annotations
 
+import threading
+import time
+
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
@@ -78,6 +81,26 @@ class ScriptedVideoCapture(FakeVideoCapture):
         if not ok:
             return False, None
         return True, np.zeros((8, 8, 3), dtype=np.uint8)
+
+
+class BlockingReadCapture(FakeVideoCapture):
+    """A capture whose read() wedges until a gate Event is set.
+
+    Models the tonight's-symptom failure: a device physically yanked mid-stream
+    (or a wedged AVFoundation) whose ``cap.read()`` never returns. The reader
+    thread parks inside read(); nothing but the process can unstick that handle,
+    so the manager must recover *around* it (watchdog + abandon), not by waiting
+    on it. Tests MUST set the gate in a ``finally`` so the abandoned reader
+    thread can unwind and never hangs pytest.
+    """
+
+    def __init__(self, index: int, backend: int | None = None, gate: threading.Event | None = None) -> None:
+        super().__init__(index, backend)
+        self._gate = gate if gate is not None else threading.Event()
+
+    def read(self):
+        self._gate.wait()  # blocks until the test releases it
+        return False, None
 
 
 @pytest.fixture
@@ -257,6 +280,110 @@ def test_read_failure_streak_force_releases_shared_capture_and_reopens_fresh(
     assert len(captures) == 2  # a brand-new capture, not the dead one
     gen2.close()
     assert captures[1].released
+
+
+# ---------------------------------------------------------------------------
+# Reader-thread watchdog: a read() wedged forever (unplugged mid-stream) must
+# never clog the manager, the recording claim, or reopen. cv2 lives only on the
+# reader thread, so a hung read can pin neither a client refcount nor a lock the
+# force-release paths need — the manager recovers around the abandoned handle.
+# ---------------------------------------------------------------------------
+
+
+def test_hung_read_client_ends_within_deadline_and_deregisters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reader wedged inside cap.read() produces no frames. The frame-age
+    watchdog must end the client stream within the deadline (not block forever)
+    and deregister the capture so it stops wedging the registry."""
+    monkeypatch.setattr(camera_preview, "_FRAME_DEADLINE", 0.15)
+    monkeypatch.setattr(camera_preview, "_RELEASE_GRACE", 0.1)
+    gate = threading.Event()
+    captures: list[BlockingReadCapture] = []
+
+    def factory(index: int, backend: int | None = None) -> BlockingReadCapture:
+        cap = BlockingReadCapture(index, backend, gate=gate)
+        captures.append(cap)
+        return cap
+
+    monkeypatch.setattr(camera_preview.cv2, "VideoCapture", factory)
+    manager = CameraPreviewManager()
+    try:
+        gen = manager.open_stream(0)  # opens fine; the reader then wedges in read()
+        t0 = time.monotonic()
+        with pytest.raises(StopIteration):
+            next(gen)  # no frame ever arrives -> the watchdog ends the stream
+        elapsed = time.monotonic() - t0
+        assert elapsed < 2.0  # ended near the (small) deadline, not hung forever
+        assert manager._captures == {}  # watchdog deregistered the wedged capture
+    finally:
+        gate.set()  # let the abandoned reader thread unwind (never hang pytest)
+
+
+def test_hung_read_block_for_recording_returns_promptly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """THE regression test for tonight's symptom. With a reader wedged inside
+    cap.read(), block_for_recording must return within its timeout and clear the
+    registry — the recording claim can never be clogged by a hung preview read
+    (the old design blocked acquiring the per-index lock the hung read held)."""
+    gate = threading.Event()
+    captures: list[BlockingReadCapture] = []
+
+    def factory(index: int, backend: int | None = None) -> BlockingReadCapture:
+        cap = BlockingReadCapture(index, backend, gate=gate)
+        captures.append(cap)
+        return cap
+
+    monkeypatch.setattr(camera_preview.cv2, "VideoCapture", factory)
+    manager = CameraPreviewManager()
+    gen = manager.open_stream(0)  # reader opens, then wedges in read(); refcount held
+    try:
+        t0 = time.monotonic()
+        manager.block_for_recording(timeout=0.1)
+        elapsed = time.monotonic() - t0
+        assert elapsed < 1.0  # returned ~within the timeout, not blocked on the hung read
+        assert manager._captures == {}  # the wedged capture was deregistered (abandoned)
+        # And the recording latch is in force: a racing open is refused.
+        with pytest.raises(CameraOpenError):
+            manager.open_stream(0)
+    finally:
+        gate.set()  # unstick the abandoned reader before finalizing the client
+        gen.close()
+
+
+def test_reopen_after_force_release_retries_a_busy_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A device freed by an abrupt force-release can report busy for a beat. The
+    next open must give it ONE short retry before surfacing CameraOpenError, so a
+    tile re-requesting right after a recording claim ends recovers smoothly."""
+    monkeypatch.setattr(camera_preview, "_REOPEN_RETRY_DELAY", 0.01)
+    captures: list[FakeVideoCapture] = []
+    # 1st open (initial) succeeds; after force-release the reopen's first attempt
+    # is busy, and the single retry succeeds.
+    opened_seq = iter([True, False, True])
+
+    def factory(index: int, backend: int | None = None) -> FakeVideoCapture:
+        cap = FakeVideoCapture(index, backend)
+        cap.opened = next(opened_seq, True)
+        captures.append(cap)
+        return cap
+
+    monkeypatch.setattr(camera_preview.cv2, "VideoCapture", factory)
+    manager = CameraPreviewManager()
+    gen = manager.open_stream(0)
+    assert b"--frame" in next(gen)
+    manager.stop_all(timeout=0.2)
+    assert captures[0].released
+
+    gen2 = manager.open_stream(0)  # first reopen attempt busy -> retry -> success
+    assert b"--frame" in next(gen2)
+    assert len(captures) == 3  # initial + busy attempt + successful retry
+    assert captures[1].released  # the busy handle was released before the retry
+    gen2.close()
+    assert captures[2].released
+    gen.close()
 
 
 def test_held_healthy_indices_tracks_open_captures(fake_captures: list[FakeVideoCapture]) -> None:
