@@ -22,6 +22,7 @@ import {
   AvailableCamera,
 } from "@/hooks/useAvailableCameras";
 import { resyncCameras } from "@/lib/resyncCameras";
+import { defaultFourccForCamera } from "@/lib/cameraDefaults";
 import CameraTile from "@/components/CameraTile";
 
 /** Stable selection/address key for an enumerated camera: the hardware
@@ -178,6 +179,10 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
       width: 640,
       height: 480,
       fps: 30,
+      // Default USB/external cameras to MJPG (compressed → bandwidth-safe when
+      // two identical cameras share a bus); built-in cameras stay auto-detect.
+      // User-overridable via the FOURCC dropdown below.
+      fourcc: defaultFourccForCamera(selectedCamera),
     };
 
     onCamerasChange([...cameras, newCamera]);
@@ -498,7 +503,7 @@ const CameraPreview: React.FC<CameraPreviewProps> = ({
                         value={code}
                         className="text-white hover:bg-gray-700 text-xs"
                       >
-                        {code}
+                        {code === "MJPG" ? "MJPG (USB)" : code}
                       </SelectItem>
                     ))}
                   </SelectContent>
