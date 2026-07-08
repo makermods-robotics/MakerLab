@@ -543,13 +543,15 @@ def test_windows_cameras_uses_real_directshow_names(monkeypatch: pytest.MonkeyPa
     """The Windows path returns pygrabber's real device names in index order so
     the frontend can match each camera to its browser deviceId (issues #12/#16).
     """
-    from lelab import server
+    from lelab import camera_enumeration as server
 
     class _FakeGraph:
         def get_input_devices(self) -> list[str]:
             return ["USB2.0_CAM1", "ASUS FHD webcam"]
 
-    _install_fake_pygrabber(monkeypatch, _FakeGraph)
+    # The pygrabber import is module-scope now (None on non-Windows), so
+    # patch the binding itself rather than sys.modules.
+    monkeypatch.setattr(server, "_FilterGraph", _FakeGraph)
 
     assert server._windows_cameras() == [
         {"index": 0, "name": "USB2.0_CAM1", "available": True},
@@ -562,13 +564,13 @@ def test_windows_cameras_falls_back_when_pygrabber_unavailable(
 ) -> None:
     """If pygrabber is missing or its COM init fails, enumeration degrades to the
     generic cv2 probe instead of erroring."""
-    from lelab import server
+    from lelab import camera_enumeration as server
 
     class _BoomGraph:
         def __init__(self) -> None:
             raise RuntimeError("DirectShow/COM unavailable")
 
-    _install_fake_pygrabber(monkeypatch, _BoomGraph)
+    monkeypatch.setattr(server, "_FilterGraph", _BoomGraph)
     sentinel = [{"index": 0, "name": "Camera 0", "available": True}]
     monkeypatch.setattr(server, "_generic_cv2_cameras", lambda backend: sentinel)
 
@@ -578,14 +580,14 @@ def test_windows_cameras_falls_back_when_pygrabber_unavailable(
 def test_v4l2_camera_name_reads_sysfs(monkeypatch: pytest.MonkeyPatch) -> None:
     import io
 
-    from lelab import server
+    from lelab import camera_enumeration as server
 
     monkeypatch.setattr("builtins.open", lambda *a, **k: io.StringIO("HD Pro Webcam C920\n"))
     assert server._v4l2_camera_name(0) == "HD Pro Webcam C920"
 
 
 def test_v4l2_camera_name_returns_none_when_missing() -> None:
-    from lelab import server
+    from lelab import camera_enumeration as server
 
     # No such sysfs node (also the case on non-Linux): graceful None, not error.
     assert server._v4l2_camera_name(999999) is None

@@ -3,9 +3,13 @@ import { VideoOff } from "lucide-react";
 import BackendCameraStream from "@/components/BackendCameraStream";
 
 interface CameraTileProps {
-  /** cv2 index on the server — the live backend MJPEG feed at this index, i.e.
-   * exactly what the recorder/rollout opens, independent of any browser deviceId
-   * match. Undefined (nothing bound) renders the empty placeholder. */
+  /** Preferred camera address: the stable hardware unique_id. The backend
+   * re-resolves the current cv2 index from it on every capture open, so the
+   * feed follows the physical device across USB index reshuffles. */
+  cameraId?: string;
+  /** Legacy fallback address: a raw cv2 index on the server, used only when
+   * cameraId is absent (callers whose entries predate unique_id, or platforms
+   * without stable ids). Both undefined renders the empty placeholder. */
   cameraIndex?: number;
   /** When true, render the paused placeholder instead of the feed. Unmounting
    * BackendCameraStream drops its HTTP connection so the server releases the
@@ -14,7 +18,7 @@ interface CameraTileProps {
   /** Tile geometry + icon/text sizing. `md` = aspect-[4/3] (config/teleop),
    * `sm` = fixed w-32 h-24 thumbnail (inference). */
   size?: "sm" | "md";
-  /** Text shown in the empty (no cameraIndex) placeholder. */
+  /** Text shown in the empty (no camera bound) placeholder. */
   emptyLabel?: string;
   /** Optional caption rendered under the tile inside a bordered card. */
   label?: string;
@@ -22,21 +26,28 @@ interface CameraTileProps {
 
 /**
  * The single camera-preview primitive: renders the backend cv2 MJPEG feed for a
- * camera index, or an idle/paused placeholder. Wraps the one guard
- * (`!paused && cameraIndex !== undefined ? feed : placeholder`) that every
- * surface (recording config, teleop, inference) previously duplicated.
+ * camera (id-addressed, with a numeric-index fallback lane), or an idle/paused
+ * placeholder. Wraps the one guard (`!paused && bound ? feed : placeholder`)
+ * that every surface (recording config, teleop, inference) previously
+ * duplicated.
  *
  * BackendCameraStream owns its own failure/retry UI — there's no error latch
- * here. Rendering it whenever a cameraIndex is known and unmounting it to
+ * here. Rendering it whenever a camera is bound and unmounting it to
  * pause/release is what lets the server hand the shared capture to cv2.
  */
 const CameraTile: React.FC<CameraTileProps> = ({
+  cameraId,
   cameraIndex,
   paused = false,
   size = "md",
   emptyLabel = "No camera selected",
   label,
 }) => {
+  // The address BackendCameraStream requests: unique_id first; a stringified
+  // cv2 index is the fallback lane (the backend treats purely-numeric ids as
+  // raw indexes).
+  const address =
+    cameraId ?? (cameraIndex !== undefined ? String(cameraIndex) : undefined);
   // Only hold a backend stream while the tile is actually on-screen. Each open
   // stream is a server-side cv2 capture + HTTP connection; N configured cameras
   // in the recording config panel would otherwise all stream at once (worst on
@@ -75,7 +86,7 @@ const CameraTile: React.FC<CameraTileProps> = ({
   // paused still forces the stream off regardless of visibility (record-start
   // release / inference submitting must unmount the stream). Effective "show
   // feed" = not paused AND a camera is bound AND the tile is on-screen.
-  const showMjpeg = !paused && cameraIndex !== undefined && onScreen;
+  const showMjpeg = !paused && address !== undefined && onScreen;
 
   const boxClass =
     size === "sm"
@@ -92,14 +103,14 @@ const CameraTile: React.FC<CameraTileProps> = ({
   // (same box dimensions, so no layout jump when it starts/stops streaming).
   const placeholderText = paused
     ? "Preview paused"
-    : cameraIndex === undefined
+    : address === undefined
       ? emptyLabel
       : "Scroll into view";
 
   const tile = (
     <div ref={rootRef} className={boxClass}>
       {showMjpeg ? (
-        <BackendCameraStream cameraIndex={cameraIndex} className={streamClass} />
+        <BackendCameraStream cameraId={address} className={streamClass} />
       ) : (
         <div className="w-full h-full flex flex-col items-center justify-center">
           <VideoOff className={`text-gray-500 ${iconClass}`} />

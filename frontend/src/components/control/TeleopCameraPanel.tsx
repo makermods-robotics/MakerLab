@@ -27,13 +27,17 @@ const TeleopCameraPanel: React.FC = () => {
   const { selectedRecord, isLoading: robotsLoading } = useRobots();
 
   // Feeds come solely from the robot's configured cameras; each is streamed
-  // from the server by its cv2 index. A configured camera the server can't open
-  // still shows (name + BackendCameraStream's retry placeholder), so the user
-  // can tell it's expected but not detected.
+  // from the server by its stable unique_id (the backend re-resolves the cv2
+  // index per open, so the feed follows the physical device across USB
+  // reshuffles), falling back to the saved cv2 index for legacy entries. A
+  // configured camera the server can't open still shows (name +
+  // BackendCameraStream's retry placeholder), so the user can tell it's
+  // expected but not detected.
   const configured = selectedRecord?.cameras ?? [];
   const feeds = configured.map((c) => ({
     key: c.id,
     name: c.name,
+    cameraId: c.unique_id,
     cameraIndex: c.camera_index,
   }));
 
@@ -73,6 +77,7 @@ const TeleopCameraPanel: React.FC = () => {
               <CameraTile
                 key={`${feed.key}:${reloadKey}`}
                 size="md"
+                cameraId={feed.cameraId}
                 cameraIndex={feed.cameraIndex}
                 label={feed.name}
               />

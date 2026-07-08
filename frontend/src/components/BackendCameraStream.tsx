@@ -1,29 +1,26 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { VideoOff, RefreshCw } from "lucide-react";
 import { useApi } from "@/contexts/ApiContext";
+import { nextRetryDelayMs } from "@/lib/cameraPreviewRetry";
 
 interface BackendCameraStreamProps {
-  /** cv2 camera index on the server (CameraConfig.camera_index). */
-  cameraIndex: number;
+  /** Camera address for GET /camera-preview/{camera_id}: the stable hardware
+   * unique_id (primary), or a purely-numeric string meaning a raw cv2 index —
+   * the legacy/fallback lane for platforms and entries without stable ids. */
+  cameraId: string;
   className?: string;
 }
 
-// Retry backoff for a failed stream: quick first attempts (a session just
-// released the camera), settling to a slow poll (camera unplugged, server
-// down). Preview failures are usually TRANSIENT — a recording session holding
-// the cameras, a restarting server — so the tile must keep trying instead of
-// latching into a dead "Preview failed" state until the modal is reopened.
-const RETRY_BASE_MS = 2000;
-const RETRY_MAX_MS = 12000;
-
-/** The backend cv2 MJPEG endpoint for a camera index. Used for both the
+/** The backend cv2 MJPEG endpoint for a camera id. Used for both the
  * `<img src>` and the error-probe fetch below. */
-const cameraPreviewUrl = (baseUrl: string, index: number) =>
-  `${baseUrl}/camera-preview/${index}`;
+const cameraPreviewUrl = (baseUrl: string, cameraId: string) =>
+  `${baseUrl}/camera-preview/${encodeURIComponent(cameraId)}`;
 
 /**
  * MJPEG `<img>` stream of a camera attached to the *server* machine
- * (GET /camera-preview/{index}).
+ * (GET /camera-preview/{camera_id}). Addressed by the camera's stable
+ * unique_id, so the backend re-resolves the current cv2 index on every fresh
+ * open — the stream follows the physical device across USB index reshuffles.
  *
  * Fallback for headless deployments (e.g. a Jetson on the LAN): the browser's
  * getUserMedia only sees the viewing machine's cameras, so a camera plugged
@@ -31,31 +28,35 @@ const cameraPreviewUrl = (baseUrl: string, index: number) =>
  * instead. Owns its whole failure lifecycle: on stream error it asks the
  * endpoint WHY (the 409/503 detail — "recording is using the cameras" etc.),
  * shows that on the tile, and retries with capped backoff; clicking the tile
- * retries immediately. Parents should render it whenever a cameraIndex is
+ * retries immediately. Parents should render it whenever a cameraId is
  * known and unmount it to pause/release (unmount cleanup clears the img src
  * so the browser drops the HTTP connection and the server releases the
  * shared capture).
  */
 const BackendCameraStream: React.FC<BackendCameraStreamProps> = ({
-  cameraIndex,
+  cameraId,
   className,
 }) => {
   const { baseUrl, fetchWithHeaders } = useApi();
   const imgRef = useRef<HTMLImageElement>(null);
   const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const attemptRef = useRef(0);
+  // True while the last failure was a 409 "recording is active" — makes the
+  // retry back off to the slow poll instead of hammering the just-claimed
+  // device (see lib/cameraPreviewRetry).
+  const recordingRef = useRef(false);
   // Bumping remounts the <img> with a cache-busted URL — a clean retry.
   const [attempt, setAttempt] = useState(0);
   const [down, setDown] = useState(false);
   const [reason, setReason] = useState<string | null>(null);
 
-  // A new index is a new stream — forget the previous one's failure state.
+  // A new camera id is a new stream — forget the previous one's failure state.
   useEffect(() => {
     attemptRef.current = 0;
     setAttempt(0);
     setDown(false);
     setReason(null);
-  }, [cameraIndex]);
+  }, [cameraId]);
 
   useEffect(() => {
     const img = imgRef.current;
@@ -69,10 +70,7 @@ const BackendCameraStream: React.FC<BackendCameraStreamProps> = ({
 
   const scheduleRetry = useCallback(() => {
     if (retryTimer.current) clearTimeout(retryTimer.current);
-    const delay = Math.min(
-      RETRY_BASE_MS * 2 ** Math.min(attemptRef.current, 5),
-      RETRY_MAX_MS
-    );
+    const delay = nextRetryDelayMs(attemptRef.current, recordingRef.current);
     retryTimer.current = setTimeout(() => {
       attemptRef.current += 1;
       setAttempt((a) => a + 1);
@@ -86,7 +84,7 @@ const BackendCameraStream: React.FC<BackendCameraStreamProps> = ({
     // the status detail so the tile can say "recording is using the cameras"
     // instead of a generic failure. Best-effort: any probe error is itself
     // a reason ("server unreachable").
-    fetchWithHeaders(cameraPreviewUrl(baseUrl, cameraIndex), {
+    fetchWithHeaders(cameraPreviewUrl(baseUrl, cameraId), {
       method: "GET",
       headers: { Range: "bytes=0-0" },
     })
@@ -94,9 +92,13 @@ const BackendCameraStream: React.FC<BackendCameraStreamProps> = ({
         if (r.ok) {
           // Endpoint is fine again — the stream just dropped; retry sooner.
           r.body?.cancel?.();
+          recordingRef.current = false;
           setReason(null);
           return;
         }
+        // 409 = recording owns the cameras; back off to the slow poll so we
+        // don't hammer a device the recorder just claimed.
+        recordingRef.current = r.status === 409;
         const data = await r.json().catch(() => ({}));
         setReason(
           typeof data.detail === "string"
@@ -104,9 +106,12 @@ const BackendCameraStream: React.FC<BackendCameraStreamProps> = ({
             : `camera preview unavailable (${r.status})`
         );
       })
-      .catch(() => setReason("server unreachable"))
+      .catch(() => {
+        recordingRef.current = false;
+        setReason("server unreachable");
+      })
       .finally(scheduleRetry);
-  }, [baseUrl, fetchWithHeaders, cameraIndex, scheduleRetry]);
+  }, [baseUrl, fetchWithHeaders, cameraId, scheduleRetry]);
 
   const retryNow = useCallback(() => {
     if (retryTimer.current) clearTimeout(retryTimer.current);
@@ -138,7 +143,7 @@ const BackendCameraStream: React.FC<BackendCameraStreamProps> = ({
     <img
       key={attempt}
       ref={imgRef}
-      src={`${cameraPreviewUrl(baseUrl, cameraIndex)}?r=${attempt}`}
+      src={`${cameraPreviewUrl(baseUrl, cameraId)}?r=${attempt}`}
       onError={handleError}
       className={className}
       alt="Server camera preview"
