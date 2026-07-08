@@ -11,7 +11,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { ConfigComponentProps, policyTypeDisplayName } from "../types";
+import { ConfigComponentProps, POLICY_TYPE_OPTIONS } from "../types";
 import WandbInstallDialog from "../WandbInstallDialog";
 import { useApi } from "@/contexts/ApiContext";
 
@@ -92,18 +92,43 @@ const EssentialsCard: React.FC<ConfigComponentProps> = ({
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div>
-            <Label className="text-slate-300">Policy</Label>
-            {/* Frozen: the model type is chosen on the home page (or inherited
-                by the Continue / Fine-tune flows) — read-only here, same
-                pattern as the Dataset field above. */}
-            <div
-              id="policy_type"
-              className="mt-1 rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-white"
+            <Label htmlFor="policy_type" className="text-slate-300">
+              Policy
+            </Label>
+            {/* Editable: arriving from the home-page grid preselects a type,
+                but the user can switch it here. Lists every policy type; ACT /
+                SmolVLA are badged "tested", the rest "untested". */}
+            <Select
+              value={config.policy_type || undefined}
+              onValueChange={(value) => updateConfig("policy_type", value)}
             >
-              {policyTypeDisplayName(config.policy_type)}
-            </div>
+              <SelectTrigger
+                id="policy_type"
+                className="mt-1 bg-slate-900 border-slate-600 text-white rounded-lg"
+              >
+                <SelectValue placeholder="Select a policy type" />
+              </SelectTrigger>
+              <SelectContent className="bg-slate-800 border-slate-600 text-white">
+                {POLICY_TYPE_OPTIONS.map((policy) => (
+                  <SelectItem key={policy.value} value={policy.value}>
+                    <span className="flex items-center gap-2">
+                      <span>{policy.display}</span>
+                      <span
+                        className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${
+                          policy.stable
+                            ? "bg-green-500/15 text-green-400"
+                            : "bg-slate-700 text-slate-400"
+                        }`}
+                      >
+                        {policy.stable ? "tested" : "untested"}
+                      </span>
+                    </span>
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
             <p className="text-xs text-slate-500 mt-1">
-              Model chosen on the home page.
+              Preselected from the home page — change it here if you like.
             </p>
           </div>
 

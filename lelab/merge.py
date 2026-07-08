@@ -35,10 +35,13 @@ import time
 from pathlib import Path
 from typing import Any
 
+from huggingface_hub import HfApi, snapshot_download
+from huggingface_hub.utils import (
+    HfHubHTTPError,
+    RepositoryNotFoundError,
+    RevisionNotFoundError,
+)
 from pydantic import BaseModel
-
-from huggingface_hub import HfApi
-from huggingface_hub.utils import HfHubHTTPError, RepositoryNotFoundError
 
 from lerobot.datasets.aggregate import aggregate_datasets
 
@@ -137,7 +140,13 @@ def _merge_source_problem(repo_ids: list[str]) -> str | None:
         info = _load_info(repo_id)
 
         if info is None:
-            # Not in the local cache — is it on the Hub?
+            # Not in the local cache — only a *confirmed* not-found blocks here.
+            # A source that exists on the Hub (or that we can't check because
+            # we're offline) is allowed through: the merge subprocess downloads
+            # it into the cache first (see _ensure_local_source), which also
+            # sidesteps lerobot's broken in-merge Hub version resolution
+            # (lerobot 0.5.2 raises RevisionNotFoundError positionally, which
+            # huggingface_hub >=1.x rejects → a cryptic `response`-arg TypeError).
             missing = _hub_repo_missing(repo_id)
             if missing is True:
                 return (
@@ -145,7 +154,6 @@ def _merge_source_problem(repo_ids: list[str]) -> str | None:
                     "cache or on the Hugging Face Hub. Check the name (or log in "
                     "if it's a private dataset)."
                 )
-            # missing is False (exists on Hub) or None (offline) → don't block.
             continue
 
         # Local source — verify the files its metadata references exist.
@@ -414,6 +422,28 @@ def _cli_friendly_error(
                 "datasets)."
             )
 
+    # Type C — lerobot resolved a source's version against the Hub and it went
+    # wrong. Two shapes in this environment: a genuine RevisionNotFoundError
+    # (the repo has no codebase-version tag), or a TypeError, because lerobot
+    # 0.5.2 raises that error positionally while huggingface_hub >=1.x requires
+    # `response=` — so constructing the friendly error itself throws. Both mean
+    # the source couldn't be loaded from the Hub and isn't available locally.
+    # (The preflight blocks not-downloaded sources before we get here; this is
+    # the backstop for a source that vanished or lost its cache mid-merge.)
+    if (
+        isinstance(exc, RevisionNotFoundError)
+        or "must be tagged with a codebase version" in text
+        or ("HfHubHTTPError" in text and "response" in text)
+    ):
+        hit = _source_for_path(text, source_repo_ids, cache_root)
+        who = f'Dataset "{hit[0]}"' if hit else "A source dataset"
+        return (
+            f"{who} couldn't be loaded from the Hugging Face Hub and isn't "
+            "downloaded locally. Download it first (open or replay it), then "
+            "merge. If you're offline or behind a network block, the Hub may be "
+            "unreachable."
+        )
+
     # Feature incompatibility — reuse the metadata-derived message when possible.
     friendly = _merge_incompatibility(source_repo_ids)
     if friendly is None and "Same features is expected" in text:
@@ -426,6 +456,40 @@ def _cli_friendly_error(
     return friendly
 
 
+def _download_failed_message(repo_id: str, exc: Exception) -> str:
+    """One-line, actionable message for a source that couldn't be downloaded."""
+    text = str(exc)
+    if isinstance(exc, RepositoryNotFoundError) or "404" in text:
+        return (
+            f'Dataset "{repo_id}" wasn\'t found on the Hugging Face Hub. Check '
+            "the name (or log in if it's a private dataset)."
+        )
+    return (
+        f'Couldn\'t download "{repo_id}" from the Hugging Face Hub '
+        f"({type(exc).__name__}). Check your internet connection or proxy and "
+        "try again."
+    )
+
+
+def _ensure_local_source(repo_id: str, cache_root: Path) -> Path:
+    """Return the local root for ``repo_id``, downloading it from the Hub into
+    the lerobot cache first if it isn't already present.
+
+    Downloading here (via huggingface_hub's own ``snapshot_download``) rather
+    than letting ``aggregate_datasets`` fetch it means the source is a plain
+    local dataset by the time lerobot loads it — so lerobot takes its
+    cache-load path and never runs the Hub version resolution that crashes
+    under huggingface_hub >=1.x (see _cli_friendly_error). Raises on failure.
+    """
+    root = cache_root / repo_id
+    if (root / "meta" / "info.json").exists():
+        return root
+    print(f"Downloading {repo_id} from the Hugging Face Hub…", flush=True)
+    snapshot_download(repo_id=repo_id, repo_type="dataset", local_dir=str(root))
+    print(f"Downloaded {repo_id}.", flush=True)
+    return root
+
+
 def _run_cli(argv: list[str] | None = None) -> int:
     """Subprocess entry: aggregate the source datasets into the output repo."""
     parser = argparse.ArgumentParser(description="Merge LeRobot datasets")
@@ -436,17 +500,19 @@ def _run_cli(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
     print(f"Merging {len(args.source_repo_ids)} datasets → {args.output_repo_id}", flush=True)
 
-    # Prefer each source's local copy: pass its root so lerobot loads it from
-    # cache instead of resolving a version against the Hub — which 404s for
-    # datasets that were never pushed. Sources not present locally get root=None
-    # so lerobot fetches them from the Hub as before.
+    # Make every source local first (downloading any that aren't), then pass its
+    # root so lerobot loads from cache instead of resolving a version against the
+    # Hub — the latter 404s for never-pushed datasets and, under
+    # huggingface_hub >=1.x, crashes outright. A download failure is reported
+    # per-source and aborts before aggregation.
     cache_root = _lerobot_cache_root()
-    roots: list[Path | None] = [
-        cache_root / repo_id
-        if (cache_root / repo_id / "meta" / "info.json").exists()
-        else None
-        for repo_id in args.source_repo_ids
-    ]
+    roots: list[Path | None] = []
+    for repo_id in args.source_repo_ids:
+        try:
+            roots.append(_ensure_local_source(repo_id, cache_root))
+        except Exception as exc:
+            print(_download_failed_message(repo_id, exc), flush=True)
+            return 1
 
     try:
         aggregate_datasets(

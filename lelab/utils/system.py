@@ -15,6 +15,8 @@
 import contextlib
 import importlib.util
 import logging
+import os
+import platform
 import queue
 import shutil
 import subprocess
@@ -26,6 +28,28 @@ from typing import Any
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
+
+
+def open_folder_in_file_browser(path: str) -> None:
+    """Open `path` in the OS file browser (Finder/Explorer/xdg-open).
+
+    Creates the directory (parents included) first so a fresh install with no
+    calibration files yet still opens a real, empty folder instead of failing.
+    Does NOT block on the launched process — the file browser runs detached.
+    This is a LOCAL action only (spawns a GUI on the host); it never touches the
+    network. Raises on an unsupported platform or a spawn failure so the caller
+    can report a clear error.
+    """
+    os.makedirs(path, exist_ok=True)
+    system = platform.system()
+    if system == "Darwin":
+        subprocess.Popen(["open", path])
+    elif system == "Windows":
+        os.startfile(path)  # type: ignore[attr-defined]  # Windows-only
+    elif system == "Linux":
+        subprocess.Popen(["xdg-open", path])
+    else:
+        raise OSError(f"Opening a folder is not supported on this platform: {system!r}")
 
 
 # accelerate and wandb are only ever consumed by training SUBPROCESSES (fresh

@@ -65,7 +65,6 @@ yarn-error.log*
 .superpowers/
 .worktrees/
 outputs/
-docs/
 PHONE_CAMERA_SETUP.md
 HTTPS_SETUP.md
 

@@ -50,6 +50,7 @@ import {
   RefreshCw,
   Wand2,
   Trash2,
+  FolderOpen,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import Logo from "@/components/Logo";
@@ -347,6 +348,36 @@ const Calibration = () => {
       return null;
     }
   }, [robotName, baseUrl, fetchWithHeaders]);
+
+  // Open the side's calibration folder in the OS file browser (Finder/Explorer/
+  // xdg-open). A local, non-network action handled server-side; the dir is
+  // created there if missing so a fresh install still opens an empty folder.
+  const openCalibrationFolder = useCallback(
+    async (device: "teleop" | "robot") => {
+      try {
+        const res = await fetchWithHeaders(`${baseUrl}/open-calibration-folder`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ device_type: device }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.opened) {
+          toast({
+            title: "Couldn't open folder",
+            description: data.message,
+            variant: "destructive",
+          });
+        }
+      } catch (e) {
+        toast({
+          title: "Couldn't open folder",
+          description: String(e),
+          variant: "destructive",
+        });
+      }
+    },
+    [baseUrl, fetchWithHeaders, toast],
+  );
 
   // List the USB-serial ports for the dropdown (filtered to arm-like devices by
   // the backend). Refreshable so plugging in an arm and rescanning works.
@@ -1928,6 +1959,16 @@ const Calibration = () => {
                           >
                             {row.label}
                           </span>
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            className="ml-auto h-6 w-6 text-slate-400 hover:text-white"
+                            onClick={() => openCalibrationFolder(row.device)}
+                            aria-label="Open calibration folder"
+                            title="Open calibration folder"
+                          >
+                            <FolderOpen className="w-4 h-4" />
+                          </Button>
                         </div>
                         <CalibrationLibrary
                           device={row.device}
