@@ -55,6 +55,7 @@ import {
 import { useToast } from "@/hooks/use-toast";
 import Logo from "@/components/Logo";
 import { useApi } from "@/contexts/ApiContext";
+import { useSessionExitGuard } from "@/hooks/useSessionExitGuard";
 import { isMotorRangeComplete } from "@/lib/calibrationTargets";
 import CameraConfiguration, {
   CameraConfig,
@@ -470,28 +471,45 @@ const Calibration = () => {
   );
   const [isPolling, setIsPolling] = useState(false);
 
-  // Mirror calibration_active into a ref so the unmount cleanup below can read
-  // the latest value without re-firing on every status change.
-  const calibrationActiveRef = useRef(false);
+  // Manual (step-by-step) calibration liveness, in state so the shared exit
+  // guard below can react to it. Set optimistically at start (so a leave in the
+  // sub-second before the first status poll still aborts) and cleared when the
+  // session reaches a terminal status.
+  //
+  // Scope note: this guards the MANUAL flow ONLY. The batch auto-calibration
+  // subprocess is deliberately designed to SURVIVE navigation — it resumes on
+  // remount (see the batch-status resume/poll effects) — so it is intentionally
+  // NOT aborted on leave. Aborting it here would break that resume feature; a
+  // running batch is stopped only via its explicit "Stop all" button.
+  const [manualCalibLive, setManualCalibLive] = useState(false);
   useEffect(() => {
-    calibrationActiveRef.current = calibrationStatus.calibration_active;
-  }, [calibrationStatus.calibration_active]);
+    if (calibrationStatus.calibration_active) {
+      setManualCalibLive(true);
+    } else if (
+      ["idle", "completed", "error"].includes(calibrationStatus.status)
+    ) {
+      setManualCalibLive(false);
+    }
+  }, [calibrationStatus.calibration_active, calibrationStatus.status]);
 
-  // If the user leaves this page (back arrow, browser back, programmatic nav)
-  // while calibration is running, the backend singleton stays active and the
-  // next Start request fails with "Calibration already active". Stop it on
-  // unmount as a catch-all.
-  useEffect(() => {
-    return () => {
-      if (calibrationActiveRef.current) {
-        fetchWithHeaders(`${baseUrl}/stop-calibration`, {
-          method: "POST",
-        }).catch((e) =>
-          console.error("Failed to stop calibration on unmount:", e),
-        );
-      }
-    };
-  }, [baseUrl, fetchWithHeaders]);
+  // Shared page-leave safety net (same hook as Recording & Inference). Manual
+  // calibration holds the serial port in a singleton that would otherwise block
+  // the next start ("Calibration already active"); an unintentional exit aborts
+  // it. The arm is LIMP during manual range recording (torque is disabled), so
+  // this is a clean teardown, not a mid-motion stop. The abort reuses the
+  // module's existing /stop-calibration teardown.
+  const { markHandled: markCalibHandled } = useSessionExitGuard({
+    active: manualCalibLive,
+    confirmMessage:
+      "Leaving aborts this calibration — nothing will be saved and the arm is released. Continue?",
+    beaconUrl: `${baseUrl}/stop-calibration`,
+    onLeave: () => {
+      fetchWithHeaders(`${baseUrl}/stop-calibration`, { method: "POST" }).catch(
+        (e) => console.error("Failed to stop calibration on leave:", e),
+      );
+    },
+    beaconFlagKey: "lelab:calibration-stopped",
+  });
 
   const pollStatus = async () => {
     try {
@@ -903,10 +921,10 @@ const Calibration = () => {
       arm,
     };
 
-    // Optimistically mark as active so the unmount cleanup will fire even if
-    // the user navigates away before the backend reports calibration_active=true.
+    // Optimistically mark as active so the leave guard will fire even if the
+    // user navigates away before the backend reports calibration_active=true.
     // Reverted below if the start request fails.
-    calibrationActiveRef.current = true;
+    setManualCalibLive(true);
 
     try {
       const response = await fetchWithHeaders(`${baseUrl}/start-calibration`, {
@@ -923,7 +941,7 @@ const Calibration = () => {
         });
         setIsPolling(true);
       } else {
-        calibrationActiveRef.current = false;
+        setManualCalibLive(false);
         toast({
           title: "Calibration Failed",
           description: result.message || "Failed to start calibration",
@@ -931,7 +949,7 @@ const Calibration = () => {
         });
       }
     } catch (error) {
-      calibrationActiveRef.current = false;
+      setManualCalibLive(false);
       console.error("Error starting calibration:", error);
       toast({
         title: "Error",
@@ -942,6 +960,9 @@ const Calibration = () => {
   };
 
   const handleStopCalibration = async () => {
+    // Explicit Cancel — mark handled so the leave guard doesn't also fire while
+    // the session winds down (the hook re-arms for any later calibration).
+    markCalibHandled();
     try {
       const response = await fetchWithHeaders(`${baseUrl}/stop-calibration`, {
         method: "POST",

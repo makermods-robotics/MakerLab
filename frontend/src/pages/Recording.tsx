@@ -24,6 +24,12 @@ import {
   playAutoAdvanceWarning,
 } from "@/lib/recordingAudio";
 import { useApi } from "@/contexts/ApiContext";
+import { useSessionExitGuard } from "@/hooks/useSessionExitGuard";
+import {
+  doneConfirmCopy,
+  quitConfirmCopy,
+  leaveDiscardMessage,
+} from "@/lib/recordingExit";
 import LogPanel from "@/components/LogPanel";
 import {
   AlertDialog,
@@ -103,7 +109,10 @@ const Recording = () => {
   const [logs, setLogs] = useState("");
 
   const [optimisticPhase, setOptimisticPhase] = useState<Phase | null>(null);
-  const [showStopConfirm, setShowStopConfirm] = useState(false);
+  // The two explicit exits while a session is live: Done (finish + keep) and
+  // Quit (end without saving / discard). Each gets its own confirm dialog.
+  const [showDoneConfirm, setShowDoneConfirm] = useState(false);
+  const [showQuitConfirm, setShowQuitConfirm] = useState(false);
   const [muted, setMutedState] = useState<boolean>(() => getMuted());
   const prevRealPhaseRef = useRef<Phase | null>(null);
   // Bumps on each re-record so the auto-advance warning re-fires for the same episode number.
@@ -111,12 +120,6 @@ const Recording = () => {
   const warningFiredForPhaseRef = useRef<{ phase: Phase | null; episode: number | null; tick: number }>({ phase: null, episode: null, tick: 0 });
   // Guards against React StrictMode double-invocation of the start effect.
   const startInitiatedRef = useRef(false);
-  // Stop the session exactly once, however the user leaves. Set true when a
-  // session ends normally (poll navigates to /upload), fails to start, or is
-  // stopped via the on-page Stop button — so the page-leave safety net below
-  // (back button / unmount / pagehide) never fires a spurious second stop on a
-  // completed or never-started session.
-  const stoppedRef = useRef(false);
   // The arm-identity guard runs inside the backend's recording worker (after
   // the start response), so its warn-but-allow findings arrive via the status
   // poll. Show them once, not on every 1s tick.
@@ -135,12 +138,59 @@ const Recording = () => {
     });
   }, []);
 
+  // The session has ended (any outcome) once the backend reports it inactive
+  // AND session_ended. Live chrome (Advance/Stop, HUD, keyboard) unmounts at
+  // this point; the guard below disarms so post-end navigation is free.
+  const sessionEnded =
+    backendStatus !== null &&
+    !backendStatus.recording_active &&
+    backendStatus.session_ended === true;
+  const resume = recordingConfig?.resume ?? false;
+
+  // Unintentional leave (back button, tab close, incidental route change) is
+  // treated as QUIT: end WITHOUT saving. Fresh → the backend deletes the whole
+  // dataset; resume → already-saved episodes stay, only the in-flight take is
+  // dropped. Best-effort discard POST; the guard's own latch runs it once.
+  const stopRecordingForLeave = useCallback(async () => {
+    try {
+      const res = await fetchWithHeaders(
+        `${baseUrl}/stop-recording?discard=true`,
+        { method: "POST" }
+      );
+      const data = await res.json().catch(() => null);
+      if (data?.success) {
+        toast({
+          title: "Recording discarded",
+          description: data.message ?? leaveDiscardMessage(resume),
+        });
+      }
+    } catch {
+      /* best-effort — the page is going away regardless */
+    }
+  }, [baseUrl, fetchWithHeaders, toast, resume]);
+
+  // One shared page-leave safety net (also used by Inference & Calibration):
+  //  - browser unload → native confirm + keepalive discard beacon;
+  //  - in-app back → blocking confirm;
+  //  - other in-app nav → discard on unmount.
+  // Armed only while the session is live; disarmed the moment it ends. The
+  // deliberate exits (Done/Quit buttons, natural end, start failure) call
+  // markHandled() so the guard doesn't fire a spurious second discard.
+  const guardActive = recordingSessionStarted && !sessionEnded;
+  const { markHandled } = useSessionExitGuard({
+    active: guardActive,
+    confirmMessage: leaveDiscardMessage(resume),
+    beaconUrl: `${baseUrl}/stop-recording?discard=true`,
+    onLeave: stopRecordingForLeave,
+    beaconFlagKey: "lelab:recording-stopped",
+  });
+
   // Redirect if no config provided
   useEffect(() => {
     if (!recordingConfig) {
       // No session was ever started here — nothing to stop, so mark the safety
       // net as already-handled before bouncing home.
-      stoppedRef.current = true;
+      markHandled();
       toast({
         title: "No Configuration",
         description: "Please start recording from the main page.",
@@ -148,7 +198,7 @@ const Recording = () => {
       });
       navigate("/");
     }
-  }, [recordingConfig, navigate, toast]);
+  }, [recordingConfig, navigate, toast, markHandled]);
 
   // Start recording session when component loads. The ref guard prevents
   // React StrictMode (and any future re-renders) from firing /start-recording
@@ -245,8 +295,8 @@ const Recording = () => {
           // The session finished on its own (or a stop we issued completed and
           // the backend returned to rest). This is a normal exit — mark the
           // safety net as handled so the imminent unmount doesn't POST a
-          // spurious /stop-recording against a session that's already gone.
-          stoppedRef.current = true;
+          // spurious discard against a session that's already gone.
+          markHandled();
           // A real failure or a cleanup-only warning: keep the user here so
           // the hint + error banner (near the log panel) is readable instead
           // of bouncing straight to upload. Freeze polling on this payload;
@@ -279,7 +329,7 @@ const Recording = () => {
     pollStatus();
     const statusInterval = setInterval(pollStatus, 1000);
     return () => clearInterval(statusInterval);
-  }, [recordingSessionStarted, recordingConfig, navigate, baseUrl, fetchWithHeaders, toast]);
+  }, [recordingSessionStarted, recordingConfig, navigate, baseUrl, fetchWithHeaders, toast, markHandled]);
 
   const formatTime = (seconds: number): string => {
     const mins = Math.floor(seconds / 60);
@@ -288,70 +338,6 @@ const Recording = () => {
       .toString()
       .padStart(2, "0")}`;
   };
-
-  // Idempotent stop for page-leave paths (back button, in-app navigation via
-  // unmount). Distinct from the on-page Stop button, which keeps its confirm
-  // dialog — leaving the page IS the decision, so the safety net skips the
-  // dialog. Runs at most once (stoppedRef), so a completed/never-started
-  // session, or an already-issued stop, won't POST a spurious second stop.
-  const stopRecordingForLeave = useCallback(async () => {
-    if (stoppedRef.current) return;
-    stoppedRef.current = true;
-    try {
-      const res = await fetchWithHeaders(`${baseUrl}/stop-recording`, {
-        method: "POST",
-      });
-      const data = await res.json().catch(() => null);
-      if (data?.success) {
-        // The stop response carries only a session_ending flag; the incomplete
-        // in-progress episode (if any) is discarded, previously saved episodes
-        // stay saved, and the arm returns to rest before going limp.
-        toast({
-          title: "Recording stopped",
-          description:
-            data.message ??
-            "The in-progress episode was discarded; saved episodes are kept.",
-        });
-      }
-    } catch {
-      /* best-effort — the page is going away regardless */
-    }
-  }, [baseUrl, fetchWithHeaders, toast]);
-
-  // Cover every page-leave path so a headless recording session can't keep the
-  // arm torqued after the user is gone. (Unlike teleop, the active recording
-  // screen has no dedicated back button — the only in-page exits are the Stop
-  // confirm flow and the browser's own back/close — so the back-button layer
-  // collapses into the unmount cleanup here.)
-  //   - any in-app navigation unmounts this component → stop via cleanup;
-  //   - a browser-level leave (URL change, reload, tab close) never runs React
-  //     cleanup, so `pagehide` fires a keepalive stop that survives the unload
-  //     and stashes a flag the next page can read. It uses a bare fetch (no JSON
-  //     Content-Type) so the request stays a CORS "simple request" and isn't
-  //     dropped to a preflight mid-unload.
-  // Normal completion and start-failure paths set stoppedRef first, so those
-  // exits fall through here without issuing a spurious stop.
-  useEffect(() => {
-    const handlePageHide = () => {
-      if (stoppedRef.current) return;
-      stoppedRef.current = true;
-      try {
-        sessionStorage.setItem("lelab:recording-stopped", "1");
-      } catch {
-        /* sessionStorage may be unavailable; the stop below still runs */
-      }
-      fetch(`${baseUrl}/stop-recording`, {
-        method: "POST",
-        keepalive: true,
-      }).catch(() => {});
-    };
-    window.addEventListener("pagehide", handlePageHide);
-
-    return () => {
-      window.removeEventListener("pagehide", handlePageHide);
-      stopRecordingForLeave();
-    };
-  }, [baseUrl, stopRecordingForLeave]);
 
   const startRecordingSession = async () => {
     try {
@@ -372,7 +358,7 @@ const Recording = () => {
         // The backend rejected the start (e.g. 409 already-active, or a config
         // error) — no session is ours to stop, so keep the safety net from
         // firing a stop that would kill an unrelated in-flight session.
-        stoppedRef.current = true;
+        markHandled();
         toast({
           title: "Error Starting Recording",
           description: data.message || "Failed to start recording session.",
@@ -382,7 +368,7 @@ const Recording = () => {
       }
     } catch (error) {
       // Never reached the backend — nothing started, nothing to stop.
-      stoppedRef.current = true;
+      markHandled();
       toast({
         title: "Connection Error",
         description: "Could not connect to the backend server.",
@@ -463,35 +449,57 @@ const Recording = () => {
     }
   }, [backendStatus, baseUrl, fetchWithHeaders, toast]);
 
-  const handleStopRecording = useCallback(async () => {
-    if (!backendStatus?.available_controls.stop_recording) return;
-    try {
-      await fetchWithHeaders(`${baseUrl}/stop-recording`, {
-        method: "POST",
-      });
+  // POST the session-end request. discard=false is DONE (keep saved episodes,
+  // the poll then navigates to upload); discard=true is QUIT (end without
+  // saving). markHandled() first so the page-leave guard doesn't also fire.
+  const doStopRecording = useCallback(
+    async (discard: boolean) => {
+      if (!backendStatus?.available_controls.stop_recording) return;
+      markHandled();
+      const url = discard
+        ? `${baseUrl}/stop-recording?discard=true`
+        : `${baseUrl}/stop-recording`;
+      try {
+        await fetchWithHeaders(url, { method: "POST" });
+        toast(
+          discard
+            ? { title: "Quitting", description: "Discarding the recording…" }
+            : { title: "Finishing", description: "Finalizing dataset…" }
+        );
+      } catch (error) {
+        toast({
+          title: "Error",
+          description: "Failed to end the recording session.",
+          variant: "destructive",
+        });
+      }
+    },
+    [backendStatus, baseUrl, fetchWithHeaders, toast, markHandled]
+  );
 
-      toast({
-        title: "Stopping recording",
-        description: "Finalizing dataset…",
-      });
-    } catch (error) {
-      toast({
-        title: "Error",
-        description: "Failed to stop recording.",
-        variant: "destructive",
-      });
-    }
-  }, [backendStatus, baseUrl, fetchWithHeaders, toast]);
-
-  const requestStopRecording = useCallback(() => {
+  const requestDone = useCallback(() => {
     if (!backendStatus?.available_controls.stop_recording) return;
-    setShowStopConfirm(true);
+    setShowDoneConfirm(true);
   }, [backendStatus]);
 
-  const confirmStopRecording = useCallback(async () => {
-    setShowStopConfirm(false);
-    await handleStopRecording();
-  }, [handleStopRecording]);
+  const requestQuit = useCallback(() => {
+    if (!backendStatus?.available_controls.stop_recording) return;
+    setShowQuitConfirm(true);
+  }, [backendStatus]);
+
+  const confirmDone = useCallback(async () => {
+    setShowDoneConfirm(false);
+    await doStopRecording(false);
+    // The poll detects session_ended and navigates on to /upload.
+  }, [doStopRecording]);
+
+  const confirmQuit = useCallback(async () => {
+    setShowQuitConfirm(false);
+    await doStopRecording(true);
+    // Quit means leave now — don't wait for the backend's rest-return/cleanup
+    // (it finishes on its own in the worker). Go home.
+    navigate("/");
+  }, [doStopRecording, navigate]);
 
   // Leave the frozen outcome banner for the upload page — same datasetInfo the
   // auto-navigation builds, on the user's own click. The upload page already
@@ -513,27 +521,52 @@ const Recording = () => {
     });
   }, [backendStatus, recordingConfig, navigate]);
 
+  // "Discard & exit" from an ENDED failed/warning session that kept episodes on
+  // disk: the session is already over (no active-session stop to issue), so
+  // delete the dataset directory outright, then go home.
+  const discardAndExit = useCallback(async () => {
+    const repoId =
+      backendStatus?.dataset_repo_id || recordingConfig?.dataset_repo_id;
+    if (repoId) {
+      try {
+        await fetchWithHeaders(`${baseUrl}/delete-dataset`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ dataset_repo_id: repoId }),
+        });
+      } catch {
+        /* best-effort — we're leaving regardless */
+      }
+    }
+    navigate("/");
+  }, [backendStatus, recordingConfig, baseUrl, fetchWithHeaders, navigate]);
+
   // Re-record is no longer keyboard-driven (the ArrowLeft binding was removed —
   // a back-gesture keystroke shouldn't discard the in-progress episode), so it's
   // reached only via the on-screen dropdown item and doesn't need to sit in the
   // stable keydown-handler ref.
+  const anyExitDialogOpen = showDoneConfirm || showQuitConfirm;
   const handlersRef = useRef({
     handleExitEarly,
-    requestStopRecording,
-    showStopConfirm,
+    requestDone,
+    anyExitDialogOpen,
   });
   useEffect(() => {
     handlersRef.current = {
       handleExitEarly,
-      requestStopRecording,
-      showStopConfirm,
+      requestDone,
+      anyExitDialogOpen,
     };
   });
 
-  const sessionReady = recordingSessionStarted && backendStatus !== null;
+  // Keyboard shortcuts are LIVE-only: once the session has ended, SPACE/→
+  // (advance) and Escape (finish) deactivate so a keystroke can't act on a
+  // session that no longer exists.
+  const keyboardActive =
+    recordingSessionStarted && backendStatus !== null && !sessionEnded;
 
   useEffect(() => {
-    if (!sessionReady) return;
+    if (!keyboardActive) return;
 
     const onKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
@@ -544,14 +577,16 @@ const Recording = () => {
         e.preventDefault();
         handlersRef.current.handleExitEarly();
       } else if (e.key === "Escape") {
-        if (handlersRef.current.showStopConfirm) return;
-        handlersRef.current.requestStopRecording();
+        if (handlersRef.current.anyExitDialogOpen) return;
+        // Escape = finish & keep (the least destructive exit). Quit is an
+        // explicit button click only.
+        handlersRef.current.requestDone();
       }
     };
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [sessionReady]);
+  }, [keyboardActive]);
 
   if (!recordingConfig) {
     return (
@@ -643,156 +678,205 @@ const Recording = () => {
   return (
     <div className="min-h-screen bg-black text-white p-8">
       <div className="max-w-2xl mx-auto">
-        <div className="mb-8 flex">
-          <Button
-            onClick={requestStopRecording}
-            disabled={!backendStatus.available_controls.stop_recording}
-            className="ml-auto bg-red-500 hover:bg-red-600 text-white flex-shrink-0"
-          >
-            Stop
-          </Button>
-        </div>
+        {/* Two explicit exits, LIVE-only. Once the session has ended these
+            unmount — no control may imply the session is still alive. */}
+        {!sessionEnded && (
+          <div className="mb-8 flex justify-end gap-3">
+            <Button
+              onClick={requestDone}
+              disabled={!backendStatus.available_controls.stop_recording}
+              className="bg-green-600 hover:bg-green-700 text-white flex-shrink-0"
+            >
+              Done
+            </Button>
+            <Button
+              onClick={requestQuit}
+              disabled={!backendStatus.available_controls.stop_recording}
+              variant="outline"
+              className="border-red-500/50 text-red-300 hover:bg-red-900/30 hover:text-red-200 flex-shrink-0"
+            >
+              Quit
+            </Button>
+          </div>
+        )}
 
         <div className="bg-gray-900 rounded-lg border border-gray-700 p-8">
-          <div className="flex justify-end items-center gap-4 mb-6 text-sm text-gray-400">
-            <span aria-label={`Episode ${currentEpisode} of ${totalEpisodes}`}>
-              Episode <span className="text-white font-semibold">{currentEpisode}</span> / {totalEpisodes}
-            </span>
-            <span className="font-mono" aria-label={`Total session time ${formatTime(sessionElapsedTime)}`}>
-              {formatTime(sessionElapsedTime)}
-            </span>
-            <Button
-              variant="ghost"
-              size="icon"
-              onClick={toggleMute}
-              aria-label={muted ? "Unmute" : "Mute"}
-              className="h-8 w-8 text-gray-400 hover:text-white hover:bg-gray-800"
-            >
-              {muted ? <VolumeX className="w-5 h-5" /> : <Volume2 className="w-5 h-5" />}
-            </Button>
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
+          {/* LIVE session chrome: episode HUD, phase pill, timers, Advance.
+              Replaced wholesale by the end-state UI once the session ends. */}
+          {!sessionEnded && (
+            <>
+              <div className="flex justify-end items-center gap-4 mb-6 text-sm text-gray-400">
+                <span aria-label={`Episode ${currentEpisode} of ${totalEpisodes}`}>
+                  Episode <span className="text-white font-semibold">{currentEpisode}</span> / {totalEpisodes}
+                </span>
+                <span className="font-mono" aria-label={`Total session time ${formatTime(sessionElapsedTime)}`}>
+                  {formatTime(sessionElapsedTime)}
+                </span>
                 <Button
                   variant="ghost"
                   size="icon"
+                  onClick={toggleMute}
+                  aria-label={muted ? "Unmute" : "Mute"}
                   className="h-8 w-8 text-gray-400 hover:text-white hover:bg-gray-800"
-                  aria-label="More actions"
                 >
-                  <MoreHorizontal className="w-5 h-5" />
+                  {muted ? <VolumeX className="w-5 h-5" /> : <Volume2 className="w-5 h-5" />}
                 </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent
-                align="end"
-                onCloseAutoFocus={(e) => e.preventDefault()}
-                className="bg-gray-900 border-gray-700 text-white"
-              >
-                <DropdownMenuItem
-                  onClick={handleRerecordEpisode}
-                  disabled={!backendStatus.available_controls.rerecord_episode}
-                  className="focus:bg-gray-800 focus:text-white"
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-8 w-8 text-gray-400 hover:text-white hover:bg-gray-800"
+                      aria-label="More actions"
+                    >
+                      <MoreHorizontal className="w-5 h-5" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent
+                    align="end"
+                    onCloseAutoFocus={(e) => e.preventDefault()}
+                    className="bg-gray-900 border-gray-700 text-white"
+                  >
+                    <DropdownMenuItem
+                      onClick={handleRerecordEpisode}
+                      disabled={!backendStatus.available_controls.rerecord_episode}
+                      className="focus:bg-gray-800 focus:text-white"
+                    >
+                      <RotateCcw className="w-4 h-4 mr-2" />
+                      Re-record episode
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              </div>
+
+              <div className="text-center mb-6">
+                <div
+                  role="status"
+                  aria-live="polite"
+                  className={`inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-bold tracking-widest ${phaseColor.pill}`}
                 >
-                  <RotateCcw className="w-4 h-4 mr-2" />
-                  Re-record episode
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          </div>
+                  <span className={`w-2 h-2 rounded-full ${phaseColor.dot} ${currentPhase !== "completed" ? "animate-pulse" : ""}`} />
+                  {getStatusText()}
+                </div>
+              </div>
 
-          <div className="text-center mb-6">
-            <div
-              role="status"
-              aria-live="polite"
-              className={`inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-bold tracking-widest ${phaseColor.pill}`}
-            >
-              <span className={`w-2 h-2 rounded-full ${phaseColor.dot} ${currentPhase !== "completed" ? "animate-pulse" : ""}`} />
-              {getStatusText()}
-            </div>
-          </div>
+              <div className="text-center mb-4">
+                <div className={`text-7xl font-mono font-bold leading-none ${phaseColor.timer}`}>
+                  {formatTime(phaseElapsedTime)}
+                </div>
+                <div className="text-sm text-gray-500 mt-2">
+                  / {formatTime(phaseTimeLimit)}
+                </div>
+              </div>
 
-          <div className="text-center mb-4">
-            <div className={`text-7xl font-mono font-bold leading-none ${phaseColor.timer}`}>
-              {formatTime(phaseElapsedTime)}
-            </div>
-            <div className="text-sm text-gray-500 mt-2">
-              / {formatTime(phaseTimeLimit)}
-            </div>
-          </div>
+              <div className="w-full bg-gray-800 rounded-full h-1.5 mb-8">
+                <div
+                  className={`h-1.5 rounded-full transition-all duration-500 ${phaseColor.bar}`}
+                  style={{
+                    width: `${Math.min((phaseElapsedTime / phaseTimeLimit) * 100, 100)}%`,
+                  }}
+                />
+              </div>
 
-          <div className="w-full bg-gray-800 rounded-full h-1.5 mb-8">
-            <div
-              className={`h-1.5 rounded-full transition-all duration-500 ${phaseColor.bar}`}
-              style={{
-                width: `${Math.min((phaseElapsedTime / phaseTimeLimit) * 100, 100)}%`,
-              }}
-            />
-          </div>
+              <Button
+                onClick={handleExitEarly}
+                disabled={
+                  !backendStatus.available_controls.exit_early ||
+                  optimisticPhase !== null ||
+                  currentPhase === "completed"
+                }
+                className={`w-full text-white font-semibold py-6 text-lg disabled:opacity-50 ${phaseColor.button}`}
+              >
+                <PrimaryIcon className="w-5 h-5 mr-2" />
+                {primaryLabel}
+                {currentPhase !== "completed" && (
+                  <span className="ml-3 px-2 py-0.5 rounded text-xs font-mono bg-black/30 text-white/70">SPACE / →</span>
+                )}
+              </Button>
+            </>
+          )}
 
-          <Button
-            onClick={handleExitEarly}
-            disabled={
-              !backendStatus.available_controls.exit_early ||
-              optimisticPhase !== null ||
-              currentPhase === "completed"
-            }
-            className={`w-full text-white font-semibold py-6 text-lg disabled:opacity-50 ${phaseColor.button}`}
-          >
-            <PrimaryIcon className="w-5 h-5 mr-2" />
-            {primaryLabel}
-            {currentPhase !== "completed" && (
-              <span className="ml-3 px-2 py-0.5 rounded text-xs font-mono bg-black/30 text-white/70">SPACE / →</span>
-            )}
-          </Button>
-
-          {currentPhase === "completed" && !endedWithIssue && (
-            <p className="text-center text-sm text-gray-400 mt-6">
+          {/* END-STATE UI. A clean finish auto-navigates to upload (see the
+              poll); this text covers the brief window before that fires. */}
+          {sessionEnded && !endedWithIssue && (
+            <p className="text-center text-sm text-gray-400">
               Recording complete — redirecting to upload…
             </p>
           )}
 
-          {endedWithIssue && (
-            <div
-              className={`mt-6 rounded-lg border p-4 ${
-                endedWarn
-                  ? "border-amber-500/40 bg-amber-500/10"
-                  : "border-red-500/40 bg-red-500/10"
-              }`}
-            >
+          {endedWithIssue && (() => {
+            const savedEpisodes = backendStatus.saved_episodes ?? 0;
+            const keptSomething = savedEpisodes > 0 && !backendStatus.discarded_empty;
+            return (
               <div
-                className={`flex items-center gap-2 text-sm font-semibold ${
-                  endedWarn ? "text-amber-300" : "text-red-300"
+                className={`rounded-lg border p-4 ${
+                  endedWarn
+                    ? "border-amber-500/40 bg-amber-500/10"
+                    : "border-red-500/40 bg-red-500/10"
                 }`}
               >
-                <span
-                  className={`w-2 h-2 rounded-full ${
-                    endedWarn ? "bg-amber-500" : "bg-red-500"
-                  }`}
-                />
-                {endedWarn
-                  ? "Session finished with a cleanup warning — your episodes are safe"
-                  : "Recording session failed"}
-              </div>
-              {backendStatus.hint && (
-                <p
-                  className={`mt-2 text-sm leading-relaxed ${
-                    endedWarn ? "text-amber-100/90" : "text-red-100/90"
+                <div
+                  className={`flex items-center gap-2 text-sm font-semibold ${
+                    endedWarn ? "text-amber-300" : "text-red-300"
                   }`}
                 >
-                  {backendStatus.hint}
-                </p>
-              )}
-              {backendStatus.error && (
-                <pre className="mt-3 max-h-40 overflow-auto rounded bg-black/40 p-2 text-xs text-slate-300 whitespace-pre-wrap break-words">
-                  {backendStatus.error}
-                </pre>
-              )}
-              <Button
-                onClick={continueToUpload}
-                className="mt-4 w-full bg-slate-700 hover:bg-slate-600 text-white font-semibold"
-              >
-                Continue to upload
-              </Button>
-            </div>
-          )}
+                  <span
+                    className={`w-2 h-2 rounded-full ${
+                      endedWarn ? "bg-amber-500" : "bg-red-500"
+                    }`}
+                  />
+                  {endedWarn
+                    ? "Session finished with a cleanup warning — your episodes are safe"
+                    : "Recording session failed"}
+                </div>
+                {backendStatus.hint && (
+                  <p
+                    className={`mt-2 text-sm leading-relaxed ${
+                      endedWarn ? "text-amber-100/90" : "text-red-100/90"
+                    }`}
+                  >
+                    {backendStatus.hint}
+                  </p>
+                )}
+                {backendStatus.error && (
+                  <pre className="mt-3 max-h-40 overflow-auto rounded bg-black/40 p-2 text-xs text-slate-300 whitespace-pre-wrap break-words">
+                    {backendStatus.error}
+                  </pre>
+                )}
+                <div className="mt-4 flex flex-col gap-2">
+                  {/* Keep the saved episodes — hidden when nothing was saved
+                      (discarded_empty) since there's no dataset to upload. */}
+                  {keptSomething && (
+                    <Button
+                      onClick={continueToUpload}
+                      className="w-full bg-slate-700 hover:bg-slate-600 text-white font-semibold"
+                    >
+                      Continue to upload
+                    </Button>
+                  )}
+                  {/* Discard the kept episodes and leave (quit path from an
+                      already-ended session). Only when there's something to
+                      discard. */}
+                  {keptSomething && (
+                    <Button
+                      onClick={discardAndExit}
+                      variant="outline"
+                      className="w-full border-red-500/50 text-red-300 hover:bg-red-900/30 hover:text-red-200"
+                    >
+                      Discard &amp; exit
+                    </Button>
+                  )}
+                  <Button
+                    onClick={() => navigate("/")}
+                    variant="ghost"
+                    className="w-full text-gray-400 hover:text-white hover:bg-gray-800"
+                  >
+                    Back to home
+                  </Button>
+                </div>
+              </div>
+            );
+          })()}
         </div>
 
         <div className="mt-6">
@@ -800,13 +884,12 @@ const Recording = () => {
         </div>
       </div>
 
-      <AlertDialog open={showStopConfirm} onOpenChange={setShowStopConfirm}>
+      <AlertDialog open={showDoneConfirm} onOpenChange={setShowDoneConfirm}>
         <AlertDialogContent className="bg-gray-900 border-gray-700 text-white">
           <AlertDialogHeader>
-            <AlertDialogTitle>Stop recording?</AlertDialogTitle>
+            <AlertDialogTitle>{doneConfirmCopy().title}</AlertDialogTitle>
             <AlertDialogDescription className="text-gray-400">
-              Saved episodes are kept. The arm returns to its starting position, then goes limp, and
-              you'll be taken to the upload page.
+              {doneConfirmCopy().description}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -814,10 +897,32 @@ const Recording = () => {
               Keep recording
             </AlertDialogCancel>
             <AlertDialogAction
-              onClick={confirmStopRecording}
+              onClick={confirmDone}
+              className="bg-green-600 hover:bg-green-700 text-white"
+            >
+              Done
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={showQuitConfirm} onOpenChange={setShowQuitConfirm}>
+        <AlertDialogContent className="bg-gray-900 border-gray-700 text-white">
+          <AlertDialogHeader>
+            <AlertDialogTitle>{quitConfirmCopy(resume).title}</AlertDialogTitle>
+            <AlertDialogDescription className="text-gray-400">
+              {quitConfirmCopy(resume).description}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel className="bg-gray-800 border-gray-700 text-white hover:bg-gray-700">
+              Keep recording
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={confirmQuit}
               className="bg-red-500 hover:bg-red-600 text-white"
             >
-              Stop
+              Quit without saving
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

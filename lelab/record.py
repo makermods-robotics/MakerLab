@@ -193,6 +193,18 @@ releasing = False
 # or by a new start request that needs the serial ports. Cleared on start.
 _release_now = threading.Event()
 
+# Set by a QUIT (stop-without-saving): the user ended the session and asked to
+# throw the recording away. For a FRESH session this deletes the whole stamped
+# dataset directory in the worker's finally (even episodes already saved this
+# session — quit discards everything this session created); for a RESUME session
+# it is a no-op on disk (the pre-existing dataset is never touched — lerobot
+# committed its earlier episodes as they saved, and the in-flight episode is
+# already dropped by the mid-episode stop path). Reset to False under the start
+# lock so a quit from one session can never leak into the next. Read by the
+# worker thread, set by the request thread — a plain bool is safe under the GIL,
+# same as the other recording_events flags.
+discard_requested = False
+
 
 def finish_pending_release(timeout: float = 10.0) -> bool:
     """Cut a pending torque-release grace short and wait for its cleanup.
@@ -448,7 +460,8 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
         last_session_discarded_empty, \
         last_session_outcome, \
         last_session_error, \
-        identity_warnings
+        identity_warnings, \
+        discard_requested
 
     from . import rollout as _rollout, teleoperate as _teleoperate
 
@@ -513,6 +526,10 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
         last_session_outcome = None
         last_session_error = None
         identity_warnings = []
+        # Clear any quit-discard request from a previous session under the same
+        # lock that claims the active flag (mirrors the _release_now reset), so a
+        # stale flag can never make this fresh session delete its own dataset.
+        discard_requested = False
 
     # Start capturing this session's logs into a fresh bounded ring buffer so the
     # Record page can display them (detaches any previous session's handler).
@@ -630,16 +647,26 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                 if recording_start_time:
                     session_end_elapsed_seconds = int(time.time() - recording_start_time)
 
-                # Discard a dataset this session created but never wrote an
-                # episode into (interrupted/failed session, or every take
-                # re-recorded away). Ordered here — after record_with_web_events
+                # Dataset cleanup, ordered here — after record_with_web_events
                 # has returned/raised, which released torque and disconnected in
                 # its own finally — so cleanup never blocks the hardware release.
-                # Best-effort: _discard_empty_dataset swallows its own errors and
-                # never re-raises, so the original error path is preserved.
-                # Guarded on the in-memory counter AND, inside the helper, the
-                # on-disk episode count; resume sessions are never touched.
-                if saved_episodes == 0:
+                # Best-effort: both helpers swallow their own errors and never
+                # re-raise, so the original error path is preserved. Resume
+                # sessions are never deleted (guarded inside both helpers).
+                if discard_requested:
+                    # QUIT: the user threw the recording away. For a fresh
+                    # session this removes the whole stamped directory — even
+                    # episodes saved earlier this session — because quit means
+                    # discard everything this session created. A resume session
+                    # keeps its pre-existing dataset (helper no-ops on resume).
+                    last_session_discarded_empty = _discard_session_dataset(
+                        request.dataset_repo_id, request.resume
+                    )
+                elif saved_episodes == 0:
+                    # Not a quit, but the session created a fresh dataset it
+                    # never wrote an episode into (interrupted/failed, or every
+                    # take re-recorded away). Confirmed against the on-disk
+                    # episode count inside the helper; resume sessions untouched.
                     last_session_discarded_empty = _discard_empty_dataset(
                         request.dataset_repo_id, request.resume
                     )
@@ -673,13 +700,24 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
         return {"success": False, "message": f"Failed to start recording: {str(e)}"}
 
 
-def handle_stop_recording() -> dict[str, Any]:
-    """Handle stop recording request - replaces ESC key.
+def handle_stop_recording(discard: bool = False) -> dict[str, Any]:
+    """End the recording session. Two flavours, selected by ``discard``:
 
-    A second stop while the session-end cleanup is holding torque for the
-    release grace cuts the hold short ("release now").
+    * ``discard=False`` (DONE / keep): finalize now, keeping every episode saved
+      so far. The in-progress (incomplete) episode is dropped by the mid-episode
+      stop path, but all completed episodes stay on disk and the frontend
+      navigates on to the upload page.
+    * ``discard=True`` (QUIT / don't save): end without keeping the recording.
+      A FRESH session's whole stamped dataset directory is removed in the
+      worker's finally; a RESUME session keeps its pre-existing dataset (only the
+      in-flight episode is dropped). This is also the path an unintentional page
+      exit (back button / tab close) takes.
+
+    Either way the arm returns to its session-start pose, then releases torque.
+    A second stop while the session-end cleanup is holding torque for the release
+    grace cuts the hold short ("release now").
     """
-    global current_phase, phase_start_time
+    global current_phase, phase_start_time, discard_requested
 
     if releasing:
         _release_now.set()
@@ -693,18 +731,29 @@ def handle_stop_recording() -> dict[str, Any]:
     if not recording_active or recording_events is None:
         return {"success": False, "message": "No recording session is active"}
 
+    if discard:
+        discard_requested = True
     recording_events["stop_recording"] = True
     recording_events["exit_early"] = True
     current_phase = "stopping"
     phase_start_time = None
-    logger.info("Stop recording triggered from web interface")
+    logger.info("Stop recording triggered from web interface (discard=%s)", discard)
+    if discard:
+        message = (
+            "Quitting without saving. The recording is being discarded; the arm returns to its "
+            "starting position, then goes limp."
+        )
+    else:
+        message = (
+            "Recording stop requested. Saved episodes are kept. When the session ends, the arm "
+            "returns to its starting position, then goes limp — press Stop again to release it "
+            "immediately."
+        )
     return {
         "success": True,
-        "message": (
-            "Recording stop requested. When the session ends, the arm returns to its starting "
-            "position, then goes limp — press Stop again to release it immediately."
-        ),
+        "message": message,
         "session_ending": True,
+        "discard": discard,
     }
 
 
@@ -942,6 +991,61 @@ def _discard_empty_dataset(repo_id: str, resume: bool) -> bool:
     invalidate_dataset_listing_cache()
 
     logger.info(f"Removed empty dataset {repo_id} — no episodes were saved.")
+    return True
+
+
+def _discard_session_dataset(repo_id: str, resume: bool) -> bool:
+    """Remove the whole directory of a FRESH session the user QUIT without saving.
+
+    Unlike :func:`_discard_empty_dataset`, this deletes even when episodes were
+    already saved earlier in THIS session — a quit means discard everything this
+    session created, not just the empty case.
+
+    Guards (all must hold before anything is removed), the resume guard FIRST and
+    load-bearing:
+      * ``resume`` is False — a resume/append session writes into a PRE-EXISTING
+        dataset, so quitting must NEVER delete it. lerobot commits episodes as
+        they save, so a resume quit keeps every already-saved episode and only
+        drops the in-flight one (handled by the mid-episode stop path). Only
+        non-resume sessions stamp a fresh timestamped directory
+        (handle_start_recording), so only those are ours to delete.
+      * The path stays strictly inside the LeRobot cache root (traversal guard,
+        mirroring handle_delete_dataset / _discard_empty_dataset).
+
+    Best-effort: any failure is logged as a warning and swallowed — this runs
+    during session-end cleanup and must never mask an original error or block the
+    hardware release. Returns True iff the directory was removed.
+    """
+    if resume:
+        # Append-into-existing: the dataset predates this session. Never delete.
+        return False
+    if not repo_id:
+        return False
+
+    root = _lerobot_cache_root().resolve()
+    try:
+        target = (root / repo_id).resolve()
+    except OSError:
+        return False
+
+    # Reject path traversal: target must stay strictly inside the cache root.
+    if target == root or root not in target.parents:
+        return False
+    if not target.is_dir():
+        return False
+
+    try:
+        shutil.rmtree(target)
+    except Exception as e:
+        logger.warning(f"Failed to discard quit session dataset {repo_id}: {e}")
+        return False
+
+    # The repo no longer exists locally — drop its cached Hub-existence probe and
+    # the cached /datasets listing so the discard reflects immediately.
+    invalidate_hub_status(repo_id)
+    invalidate_dataset_listing_cache()
+
+    logger.info(f"Discarded dataset {repo_id} — session was quit without saving.")
     return True
 
 

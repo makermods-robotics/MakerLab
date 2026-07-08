@@ -24,6 +24,7 @@ import {
 } from "@/lib/inferenceApi";
 import LogPanel from "@/components/LogPanel";
 import { formatBytes } from "@/lib/formatBytes";
+import { useSessionExitGuard } from "@/hooks/useSessionExitGuard";
 
 const POLL_MS = 1000;
 
@@ -94,6 +95,22 @@ const Inference: React.FC = () => {
   // Toast it once when first seen so it isn't repeated on every poll.
   const warnedRef = useRef(false);
 
+  // Safety net: a policy must never keep driving the arm with nobody watching.
+  // While a session is active (any phase, INCLUDING downloading_model), an
+  // unintentional exit stops the run — in-app back gets a blocking confirm, a
+  // browser unload fires a best-effort stop beacon. There's no artifact and no
+  // Done/Quit split here: the only semantic is STOP. After the run ends
+  // (inference_active false) the guard disarms and navigation is free.
+  const { markHandled } = useSessionExitGuard({
+    active: status?.inference_active === true,
+    confirmMessage: "Leaving stops the running inference. Continue?",
+    beaconUrl: `${baseUrl}/stop-inference`,
+    onLeave: () => {
+      stopInference(baseUrl, fetchWithHeaders).catch(() => {});
+    },
+    beaconFlagKey: "lelab:inference-stopped",
+  });
+
   useEffect(() => {
     let cancelled = false;
     const stopIfHung = async () => {
@@ -139,6 +156,9 @@ const Inference: React.FC = () => {
             return;
           }
           // A clean finish (completed / user stop): toast + auto-bounce home.
+          // Mark the exit handled so the leave guard doesn't fire a spurious
+          // stop on the imminent unmount.
+          markHandled();
           navigatedAwayRef.current = true;
           doneRef.current = true;
           if (next.exited) {
@@ -188,10 +208,13 @@ const Inference: React.FC = () => {
       cancelled = true;
       clearInterval(id);
     };
-  }, [baseUrl, fetchWithHeaders, navigate, toast]);
+  }, [baseUrl, fetchWithHeaders, navigate, toast, markHandled]);
 
   const handleStop = async () => {
     setShowStopConfirm(false);
+    // Explicit Stop — mark handled so the leave guard doesn't double-fire while
+    // the run winds down.
+    markHandled();
     try {
       await stopInference(baseUrl, fetchWithHeaders);
       // Status poll will catch the inactive state and navigate home.
@@ -274,7 +297,19 @@ const Inference: React.FC = () => {
         <Button
           variant="ghost"
           size="icon"
-          onClick={() => navigate("/")}
+          onClick={() => {
+            // Blocking confirm while the run is live: leaving stops inference.
+            // (navigate("/") is a push, not a Back, so the guard's popstate
+            // handler wouldn't fire — confirm here instead. onLeave/unmount then
+            // issues the actual stop.) After the run ends, leaving is free.
+            if (
+              status.inference_active &&
+              !window.confirm("Leaving stops the running inference. Continue?")
+            ) {
+              return;
+            }
+            navigate("/");
+          }}
           className="text-slate-400 hover:bg-slate-800 hover:text-white rounded-lg"
         >
           <ArrowLeft className="w-5 h-5" />

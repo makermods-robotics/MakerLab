@@ -527,6 +527,129 @@ def test_discard_empty_dataset_invalidates_hub_status(tmp_lerobot_home) -> None:
         assert "tester/probed_20260703" not in datasets._HUB_STATUS_CACHE
 
 
+# ---------------------------------------------------------------------------
+# Quit-without-saving (discard) — _discard_session_dataset + the stop handler.
+# The resume-protection test comes FIRST and is the load-bearing data-safety
+# guarantee: a quit must never delete a pre-existing (resume) dataset.
+# ---------------------------------------------------------------------------
+
+
+def test_discard_session_dataset_never_touches_resume_session(tmp_lerobot_home) -> None:
+    """A QUIT on a RESUME session must NEVER delete the pre-existing dataset —
+    lerobot already committed its earlier episodes, so they must survive. The
+    resume guard is checked first; this is the load-bearing safety property."""
+    import lelab.record as record
+
+    target = _make_dataset_dir(tmp_lerobot_home, "tester/preexisting", total_episodes=5)
+
+    removed = record._discard_session_dataset("tester/preexisting", resume=True)
+
+    assert removed is False
+    assert target.exists()  # every already-saved episode is intact
+
+
+def test_discard_session_dataset_removes_fresh_dir_with_episodes(tmp_lerobot_home) -> None:
+    """A QUIT on a FRESH session removes the whole stamped directory even when
+    episodes were saved earlier THIS session — quit discards everything the
+    session created (unlike _discard_empty_dataset, which keeps a non-empty dir)."""
+    import lelab.record as record
+
+    target = _make_dataset_dir(tmp_lerobot_home, "tester/quit_20260708_120000", total_episodes=3)
+    assert target.exists()
+
+    removed = record._discard_session_dataset("tester/quit_20260708_120000", resume=False)
+
+    assert removed is True
+    assert not target.exists()
+
+
+def test_discard_session_dataset_rejects_path_traversal(tmp_lerobot_home) -> None:
+    """A repo_id escaping the cache root is refused — no deletion outside cache."""
+    import lelab.record as record
+
+    removed = record._discard_session_dataset("../../etc", resume=False)
+    assert removed is False
+
+
+def test_discard_session_dataset_invalidates_hub_status(tmp_lerobot_home) -> None:
+    """Discarding a quit session drops any cached Hub-existence probe for it."""
+    import lelab.datasets as datasets
+    import lelab.record as record
+
+    _make_dataset_dir(tmp_lerobot_home, "tester/quit_probed", total_episodes=2)
+    with datasets._HUB_STATUS_LOCK:
+        datasets._HUB_STATUS_CACHE["tester/quit_probed"] = "local_only"
+
+    assert record._discard_session_dataset("tester/quit_probed", resume=False) is True
+
+    with datasets._HUB_STATUS_LOCK:
+        assert "tester/quit_probed" not in datasets._HUB_STATUS_CACHE
+
+
+def test_handle_stop_recording_discard_arms_flag_and_stop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Quit stop (discard=True) on a live session arms discard_requested, sets
+    the same stop events a Done stop does, and echoes discard in the response."""
+    import lelab.record as record
+
+    events = {"stop_recording": False, "exit_early": False}
+    monkeypatch.setattr(record, "releasing", False)
+    monkeypatch.setattr(record, "recording_active", True)
+    monkeypatch.setattr(record, "recording_events", events)
+    monkeypatch.setattr(record, "discard_requested", False)
+
+    result = record.handle_stop_recording(discard=True)
+
+    assert result["success"] is True
+    assert result["discard"] is True
+    assert record.discard_requested is True
+    assert events["stop_recording"] is True
+    assert events["exit_early"] is True
+    assert "without saving" in result["message"].lower()
+
+
+def test_handle_stop_recording_discard_ignored_when_idle(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A discard stop against no active session is refused and never arms the
+    discard flag — an idle/mutex miss can't schedule a dataset deletion."""
+    import lelab.record as record
+
+    monkeypatch.setattr(record, "releasing", False)
+    monkeypatch.setattr(record, "recording_active", False)
+    monkeypatch.setattr(record, "recording_events", None)
+    monkeypatch.setattr(record, "discard_requested", False)
+
+    result = record.handle_stop_recording(discard=True)
+
+    assert result["success"] is False
+    assert record.discard_requested is False
+
+
+def test_worker_quit_discards_fresh_dataset_with_saved_episodes(
+    monkeypatch: pytest.MonkeyPatch, tmp_lerobot_home
+) -> None:
+    """End-to-end through the real worker: a fresh session whose user quit
+    (discard_requested set) has its whole stamped directory removed in the
+    finally block, even with episodes saved, and reports discarded_empty."""
+    import lelab.record as record
+
+    def _work_then_quit(cfg, events, **kwargs):
+        # Create the dataset dir at the stamped repo id the session recorded into,
+        # then simulate a completed loop with saved episodes and a user quit.
+        repo_id = record.recording_config.dataset_repo_id
+        _make_dataset_dir(tmp_lerobot_home, repo_id, total_episodes=2)
+        record.current_phase = "completed"
+        record.saved_episodes = 2
+        record.discard_requested = True  # handle_stop_recording(discard=True) would set this
+
+    try:
+        status = _start_session_with_fake_work(monkeypatch, _work_then_quit)
+
+        assert status["session_ended"] is True
+        assert status["discarded_empty"] is True
+        assert not (tmp_lerobot_home / status["dataset_repo_id"]).exists()
+    finally:
+        record.discard_requested = False  # don't leak the armed flag into later tests
+
+
 def test_recording_status_reports_discarded_empty_at_session_end(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

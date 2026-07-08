@@ -842,9 +842,15 @@ def start_recording(request: RecordingRequest):
 
 
 @app.post("/stop-recording")
-def stop_recording():
-    """Stop the current recording session"""
-    return handle_stop_recording()
+def stop_recording(discard: bool = False):
+    """End the current recording session.
+
+    ``discard`` is a query parameter (not a body) so the browser's page-leave
+    safety net can POST it via a keepalive/beacon "simple request" during unload
+    without tripping a CORS preflight. ``discard=false`` keeps every saved
+    episode (Done); ``discard=true`` throws the recording away (Quit / an
+    unintentional page exit) — see handle_stop_recording."""
+    return handle_stop_recording(discard=discard)
 
 
 @app.get("/recording-status")
