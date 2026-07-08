@@ -21,11 +21,49 @@ lives in app/jobs.py.
 import re
 
 import torch
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from lelab.utils.config import REQUIRED_HUB_TAGS
 
 _SLUG_RE = re.compile(r"[^a-zA-Z0-9._-]+")
+
+# HF-Jobs duration strings (the `timeout` HfApi.run_job accepts). The Hub API
+# itself only understands a SINGLE unit suffix (e.g. "2h", "30m") or a bare
+# integer of seconds — see huggingface_hub._jobs_api._create_job_spec, which
+# does `float(timeout[:-1]) * factor[timeout[-1]]`. We accept a friendlier
+# superset here (compound forms like "3h30m") and normalise to an int of
+# seconds in parse_hf_duration, so the runner always hands run_job a plain
+# seconds int rather than relying on the Hub's single-unit parser.
+_DURATION_UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+# One-or-more <number><unit> segments and nothing else. Number may be integer
+# or decimal (e.g. "1.5h"); units are s/m/h/d. Anchored so trailing junk like
+# "2h30" (number without a unit) or "2x" is rejected.
+_DURATION_FULL_RE = re.compile(r"^(?:\d+(?:\.\d+)?[smhd])+$")
+_DURATION_SEGMENT_RE = re.compile(r"(\d+(?:\.\d+)?)([smhd])")
+
+
+def parse_hf_duration(value: str) -> int:
+    """Parse an HF-Jobs timeout string into a positive integer of seconds.
+
+    Accepts single- or multi-segment durations: "2h", "45m", "3h30m", "90s",
+    "1d", "1.5h". Raises ValueError with a user-facing message for anything
+    that isn't a well-formed duration or resolves to <= 0 seconds. Kept
+    separate from the pydantic model so the cloud runner can reuse the exact
+    same normalisation when converting the request's value for run_job.
+    """
+    text = value.strip().lower()
+    if not text or not _DURATION_FULL_RE.match(text):
+        raise ValueError(
+            f"Invalid job timeout {value!r}. Use a duration like '2h', '45m', "
+            "'3h30m', '90s', or '1d' (units: s, m, h, d)."
+        )
+    total = 0.0
+    for num, unit in _DURATION_SEGMENT_RE.findall(text):
+        total += float(num) * _DURATION_UNIT_SECONDS[unit]
+    seconds = int(round(total))
+    if seconds <= 0:
+        raise ValueError(f"Job timeout {value!r} must be greater than zero.")
+    return seconds
 
 
 def _policy_hub_flags() -> list[str]:
@@ -151,6 +189,34 @@ class TrainingRequest(BaseModel):
     # Advanced
     use_policy_training_preset: bool = True
     config_path: str | None = None
+
+    # HF Jobs runner only. When set, overrides the platform-default job timeout
+    # for CLOUD training (local runs ignore this field entirely — it never
+    # reaches build_training_command's argv). Duration string in HF-Jobs format
+    # ("2h", "45m", "3h30m", "1.5h"); validated below at request time and
+    # normalised to an int of seconds by the cloud runner when it calls
+    # run_job. None ⇒ the runner falls back to its HF_JOB_TIMEOUT default.
+    # Optional with a default so JobRecord.config JSON persisted before this
+    # field existed round-trips unchanged.
+    hf_job_timeout: str | None = None
+
+    @field_validator("hf_job_timeout")
+    @classmethod
+    def _validate_hf_job_timeout(cls, value: str | None) -> str | None:
+        """Reject malformed timeout strings at request time with a clear
+        message (pydantic wraps the ValueError into a 422 whose detail carries
+        the guidance text). The friendly form the user typed (e.g. "3h30m") is
+        kept on the model — the cloud runner calls parse_hf_duration to convert
+        it to the seconds int run_job wants. None/blank passes through untouched
+        so the runner applies its own default."""
+        if value is None:
+            return None
+        text = value.strip()
+        if not text:
+            return None
+        # Raises ValueError with a user-facing message when malformed or <= 0.
+        parse_hf_duration(text)
+        return text
 
 
 def build_training_command(

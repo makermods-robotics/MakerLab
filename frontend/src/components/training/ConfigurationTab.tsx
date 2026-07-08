@@ -9,6 +9,9 @@ interface ConfigurationTabProps extends ConfigComponentProps {
   authenticated: boolean;
   flavors: RunnerFlavor[];
   hardwareLoading: boolean;
+  // On-disk dataset size (bytes) when known, for the cloud timeout suggestion.
+  // Null when unknown — the estimator drops the download term.
+  datasetSizeBytes: number | null;
 }
 
 const ConfigurationTab: React.FC<ConfigurationTabProps> = ({
@@ -17,6 +20,7 @@ const ConfigurationTab: React.FC<ConfigurationTabProps> = ({
   authenticated,
   flavors,
   hardwareLoading,
+  datasetSizeBytes,
 }) => {
   return (
     <div className="max-w-3xl mx-auto space-y-6">
@@ -26,6 +30,7 @@ const ConfigurationTab: React.FC<ConfigurationTabProps> = ({
         authenticated={authenticated}
         flavors={flavors}
         loading={hardwareLoading}
+        datasetSizeBytes={datasetSizeBytes}
       />
       <EssentialsCard config={config} updateConfig={updateConfig} />
       <AdvancedCard config={config} updateConfig={updateConfig} />

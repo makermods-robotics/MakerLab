@@ -51,6 +51,11 @@ export interface TrainingConfig {
 
   // Advanced configuration
   use_policy_training_preset: boolean;
+
+  // HF Cloud only: optional per-run override for the HF Jobs timeout, as a
+  // duration string ("2h", "45m", "3h30m"). Undefined/blank ⇒ backend applies
+  // its default. Ignored for local runs.
+  hf_job_timeout?: string;
 }
 
 // The policy types the trainer supports. The model is chosen up-front on the

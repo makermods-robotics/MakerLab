@@ -227,3 +227,84 @@ def test_training_request_validates_required_field() -> None:
 
     with pytest.raises(ValidationError):
         TrainingRequest()  # dataset_repo_id is required
+
+
+# ---------------------------------------------------------------------------
+# HF Jobs timeout: parse helper + request-level validation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "value,expected_seconds",
+    [
+        ("2h", 7200),
+        ("45m", 2700),
+        ("90s", 90),
+        ("1d", 86400),
+        ("3h30m", 12600),
+        ("1.5h", 5400),
+        ("  2H  ", 7200),  # trimmed + case-insensitive
+    ],
+)
+def test_parse_hf_duration_accepts_valid_forms(value: str, expected_seconds: int) -> None:
+    from lelab.train import parse_hf_duration
+
+    assert parse_hf_duration(value) == expected_seconds
+
+
+@pytest.mark.parametrize("value", ["", "   ", "2h30", "2x", "abc", "-1h", "0h", "0s", "h"])
+def test_parse_hf_duration_rejects_bad_forms(value: str) -> None:
+    from lelab.train import parse_hf_duration
+
+    with pytest.raises(ValueError):
+        parse_hf_duration(value)
+
+
+def test_hf_job_timeout_defaults_to_none_and_round_trips() -> None:
+    """Optional field: absent in old persisted config JSON loads as None, and
+    a valid value survives a JSON round-trip."""
+    from lelab.train import TrainingRequest
+
+    assert TrainingRequest(dataset_repo_id="x").hf_job_timeout is None
+
+    # Old JobRecord.config JSON (pre-field) has no hf_job_timeout key.
+    legacy = TrainingRequest.model_validate({"dataset_repo_id": "x", "policy_type": "act"})
+    assert legacy.hf_job_timeout is None
+
+    req = TrainingRequest(dataset_repo_id="x", hf_job_timeout="3h30m")
+    assert TrainingRequest.model_validate_json(req.model_dump_json()).hf_job_timeout == "3h30m"
+
+
+@pytest.mark.parametrize(
+    "value,stored",
+    [("2h", "2h"), ("3h30m", "3h30m"), ("  45m  ", "45m"), (None, None), ("", None), ("   ", None)],
+)
+def test_hf_job_timeout_validator_accepts_and_normalises(value, stored) -> None:
+    """Valid (or blank/None) inputs pass; the friendly form is kept (whitespace
+    trimmed), NOT converted to seconds — the runner does that conversion."""
+    from lelab.train import TrainingRequest
+
+    req = TrainingRequest(dataset_repo_id="x", hf_job_timeout=value)
+    assert req.hf_job_timeout == stored
+
+
+@pytest.mark.parametrize("value", ["2h30", "2x", "banana", "0h", "-5m"])
+def test_hf_job_timeout_validator_rejects_bad_forms(value: str) -> None:
+    from pydantic import ValidationError
+
+    from lelab.train import TrainingRequest
+
+    with pytest.raises(ValidationError):
+        TrainingRequest(dataset_repo_id="x", hf_job_timeout=value)
+
+
+def test_hf_job_timeout_never_leaks_into_training_argv() -> None:
+    """The timeout is a runner/platform concern; build_training_command must
+    not emit it as a lerobot CLI flag (local runs ignore the field entirely)."""
+    from lelab.train import TrainingRequest, build_training_command
+
+    req = TrainingRequest(dataset_repo_id="x", hf_job_timeout="3h30m")
+    cmd = build_training_command(req, output_dir="/tmp/out")
+
+    assert not any("timeout" in tok.lower() for tok in cmd)
+    assert "3h30m" not in cmd

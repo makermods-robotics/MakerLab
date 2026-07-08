@@ -161,6 +161,12 @@ function configToRequest(c: TrainingConfig): TrainingRequest {
     optimizer_weight_decay: c.optimizer_weight_decay,
     optimizer_grad_clip_norm: c.optimizer_grad_clip_norm,
     use_policy_training_preset: c.use_policy_training_preset,
+    // Cloud-only; the backend validates the format and ignores it for local.
+    // Send only a non-blank value so a stray "" doesn't reach the validator.
+    hf_job_timeout:
+      c.target.runner === "hf_cloud" && c.hf_job_timeout?.trim()
+        ? c.hf_job_timeout.trim()
+        : undefined,
   };
 }
 
@@ -569,6 +575,7 @@ const ConfigurationMode: React.FC = () => {
           authenticated={authenticated}
           flavors={flavors}
           hardwareLoading={hardwareLoading}
+          datasetSizeBytes={datasetSizeBytes}
         />
         {needsUpload ? (
           <div className="max-w-3xl mx-auto mt-6">

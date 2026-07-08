@@ -43,7 +43,7 @@ from huggingface_hub.errors import RepositoryNotFoundError
 from packaging.requirements import Requirement
 
 from ..jobs import LogLine, TrainingMetrics, extract_wandb_run_url, parse_metrics_into
-from ..train import TrainingRequest, build_training_command
+from ..train import TrainingRequest, build_training_command, parse_hf_duration
 from ..utils.config import with_lelab_tag
 from ..utils.hf_auth import cached_whoami, shared_hf_api
 
@@ -393,8 +393,26 @@ WRAPPER_SOURCE = _WRAPPER_TEMPLATE.replace("__INSTALL_PLAN_SOURCE__", inspect.ge
 
 # HF Jobs' platform default timeout has killed legitimate runs that pushed
 # the model successfully but were still uploading auxiliary files. 2h covers
-# our typical ACT/SmolVLA runs on t4-small with comfortable headroom.
+# our typical ACT/SmolVLA runs on t4-small with comfortable headroom. This is
+# the FALLBACK: used only when the request carries no explicit hf_job_timeout.
 HF_JOB_TIMEOUT = "2h"
+
+
+def resolve_job_timeout(config: TrainingRequest) -> int | str:
+    """The value to hand HfApi.run_job's `timeout` for this job.
+
+    Precedence: an explicit, already-validated request value
+    (config.hf_job_timeout) wins and is normalised to an int of SECONDS —
+    run_job's own string parser only understands a single unit suffix
+    (float(timeout[:-1]) * factor[timeout[-1]]), so compound forms like
+    "3h30m" must be pre-resolved here rather than passed through as a string.
+    When the request leaves the field unset we fall back to the HF_JOB_TIMEOUT
+    constant (a plain single-unit string run_job parses natively), preserving
+    the platform-default-killed-legit-runs safety net.
+    """
+    if config.hf_job_timeout:
+        return parse_hf_duration(config.hf_job_timeout)
+    return HF_JOB_TIMEOUT
 
 # Cadence at which the status poller hits inspect_job. inspect_job is the
 # authoritative source for job liveness; the log stream is best-effort and
@@ -571,7 +589,7 @@ class HfCloudJobRunner:
             command=wrapped_command,
             flavor=self._flavor,
             secrets=secrets,
-            timeout=HF_JOB_TIMEOUT,
+            timeout=resolve_job_timeout(config),
         )
         self._hf_job_id = job.id
         self._hf_job_url = getattr(job, "url", None)
