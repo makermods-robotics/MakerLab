@@ -75,21 +75,54 @@ def tmp_lerobot_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return cache
 
 
-@pytest.fixture(autouse=True)
-def _reset_hub_listing_caches() -> Iterator[None]:
-    """Clear the short-TTL Hub-listing caches (/datasets and /jobs/hub) before
-    each test so cached results from one test never leak into the next. Both
-    caches are module-global and process-lived, so without this a test that
-    populates them would make a later test see stale data instead of its own
-    mocked Hub response."""
+def _reset_module_caches() -> None:
+    """Drop every process-lived, module-global cache/singleton state that could
+    leak Hub answers (or a real-machine cache read) from one test into the next.
+
+    Covers the short-TTL listing caches (/datasets, /models, /jobs/hub), the
+    per-repo Hub-status / Hub-info memo dicts, and the two download-manager
+    singletons' public state. The listing caches expose whole-cache invalidation
+    functions; the per-repo memo dicts (keyed by repo_id, no whole-clear helper)
+    are cleared directly under their locks — the same access pattern the dataset
+    tests already use via their local _clear_hub_status_cache helper."""
     import lelab.datasets as _ds
+    import lelab.models as _models
     import lelab.server as _srv
 
     _ds.invalidate_dataset_listing_cache()
+    _models.invalidate_model_listing_cache()
     _srv.invalidate_hub_jobs_cache()
+
+    with _ds._HUB_STATUS_LOCK:
+        _ds._HUB_STATUS_CACHE.clear()
+    with _ds._HUB_DATASET_INFO_LOCK:
+        _ds._HUB_DATASET_INFO_CACHE.clear()
+    with _models._MODEL_HUB_INFO_LOCK:
+        _models._MODEL_HUB_INFO_CACHE.clear()
+
+    # Reset both download-manager singletons to their idle shape so a test that
+    # drove one (or hit a /download endpoint) can't leave "running"/"done"/"error"
+    # visible to the next test's status poll. (No thread is torn down here: tests
+    # join or mock their downloads; the singleton is only ever left dirty by state
+    # writes, not live threads.)
+    for _mgr in (_ds.download_manager, _models.model_download_manager):
+        with _mgr._lock:
+            _mgr.state = "idle"
+            _mgr.repo_id = None
+            _mgr.message = None
+            _mgr.error = None
+
+
+@pytest.fixture(autouse=True)
+def _reset_hub_listing_caches() -> Iterator[None]:
+    """Clear all process-lived Hub caches + download-manager singleton state
+    before AND after each test so cached results (or a real-machine cache read)
+    from one test never leak into the next. These caches/singletons are
+    module-global and process-lived, so without this a test that populates one
+    would make a later test see stale data instead of its own mocked response."""
+    _reset_module_caches()
     yield
-    _ds.invalidate_dataset_listing_cache()
-    _srv.invalidate_hub_jobs_cache()
+    _reset_module_caches()
 
 
 @pytest.fixture

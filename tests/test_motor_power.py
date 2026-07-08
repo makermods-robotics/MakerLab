@@ -60,7 +60,10 @@ def test_torque_limit_from_percent_scales_and_clamps() -> None:
     # Clamped inputs: below range, above range, junk.
     assert torque_limit_from_percent(5) == 100
     assert torque_limit_from_percent(1000) == 1000
-    assert torque_limit_from_percent(None) == 1000
+    # Junk/missing (None) falls back to DEFAULT_MOTOR_POWER (38 = the auto-cal
+    # torque level, not full power) → 380. This is a fixed constant in
+    # utils.config, not a persisted/per-machine read.
+    assert torque_limit_from_percent(None) == 380
 
 
 def test_apply_motor_power_writes_ram_register_to_every_motor() -> None:
