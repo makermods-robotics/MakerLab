@@ -26,7 +26,6 @@ from lerobot.teleoperators.bi_so_leader import BiSOLeader
 from lerobot.teleoperators.so_leader import SO101Leader
 
 from .arm_identity import verify_devices
-from .camera_preview import camera_preview_manager
 from .motor_power import apply_motor_power, clear_goal_velocity, torque_limit_from_percent
 from .rest_pose import capture_rest_pose, return_to_rest_pose
 from .utils.devices import _force_close_device_resources
@@ -453,8 +452,8 @@ def _safe_disconnect(device, label: str = "device") -> str | None:
             "TORQUE MAY STILL BE ENABLED — the arm can stay rigid; unplug its power to release it."
         )
         logger.error(message)
-        # Last resort (upstream): force-close the serial port(s) and cameras so a
-        # failed disconnect can't leave the port handle open until process exit.
+        # Last resort (upstream): force-close the serial port(s) so a failed
+        # disconnect can't leave the port handle open until process exit.
         # Buses live on sub-arms for bimanual BiSO devices, so hit those too.
         for target in (device, getattr(device, "left_arm", None), getattr(device, "right_arm", None)):
             if target is not None:
@@ -514,11 +513,12 @@ def _connect_bimanual(request: TeleoperateRequest):
         )
 
         # Each sub-arm auto-loaded its calibration in __init__ (id=<base>_side);
-        # register it on the bus, then cameras + configure both sides.
+        # register it on the bus, then configure both sides. Teleop opens no
+        # cameras: whoever consumes frames owns the cameras, and teleop consumes
+        # none (only motor positions drive the URDF viewer), so lerobot gets no
+        # cameras and the shared preview manager owns camera display exclusively.
         for arm in (robot.left_arm, robot.right_arm, teleop_device.left_arm, teleop_device.right_arm):
             arm.bus.write_calibration(arm.calibration)
-        for cam in robot.cameras.values():
-            cam.connect()
         robot.configure()
         teleop_device.configure()
         # Session motor power (RAM Torque_Limit) — followers only, never the
@@ -585,11 +585,6 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
     robot = None
     teleop_device = None
     try:
-        # Backend camera previews (GET /camera-preview/{index}) may hold cv2
-        # devices this session's robot cameras need — teleoperation always
-        # wins, so force-release them before any robot/camera construction.
-        camera_preview_manager.stop_all()
-
         logger.info(
             f"Starting teleoperation with leader port: {request.leader_port}, follower port: {request.follower_port}"
         )
@@ -642,10 +637,11 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
             robot.bus.write_calibration(robot.calibration)
             teleop_device.bus.write_calibration(teleop_device.calibration)
 
-            # Connect cameras and configure motors
-            logger.info("Connecting cameras and configuring motors...")
-            for cam in robot.cameras.values():
-                cam.connect()
+            # Configure motors. Teleop opens no cameras: whoever consumes frames
+            # owns the cameras, and teleop consumes none (only motor positions
+            # drive the URDF viewer), so lerobot gets no cameras and the shared
+            # preview manager owns camera display exclusively.
+            logger.info("Configuring motors...")
             robot.configure()
             teleop_device.configure()
             # Session motor power (RAM Torque_Limit) — follower only, never the

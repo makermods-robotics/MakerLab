@@ -167,6 +167,123 @@ def test_start_teleoperation_disconnects_follower_when_leader_fails(
     assert teleop.teleoperation_active is False
 
 
+# ---------------------------------------------------------------------------
+# Teleop opens no cameras: whoever consumes frames owns the cameras, and teleop
+# consumes none (only motor positions drive the URDF viewer). The follower
+# config it builds therefore carries an empty camera set in BOTH paths, and the
+# start path never force-releases the shared preview tiles — they keep streaming
+# through the whole session. Recording, which DOES consume frames, is unchanged.
+# ---------------------------------------------------------------------------
+
+
+def test_teleop_single_config_carries_no_cameras(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The single-arm follower config teleop builds has no cameras — lerobot
+    opens none, so the shared preview manager owns camera display exclusively."""
+    monkeypatch.setattr(
+        "lelab.utils.robot_factory.setup_calibration_files",
+        lambda leader, follower: ("leader", "follower"),
+    )
+    from lelab.teleoperate import TeleoperateRequest
+    from lelab.utils.robot_factory import build_single_configs
+
+    request = TeleoperateRequest(
+        leader_port="/dev/l",
+        follower_port="/dev/f",
+        leader_config="L",
+        follower_config="F",
+    )
+    robot_config, _ = build_single_configs(request)
+
+    assert robot_config.cameras == {}
+
+
+def test_teleop_bimanual_config_carries_no_cameras(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bimanual left-follower config teleop builds has no cameras either —
+    the same no-frames-no-cameras rule applies to both arms."""
+    monkeypatch.setattr("lelab.utils.robot_factory.bimanual_base_id", lambda name: "base")
+    monkeypatch.setattr(
+        "lelab.utils.robot_factory.stage_bimanual_calibrations",
+        lambda *args: ("leader_staging", "follower_staging", "base"),
+    )
+    from lelab.teleoperate import TeleoperateRequest
+    from lelab.utils.robot_factory import build_bimanual_configs
+
+    request = TeleoperateRequest(
+        leader_port="/dev/l",
+        follower_port="/dev/f",
+        leader_config="L",
+        follower_config="F",
+        mode="bimanual",
+        right_leader_port="/dev/rl",
+        right_follower_port="/dev/rf",
+        right_leader_config="RL",
+        right_follower_config="RF",
+    )
+    robot_config, _ = build_bimanual_configs(request)
+
+    # Cameras (when present) would be wired onto the LEFT follower arm.
+    assert robot_config.left_arm_config.cameras == {}
+    assert robot_config.right_arm_config.cameras == {}
+
+
+def test_start_teleoperation_does_not_force_release_previews(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Teleop start must NOT stop/force-release the backend camera previews:
+    with lerobot no longer opening cameras there is no conflict to clear, and
+    the teleop-page preview tiles must keep streaming through the session. A
+    stop_all() here would tear them down on every start — regression guard."""
+    import lelab.camera_preview as camera_preview
+    import lelab.teleoperate as teleop
+
+    monkeypatch.setattr(teleop, "teleoperation_active", False)
+    monkeypatch.setattr(teleop, "teleoperation_thread", None)
+    monkeypatch.setattr(
+        "lelab.utils.robot_factory.setup_calibration_files",
+        lambda leader, follower: ("leader", "follower"),
+    )
+
+    stop_all_calls: list[int] = []
+    monkeypatch.setattr(
+        camera_preview.camera_preview_manager,
+        "stop_all",
+        lambda *a, **k: stop_all_calls.append(1),
+    )
+
+    class _Bus:
+        def connect(self) -> None:
+            # Fail the connect so the start returns synchronously without a
+            # worker thread or any real hardware — the preview assertion holds
+            # regardless of whether the connect succeeds.
+            raise RuntimeError("serial port unavailable")
+
+    class _Device:
+        def __init__(self, config) -> None:
+            self.bus = _Bus()
+            self.cameras: dict = {}
+
+        def disconnect(self) -> None:
+            pass
+
+    monkeypatch.setattr(teleop, "SO101Follower", _Device)
+    monkeypatch.setattr(teleop, "SO101Leader", _Device)
+
+    teleop.handle_start_teleoperation(
+        teleop.TeleoperateRequest(
+            leader_port="COM_LEADER",
+            follower_port="COM_FOLLOWER",
+            leader_config="leader",
+            follower_config="follower",
+        )
+    )
+
+    assert stop_all_calls == []
+
+
 class _FakeBus:
     """Motor bus double for the explicit torque-disable cleanup step."""
 
