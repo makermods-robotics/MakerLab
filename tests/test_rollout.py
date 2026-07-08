@@ -21,6 +21,9 @@ branches here — the parts that matter for safety."""
 
 from __future__ import annotations
 
+import io
+import threading
+
 import pytest
 
 
@@ -35,6 +38,36 @@ def _reset_rollout_globals(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(rollout, "_inference_started_at", None)
     monkeypatch.setattr(rollout, "_inference_rollout_started_at", None)
     monkeypatch.setattr(rollout, "_inference_meta", {})
+    monkeypatch.setattr(rollout, "_inference_cancel", None)
+
+
+class _SyncThread:
+    """A ``threading.Thread`` stand-in whose ``.start()`` runs the target inline.
+
+    The start handler now hands the heavy work (download → preflight → spawn) to
+    a background ``threading.Thread``; patching it with this lets a test drive
+    that worker — and the stdout-pump thread it in turn spawns — deterministically
+    in the calling thread, no real threads or sleeps. Only the keyword call shape
+    the code uses (``Thread(target=..., args=..., name=..., daemon=...)``) is
+    supported."""
+
+    def __init__(self, target=None, args=(), kwargs=None, name=None, daemon=None) -> None:
+        self._target = target
+        self._args = args
+        self._kwargs = kwargs or {}
+
+    def start(self) -> None:
+        if self._target is not None:
+            self._target(*self._args, **self._kwargs)
+
+
+class _EmptyStdout:
+    """A subprocess ``stdout`` that is immediately at EOF, so the stdout pump's
+    ``iter(proc.stdout.readline, b"")`` loop exits at once when a test runs it
+    synchronously."""
+
+    def readline(self) -> bytes:
+        return b""
 
 
 def test_inference_request_rejects_missing_required_fields() -> None:
@@ -233,8 +266,10 @@ def test_resolve_policy_path_resolves_hub_ref(monkeypatch: pytest.MonkeyPatch, t
 
 
 def test_resolve_policy_path_resolves_hub_root_ref(monkeypatch, tmp_path) -> None:
-    """A flat-model ref ('user/repo@root') downloads the whole repo and
-    returns its root."""
+    """A flat-model ref ('user/repo@root') downloads the repo root and returns
+    it — but excludes the checkpoints/ and training_state/ sub-trees (neither is
+    needed to run inference, both can be multi-GB) so only the root pretrained
+    files are pulled."""
     from lelab.rollout import _resolve_policy_path
 
     fake_root = tmp_path / "snapshot"
@@ -248,7 +283,10 @@ def test_resolve_policy_path_resolves_hub_root_ref(monkeypatch, tmp_path) -> Non
     monkeypatch.setattr("huggingface_hub.snapshot_download", fake_snapshot_download)
     result = _resolve_policy_path("user/repo@root")
     assert seen["repo_id"] == "user/repo"
+    # Byte-scoping: no allow_patterns (the whole root IS the model), but the
+    # heavy sibling sub-trees are ignored.
     assert "allow_patterns" not in seen
+    assert seen["ignore_patterns"] == ["checkpoints/**", "training_state/**"]
     assert result == str(fake_root)
 
 
@@ -360,35 +398,40 @@ def test_handle_start_inference_pins_return_to_initial_position(monkeypatch, tmp
     flip can't silently break the promise. Capture the rollout command and
     assert the flag is present.
 
-    This is the one command-construction test: it stubs out the subprocess,
-    the stdout pump, and every hardware-touching preflight so nothing real is
-    started — we only inspect the argv handed to Popen."""
+    This is the one command-construction test: it stubs out the subprocess and
+    every hardware-touching preflight so nothing real is started, runs the
+    background startup worker synchronously (via the _SyncThread stub), and
+    redirects HOME so the worker's log file lands in tmp rather than the real
+    cache — we only inspect the argv handed to Popen. The resolve stub takes the
+    `report` kwarg the worker now passes for download progress."""
     from lelab import rollout
 
+    monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(rollout, "setup_follower_calibration_file", lambda cfg: cfg)
     monkeypatch.setattr(rollout, "_preflight_arm_identity", lambda *a, **k: [])
     monkeypatch.setattr(rollout, "_preflight_motor_power", lambda *a, **k: [])
-    monkeypatch.setattr(rollout, "_resolve_policy_path", lambda ref: str(tmp_path / "pretrained_model"))
+    monkeypatch.setattr(
+        rollout, "_resolve_policy_path", lambda ref, report=None: str(tmp_path / "pretrained_model")
+    )
     monkeypatch.setattr(rollout, "_detect_device", lambda: "cpu")
 
     captured: dict = {}
 
     class _FakeProc:
         pid = 4321
-        stdin = None
 
         def __init__(self, cmd, **kwargs):
             captured["cmd"] = cmd
-            # Provide a stdin object so the newline-seeding block runs cleanly.
-            import io
-
+            # A stdin for the newline-seeding block, a stdout the pump can drain.
             self.stdin = io.BytesIO()
+            self.stdout = _EmptyStdout()
+
+        def poll(self):
+            return None
 
     monkeypatch.setattr(rollout.subprocess, "Popen", _FakeProc)
-    # Don't spawn the real stdout-pump thread.
-    monkeypatch.setattr(
-        rollout.threading, "Thread", lambda *a, **k: type("_T", (), {"start": lambda self: None})()
-    )
+    # Run the startup worker (and its stdout pump) inline.
+    monkeypatch.setattr(rollout.threading, "Thread", _SyncThread)
 
     result = rollout.handle_start_inference(_stub_request())
     assert result["success"] is True, result
@@ -548,10 +591,13 @@ def test_handle_start_inference_bimanual_builds_bi_so_follower_command(monkeypat
     calibrations and hands Popen a `bi_so_follower` argv with both ports and
     two stdin newlines (one prompt per sub-arm's connect()).
 
-    Mirrors the pin-test's stub pattern: subprocess, the stdout pump, the two
-    preflights, and the staging helper are all replaced so nothing real runs."""
+    Mirrors the pin-test's stub pattern: subprocess, the two preflights, and the
+    staging helper are all replaced so nothing real runs; the startup worker (and
+    its stdout pump) run inline via _SyncThread and HOME is redirected so the log
+    file lands in tmp."""
     from lelab import rollout
 
+    monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(rollout, "bimanual_base_id", lambda name: "dual_arm")
     monkeypatch.setattr(
         rollout,
@@ -560,7 +606,9 @@ def test_handle_start_inference_bimanual_builds_bi_so_follower_command(monkeypat
     )
     monkeypatch.setattr(rollout, "_preflight_arm_identity", lambda *a, **k: [])
     monkeypatch.setattr(rollout, "_preflight_motor_power", lambda *a, **k: [])
-    monkeypatch.setattr(rollout, "_resolve_policy_path", lambda ref: str(tmp_path / "pretrained_model"))
+    monkeypatch.setattr(
+        rollout, "_resolve_policy_path", lambda ref, report=None: str(tmp_path / "pretrained_model")
+    )
     monkeypatch.setattr(rollout, "_detect_device", lambda: "cpu")
 
     captured: dict = {}
@@ -584,12 +632,14 @@ def test_handle_start_inference_bimanual_builds_bi_so_follower_command(monkeypat
         def __init__(self, cmd, **kwargs):
             captured["cmd"] = cmd
             self.stdin = _FakeStdin()
+            self.stdout = _EmptyStdout()
             captured["stdin"] = self.stdin
 
+        def poll(self):
+            return None
+
     monkeypatch.setattr(rollout.subprocess, "Popen", _FakeProc)
-    monkeypatch.setattr(
-        rollout.threading, "Thread", lambda *a, **k: type("_T", (), {"start": lambda self: None})()
-    )
+    monkeypatch.setattr(rollout.threading, "Thread", _SyncThread)
 
     result = rollout.handle_start_inference(_bimanual_request())
     assert result["success"] is True, result
@@ -745,32 +795,15 @@ def test_pump_stdout_does_not_regress_phase_after_marker(monkeypatch) -> None:
     assert rollout._inference_meta["phase"] == rollout.PHASE_RUNNING
 
 
-def test_start_inference_seeds_starting_phase(monkeypatch, tmp_path) -> None:
-    """After a successful start, the meta carries a `starting` phase (the
-    subprocess is up but no setup line has been parsed yet)."""
+def test_start_inference_seeds_starting_phase(monkeypatch) -> None:
+    """The start handler seeds a `starting` phase synchronously before handing
+    off to the background worker, so the very first status poll can already name
+    the wait. Here the worker Thread is a no-op — modelling the instant after the
+    POST returns, before the worker has run — so the phase stays `starting`."""
     from lelab import rollout
 
-    monkeypatch.setattr(rollout, "setup_follower_calibration_file", lambda cfg: cfg)
-    monkeypatch.setattr(rollout, "_preflight_arm_identity", lambda *a, **k: [])
-    monkeypatch.setattr(rollout, "_preflight_motor_power", lambda *a, **k: [])
-    monkeypatch.setattr(rollout, "_resolve_policy_path", lambda ref: str(tmp_path / "pretrained_model"))
-    monkeypatch.setattr(rollout, "_detect_device", lambda: "cpu")
-
-    class _FakeProc:
-        pid = 4321
-
-        def __init__(self, cmd, **kwargs):
-            import io
-
-            self.stdin = io.BytesIO()
-
-        def poll(self):
-            # Still running — status returns the live (non-terminal) branch.
-            return None
-
-    monkeypatch.setattr(rollout.subprocess, "Popen", _FakeProc)
-    # Don't spawn the real stdout-pump thread (it would try to iterate a
-    # non-existent stdout on the fake proc).
+    # A no-op Thread: the background startup worker is never actually run, so the
+    # meta shows the state the POST left behind.
     monkeypatch.setattr(
         rollout.threading, "Thread", lambda *a, **k: type("_T", (), {"start": lambda self: None})()
     )
@@ -909,3 +942,219 @@ def test_inference_in_use_path_returns_resolved_path(monkeypatch: pytest.MonkeyP
         {"policy_ref": "user/repo@root", "policy_path": "/tmp/ckpt/pretrained_model"},
     )
     assert rollout.inference_in_use_path() == "/tmp/ckpt/pretrained_model"
+
+
+# ---------------------------------------------------------------------------
+# Navigate-first startup: the POST returns immediately and the heavy work
+# (download → preflight → spawn) runs in the background worker. All of these
+# fully MOCK snapshot_download / the subprocess — no network, no hardware.
+# ---------------------------------------------------------------------------
+
+
+def test_start_inference_returns_immediately_without_downloading(monkeypatch) -> None:
+    """The whole point of the rework: the POST must not block on the Hub
+    download. With the worker Thread stubbed to a no-op, the handler still
+    returns success and claims the session — and snapshot_download is never
+    touched on the request thread (it would raise here if it were)."""
+    from lelab import rollout
+
+    def _boom(**kwargs):
+        raise AssertionError("snapshot_download must not run on the request thread")
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", _boom)
+    monkeypatch.setattr(
+        rollout.threading, "Thread", lambda *a, **k: type("_T", (), {"start": lambda self: None})()
+    )
+
+    result = rollout.handle_start_inference(_stub_request())
+    assert result["success"] is True
+    assert rollout.inference_active is True
+    # Visible from the very first status poll, before the worker has run.
+    assert rollout._inference_meta["phase"] == rollout.PHASE_STARTING
+
+
+def test_download_progress_reported_into_status(monkeypatch) -> None:
+    """While a Hub checkpoint downloads, snapshot_download's byte updates flow
+    through the progress tqdm into the meta, and /inference-status exposes them
+    as download_bytes_done / _total / _percent. The total can arrive after some
+    bytes (metadata discovery), which is exactly the refresh()-then-update()
+    order huggingface_hub uses on the shared bytes bar."""
+    from lelab import rollout
+
+    monkeypatch.setattr(rollout, "inference_active", True)
+    monkeypatch.setattr(rollout, "_inference_started_at", 0.0)
+    monkeypatch.setattr(
+        rollout,
+        "_inference_meta",
+        {"phase": rollout.PHASE_STARTING, "policy_ref": "user/repo@checkpoints/000050"},
+    )
+
+    def fake_snapshot_download(**kwargs):
+        # huggingface_hub instantiates the shared bytes bar (unit="B"); a file's
+        # size becoming known grows total via refresh(), chunks arrive via
+        # update(n).
+        cls = kwargs["tqdm_class"]
+        bar = cls(total=None, unit="B")
+        bar.total = 1000
+        bar.refresh()
+        bar.update(250)
+        return "/tmp/snap"
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", fake_snapshot_download)
+    rollout._resolve_policy_path("user/repo@checkpoints/000050", report=rollout._report_download_progress)
+
+    assert rollout._inference_meta["phase"] == rollout.PHASE_DOWNLOADING_MODEL
+    status = rollout.handle_inference_status()
+    assert status["download_bytes_done"] == 250
+    assert status["download_bytes_total"] == 1000
+    assert status["download_percent"] == 25.0
+
+
+def test_download_percent_is_none_until_total_known(monkeypatch) -> None:
+    """Before any file size is known the total is None, so download_percent is
+    None too → the UI shows an indeterminate bar rather than a bogus 0/0%."""
+    from lelab import rollout
+
+    monkeypatch.setattr(rollout, "inference_active", True)
+    monkeypatch.setattr(
+        rollout, "_inference_meta", {"phase": rollout.PHASE_STARTING, "policy_ref": "user/repo@root"}
+    )
+
+    def fake_snapshot_download(**kwargs):
+        cls = kwargs["tqdm_class"]
+        bar = cls(total=None, unit="B")
+        bar.update(128)  # bytes trickling in before any total is known
+        return "/tmp/snap"
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", fake_snapshot_download)
+    rollout._resolve_policy_path("user/repo@root", report=rollout._report_download_progress)
+
+    status = rollout.handle_inference_status()
+    assert status["download_bytes_done"] == 128
+    assert status["download_bytes_total"] is None
+    assert status["download_percent"] is None
+
+
+def test_startup_download_failure_reports_failed_and_hint_without_spawn(monkeypatch) -> None:
+    """A Hub download that raises (offline / 404 / disk full) is finalised as a
+    `failed` outcome carrying the error text + a friendly hint — and no arm
+    preflight runs and no subprocess spawns."""
+    from lelab import rollout
+
+    monkeypatch.setattr(rollout, "inference_active", True)
+    monkeypatch.setattr(
+        rollout,
+        "_inference_meta",
+        {"phase": rollout.PHASE_STARTING, "policy_ref": "user/repo@checkpoints/000050"},
+    )
+
+    def _raise(ref, report=None):
+        raise RuntimeError("Repository Not Found for url: https://huggingface.co/api/models/x")
+
+    monkeypatch.setattr(rollout, "_resolve_policy_path", _raise)
+
+    def _no_prepare(*a, **k):
+        raise AssertionError("preflight must not run after a download failure")
+
+    def _no_popen(*a, **k):
+        raise AssertionError("no subprocess may spawn after a download failure")
+
+    monkeypatch.setattr(rollout, "_prepare_robot", _no_prepare)
+    monkeypatch.setattr(rollout.subprocess, "Popen", _no_popen)
+
+    rollout._run_inference_startup(_stub_request(), threading.Event())
+
+    assert rollout.inference_active is False
+    status = rollout.handle_inference_status()
+    assert status["exited"] is True
+    assert status["outcome"] == "failed"
+    assert status["phase"] == rollout.PHASE_ERROR
+    assert "download" in (status["error"] or "").lower()
+    # friendly_hint recognises the Hub-not-found token and adds a hint.
+    assert status["hint"] is not None and "Hub" in status["hint"]
+
+
+def test_stop_during_download_leaves_clean_idle_without_spawn(monkeypatch) -> None:
+    """Pressing Stop while the model is still downloading tears the session down
+    to a clean idle: the worker abandons after the download returns, never
+    opening the bus (_prepare_robot) or spawning a subprocess. Models the real
+    ordering — stop() with no subprocess yet flips the session idle and sets the
+    cancel event; the in-flight download still finishes into the cache."""
+    from lelab import rollout
+
+    cancel = threading.Event()
+    monkeypatch.setattr(rollout, "inference_active", True)
+    monkeypatch.setattr(rollout, "_inference_cancel", cancel)
+    monkeypatch.setattr(rollout, "_inference_proc", None)
+    monkeypatch.setattr(
+        rollout,
+        "_inference_meta",
+        {"phase": rollout.PHASE_DOWNLOADING_MODEL, "policy_ref": "user/repo@checkpoints/000050"},
+    )
+
+    def _resolve_then_stop(ref, report=None):
+        rollout.handle_stop_inference()
+        return "/tmp/snap/pretrained_model"
+
+    def _no_prepare(*a, **k):
+        raise AssertionError("no bus may be opened after a stop during download")
+
+    def _no_popen(*a, **k):
+        raise AssertionError("no subprocess may spawn after a stop during download")
+
+    monkeypatch.setattr(rollout, "_resolve_policy_path", _resolve_then_stop)
+    monkeypatch.setattr(rollout, "_prepare_robot", _no_prepare)
+    monkeypatch.setattr(rollout.subprocess, "Popen", _no_popen)
+
+    rollout._run_inference_startup(_stub_request(), cancel)
+
+    assert rollout.inference_active is False
+    assert rollout._inference_proc is None
+    assert rollout._inference_meta == {}
+    assert rollout.handle_inference_status()["inference_active"] is False
+
+
+def test_run_inference_startup_local_ref_skips_download_phase(monkeypatch, tmp_path) -> None:
+    """A local checkpoint dir needs no download: the worker resolves it instantly,
+    never enters the downloading_model phase, and proceeds straight to preflight
+    + spawn."""
+    from lelab import rollout
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    pretrained = tmp_path / "pretrained_model"
+    pretrained.mkdir()
+
+    monkeypatch.setattr(rollout, "inference_active", True)
+    monkeypatch.setattr(
+        rollout, "_inference_meta", {"phase": rollout.PHASE_STARTING, "policy_ref": str(pretrained)}
+    )
+
+    phases: list[str] = []
+    real_set_phase = rollout._set_phase
+
+    def _rec(phase: str) -> None:
+        phases.append(phase)
+        real_set_phase(phase)
+
+    monkeypatch.setattr(rollout, "_set_phase", _rec)
+    monkeypatch.setattr(rollout, "_prepare_robot", lambda req: (["--robot.type=so101_follower"], []))
+    monkeypatch.setattr(rollout, "_detect_device", lambda: "cpu")
+
+    class _FakeProc:
+        pid = 1
+
+        def __init__(self, cmd, **kwargs):
+            self.stdin = io.BytesIO()
+            self.stdout = _EmptyStdout()
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(rollout.subprocess, "Popen", _FakeProc)
+    monkeypatch.setattr(rollout.threading, "Thread", _SyncThread)
+
+    req = rollout.InferenceRequest(follower_port="/dev/x", follower_config="c", policy_ref=str(pretrained))
+    rollout._run_inference_startup(req, threading.Event())
+
+    assert rollout.PHASE_DOWNLOADING_MODEL not in phases
+    assert rollout._inference_proc is not None

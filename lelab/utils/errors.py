@@ -96,6 +96,23 @@ def friendly_hint(error_text: str | None) -> str | None:
             "A follower motor isn't responding (often the gripper, id 6). If a skill was holding an object "
             "it likely overloaded — remove it, power-cycle the arm, then try teleoperation first."
         )
+    # Hub model-download failures (snapshot_download, before the arm is ever
+    # touched). Keyed on hub-specific tokens so a network/404/disk error while
+    # fetching a checkpoint isn't mistaken for an arm-connection problem below.
+    if "no space left" in low or "disk quota exceeded" in low:
+        return "Ran out of disk space downloading the model — free up space in the Hugging Face cache and try again."
+    if (
+        "repository not found" in low
+        or "repositorynotfound" in low
+        or "gatedrepo" in low
+        or "gated repo" in low
+        or ("404" in low and ("huggingface" in low or "hf.co" in low or "repo" in low))
+    ):
+        return "Couldn't find the model on the Hub — check the repo id, and that you have access if it's private or gated."
+    if ("huggingface.co" in low or "hf.co" in low or "max retries" in low or "connectionerror" in low) and (
+        "connect" in low or "reach" in low or "retries" in low or "timed out" in low or "timeout" in low
+    ):
+        return "Couldn't download the model — check your internet connection, then confirm the repo id."
     if "could not connect" in low or "failed to connect" in low or "not connected" in low:
         return "Couldn't connect to the arm — make sure it's plugged in, powered on, and on the right port."
     if "frame is too old" in low or "no frame" in low or "frame timeout" in low:

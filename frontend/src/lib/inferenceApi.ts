@@ -68,14 +68,30 @@ export interface InferenceStatus {
   outcome?: InferenceOutcome | null;
   error?: string | null;
   hint?: string | null;
+  // Byte progress of the Hub model download, populated only during the
+  // `downloading_model` phase (all null outside it / for a local checkpoint).
+  // `download_percent` is null while the total is still unknown → the UI shows
+  // an indeterminate bar. The total can grow as file sizes are discovered, so
+  // the bar may legitimately step backwards — that's honest, not a glitch.
+  download_bytes_done?: number | null;
+  download_bytes_total?: number | null;
+  download_percent?: number | null;
+  // Warn-but-allow arm-identity finding, surfaced once the run is up (the
+  // preflight now runs server-side in the background, after the POST returned).
+  warning?: string | null;
 }
 
+// The POST now returns immediately: it only validates the request cheaply, then
+// hands the model download + arm preflight + subprocess spawn to a background
+// worker. So there's no log_path or warning here yet — the inference page polls
+// /inference-status for the download progress, the warn-but-allow finding, and
+// any failure. A 4xx still surfaces here (mutex/arm-count/policy-ref shape).
 export async function startInference(
   baseUrl: string,
   fetcher: Fetcher,
   request: StartInferenceRequest,
-): Promise<{ message: string; log_path: string; warning?: string }> {
-  return apiRequest<{ message: string; log_path: string; warning?: string }>(
+): Promise<{ message: string }> {
+  return apiRequest<{ message: string }>(
     baseUrl,
     fetcher,
     "/start-inference",

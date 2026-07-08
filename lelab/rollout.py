@@ -31,11 +31,13 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel
+from tqdm.auto import tqdm as _base_tqdm
 
 from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
 
@@ -94,6 +96,13 @@ _inference_proc: subprocess.Popen | None = None
 _inference_started_at: float | None = None
 _inference_rollout_started_at: float | None = None
 _inference_meta: dict[str, Any] = {}
+# Set for the CURRENT session at claim time; the background startup worker
+# captures its own reference and stop() sets it. It's the only way to abandon a
+# start that's still in its pre-subprocess window (Hub download / arm preflight),
+# where there's no process to terminate. A fresh Event per session means an
+# orphaned worker from a stopped session sees its (set) event and bails, while a
+# new session gets a clean one. None while idle.
+_inference_cancel: threading.Event | None = None
 # Guards mutations to the globals above; held only for the short critical
 # sections in start/stop/status.
 _state_lock = threading.Lock()
@@ -204,7 +213,89 @@ def _detect_device() -> str:
     return "cpu"
 
 
-def _resolve_policy_path(policy_ref: str) -> str:
+def make_snapshot_progress_tqdm(
+    report: Callable[[int, int | None], None],
+) -> type[_base_tqdm]:
+    """A ``tqdm_class`` for ``snapshot_download`` that reports byte progress.
+
+    Mirrored (name + shape kept identical) from
+    ``datasets.make_snapshot_progress_tqdm`` on the sibling
+    ``claude/download-progress`` branch so the eventual landing of that branch
+    can dedup to a single shared helper. Verified against the pinned
+    huggingface_hub 1.21.0 contract: ``snapshot_download(tqdm_class=cls)``
+    instantiates ``cls`` twice — a file-count bar and ONE shared bytes bar
+    (``unit="B"``). Both the plain-HTTP and xet download paths funnel their chunk
+    updates into that shared bar: as each file's metadata arrives its size is
+    added by mutating ``bar.total`` in place followed by ``bar.refresh()``, and
+    downloaded chunks arrive as ``bar.update(n)``. So the recorder keys off
+    ``unit == "B"``, hooks ``update`` for bytes done, and hooks ``refresh`` as
+    the signal that the (growing) total changed. The total keeps growing while
+    file metadata is discovered, so percent can legitimately drop — honest, since
+    the real total isn't known upfront.
+
+    Subclasses the vanilla tqdm on purpose: huggingface_hub hands non-hf
+    subclasses full responsibility (no ``disable``/``name`` injection, no
+    HF_HUB_DISABLE_PROGRESS_BARS gating), so reporting can't be silently turned
+    off by env/log-level. The bar itself is force-disabled — nothing is drawn to
+    the server's stderr — which also means tqdm's own ``n`` never advances; bytes
+    are accumulated in ``_bytes_done`` instead. ``total`` IS still set and mutable
+    on a disabled tqdm, which is all ``refresh`` needs to read."""
+
+    class _ProgressTqdm(_base_tqdm):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            self._is_bytes_bar = kwargs.get("unit") == "B"
+            self._bytes_done = int(kwargs.get("initial") or 0)
+            kwargs["disable"] = True
+            super().__init__(*args, **kwargs)
+
+        def _report(self) -> None:
+            total = getattr(self, "total", None)
+            report(self._bytes_done, int(total) if total else None)
+
+        def update(self, n: float | None = 1) -> bool | None:
+            if self._is_bytes_bar:
+                if n:
+                    self._bytes_done += int(n)
+                self._report()
+            return super().update(n)
+
+        def refresh(self, *args: Any, **kwargs: Any) -> bool | None:
+            if self._is_bytes_bar:
+                self._report()
+            return super().refresh(*args, **kwargs)
+
+    return _ProgressTqdm
+
+
+def _report_download_progress(bytes_done: int, bytes_total: int | None) -> None:
+    """Record Hub-download byte progress on the live inference meta.
+
+    Fed from the snapshot_download tqdm hook (make_snapshot_progress_tqdm), may
+    fire from any thread. A no-op once the meta is gone (a stopped/failed session
+    cleared it) so a late tqdm callback can't resurrect a dead session. ``percent``
+    is None while the total is still unknown → the UI shows an indeterminate bar."""
+    with _state_lock:
+        if not _inference_meta:
+            return
+        _inference_meta["download_bytes_done"] = bytes_done
+        _inference_meta["download_bytes_total"] = bytes_total
+        _inference_meta["download_percent"] = (
+            round(bytes_done / bytes_total * 100, 1) if bytes_total else None
+        )
+
+
+def _policy_ref_is_valid(policy_ref: str) -> bool:
+    """Cheap shape check for a policy ref (one is_dir stat, no network) so a
+    malformed ref is rejected synchronously in the POST — surfacing in the modal
+    as a 4xx — instead of failing later on the inference page."""
+    return (
+        bool(_HUB_REF_RE.match(policy_ref))
+        or bool(_HUB_ROOT_REF_RE.match(policy_ref))
+        or Path(policy_ref).is_dir()
+    )
+
+
+def _resolve_policy_path(policy_ref: str, report: Callable[[int, int | None], None] | None = None) -> str:
     """Turn a checkpoints API ref into a local path that lerobot accepts.
 
     Local refs are already absolute paths to a pretrained_model dir.
@@ -214,17 +305,26 @@ def _resolve_policy_path(policy_ref: str) -> str:
     resolved local path.
     A 'user/repo@root' ref means the whole repo IS the pretrained_model
     (no checkpoints sub-tree); the full repo is downloaded via
-    snapshot_download and its root is returned directly."""
+    snapshot_download and its root is returned directly.
+
+    When ``report`` is given, snapshot_download streams byte progress through it
+    (see make_snapshot_progress_tqdm) so the inference page can show a real
+    download bar. Local refs never download, so they never report and never flip
+    the phase."""
     if Path(policy_ref).is_dir():
         # A local checkpoint — nothing to fetch, so no downloading_model phase.
         return policy_ref
     from huggingface_hub import snapshot_download
 
-    # A Hub ref: snapshot_download may pull hundreds of MB and block the start
-    # thread for tens of seconds. Announce it so the UI names the wait instead
-    # of showing an opaque spinner. Set only on the download paths (not the
-    # local branch above), and only when a session is live (_set_phase no-ops
-    # otherwise), so this helper stays safe to call from the unit tests.
+    # A Hub ref: snapshot_download may pull hundreds of MB and take minutes.
+    # Announce it (downloading_model phase) so the UI names the wait, and feed
+    # byte progress through the tqdm hook when a reporter is supplied. Set only on
+    # the download paths (not the local branch above), and only when a session is
+    # live (_set_phase no-ops otherwise), so this helper stays safe to call from
+    # the unit tests.
+    dl_kwargs: dict[str, Any] = {}
+    if report is not None:
+        dl_kwargs["tqdm_class"] = make_snapshot_progress_tqdm(report)
     m = _HUB_REF_RE.match(policy_ref)
     if m:
         repo_id, step_dir = m.group("repo"), m.group("step_dir")
@@ -233,12 +333,25 @@ def _resolve_policy_path(policy_ref: str) -> str:
             repo_id=repo_id,
             repo_type="model",
             allow_patterns=[f"checkpoints/{step_dir}/pretrained_model/*"],
+            **dl_kwargs,
         )
         return str(Path(local_root) / "checkpoints" / step_dir / "pretrained_model")
     m = _HUB_ROOT_REF_RE.match(policy_ref)
     if m:
         _set_phase(PHASE_DOWNLOADING_MODEL)
-        return snapshot_download(repo_id=m.group("repo"), repo_type="model")
+        # A '@root' ref means the repo root IS the pretrained_model, but a repo
+        # can still carry a checkpoints/ sub-tree (per-step snapshots) and a
+        # training_state/ dir (optimizer/scheduler state) alongside it — neither
+        # is needed to run inference and both can be multi-GB. Exclude them so a
+        # flat-model download over a slow link only pulls the root pretrained
+        # files (config.json, model.safetensors, …), mirroring the tight
+        # allow_patterns scoping of the checkpoint case above.
+        return snapshot_download(
+            repo_id=m.group("repo"),
+            repo_type="model",
+            ignore_patterns=["checkpoints/**", "training_state/**"],
+            **dl_kwargs,
+        )
     raise ValueError(f"Unrecognised policy ref: {policy_ref!r}")
 
 
@@ -519,11 +632,259 @@ def _bimanual_robot_args(request: InferenceRequest, base: str, follower_staging:
     return args
 
 
-def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
-    """Start a one-shot rollout subprocess. Returns a dict — the route
-    layer turns it into a JSON response or HTTPException as appropriate."""
+def _prepare_robot(request: InferenceRequest) -> tuple[list[str], list[str]]:
+    """Stage calibrations, run the arm-identity + motor-power preflights, and
+    build the `--robot.*` argv for the rollout subprocess.
+
+    This is the robot-TOUCHING part of startup: it opens and releases the
+    follower serial bus (read-only identity check + RAM torque-limit priming).
+    It runs in the background startup worker AFTER the model download, so a stop
+    pressed during the (long) download never reaches here — no bus is opened and
+    no register is written. Raises ArmIdentityError on a hard arm mismatch;
+    returns (robot_args, warn-but-allow messages)."""
+    is_bimanual = request.mode == "bimanual"
+    if is_bimanual:
+        # BiSO loads each sub-arm's calibration as "<base>_left/right.json"
+        # from one dir, with no way to point left/right at differently named
+        # library files. Stage the two arbitrarily-named follower library
+        # calibrations into that convention and point BiSO at the staging
+        # dir. Inference has NO leader arms, so stage the follower side only
+        # — staging the leader side would require leader library files that
+        # this flow never uses (and usually don't exist under the follower's
+        # names). The copy fails fast with a clear per-slot error if a
+        # library file is missing.
+        base = bimanual_base_id(request.robot_name)
+        follower_staging, _ = stage_bimanual_follower_calibrations(
+            base,
+            request.follower_config,
+            request.right_follower_config,
+        )
+        # Sub-arm ids are the BiSO staging aliases ("<base>_left/right"), so
+        # the identity guard compares against the real library stems.
+        left_id, right_id = f"{base}_left", f"{base}_right"
+
+        identity_warnings: list[str] = []
+        if request.skip_identity_check:
+            logger.warning("Arm identity check SKIPPED by request (skip_identity_check=true)")
+        else:
+            # Each bus opens/verifies/releases sequentially — never both at
+            # once — mirroring the single-arm preflight.
+            identity_warnings += _preflight_arm_identity(
+                request.follower_port, left_id, config_name=request.follower_config
+            )
+            identity_warnings += _preflight_arm_identity(
+                request.right_follower_port, right_id, config_name=request.right_follower_config
+            )
+        # Motor power on both buses, sequentially (each opens its own port).
+        identity_warnings += _preflight_motor_power(request.follower_port, left_id, request.motor_power)
+        identity_warnings += _preflight_motor_power(
+            request.right_follower_port, right_id, request.motor_power
+        )
+
+        return _bimanual_robot_args(request, base, follower_staging), identity_warnings
+
+    # `setup_follower_calibration_file` returns the basename without the
+    # .json extension. We need that stripped form for `--robot.id`,
+    # because lerobot appends `.json` itself when constructing
+    # `calibration_dir / f"{id}.json"`.
+    follower_id = setup_follower_calibration_file(request.follower_config)
+
+    # Arm-identity guard: refuse before the subprocess can move (or stamp
+    # the wrong calibration into) an arm that doesn't match its file.
+    identity_warnings = []
+    if request.skip_identity_check:
+        logger.warning("Arm identity check SKIPPED by request (skip_identity_check=true)")
+    else:
+        identity_warnings = _preflight_arm_identity(request.follower_port, follower_id)
+
+    # Always written (even at 100%) so a gentler previous session can't
+    # linger when the arm was never power-cycled.
+    identity_warnings += _preflight_motor_power(request.follower_port, follower_id, request.motor_power)
+
+    return _single_robot_args(request, follower_id), identity_warnings
+
+
+def _fail_startup(error: str) -> None:
+    """Record a background-startup failure (download or preflight — before any
+    subprocess exists) as a terminal FAILED state on the meta, reusing the exact
+    outcome/error/hint contract the subprocess-exit path already exposes so the
+    inference page surfaces it the same way.
+
+    A no-op when a stop already tore the session down (inference_active False):
+    the stop wins, and a download that raised while being abandoned must not
+    resurrect a phantom failure."""
     global inference_active, _inference_proc, _inference_started_at
     global _inference_rollout_started_at, _inference_meta
+    with _state_lock:
+        if not inference_active:
+            return
+        policy_ref = _inference_meta.get("policy_ref")
+        inference_active = False
+        _inference_proc = None
+        _inference_started_at = None
+        _inference_rollout_started_at = None
+        _inference_meta = {
+            "phase": PHASE_ERROR,
+            "exited": True,
+            "outcome": "failed",
+            "error": error,
+            "hint": friendly_hint(error),
+            "policy_ref": policy_ref,
+        }
+
+
+def _run_inference_startup(request: InferenceRequest, cancel_event: threading.Event) -> None:
+    """Background startup sequence for one rollout: download the model (with byte
+    progress), preflight the arm, then spawn the rollout subprocess.
+
+    Runs off the request thread so POST /start-inference returns immediately and
+    the UI lands on the inference page while the (possibly multi-minute) Hub
+    download runs there with a progress bar. Ordered download → preflight → spawn
+    so a stop pressed DURING the download never opens the serial bus or spawns a
+    subprocess ("no robot touched"). snapshot_download can't be interrupted
+    mid-flight, so a stop during the download abandons this worker: the download
+    finishes into the HF cache (cached for next time) and the worker bails at the
+    next cancel check without preflighting or spawning. Terminal download/
+    preflight failures flow through _fail_startup into the shared outcome/error/
+    hint status machinery."""
+    global _inference_proc, _inference_rollout_started_at, _inference_meta
+
+    # 1. Resolve/download the policy. A Hub ref streams byte progress into the
+    #    meta; a local dir returns instantly (no downloading_model phase, no
+    #    robot touched yet).
+    try:
+        policy_path = _resolve_policy_path(request.policy_ref, report=_report_download_progress)
+    except Exception as exc:
+        logger.exception("Inference model download failed")
+        _fail_startup(f"Failed to download the model: {exc}")
+        return
+    # Stop during the download → abandon (stop already set the state idle).
+    if cancel_event.is_set():
+        logger.info("Inference startup abandoned during model download (stop requested)")
+        return
+
+    # 2. Preflight + stage the arm (opens the serial bus). This is the first
+    #    robot-touching step, deliberately AFTER the download.
+    try:
+        robot_args, identity_warnings = _prepare_robot(request)
+    except ArmIdentityError as exc:
+        # The connected arm doesn't match its assigned calibration; the message
+        # is already user-facing.
+        _fail_startup(str(exc))
+        return
+    except Exception as exc:
+        logger.exception("Failed to prepare robot for inference")
+        _fail_startup(f"Failed to start inference: {exc}")
+        return
+    if cancel_event.is_set():
+        logger.info("Inference startup abandoned after preflight (stop requested)")
+        return
+
+    # 3. Spawn the rollout subprocess.
+    is_bimanual = request.mode == "bimanual"
+    cmd = _build_rollout_cmd(request, policy_path, robot_args)
+
+    log_dir = Path.home() / ".cache" / "huggingface" / "lerobot" / "inference_logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"{int(time.time())}.log"
+    log_handle = log_path.open("w", buffering=1)
+
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
+    # Feed a newline into stdin PER follower arm so SOFollower.calibrate()'s
+    # `input("Press ENTER to use the calibration file ...")` returns "" and
+    # writes the existing calibration to the motors instead of hanging
+    # forever waiting for an interactive operator. A BiSO follower connects
+    # its two sub-arms sequentially (left then right), each of which can fire
+    # that prompt once — so seed two newlines for bimanual, one for single.
+    # Any prompt that doesn't fire just leaves an unread newline (harmless);
+    # subsequent input() calls in the recalibration path get EOF and raise —
+    # fine, because we never want to enter that path from the UI.
+    stdin_seed = b"\n\n" if is_bimanual else b"\n"
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            env=env,
+        )
+    except Exception as exc:
+        logger.exception("Failed to spawn rollout subprocess")
+        with contextlib.suppress(Exception):
+            log_handle.close()
+        _fail_startup(f"Failed to start inference: {exc}")
+        return
+    try:
+        assert proc.stdin is not None
+        proc.stdin.write(stdin_seed)
+        proc.stdin.flush()
+        proc.stdin.close()
+    except Exception as exc:
+        logger.warning("Failed to seed stdin for inference subprocess: %s", exc)
+
+    # Commit the subprocess under the lock, re-checking the cancel flag: a stop
+    # that raced the spawn must NOT leave a live subprocess driving the arm.
+    with _state_lock:
+        abandoned = cancel_event.is_set() or not inference_active
+        if not abandoned:
+            _inference_proc = proc
+            _inference_rollout_started_at = None
+            # Carry forward any phase the not-yet-started pump could set later;
+            # the download phase is behind us, so `starting` is the floor.
+            carried_phase = _inference_meta.get("phase") or PHASE_STARTING
+            if carried_phase == PHASE_DOWNLOADING_MODEL:
+                carried_phase = PHASE_STARTING
+            meta: dict[str, Any] = {
+                "policy_ref": request.policy_ref,
+                # The RESOLVED local checkpoint dir (policy_ref can be a Hub ref,
+                # fragile for path comparisons) — read by inference_in_use_path so
+                # models.delete_local_model can refuse deleting it mid-run.
+                "policy_path": policy_path,
+                "duration_s": request.duration_s,
+                "log_path": str(log_path),
+                "phase": carried_phase,
+            }
+            # Warn-but-allow arm-identity findings, surfaced once via the status
+            # payload now that the POST returned before the preflight ran.
+            if identity_warnings:
+                meta["warning"] = " ".join(identity_warnings)
+            _inference_meta = meta
+
+    if abandoned:
+        # Stopped during/just after the spawn — kill the subprocess we just
+        # started and leave the (already idle) state alone.
+        logger.info("Inference startup abandoned after spawn (stop requested); killing subprocess")
+        with contextlib.suppress(Exception):
+            proc.terminate()
+        with contextlib.suppress(Exception):
+            proc.wait(timeout=5)
+        with contextlib.suppress(Exception):
+            log_handle.close()
+        return
+
+    # Start the stdout pump only after committing, so it never advances the phase
+    # of a subprocess we might have abandoned above.
+    threading.Thread(
+        target=_pump_stdout,
+        args=(proc, log_handle),
+        name="inference-stdout-pump",
+        daemon=True,
+    ).start()
+    logger.info("Inference started: pid=%s policy=%s", proc.pid, policy_path)
+
+
+def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
+    """Validate the request cheaply and hand the heavy startup (model download →
+    arm preflight → subprocess spawn) to a background worker, returning
+    immediately.
+
+    Returns a dict — the route layer turns it into a JSON response or
+    HTTPException as appropriate. Only cheap, synchronous checks stay here
+    (mutex, arm-count guard, policy-ref shape) so a 4xx still surfaces in the
+    launch modal; the multi-minute Hub download moves off the request thread so
+    the UI lands on the inference page and shows download progress there."""
+    global inference_active, _inference_started_at, _inference_meta, _inference_cancel
 
     # Mutex with teleop and recording: all three drive the same serial bus.
     from . import record as _record, teleoperate as _teleoperate
@@ -547,171 +908,52 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
                 "status_code": 409,
                 "message": "Inference is already active. Stop it first.",
             }
-        # Claim the slot now so a concurrent caller losing the race sees us.
+        # Claim the slot now so a concurrent caller losing the race sees us, and
+        # seed the meta + timer so the phase is visible from the very first
+        # status poll (the download runs on the inference page — the UI must be
+        # able to name that wait before the subprocess even exists). A fresh
+        # cancel Event lets stop() abandon the pre-subprocess window.
         inference_active = True
-        # Seed the meta so the phase is visible from the very first status poll
-        # (the download below can take tens of seconds — the UI must be able to
-        # name that wait before the subprocess even exists). Populated fully at
-        # the end of the start path once the subprocess is running.
+        _inference_started_at = time.time()
+        _inference_cancel = threading.Event()
+        cancel_event = _inference_cancel
         _inference_meta = {"phase": PHASE_STARTING, "policy_ref": request.policy_ref}
 
+    def _release_slot() -> None:
+        global inference_active, _inference_started_at, _inference_cancel, _inference_meta
+        with _state_lock:
+            inference_active = False
+            _inference_started_at = None
+            _inference_cancel = None
+            _inference_meta = {}
+
     # Arm-count guard: reject a single-arm checkpoint on a bimanual robot (and
-    # vice versa) BEFORE opening any port or spawning the subprocess, where the
-    # shape mismatch would otherwise crash unexplained. Best-effort — defers to
-    # the subprocess when the checkpoint doesn't expose observation.state.
+    # vice versa) BEFORE spawning the worker, where the shape mismatch would
+    # otherwise crash unexplained. Cheap (no I/O) — defers to the subprocess when
+    # the checkpoint doesn't expose observation.state.
     mismatch = _arm_count_mismatch(request.mode, request.checkpoint_state_dim)
     if mismatch is not None:
-        with _state_lock:
-            inference_active = False
-            _inference_meta = {}
+        _release_slot()
         return {"success": False, "status_code": 409, "message": mismatch}
 
-    is_bimanual = request.mode == "bimanual"
-    try:
-        if is_bimanual:
-            # BiSO loads each sub-arm's calibration as "<base>_left/right.json"
-            # from one dir, with no way to point left/right at differently named
-            # library files. Stage the two arbitrarily-named follower library
-            # calibrations into that convention and point BiSO at the staging
-            # dir. Inference has NO leader arms, so stage the follower side only
-            # — staging the leader side would require leader library files that
-            # this flow never uses (and usually don't exist under the follower's
-            # names). The copy fails fast with a clear per-slot error if a
-            # library file is missing.
-            base = bimanual_base_id(request.robot_name)
-            follower_staging, _ = stage_bimanual_follower_calibrations(
-                base,
-                request.follower_config,
-                request.right_follower_config,
-            )
-            # Sub-arm ids are the BiSO staging aliases ("<base>_left/right"), so
-            # the identity guard compares against the real library stems.
-            left_id, right_id = f"{base}_left", f"{base}_right"
-
-            identity_warnings = []
-            if request.skip_identity_check:
-                logger.warning("Arm identity check SKIPPED by request (skip_identity_check=true)")
-            else:
-                # Each bus opens/verifies/releases sequentially — never both at
-                # once — mirroring the single-arm preflight.
-                identity_warnings += _preflight_arm_identity(
-                    request.follower_port, left_id, config_name=request.follower_config
-                )
-                identity_warnings += _preflight_arm_identity(
-                    request.right_follower_port, right_id, config_name=request.right_follower_config
-                )
-            # Motor power on both buses, sequentially (each opens its own port).
-            identity_warnings += _preflight_motor_power(request.follower_port, left_id, request.motor_power)
-            identity_warnings += _preflight_motor_power(
-                request.right_follower_port, right_id, request.motor_power
-            )
-
-            robot_args = _bimanual_robot_args(request, base, follower_staging)
-        else:
-            # `setup_follower_calibration_file` returns the basename without the
-            # .json extension. We need that stripped form for `--robot.id`,
-            # because lerobot appends `.json` itself when constructing
-            # `calibration_dir / f"{id}.json"`.
-            follower_id = setup_follower_calibration_file(request.follower_config)
-
-            # Arm-identity guard: refuse before the subprocess can move (or stamp
-            # the wrong calibration into) an arm that doesn't match its file.
-            identity_warnings = []
-            if request.skip_identity_check:
-                logger.warning("Arm identity check SKIPPED by request (skip_identity_check=true)")
-            else:
-                identity_warnings = _preflight_arm_identity(request.follower_port, follower_id)
-
-            # Always written (even at 100%) so a gentler previous session can't
-            # linger when the arm was never power-cycled.
-            identity_warnings += _preflight_motor_power(
-                request.follower_port, follower_id, request.motor_power
-            )
-
-            robot_args = _single_robot_args(request, follower_id)
-
-        policy_path = _resolve_policy_path(request.policy_ref)
-        cmd = _build_rollout_cmd(request, policy_path, robot_args)
-
-        log_dir = Path.home() / ".cache" / "huggingface" / "lerobot" / "inference_logs"
-        log_dir.mkdir(parents=True, exist_ok=True)
-        log_path = log_dir / f"{int(time.time())}.log"
-        log_handle = log_path.open("w", buffering=1)
-
-        env = os.environ.copy()
-        env["PYTHONUNBUFFERED"] = "1"
-        # Feed a newline into stdin PER follower arm so SOFollower.calibrate()'s
-        # `input("Press ENTER to use the calibration file ...")` returns "" and
-        # writes the existing calibration to the motors instead of hanging
-        # forever waiting for an interactive operator. A BiSO follower connects
-        # its two sub-arms sequentially (left then right), each of which can fire
-        # that prompt once — so seed two newlines for bimanual, one for single.
-        # Any prompt that doesn't fire just leaves an unread newline (harmless);
-        # subsequent input() calls in the recalibration path get EOF and raise —
-        # fine, because we never want to enter that path from the UI.
-        stdin_seed = b"\n\n" if is_bimanual else b"\n"
-        proc = subprocess.Popen(
-            cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            env=env,
-        )
-        try:
-            assert proc.stdin is not None
-            proc.stdin.write(stdin_seed)
-            proc.stdin.flush()
-            proc.stdin.close()
-        except Exception as exc:
-            logger.warning("Failed to seed stdin for inference subprocess: %s", exc)
-        threading.Thread(
-            target=_pump_stdout,
-            args=(proc, log_handle),
-            name="inference-stdout-pump",
-            daemon=True,
-        ).start()
-    except ArmIdentityError as exc:
-        # The connected arm doesn't match its assigned calibration; the message
-        # is already user-facing. Subprocess never started — release the slot.
-        with _state_lock:
-            inference_active = False
-        return {"success": False, "status_code": 409, "message": str(exc)}
-    except Exception as exc:
-        logger.exception("Failed to start inference")
-        # Subprocess never started — release the slot.
-        with _state_lock:
-            inference_active = False
-        return {"success": False, "status_code": 500, "message": f"Failed to start inference: {exc}"}
-
-    with _state_lock:
-        _inference_proc = proc
-        _inference_started_at = time.time()
-        _inference_rollout_started_at = None
-        # Rebuild the meta now that the subprocess is up, but carry forward any
-        # phase the just-spawned stdout pump has already advanced to: the pump
-        # thread started above and may have seen "Loading policy…"/"Connecting
-        # robot…"/the rollout marker before we took this lock, so defaulting to
-        # `starting` here could stomp a further-along phase. The download phase
-        # is behind us (the subprocess only spawns after _resolve_policy_path
-        # returned), so `starting` is the correct floor.
-        carried_phase = _inference_meta.get("phase") or PHASE_STARTING
-        if carried_phase == PHASE_DOWNLOADING_MODEL:
-            carried_phase = PHASE_STARTING
-        _inference_meta = {
-            "policy_ref": request.policy_ref,
-            # The RESOLVED local checkpoint dir (policy_ref can be a Hub ref,
-            # fragile for path comparisons) — read by inference_in_use_path so
-            # models.delete_local_model can refuse deleting it mid-run.
-            "policy_path": policy_path,
-            "duration_s": request.duration_s,
-            "log_path": str(log_path),
-            "phase": carried_phase,
+    # Cheap policy-ref shape check so a malformed ref 4xxs in the modal instead
+    # of failing later on the inference page (one is_dir stat, no network).
+    if not _policy_ref_is_valid(request.policy_ref):
+        _release_slot()
+        return {
+            "success": False,
+            "status_code": 400,
+            "message": f"Unrecognised policy ref: {request.policy_ref!r}",
         }
-    logger.info("Inference started: pid=%s policy=%s", proc.pid, policy_path)
-    response = {"success": True, "message": "Inference started", "log_path": str(log_path)}
-    if identity_warnings:
-        response["warning"] = " ".join(identity_warnings)
-    return response
+
+    # Everything heavy (download, preflight, spawn) runs off the request thread.
+    threading.Thread(
+        target=_run_inference_startup,
+        args=(request, cancel_event),
+        name="inference-startup",
+        daemon=True,
+    ).start()
+    return {"success": True, "message": "Inference starting"}
 
 
 def inference_in_use_path() -> str | None:
@@ -731,16 +973,36 @@ def inference_in_use_path() -> str | None:
 
 def handle_stop_inference() -> dict[str, Any]:
     global inference_active, _inference_proc, _inference_started_at
-    global _inference_rollout_started_at, _inference_meta
+    global _inference_rollout_started_at, _inference_meta, _inference_cancel
 
     with _state_lock:
-        if not inference_active or _inference_proc is None:
+        if not inference_active:
             return {"success": False, "status_code": 409, "message": "No inference is active"}
+        # Signal the background startup worker to abandon: this is the only way
+        # to stop during the pre-subprocess window (Hub download / arm
+        # preflight), where there's no process to terminate.
+        if _inference_cancel is not None:
+            _inference_cancel.set()
         proc = _inference_proc
         # Surface the stop as its own phase so a status poll racing the
         # terminate/wait below sees "stopping" rather than a stale "running".
         if _inference_meta:
             _inference_meta["phase"] = PHASE_STOPPING
+
+        if proc is None:
+            # Stop pressed before the subprocess spawned (during the model
+            # download or the arm preflight). There's no process to terminate and
+            # no policy has driven the robot. Go straight to idle: the orphaned
+            # startup worker (if any) finishes its in-flight download into the HF
+            # cache and bails at its next cancel check — it never opens the bus
+            # or spawns a subprocess. A download-first ordering guarantees "no
+            # robot touched" here.
+            inference_active = False
+            _inference_proc = None
+            _inference_started_at = None
+            _inference_rollout_started_at = None
+            _inference_meta = {}
+            return {"success": True, "message": "Inference stopped"}
 
     try:
         proc.terminate()
@@ -813,6 +1075,30 @@ def handle_inference_status() -> dict[str, Any]:
     # Finalise state lazily if the subprocess died on its own.
     with _state_lock:
         proc = _inference_proc
+        # Terminal FAILURE recorded by the background startup worker before any
+        # subprocess existed (a model-download or preflight failure — see
+        # _fail_startup). Reuses the same exited/outcome/error/hint shape as the
+        # subprocess-exit path below so the inference page renders it identically.
+        # Reported once, then the meta is cleared (mirrors that finalisation).
+        if proc is None and not inference_active and _inference_meta.get("exited"):
+            finished = _inference_meta
+            _inference_meta = {}
+            return {
+                "inference_active": False,
+                "exited": True,
+                "exit_code": None,
+                "outcome": finished.get("outcome"),
+                "error": finished.get("error"),
+                "hint": finished.get("hint"),
+                "phase": finished.get("phase", PHASE_ERROR),
+                "policy_ref": finished.get("policy_ref"),
+                "duration_s": finished.get("duration_s"),
+                "log_path": finished.get("log_path"),
+                "started_at": finished.get("started_at"),
+                "rollout_started_at": None,
+                "rollout_elapsed_s": 0,
+                "elapsed_s": 0,
+            }
         if proc is not None and proc.poll() is not None:
             rc = proc.returncode
             logger.info("Inference subprocess exited rc=%s", rc)
@@ -867,4 +1153,14 @@ def handle_inference_status() -> dict[str, Any]:
             # None when idle (no session has seeded a meta yet); the frontend
             # treats an absent phase as "no active startup to narrate".
             "phase": _inference_meta.get("phase"),
+            # Byte progress of the Hub model download, populated only during the
+            # downloading_model phase (all None outside it / for a local
+            # checkpoint). download_percent is None while the total is still
+            # unknown → the UI shows an indeterminate bar.
+            "download_bytes_done": _inference_meta.get("download_bytes_done"),
+            "download_bytes_total": _inference_meta.get("download_bytes_total"),
+            "download_percent": _inference_meta.get("download_percent"),
+            # Warn-but-allow arm-identity finding, surfaced once the run is up
+            # (the preflight now runs in the background, after the POST returned).
+            "warning": _inference_meta.get("warning"),
         }

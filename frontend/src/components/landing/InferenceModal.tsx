@@ -325,7 +325,12 @@ const InferenceModal: React.FC<Props> = ({
       };
     }
     try {
-      const result = await startInference(baseUrl, fetchWithHeaders, {
+      // The POST now returns immediately (it only validates cheaply, then the
+      // server downloads the model + preflights the arm in the background), so
+      // this navigates to the inference page right away — the download and its
+      // progress, any warn-but-allow arm finding, and any failure all surface
+      // there via /inference-status polling.
+      await startInference(baseUrl, fetchWithHeaders, {
         follower_port: robot.follower_port,
         follower_config: robot.follower_config,
         policy_ref: selectedRef,
@@ -347,15 +352,6 @@ const InferenceModal: React.FC<Props> = ({
         // observation.state — the server then defers to its shape check).
         checkpoint_state_dim: policyConfig.state_dim ?? undefined,
       });
-      // A success can carry a warn-but-allow arm-identity finding — surface
-      // it instead of silently dropping it.
-      if (result.warning) {
-        toast({
-          title: "Started with a warning",
-          description: result.warning,
-          duration: 10000,
-        });
-      }
       onOpenChange(false);
       navigate("/inference");
     } catch (e) {

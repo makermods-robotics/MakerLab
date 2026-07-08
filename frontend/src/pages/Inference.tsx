@@ -23,6 +23,7 @@ import {
   stopInference,
 } from "@/lib/inferenceApi";
 import LogPanel from "@/components/LogPanel";
+import { formatBytes } from "@/lib/formatBytes";
 
 const POLL_MS = 1000;
 
@@ -88,6 +89,10 @@ const Inference: React.FC = () => {
   // next idle status (which lacks outcome/error/hint, since the subprocess is
   // already reaped) can't clobber the error display.
   const doneRef = useRef(false);
+  // The warn-but-allow arm-identity finding now arrives on the status payload
+  // (the preflight runs server-side in the background), not the start response.
+  // Toast it once when first seen so it isn't repeated on every poll.
+  const warnedRef = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -106,6 +111,15 @@ const Inference: React.FC = () => {
         const next = await getInferenceStatus(baseUrl, fetchWithHeaders);
         if (cancelled) return;
         setStatus(next);
+        // Surface the server's warn-but-allow arm-identity finding once.
+        if (next.warning && !warnedRef.current) {
+          warnedRef.current = true;
+          toast({
+            title: "Started with a warning",
+            description: next.warning,
+            duration: 10000,
+          });
+        }
         // Pull the rollout log tail on the same tick so the panel stays live.
         // Best-effort: a log fetch failure must not disturb status handling.
         try {
@@ -244,6 +258,16 @@ const Inference: React.FC = () => {
   const phaseMeta =
     !showOutcome && status.phase ? PHASE_META[status.phase] ?? null : null;
 
+  // Hub model download: show a real byte-progress bar during the
+  // downloading_model phase. Indeterminate (pulsing) until the total is known —
+  // the total can grow as file sizes are discovered, so the bar may legitimately
+  // step backwards. Mirrors the sibling branch's DownloadProgressBar shape.
+  const isDownloading = !showOutcome && status.phase === "downloading_model";
+  const dlDone = status.download_bytes_done ?? null;
+  const dlTotal = status.download_bytes_total ?? null;
+  const dlPercent = status.download_percent ?? null;
+  const dlDeterminate = dlPercent != null && dlTotal != null;
+
   return (
     <div className="min-h-screen bg-black text-white flex flex-col p-4 sm:p-6 lg:p-8">
       <div className="flex items-center gap-4 mb-8">
@@ -375,6 +399,28 @@ const Inference: React.FC = () => {
               <span className={`font-medium ${PHASE_TEXT[phaseMeta.tone]}`}>
                 {phaseMeta.label}
               </span>
+            </div>
+          )}
+
+          {isDownloading && (
+            <div className="mt-3 space-y-1">
+              <div className="h-1.5 w-full overflow-hidden rounded-full bg-gray-800">
+                {dlDeterminate ? (
+                  <div
+                    className="h-full rounded-full bg-amber-500 transition-[width] duration-500"
+                    style={{ width: `${dlPercent}%` }}
+                  />
+                ) : (
+                  <div className="h-full w-full animate-pulse rounded-full bg-amber-500/40" />
+                )}
+              </div>
+              <div className="text-[11px] tabular-nums text-slate-500">
+                {dlDeterminate
+                  ? `${formatBytes(dlDone ?? 0)} / ${formatBytes(dlTotal)}`
+                  : dlDone != null
+                    ? `${formatBytes(dlDone)} so far`
+                    : "Starting download…"}
+              </div>
             </div>
           )}
 

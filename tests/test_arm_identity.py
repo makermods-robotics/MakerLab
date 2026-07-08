@@ -684,26 +684,46 @@ def test_start_teleoperation_verified_arms_pass_without_identity_warnings(
 
 
 def test_start_inference_refuses_on_identity_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The identity preflight moved into the async startup worker (it opens the
+    serial bus, which the instant-start POST must not do). A hard mismatch is
+    now finalised by the worker as a `failed` outcome carrying the user-facing
+    message — before any subprocess spawns."""
+    import threading
+
     from lelab import rollout
 
-    monkeypatch.setattr(rollout, "inference_active", False)
-    monkeypatch.setattr(rollout, "setup_follower_calibration_file", lambda config: "follower_a")
+    monkeypatch.setattr(rollout, "inference_active", True)
+    monkeypatch.setattr(
+        rollout,
+        "_inference_meta",
+        {"phase": rollout.PHASE_STARTING, "policy_ref": "/tmp/model"},
+    )
+    # Local-path ref: resolve is instant, no download phase — isolates the
+    # identity failure as the first thing the worker hits.
+    monkeypatch.setattr(rollout, "_resolve_policy_path", lambda ref, report=None: "/tmp/model")
 
-    def _refuse(port: str, follower_id: str) -> list[str]:
-        raise ArmIdentityError(f"The follower arm on {port} carries calibration 'leader_a' — SWAPPED")
+    def _refuse(request):
+        raise ArmIdentityError("The follower arm on /dev/f carries calibration 'leader_a' — SWAPPED")
 
-    monkeypatch.setattr(rollout, "_preflight_arm_identity", _refuse)
+    monkeypatch.setattr(rollout, "_prepare_robot", _refuse)
 
-    result = rollout.handle_start_inference(
+    def _no_popen(*a, **k):
+        raise AssertionError("no subprocess may spawn after an identity refusal")
+
+    monkeypatch.setattr(rollout.subprocess, "Popen", _no_popen)
+
+    rollout._run_inference_startup(
         rollout.InferenceRequest(
-            follower_port="/dev/f", follower_config="follower_a", policy_ref="user/repo@root"
-        )
+            follower_port="/dev/f", follower_config="follower_a", policy_ref="/tmp/model"
+        ),
+        threading.Event(),
     )
 
-    assert result["success"] is False
-    assert result["status_code"] == 409
-    assert "SWAPPED" in result["message"]
     assert rollout.inference_active is False
+    status = rollout.handle_inference_status()
+    assert status["exited"] is True
+    assert status["outcome"] == "failed"
+    assert "SWAPPED" in (status["error"] or "")
 
 
 def test_rollout_counterpart_slots_come_from_robot_records(monkeypatch: pytest.MonkeyPatch) -> None:
