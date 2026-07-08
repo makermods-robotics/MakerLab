@@ -340,15 +340,20 @@ class CameraPreviewManager:
         # the reader thread) nor simultaneously with any entry's _cond, so it can
         # never be blocked behind a hung read and there is no lock-ordering risk.
         self._registry_lock = threading.Lock()
-        # Latched True while a recording session owns the cv2 devices (set by
-        # block_for_recording, cleared by resume_previews). Checked in _acquire
-        # under the SAME registry lock that block_for_recording snapshots under,
-        # so a preview open that races the session's force-release is refused
-        # rather than re-acquiring the device the recorder is about to grab —
-        # the TOCTOU the recording_active 409 gate alone can't close (that flag
-        # lives in the record module, so the route's check and the manager's
-        # open are not atomic). See block_for_recording.
+        # Latched True while a session that opens the cv2 devices in a separate
+        # capture stack owns them (set by block_for_recording, cleared by
+        # resume_previews). Checked in _acquire under the SAME registry lock that
+        # block_for_recording snapshots under, so a preview open that races the
+        # session's force-release is refused rather than re-acquiring the device
+        # the owner is about to grab — the TOCTOU the recording_active 409 gate
+        # alone can't close (that flag lives in the record module, so the route's
+        # check and the manager's open are not atomic). See block_for_recording.
         self._blocked = False
+        # What has the devices latched, folded into the refusal message so a tile
+        # names the real owner ("recording" or "inference"). Set alongside
+        # _blocked under _registry_lock; stale after a resume, but only ever read
+        # while _blocked is True.
+        self._block_reason = "recording"
         # camera_id → monotonic time the reader last released that id's capture.
         # Lets the *next* open give a just-released (possibly still-busy) device
         # one short retry. Guarded by _registry_lock.
@@ -409,23 +414,31 @@ class CameraPreviewManager:
             entries = list(self._captures.values())
         self._stop_and_release(entries, timeout)
 
-    def block_for_recording(self, timeout: float = 1.0) -> None:
-        """Stop every preview AND latch new opens off for a recording session.
+    def block_for_recording(self, timeout: float = 1.0, reason: str = "recording") -> None:
+        """Stop every preview AND latch new opens off for a session that owns the
+        cv2 devices in its own capture stack (recording, or an inference rollout
+        subprocess).
 
         The same force-release as :meth:`stop_all`, but it atomically sets the
         block flag in the SAME critical section that snapshots the live captures.
         That closes the window :meth:`stop_all` leaves open: without the latch, a
         preview open that races the release (a retrying ``<img>`` re-requesting
-        right after the device is freed) re-acquires the very device the recorder
-        is about to open, starving it to actual_fps=5.0. Because the flag is set
-        before the snapshot under ``_registry_lock``, any concurrent
-        :meth:`_acquire` either registered before us (so it is in the snapshot and
-        gets force-released) or observes the flag and is rejected — it can never
-        slip a fresh capture in behind us. Cleared by :meth:`resume_previews` when
-        the session ends.
+        right after the device is freed) re-acquires the very device the owner
+        is about to open, starving the recorder to actual_fps=5.0 or handing the
+        rollout subprocess a device that already has a second capture stack on it.
+        Because the flag is set before the snapshot under ``_registry_lock``, any
+        concurrent :meth:`_acquire` either registered before us (so it is in the
+        snapshot and gets force-released) or observes the flag and is rejected —
+        it can never slip a fresh capture in behind us. Cleared by
+        :meth:`resume_previews` when the session ends.
+
+        ``reason`` names the owner in the refusal a rejected open raises, so an
+        inference-latched tile says inference is using the cameras, not recording.
+        The name and default are kept so recording's call sites need no change.
         """
         with self._registry_lock:
             self._blocked = True
+            self._block_reason = reason
             entries = list(self._captures.values())
         self._stop_and_release(entries, timeout)
 
@@ -557,7 +570,9 @@ class CameraPreviewManager:
             # retries; the route's recording_active check already answers 409
             # for every non-racing open.
             if self._blocked:
-                raise CameraOpenError(f"Camera {camera_id} is reserved for the active recording session.")
+                raise CameraOpenError(
+                    f"Camera {camera_id} is reserved for the active {self._block_reason} session."
+                )
             entry = self._captures.get(camera_id)
             created = entry is None
             if created:

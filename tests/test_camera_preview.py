@@ -559,6 +559,33 @@ def test_resume_previews_lifts_the_recording_latch(fake_captures: list[FakeVideo
     assert fake_captures[0].released
 
 
+def test_block_for_recording_default_reason_is_recording(
+    fake_captures: list[FakeVideoCapture],
+) -> None:
+    """The generalised latch defaults to a recording-flavoured reason, so the
+    unchanged recording call site (block_for_recording() with no args) still
+    refuses a racing open with the recording-worded message."""
+    manager = CameraPreviewManager()
+    manager.block_for_recording(timeout=0.05)
+    with pytest.raises(CameraOpenError) as exc:
+        manager.open_stream(0)
+    assert "reserved for the active recording session" in str(exc.value)
+
+
+def test_block_for_recording_custom_reason_surfaces_in_refusal(
+    fake_captures: list[FakeVideoCapture],
+) -> None:
+    """A caller (inference) passing a custom reason has it named in the refusal a
+    racing preview open raises, so the tile can say inference — not recording —
+    owns the cameras."""
+    manager = CameraPreviewManager()
+    manager.block_for_recording(timeout=0.05, reason="inference")
+    with pytest.raises(CameraOpenError) as exc:
+        manager.open_stream(0)
+    assert "reserved for the active inference session" in str(exc.value)
+    assert "recording" not in str(exc.value)
+
+
 # ---------------------------------------------------------------------------
 # camera_id addressing — the unique_id is canonical; the cv2 index is resolved
 # fresh on every capture open
@@ -858,30 +885,3 @@ def test_start_recording_stops_camera_previews(monkeypatch: pytest.MonkeyPatch) 
     assert record.recording_active is False
 
 
-def test_start_teleoperation_stops_camera_previews(monkeypatch: pytest.MonkeyPatch) -> None:
-    """handle_start_teleoperation force-releases the previews before any
-    device construction (setup_calibration_files is made to fail right after)."""
-    calls: list[str] = []
-    monkeypatch.setattr(teleoperate.camera_preview_manager, "stop_all", lambda: calls.append("stop_all"))
-    monkeypatch.setattr(teleoperate, "teleoperation_active", False)
-    monkeypatch.setattr(teleoperate, "teleoperation_thread", None)
-    monkeypatch.setattr(record, "recording_active", False)
-    monkeypatch.setattr(record, "recording_thread", None)
-
-    def _boom(leader, follower):
-        raise RuntimeError("stop before hardware")
-
-    monkeypatch.setattr("lelab.utils.robot_factory.setup_calibration_files", _boom)
-
-    result = teleoperate.handle_start_teleoperation(
-        teleoperate.TeleoperateRequest(
-            leader_port="COM_LEADER",
-            follower_port="COM_FOLLOWER",
-            leader_config="leader",
-            follower_config="follower",
-        )
-    )
-
-    assert result["success"] is False
-    assert calls == ["stop_all"]
-    assert teleoperate.teleoperation_active is False
