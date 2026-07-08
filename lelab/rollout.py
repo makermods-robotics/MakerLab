@@ -396,6 +396,26 @@ def _format_cameras_arg(cameras: dict[str, dict[str, Any]]) -> str:
 _EXC_LINE_RE = re.compile(r"^[A-Za-z_][\w.]*(?:Error|Exception|Interrupt|Timeout|Failure)\b")
 
 
+def _read_log_tail_lines(log_path: str | None) -> list[str] | None:
+    """Decode the last ~64 KB of a log file into text lines (the window's oldest
+    line first, newest last).
+
+    Only the tail is read, so a multi-MB verbose log is never materialized in
+    full — the shared basis for both the error-mining in _extract_error_from_log
+    and the log-tail endpoint in handle_inference_log. Returns None for a missing
+    path or an unreadable file (OSError); an empty list for an empty file."""
+    if not log_path:
+        return None
+    try:
+        with open(log_path, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            fh.seek(max(0, fh.tell() - 64 * 1024))
+            data = fh.read()
+    except OSError:
+        return None
+    return data.decode("utf-8", errors="replace").splitlines()
+
+
 def _extract_error_from_log(log_path: str | None) -> str | None:
     """Pull the meaningful error out of a failed rollout's log so the UI can
     show it directly instead of telling the user to open a file in the cache.
@@ -404,17 +424,10 @@ def _extract_error_from_log(log_path: str | None) -> str | None:
     last traceback exception line + its message body. (Recording/teleop run
     in-process and will hand the caught exception's text straight to
     friendly_hint/is_cleanup_error instead — this step is rollout-only.)"""
-    if not log_path:
+    lines = _read_log_tail_lines(log_path)
+    if lines is None:
         return None
-    try:
-        # Only the tail matters; avoid materializing a multi-MB verbose log.
-        with open(log_path, "rb") as fh:
-            fh.seek(0, os.SEEK_END)
-            fh.seek(max(0, fh.tell() - 64 * 1024))
-            data = fh.read()
-    except OSError:
-        return None
-    tail = data.decode("utf-8", errors="replace").splitlines()[-50:]
+    tail = lines[-50:]
     # Prefer the last exception line + everything after it (the message body).
     exc_idx = next((i for i in range(len(tail) - 1, -1, -1) if _EXC_LINE_RE.match(tail[i])), None)
     if exc_idx is not None:
@@ -783,11 +796,11 @@ def handle_inference_log(max_lines: int = _INFERENCE_LOG_MAX_LINES) -> dict[str,
     path = _resolve_inference_log_path()
     if path is None:
         return {"logs": "", "log_path": None}
-    try:
-        # A rollout log is small (setup + per-step lines); reading it fully and
-        # slicing the tail is simpler than a seek-from-end and cheap at this size.
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    except OSError:
+    # Bounded read: only the last ~64 KB is decoded (shared with the error-mining
+    # path), which holds every line a rollout log this size produces. A
+    # missing/unreadable file yields None -> empty text, keeping the route 200.
+    lines = _read_log_tail_lines(str(path))
+    if lines is None:
         return {"logs": "", "log_path": str(path)}
     tail = lines[-max_lines:] if max_lines > 0 else lines
     return {"logs": "\n".join(tail), "log_path": str(path)}

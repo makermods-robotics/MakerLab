@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import collections
+import contextlib
 import json
 import logging
 import shutil
@@ -1111,13 +1112,13 @@ def record_with_web_events(
     # handler already returns; no new plumbing.)
     current_phase = "connecting_robot"
     phase_start_time = time.time()
-    CONNECT_ATTEMPTS = 3
-    for attempt in range(1, CONNECT_ATTEMPTS + 1):
+    connect_attempts = 3
+    for attempt in range(1, connect_attempts + 1):
         try:
             logger.info(
                 "🔧 ROBOT CONNECTION: Attempting to connect robot (attempt %d/%d)...",
                 attempt,
-                CONNECT_ATTEMPTS,
+                connect_attempts,
             )
             # Calibration is already on disk (loaded via the configs above), so never
             # let connect() drop into interactive recalibration — that would hang the
@@ -1132,25 +1133,18 @@ def record_with_web_events(
             transient_fps = "failed to set fps" in msg
             logger.error(f"❌ ROBOT CONNECTION: Failed to connect robot: {e}")
             # If robot connection fails due to camera conflict, provide clear error
-            if (
-                "camera" in msg.lower()
-                or "device" in msg.lower()
-                or "busy" in msg.lower()
-                or transient_fps
-            ):
+            if "camera" in msg.lower() or "device" in msg.lower() or "busy" in msg.lower() or transient_fps:
                 logger.error(
                     "💡 ROBOT CONNECTION: Camera connection failure - resource conflict or cold-open fps read"
                 )
                 logger.error(
                     "💡 ROBOT CONNECTION: Make sure frontend camera streams are released before recording"
                 )
-            if attempt < CONNECT_ATTEMPTS and transient_fps:
+            if attempt < connect_attempts and transient_fps:
                 # Drop any half-open handles from this failed attempt so the retry
                 # starts from a clean device, then let the OS release settle.
-                try:
+                with contextlib.suppress(Exception):
                     robot.disconnect()
-                except Exception:
-                    pass
                 time.sleep(1.5)
                 continue
             raise

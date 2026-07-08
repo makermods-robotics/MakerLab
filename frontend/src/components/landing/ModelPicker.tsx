@@ -15,7 +15,7 @@ import {
 } from "@/components/ui/command";
 import { ModelItem } from "@/lib/modelsApi";
 import { sortByNamespaceFirst } from "@/lib/sortByNamespaceFirst";
-import { policyTypeDisplayName } from "@/components/training/types";
+import { policyTypeShortLabel } from "@/components/training/types";
 import { useHfAuth } from "@/contexts/HfAuthContext";
 
 interface ModelPickerProps {
@@ -94,7 +94,7 @@ const ModelPicker: React.FC<ModelPickerProps> = ({
           when unknown. */}
       {m.policy_type && (
         <span className="shrink-0 text-xs text-gray-500">
-          {policyTypeDisplayName(m.policy_type)}
+          {policyTypeShortLabel(m.policy_type)}
         </span>
       )}
       {m.source === "both" && (

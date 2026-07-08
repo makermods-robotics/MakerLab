@@ -99,6 +99,16 @@ export function policyTypeDisplayName(value: string): string {
   );
 }
 
+// Short label for a policy type value (the picker-row form: "ACT", "SmolVLA",
+// "Diffusion"…) — the same mapping as policyTypeDisplayName but the compact
+// `label`. Same raw-value-uppercased fallback for unknown/older types.
+export function policyTypeShortLabel(value: string): string {
+  return (
+    POLICY_TYPE_OPTIONS.find((o) => o.value === value)?.label ||
+    value.toUpperCase()
+  );
+}
+
 export interface TrainingStatus {
   training_active: boolean;
   current_step: number;
