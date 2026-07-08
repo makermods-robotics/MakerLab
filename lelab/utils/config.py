@@ -60,6 +60,25 @@ DEFAULT_BIMANUAL_BASE = "bimanual"
 # — so hiding a dead run from the untracked list must be persisted locally.
 DISMISSED_HUB_JOBS_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/dismissed_hub_jobs.json")
 
+# Hub dataset repo ids the user typed straight into the picker and chose to keep
+# ("Use org/name"). They aren't in the user's own namespace listing and have no
+# local copy, so they'd vanish after selection unless we persist them here and
+# fold them back into the merged /datasets listing.
+SAVED_CUSTOM_DATASETS_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/saved_custom_datasets.json")
+
+# Hub MODEL repo ids the user pinned via the "Add model" chooser — the models
+# mirror of SAVED_CUSTOM_DATASETS_FILE (same rationale: a foreign-namespace repo
+# with no local copy vanishes from the /models listing unless persisted here).
+SAVED_CUSTOM_MODELS_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/saved_custom_models.json")
+
+# Hub dataset/model repo ids the user removed from their pickers ("hidden").
+# Hiding NEVER touches the Hub repo — it only filters the merged listing, so a
+# repo the user's own namespace listing keeps returning stays gone until they
+# re-add it (re-pinning auto-unhides). Persisted like the dismissed hub jobs
+# (JSON list on disk, a set in memory).
+SAVED_HIDDEN_DATASETS_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/hidden_datasets.json")
+SAVED_HIDDEN_MODELS_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/hidden_models.json")
+
 # Tag stamped on every dataset pushed to the Hub from LeLab, so we can later
 # query the Hub for LeLab-produced datasets and compute usage metrics.
 LELAB_TAG = "LeLab"
@@ -686,6 +705,212 @@ def prune_dismissed_hub_jobs(live_job_ids: set[str]) -> None:
     kept = dismissed & live_job_ids
     if kept != dismissed:
         _atomic_write_text(DISMISSED_HUB_JOBS_FILE, json.dumps(sorted(kept), indent=2))
+
+
+def get_saved_custom_datasets() -> list[str]:
+    """Return the Hub dataset repo ids the user pinned by typing them into the
+    picker, most-recently-used first.
+
+    A missing or corrupted file yields the empty list — pinning is cosmetic, so
+    it must never block the dataset listing. Order is preserved (unlike the
+    dismissed-jobs set) so the picker can show the freshest picks first.
+    """
+    if not os.path.exists(SAVED_CUSTOM_DATASETS_FILE):
+        return []
+    try:
+        with open(SAVED_CUSTOM_DATASETS_FILE) as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        logger.error(f"Failed to read saved custom datasets: {e}")
+        return []
+    if not isinstance(data, list):
+        return []
+    seen: set[str] = set()
+    out: list[str] = []
+    for r in data:
+        if isinstance(r, str) and r.strip() and r not in seen:
+            seen.add(r)
+            out.append(r)
+    return out
+
+
+def add_saved_custom_dataset(repo_id: str) -> bool:
+    """Pin a typed Hub dataset repo id so it persists in the picker. Returns
+    False for a blank id.
+
+    Idempotent; re-saving an already-pinned id moves it to the front (so the
+    listing shows most-recently-used first).
+    """
+    repo_id = (repo_id or "").strip()
+    if not repo_id:
+        return False
+    saved = [r for r in get_saved_custom_datasets() if r != repo_id]
+    saved.insert(0, repo_id)
+    _atomic_write_text(SAVED_CUSTOM_DATASETS_FILE, json.dumps(saved, indent=2))
+    logger.info(f"Saved custom dataset {repo_id}")
+    return True
+
+
+def remove_saved_custom_dataset(repo_id: str) -> bool:
+    """Unpin a saved custom dataset. Returns True if it was present, False if it
+    wasn't pinned in the first place."""
+    repo_id = (repo_id or "").strip()
+    saved = get_saved_custom_datasets()
+    if repo_id not in saved:
+        return False
+    _atomic_write_text(
+        SAVED_CUSTOM_DATASETS_FILE,
+        json.dumps([r for r in saved if r != repo_id], indent=2),
+    )
+    logger.info(f"Removed saved custom dataset {repo_id}")
+    return True
+
+
+def get_saved_custom_models() -> list[str]:
+    """The Hub MODEL repo ids the user pinned via the "Add model" chooser,
+    most-recently-used first. Mirrors get_saved_custom_datasets: a missing or
+    corrupted file yields the empty list — pinning is cosmetic, so it must never
+    block the /models listing."""
+    if not os.path.exists(SAVED_CUSTOM_MODELS_FILE):
+        return []
+    try:
+        with open(SAVED_CUSTOM_MODELS_FILE) as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        logger.error(f"Failed to read saved custom models: {e}")
+        return []
+    if not isinstance(data, list):
+        return []
+    seen: set[str] = set()
+    out: list[str] = []
+    for r in data:
+        if isinstance(r, str) and r.strip() and r not in seen:
+            seen.add(r)
+            out.append(r)
+    return out
+
+
+def add_saved_custom_model(repo_id: str) -> bool:
+    """Pin a Hub model repo id so it persists in the /models listing. Returns
+    False for a blank id. Idempotent; re-saving an already-pinned id moves it to
+    the front (most-recently-used first). Mirrors add_saved_custom_dataset."""
+    repo_id = (repo_id or "").strip()
+    if not repo_id:
+        return False
+    saved = [r for r in get_saved_custom_models() if r != repo_id]
+    saved.insert(0, repo_id)
+    _atomic_write_text(SAVED_CUSTOM_MODELS_FILE, json.dumps(saved, indent=2))
+    logger.info(f"Saved custom model {repo_id}")
+    return True
+
+
+def remove_saved_custom_model(repo_id: str) -> bool:
+    """Unpin a saved custom model. Returns True if it was present, False if it
+    wasn't pinned in the first place. Mirrors remove_saved_custom_dataset."""
+    repo_id = (repo_id or "").strip()
+    saved = get_saved_custom_models()
+    if repo_id not in saved:
+        return False
+    _atomic_write_text(
+        SAVED_CUSTOM_MODELS_FILE,
+        json.dumps([r for r in saved if r != repo_id], indent=2),
+    )
+    logger.info(f"Removed saved custom model {repo_id}")
+    return True
+
+
+def get_hidden_datasets() -> set[str]:
+    """The Hub dataset repo ids the user removed from their picker ("hidden").
+
+    A missing or corrupted file yields the empty set — hiding is cosmetic, so it
+    must never block the dataset listing. Mirrors get_dismissed_hub_jobs."""
+    if not os.path.exists(SAVED_HIDDEN_DATASETS_FILE):
+        return set()
+    try:
+        with open(SAVED_HIDDEN_DATASETS_FILE) as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        logger.error(f"Failed to read hidden datasets: {e}")
+        return set()
+    if not isinstance(data, list):
+        return set()
+    return {r for r in data if isinstance(r, str) and r.strip()}
+
+
+def add_hidden_dataset(repo_id: str) -> bool:
+    """Hide a Hub dataset repo id from the picker listing. Returns False for a
+    blank id. Idempotent — re-hiding an already-hidden id is a no-op success.
+    NEVER touches the Hub repo or any local copy."""
+    repo_id = (repo_id or "").strip()
+    if not repo_id:
+        return False
+    hidden = get_hidden_datasets()
+    if repo_id not in hidden:
+        hidden.add(repo_id)
+        _atomic_write_text(SAVED_HIDDEN_DATASETS_FILE, json.dumps(sorted(hidden), indent=2))
+        logger.info(f"Hid dataset {repo_id}")
+    return True
+
+
+def remove_hidden_dataset(repo_id: str) -> bool:
+    """Unhide a dataset. Returns True if it was hidden, False if it wasn't.
+    Also called by the pin route so re-adding a hidden repo makes it visible
+    again (the auto-unhide)."""
+    repo_id = (repo_id or "").strip()
+    hidden = get_hidden_datasets()
+    if repo_id not in hidden:
+        return False
+    _atomic_write_text(
+        SAVED_HIDDEN_DATASETS_FILE,
+        json.dumps(sorted(hidden - {repo_id}), indent=2),
+    )
+    logger.info(f"Unhid dataset {repo_id}")
+    return True
+
+
+def get_hidden_models() -> set[str]:
+    """The Hub model repo ids the user removed from their picker ("hidden").
+    Mirrors get_hidden_datasets — a missing/corrupted file yields the empty set."""
+    if not os.path.exists(SAVED_HIDDEN_MODELS_FILE):
+        return set()
+    try:
+        with open(SAVED_HIDDEN_MODELS_FILE) as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        logger.error(f"Failed to read hidden models: {e}")
+        return set()
+    if not isinstance(data, list):
+        return set()
+    return {r for r in data if isinstance(r, str) and r.strip()}
+
+
+def add_hidden_model(repo_id: str) -> bool:
+    """Hide a Hub model repo id from the picker listing. Idempotent; returns
+    False for a blank id. NEVER touches the Hub repo or any local copy."""
+    repo_id = (repo_id or "").strip()
+    if not repo_id:
+        return False
+    hidden = get_hidden_models()
+    if repo_id not in hidden:
+        hidden.add(repo_id)
+        _atomic_write_text(SAVED_HIDDEN_MODELS_FILE, json.dumps(sorted(hidden), indent=2))
+        logger.info(f"Hid model {repo_id}")
+    return True
+
+
+def remove_hidden_model(repo_id: str) -> bool:
+    """Unhide a model. Returns True if it was hidden, False if it wasn't. Also
+    called by the pin route so re-adding a hidden repo makes it visible again."""
+    repo_id = (repo_id or "").strip()
+    hidden = get_hidden_models()
+    if repo_id not in hidden:
+        return False
+    _atomic_write_text(
+        SAVED_HIDDEN_MODELS_FILE,
+        json.dumps(sorted(hidden - {repo_id}), indent=2),
+    )
+    logger.info(f"Unhid model {repo_id}")
+    return True
 
 
 # ---------------------------------------------------------------------------

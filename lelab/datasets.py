@@ -16,6 +16,7 @@ import concurrent.futures
 import json
 import logging
 import os
+import shutil
 import threading
 import time
 from collections.abc import Callable
@@ -25,10 +26,21 @@ from typing import Any
 
 import httpx
 import pyarrow.parquet as pq
-from huggingface_hub import metadata_update, try_to_load_from_cache
+from huggingface_hub import (
+    hf_hub_download,
+    metadata_update,
+    snapshot_download,
+    try_to_load_from_cache,
+)
 from huggingface_hub.errors import HfHubHTTPError
 
-from .utils.config import validate_dataset_name, with_lelab_tag
+from .utils.config import (
+    get_hidden_datasets,
+    get_saved_custom_datasets,
+    validate_dataset_name,
+    validate_dataset_repo_id,
+    with_lelab_tag,
+)
 from .utils.hf_auth import cached_whoami, hf_hub_offline, shared_hf_api
 
 logger = logging.getLogger(__name__)
@@ -48,10 +60,13 @@ _HUB_LISTING_ERRORS = (HfHubHTTPError, httpx.HTTPError, OSError)
 # handshakes behind a flaky link.
 _HUB_FANOUT_MAX_WORKERS = 8
 
-# Per-author Hub-call budget. A blocked call (GFW cutting TLS mid-handshake) can
-# otherwise hang on huggingface_hub's default long timeout and stall startup;
-# 5s is generous enough that a merely-slow-but-working Hub still succeeds, short
-# enough that a truly blocked author gives up fast and degrades to empty.
+# OVERALL fan-out budget: the single deadline the whole per-author batch must
+# finish within (authors run concurrently, so overall ≈ per-author). This is
+# the ONLY timeout in the stack — the shared HfApi httpx client is built with
+# timeout=None, so a blackholed connection would otherwise stall the listing
+# until the OS TCP layer gives up. 5s is generous enough that a merely-slow-
+# but-working Hub still succeeds, short enough that a hung author is abandoned
+# fast and degrades to "whatever the finished authors returned".
 _HUB_FANOUT_TIMEOUT_S = 5.0
 
 # In-process cache of Hub existence checks, keyed by repo_id. /whoami-v2 and
@@ -98,10 +113,15 @@ def _fan_out_hub_authors(authors: list[str], call: Callable[[str], Any]) -> list
     """Run `call(author)` for each author concurrently, gathering the results.
 
     Each author's call runs in a bounded ThreadPoolExecutor and is guarded so a
-    Hub failure for one author (including a GFW-killed TLS connection, a timeout,
-    or a slow author exceeding the per-call budget) is logged and swallowed — it
-    contributes nothing rather than sinking the whole batch. `call` must return
-    the (already-materialized) result for one author; returns the list of
+    Hub failure for one author (a GFW-killed TLS connection, any transport
+    error) is logged and swallowed — it contributes nothing rather than sinking
+    the whole batch. The whole batch runs under ONE overall deadline
+    (_HUB_FANOUT_TIMEOUT_S, via `as_completed(timeout=...)`): authors that
+    haven't finished by then are abandoned and logged by name, and the finished
+    authors' results are returned. That deadline is load-bearing — the shared
+    HfApi httpx client has timeout=None, so a hung socket would otherwise stall
+    the caller until the OS TCP timeout. `call` must return the
+    (already-materialized) result for one author; returns the list of
     successful results in author order.
     """
     if not authors:
@@ -109,19 +129,34 @@ def _fan_out_hub_authors(authors: list[str], call: Callable[[str], Any]) -> list
 
     results: list[Any] = [None] * len(authors)
     max_workers = min(_HUB_FANOUT_MAX_WORKERS, len(authors))
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
-        future_to_idx = {pool.submit(call, author): i for i, author in enumerate(authors)}
-        for future in concurrent.futures.as_completed(future_to_idx):
+    # Deliberately NOT `with ThreadPoolExecutor(...)`: the context-manager exit
+    # JOINS the worker threads, so a hung author would stall us at the `with`
+    # exit even after the as_completed deadline fired. Instead shut down with
+    # wait=False + cancel_futures=True in the finally: queued-not-started work
+    # is cancelled, while an already-running hung thread is left to die with
+    # its socket — a bounded leak (the OS TCP timeout eventually reaps it),
+    # which beats blocking the endpoint on it.
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+    future_to_idx = {pool.submit(call, author): i for i, author in enumerate(authors)}
+    try:
+        for future in concurrent.futures.as_completed(future_to_idx, timeout=_HUB_FANOUT_TIMEOUT_S):
             idx = future_to_idx[future]
             author = authors[idx]
             try:
-                results[idx] = future.result(timeout=_HUB_FANOUT_TIMEOUT_S)
-            except concurrent.futures.TimeoutError:
-                logger.warning("Hub listing for author %s timed out after %ss", author, _HUB_FANOUT_TIMEOUT_S)
+                results[idx] = future.result()
             except _HUB_LISTING_ERRORS as exc:
                 logger.warning("Hub listing for author %s failed: %s", author, exc)
             except Exception as exc:  # noqa: BLE001 - listings are best-effort; never 500
                 logger.warning("Hub listing for author %s failed unexpectedly: %s", author, exc)
+    except concurrent.futures.TimeoutError:
+        unfinished = [authors[i] for f, i in future_to_idx.items() if not f.done()]
+        logger.warning(
+            "Hub listing fan-out exceeded %ss; giving up on authors: %s",
+            _HUB_FANOUT_TIMEOUT_S,
+            ", ".join(unfinished) or "(none)",
+        )
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
 
     return [r for r in results if r is not None]
 
@@ -549,7 +584,77 @@ def get_local_dataset_info(repo_id: str) -> dict[str, Any] | None:
         "cameras": cameras,
         "tasks": tasks,
         "size_bytes": _dir_size_bytes(path),
+        # ADDITIVE /datasets/info contract: "local" (full detail from the local
+        # cache) vs "hub" (the meta/info.json summary of a not-yet-downloaded
+        # Hub dataset — see get_hub_dataset_info). The card gates its local-only
+        # affordances (rename, size, task counts) on this.
+        "source": "local",
     }
+
+
+# In-process cache of per-repo Hub dataset summaries (the /datasets/info hub
+# fallback), mirroring _HUB_STATUS_CACHE conventions: successful answers are
+# memoized for the process lifetime; the offline/error degrade is NEVER cached,
+# so connectivity returning is picked up on the next check. Invalidated when
+# the repo's content changes (upload / download-complete) or the row is hidden.
+_HUB_DATASET_INFO_CACHE: dict[str, dict[str, Any]] = {}
+_HUB_DATASET_INFO_LOCK = threading.Lock()
+
+
+def invalidate_hub_dataset_info(repo_id: str) -> None:
+    """Drop the cached Hub summary for `repo_id`, so the next /datasets/info
+    re-fetches its meta/info.json (e.g. after an upload changed it)."""
+    with _HUB_DATASET_INFO_LOCK:
+        _HUB_DATASET_INFO_CACHE.pop(repo_id, None)
+
+
+def get_hub_dataset_info(repo_id: str) -> dict[str, Any] | None:
+    """Summary of a Hub dataset that has NO local copy, for the info card's
+    hub fallback (the /datasets/info route tries get_local_dataset_info first).
+
+    Fetches just ``meta/info.json`` via hf_hub_download — a tiny file — for the
+    episode/frame counts, fps, robot type, and camera keys (from ``features``).
+    Task strings and size-on-disk need the full dataset, so they degrade to
+    empty/None; ``source: "hub"`` tells the card which contract it got. This is
+    a LAZY per-card fetch, deliberately not part of the /datasets listing.
+
+    Degrade-not-crash: returns None offline or on any fetch/parse failure (the
+    card then falls back to the sparse "not downloaded" view); only successful
+    answers are cached (see _HUB_DATASET_INFO_CACHE).
+    """
+    if hf_hub_offline():
+        return None
+
+    with _HUB_DATASET_INFO_LOCK:
+        cached = _HUB_DATASET_INFO_CACHE.get(repo_id)
+    if cached is not None:
+        return dict(cached)
+
+    try:
+        path = hf_hub_download(repo_id, filename="meta/info.json", repo_type="dataset")
+        info = json.loads(Path(path).read_text())
+    except Exception as exc:
+        logger.info("hub dataset info fetch for %s failed: %s", repo_id, exc)
+        return None
+
+    features = info.get("features") or {}
+    cameras = [key[len(CAMERA_FEATURE_PREFIX) :] for key in features if key.startswith(CAMERA_FEATURE_PREFIX)]
+
+    row: dict[str, Any] = {
+        "repo_id": repo_id,
+        "total_episodes": int(info.get("total_episodes") or 0),
+        "total_frames": int(info.get("total_frames") or 0),
+        "fps": info.get("fps"),
+        "robot_type": info.get("robot_type"),
+        "cameras": cameras,
+        "tasks": [],
+        "size_bytes": None,
+        "source": "hub",
+    }
+
+    with _HUB_DATASET_INFO_LOCK:
+        _HUB_DATASET_INFO_CACHE[repo_id] = dict(row)
+    return row
 
 
 class DatasetRenameError(Exception):
@@ -588,7 +693,7 @@ def _dataset_in_use(repo_id: str) -> str | None:
         # The session stamps a timestamp onto the base name (name -> name_<ts>),
         # so match either the stamped id or a rename of the still-writing base.
         if active_id and (active_id == repo_id or active_id.startswith(f"{repo_id}_")):
-            return "A recording session is writing to this dataset. Stop it before renaming."
+            return "A recording session is writing to this dataset. Stop it first."
 
     # Upload: record.py owns an UploadManager singleton (state + repo_id). Same
     # lazy import (datasets<->record cycle) as recording above.
@@ -600,7 +705,7 @@ def _dataset_in_use(repo_id: str) -> str | None:
 
     mgr = _merge.merge_manager
     if mgr.state == "running" and mgr.output_repo_id == repo_id:
-        return "A merge is producing this dataset right now. Wait for it to finish before renaming."
+        return "A merge is producing this dataset right now. Wait for it to finish first."
 
     # Local training: a running local job whose config trains on this dataset.
     from .jobs import job_registry
@@ -611,7 +716,7 @@ def _dataset_in_use(repo_id: str) -> str | None:
             and record.runner == "local"
             and record.config.dataset_repo_id == repo_id
         ):
-            return "A local training run is using this dataset. Stop it before renaming."
+            return "A local training run is using this dataset. Stop it first."
 
     return None
 
@@ -749,9 +854,241 @@ def list_all_datasets() -> list[dict[str, Any]]:
         else:
             merged[rid] = {**item, "source": "local"}
 
+    # Fold in the user's pinned custom Hub datasets (typed into the picker). Any
+    # that already surfaced as their own hub row are skipped — the pin is
+    # redundant then. A pinned dataset that ALSO has a local copy (the flat scan
+    # found it — e.g. it was downloaded after pinning) is a Hub dataset with a
+    # local copy: flip its source to "both" and keep the saved_custom flag so
+    # "remove from list" (unpin) stays available. The rest join as hub rows
+    # flagged saved_custom=True; private flag / timestamp / episode counts fill
+    # in lazily via /datasets/hub-status and /datasets/info.
+    for repo_id in get_saved_custom_datasets():
+        existing = merged.get(repo_id)
+        if existing is None:
+            merged[repo_id] = {
+                "repo_id": repo_id,
+                "last_modified": None,
+                "private": False,
+                "source": "hub",
+                "saved_custom": True,
+            }
+        elif existing["source"] == "local":
+            existing["source"] = "both"
+            existing["saved_custom"] = True
+
+    # Hidden datasets ("removed from list") are filtered LAST — after the
+    # hub/local merge and the pin fold — so a hidden id can't resurface via a
+    # pin or a local copy. Re-pinning auto-unhides (see /datasets/custom), which
+    # is the intended way back in.
+    hidden = get_hidden_datasets()
+    if hidden:
+        merged = {rid: row for rid, row in merged.items() if rid not in hidden}
+
     out = list(merged.values())
     out.sort(key=lambda d: d["last_modified"] or "", reverse=True)
 
     with _listing_cache_lock:
         _listing_cache = {"at": time.monotonic(), "value": out}
     return out
+
+
+# ---------------------------------------------------------------------------
+# Download a Hub dataset into the local cache (background, pollable).
+# ---------------------------------------------------------------------------
+
+
+class DownloadManager:
+    """Runs one Hub snapshot download at a time in a background thread.
+
+    ``snapshot_download`` of a LeRobot dataset (or a policy checkpoint) pulls
+    100+ MB over the network and takes minutes, so it runs off the request
+    thread (same start/poll shape as record.UploadManager) rather than block the
+    browser on a multi-minute HTTP request a navigation-away would abort
+    mid-fetch. One download at a time: a second concurrent start for any repo is
+    refused (409-mapped by the route). The per-repo status lets the info card /
+    picker poll "is *my* repo downloading?" and survive navigation.
+
+    The state machine is repo-type agnostic — the datasets and models browsers
+    share it by instantiating with their own callables:
+
+    * ``fetch(repo_id)`` performs the actual download into the right local
+      layout AND any success-side cache invalidation; it raises on failure.
+    * ``cleanup(repo_id)`` (optional) removes any partial/unusable artifact a
+      failed fetch left behind, so a half-download is never mistaken for a
+      complete local copy.
+    """
+
+    def __init__(
+        self,
+        fetch: Callable[[str], None],
+        cleanup: Callable[[str], None] | None = None,
+    ) -> None:
+        self._fetch = fetch
+        self._cleanup = cleanup
+        self.state: str = "idle"  # "idle" | "running" | "done" | "error"
+        self.repo_id: str | None = None
+        self.message: str | None = None
+        self.error: str | None = None
+        self._thread: threading.Thread | None = None
+        self._lock = threading.Lock()
+
+    def start(self, repo_id: str) -> dict[str, Any]:
+        with self._lock:
+            if self.state == "running":
+                return {
+                    "started": False,
+                    "repo_id": self.repo_id,
+                    "message": f"A download is already running for {self.repo_id}",
+                }
+            self.state = "running"
+            self.repo_id = repo_id
+            self.message = f"Downloading {repo_id} from the Hub…"
+            self.error = None
+
+        self._thread = threading.Thread(
+            target=self._worker, args=(repo_id,), name="hub-download-worker", daemon=True
+        )
+        self._thread.start()
+        return {"started": True, "repo_id": repo_id, "message": "Download started"}
+
+    def get_status(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "state": self.state,
+                "repo_id": self.repo_id,
+                "message": self.message,
+                "error": self.error,
+            }
+
+    def _worker(self, repo_id: str) -> None:
+        try:
+            logger.info("Downloading %s from the Hub", repo_id)
+            self._fetch(repo_id)
+            logger.info("Downloaded %s", repo_id)
+            with self._lock:
+                self.state = "done"
+                self.message = f"Downloaded {repo_id} to the local cache"
+                self.error = None
+        except Exception as exc:  # noqa: BLE001 - surface any failure to the poller
+            logger.error("Error downloading %s: %s", repo_id, exc)
+            if self._cleanup is not None:
+                self._cleanup(repo_id)
+            with self._lock:
+                self.state = "error"
+                self.error = str(exc)
+                self.message = f"Failed to download {repo_id}: {exc}"
+
+
+def _fetch_dataset_snapshot(repo_id: str) -> None:
+    """Snapshot a Hub dataset into the FLAT cache layout
+    ``<lerobot_home>/<repo_id>/`` (via ``local_dir``), the same layout
+    recording/merge produce. That layout is recognized by BOTH
+    ``is_dataset_available_locally`` (its first probe) AND ``list_local_datasets``
+    (the merged-listing scan), so on completion the listing source flips from
+    "hub" to "both" — which downloading only into the hub snapshot cache would
+    NOT achieve (that cache isn't walked by the listing). Invalidates the
+    hub-status + listing caches so the flip shows immediately."""
+    target = _lerobot_cache_root() / repo_id
+    snapshot_download(repo_id, repo_type="dataset", local_dir=str(target))
+    invalidate_hub_status(repo_id)
+    invalidate_dataset_listing_cache()
+    # The card flips from the hub summary to full local detail — drop the
+    # cached hub summary alongside the listing.
+    invalidate_hub_dataset_info(repo_id)
+
+
+def _cleanup_partial_dataset(repo_id: str) -> None:
+    """Remove a failed download's partial dir so it isn't mistaken for a
+    complete local copy by is_dataset_available_locally."""
+    target = _lerobot_cache_root() / repo_id
+    if target.exists() and not _is_dataset_dir(target):
+        shutil.rmtree(target, ignore_errors=True)
+
+
+download_manager = DownloadManager(_fetch_dataset_snapshot, _cleanup_partial_dataset)
+
+
+# ---------------------------------------------------------------------------
+# Import a LeRobot dataset folder already on disk into the local cache.
+# ---------------------------------------------------------------------------
+
+
+class DatasetImportError(Exception):
+    """Raised by import_local_dataset when the import can't proceed. `status` is
+    the HTTP status the route should return (400 invalid source/name, 404 no
+    such folder, 409 target already exists); `message` is the user-facing
+    reason."""
+
+    def __init__(self, status: int, message: str) -> None:
+        super().__init__(message)
+        self.status = status
+        self.message = message
+
+
+def import_local_dataset(source_path: str, name: str | None = None) -> dict[str, Any]:
+    """Copy a LeRobot dataset folder already on the server machine into the flat
+    cache layout, so it appears under "Local".
+
+    `source_path` points at an existing LeRobot dataset dir (recognized by
+    meta/info.json). `name` is the target repo id — a bare name or
+    ``namespace/name`` — validated with the same rules the recorder uses
+    (validate_dataset_repo_id → validate_dataset_name per segment); when omitted
+    it defaults to the source folder's basename. The dataset is COPIED (never
+    moved) into ``<lerobot_home>/<name>/`` so the user's source folder is left
+    intact.
+
+    Raises DatasetImportError (with an HTTP status + message) on: a source that
+    isn't a folder / isn't a LeRobot dataset / has no episodes, a bad target
+    name, a target that escapes the cache root, an overlapping source/target, or
+    a target that already exists. Invalidates the listing cache on success so the
+    imported dataset shows under "Local" immediately. Returns {"repo_id": ...}.
+
+    NOTE: the copy runs SYNCHRONOUSLY (the route blocks on it, frontend shows a
+    spinner). A large multi-GB dataset makes this a slow request; a background
+    manager (like DownloadManager) would be the follow-up if that becomes a pain
+    point, but a local disk copy is far faster than a network fetch, so inline is
+    an acceptable tradeoff for now.
+    """
+    try:
+        src = Path(source_path).expanduser().resolve()
+    except OSError:
+        raise DatasetImportError(400, "Invalid source path.") from None
+    if not src.is_dir():
+        raise DatasetImportError(404, f"No folder found at '{source_path}'.")
+    if not _is_dataset_dir(src):
+        raise DatasetImportError(400, "That folder isn't a LeRobot dataset (no meta/info.json inside it).")
+    if not _dataset_has_episodes(src):
+        raise DatasetImportError(400, "That dataset has no recorded episodes — nothing to import.")
+
+    raw = (name or "").strip() or src.name
+    ok, reason = validate_dataset_repo_id(raw)
+    if not ok:
+        raise DatasetImportError(400, reason)
+
+    root = _lerobot_cache_root().resolve()
+    dst = (root / raw).resolve()
+    # Reject a target that escapes the cache root (traversal) — the imported
+    # dataset must land strictly inside it.
+    if dst == root or root not in dst.parents:
+        raise DatasetImportError(400, "Invalid target dataset name.")
+    # Refuse a source/target that overlap (e.g. importing a dir into itself),
+    # which would corrupt the copy.
+    if dst == src or src in dst.parents or dst in src.parents:
+        raise DatasetImportError(400, "The source folder and the import target overlap.")
+    if dst.exists():
+        raise DatasetImportError(409, f"A dataset named '{raw}' already exists locally.")
+
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        shutil.copytree(src, dst)
+    except OSError as exc:
+        logger.error("Failed to import dataset %s -> %s: %s", src, dst, exc)
+        # Remove a partial copy so a failed import leaves no half-written dir.
+        if dst.exists():
+            shutil.rmtree(dst, ignore_errors=True)
+        raise DatasetImportError(500, f"Failed to copy the dataset: {exc}") from exc
+
+    invalidate_hub_status(raw)
+    invalidate_dataset_listing_cache()
+    logger.info("Imported dataset %s -> %s", src, dst)
+    return {"repo_id": raw}

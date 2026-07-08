@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import collections
 import json
 import logging
 import shutil
@@ -33,6 +34,7 @@ from .camera_preview import camera_preview_manager
 from .datasets import (
     _lerobot_cache_root,
     invalidate_dataset_listing_cache,
+    invalidate_hub_dataset_info,
     invalidate_hub_status,
 )
 from .motor_power import apply_motor_power, clear_goal_velocity
@@ -42,9 +44,105 @@ from .utils.config import (
     validate_dataset_repo_id,
     with_lelab_tag,
 )
+from .utils.errors import classify_outcome, format_exception, friendly_hint
 from .utils.robot_factory import build_bimanual_configs, build_single_configs
 
 logger = logging.getLogger(__name__)
+
+# --- Recording log capture (bounded ring buffer) ------------------------------
+# The record flow logs progress through the Python `logger` rather than a
+# subprocess, so its output only ever reached the uvicorn console. To surface it
+# on the Record page we attach a bounded logging.Handler to the loggers that
+# carry recording output while a session is active, and expose the buffer via a
+# polled GET endpoint. The deque is capacity-capped (maxlen) so memory can never
+# grow unbounded no matter how chatty or long a session is.
+_RECORD_LOG_MAX_LINES = 500
+# Loggers whose records describe a recording session: this module's logger and
+# lerobot's own record/control loggers (the "Recording episode N", save/reset
+# lines come from there). Attaching to the shared "lerobot" ancestor captures
+# any lerobot child logger via propagation.
+_RECORD_LOG_LOGGER_NAMES = (__name__, "lerobot")
+
+
+class _RingBufferLogHandler(logging.Handler):
+    """A logging.Handler that keeps only the last N formatted records.
+
+    Backed by a `collections.deque(maxlen=...)`, so it is O(1) per record and
+    strictly bounded in memory. `snapshot()` returns the current lines; the
+    handler's own lock guards concurrent emit/read."""
+
+    def __init__(self, capacity: int) -> None:
+        super().__init__()
+        self._buffer: collections.deque[str] = collections.deque(maxlen=capacity)
+        self.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S"))
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            line = self.format(record)
+        except Exception:
+            self.handleError(record)
+            return
+        # deque.append is atomic under the GIL; acquire the handler lock anyway
+        # to stay consistent with snapshot() and satisfy Handler conventions.
+        with self.lock:
+            self._buffer.append(line)
+
+    def snapshot(self) -> list[str]:
+        with self.lock:
+            return list(self._buffer)
+
+
+# The single active handler (None when no session has attached one). Guarded by
+# _record_log_lock for attach/detach; the handler's own lock guards its buffer.
+_record_log_handler: _RingBufferLogHandler | None = None
+_record_log_lock = threading.Lock()
+
+
+def _attach_record_log_handler() -> None:
+    """Start capturing recording logs into a fresh bounded ring buffer.
+
+    Detaches any previous handler first (so a new session starts clean) and
+    attaches a new one to the recording-related loggers. Called at the start of
+    each session."""
+    global _record_log_handler
+    with _record_log_lock:
+        _detach_record_log_handler_locked()
+        handler = _RingBufferLogHandler(_RECORD_LOG_MAX_LINES)
+        for name in _RECORD_LOG_LOGGER_NAMES:
+            lg = logging.getLogger(name)
+            lg.addHandler(handler)
+            # Ensure INFO records reach the handler even if the logger's own
+            # level would otherwise filter them; never lower it below INFO.
+            if lg.level == logging.NOTSET or lg.level > logging.INFO:
+                lg.setLevel(logging.INFO)
+        _record_log_handler = handler
+
+
+def _detach_record_log_handler_locked() -> None:
+    """Remove the active handler from all loggers. Caller holds _record_log_lock."""
+    global _record_log_handler
+    if _record_log_handler is None:
+        return
+    for name in _RECORD_LOG_LOGGER_NAMES:
+        logging.getLogger(name).removeHandler(_record_log_handler)
+    # Keep the buffer around (don't null the handler) so the log stays readable
+    # after the session ends until the next session attaches a fresh one.
+
+
+def handle_recording_log(max_lines: int = _RECORD_LOG_MAX_LINES) -> dict[str, Any]:
+    """Return the tail of the current/most-recent recording session's log.
+
+    Read-only and bounded: at most `max_lines` trailing lines from the ring
+    buffer (itself capped at _RECORD_LOG_MAX_LINES). Never raises — before any
+    session has captured logs the buffer is empty, so the route stays 200."""
+    with _record_log_lock:
+        handler = _record_log_handler
+    if handler is None:
+        return {"logs": ""}
+    lines = handler.snapshot()
+    tail = lines[-max_lines:] if max_lines > 0 else lines
+    return {"logs": "\n".join(tail)}
+
 
 # Global variables for recording state
 recording_active = False
@@ -61,6 +159,17 @@ phase_start_time = None  # Track when current phase started
 # created) dataset directory was discarded. Surfaced in the session-end status
 # so the frontend can tell the user nothing was kept (see Upload.tsx).
 last_session_discarded_empty = False
+# Terminal error taxonomy of the most recent session, surfaced with the
+# session-end status (the in-process twin of rollout's exited payload).
+# `last_session_outcome` is "ok" | "ran_with_warning" | "failed" (None before
+# any session ends); `last_session_error` is the caught exception formatted as
+# "Type: message" — recording runs in-process, so the worker's catch site holds
+# the actual exception object and no log forensics are needed. Classified by
+# catch site: an exception AFTER the recording loop finished its real work
+# (current_phase already "completed" — episodes saved / stop honored) means
+# only teardown tripped, which must NOT be reported as a failed session.
+last_session_outcome: str | None = None
+last_session_error: str | None = None
 # Warn-but-allow arm-identity findings from the current session's guard (see
 # lelab/arm_identity.py). The guard runs inside the recording worker (after the
 # start response has already been sent), so the messages are surfaced through
@@ -269,6 +378,8 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
         current_phase, \
         phase_start_time, \
         last_session_discarded_empty, \
+        last_session_outcome, \
+        last_session_error, \
         identity_warnings
 
     from . import rollout as _rollout, teleoperate as _teleoperate
@@ -331,7 +442,13 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
         current_phase = "preparing"
         phase_start_time = None
         last_session_discarded_empty = False
+        last_session_outcome = None
+        last_session_error = None
         identity_warnings = []
+
+    # Start capturing this session's logs into a fresh bounded ring buffer so the
+    # Record page can display them (detaches any previous session's handler).
+    _attach_record_log_handler()
 
     try:
         # Backend camera previews (GET /camera-preview/{index}) hold the cv2
@@ -368,7 +485,9 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                 phase_start_time, \
                 current_episode, \
                 saved_episodes, \
-                last_session_discarded_empty
+                last_session_discarded_empty, \
+                last_session_outcome, \
+                last_session_error
             recording_start_time = time.time()
             current_episode = 1
             saved_episodes = 0
@@ -411,9 +530,25 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                     identity_config_names=identity_config_names,
                 )
                 logger.info(f"Recording completed successfully. Dataset has {dataset.num_episodes} episodes")
-            except Exception:
+                last_session_outcome = "ok"
+            except Exception as exc:
                 logger.exception("Recording session failed")
-                current_phase = "error"
+                # In-process error taxonomy: this catch site holds the actual
+                # exception object, so format it straight into the session-end
+                # status (no log forensics — that's rollout's subprocess-only
+                # step). Classified by catch-site phase: current_phase is
+                # "completed" only when the recording loop already finished its
+                # real work (all episodes saved / user stop honored) before the
+                # raise — i.e. only teardown/cleanup tripped (e.g. a gripper
+                # overload on torque disable). That session ran fine, so it's a
+                # warning, NOT a failure — the episodes are on disk. Any other
+                # phase (connecting_*, recording, resetting, stopping) means
+                # the session's work was cut short: a real failure.
+                last_session_error = format_exception(exc)
+                work_completed = current_phase == "completed"
+                last_session_outcome = classify_outcome(work_completed, last_session_error)
+                if not work_completed:
+                    current_phase = "error"
                 if recording_start_time:
                     session_end_elapsed_seconds = int(time.time() - recording_start_time)
             finally:
@@ -580,6 +715,16 @@ def handle_recording_status() -> dict[str, Any]:
     # saved" variant and does NOT link the (now-gone) repo id.
     if session_ended:
         status["discarded_empty"] = last_session_discarded_empty
+        # Terminal error taxonomy (the in-process twin of rollout's exited
+        # payload): `outcome` classifies the ended session (ok |
+        # ran_with_warning | failed), `error` is the caught exception's
+        # "Type: message" text, and `hint` a plain-language headline for the
+        # common SO-101 failures. ran_with_warning = the episodes are safe on
+        # disk and only teardown tripped — the frontend styles it amber, not
+        # as a failed session.
+        status["outcome"] = last_session_outcome
+        status["error"] = last_session_error
+        status["hint"] = friendly_hint(last_session_error)
 
     # Warn-but-allow arm-identity findings (the guard runs in the worker, after
     # the start response) — the frontend shows these as a non-blocking toast.
@@ -627,12 +772,15 @@ def handle_delete_dataset(request: DatasetInfoRequest) -> dict[str, Any]:
     if target == root or root not in target.parents:
         return {"success": False, "message": "Invalid dataset path"}
 
-    # Don't yank the directory out from under an in-flight push to the Hub.
-    if upload_manager.state == "running" and upload_manager.repo_id == repo_id:
-        return {
-            "success": False,
-            "message": "This dataset is being uploaded to the Hub right now. Wait for it to finish.",
-        }
+    # Don't yank the directory out from under an active writer/reader. Reuses
+    # the full rename busy-guard (recording / merge / upload / local training)
+    # instead of the old upload-only check; lazy import to avoid the
+    # datasets<->record cycle documented in _dataset_in_use.
+    from .datasets import _dataset_in_use
+
+    in_use = _dataset_in_use(repo_id)
+    if in_use is not None:
+        return {"success": False, "message": in_use}
 
     if not target.exists():
         return {"success": False, "message": f"Dataset not found on disk: {repo_id}"}
@@ -817,10 +965,12 @@ class UploadManager:
 
             # The dataset now exists on the Hub; drop any cached "local_only"
             # answer so the info card's next hub-status check flips to "On Hub",
-            # and drop the cached /datasets listing so the newly-pushed repo
-            # appears immediately.
+            # drop the cached /datasets listing so the newly-pushed repo appears
+            # immediately, and drop any cached hub summary (the push changed
+            # meta/info.json on the Hub).
             invalidate_hub_status(repo_id)
             invalidate_dataset_listing_cache()
+            invalidate_hub_dataset_info(repo_id)
 
             with self._lock:
                 self.state = "done"
@@ -953,6 +1103,14 @@ def record_with_web_events(
     # hasn't settled. lerobot's _validate_fps then raises before any warmup frame.
     # The device isn't broken: a cold re-open a moment later negotiates 30fps
     # cleanly, so retry the transient fps failure a couple of times.
+    # Refine the coarse "preparing" phase into a named substep so the UI can say
+    # "Connecting arm & cameras…" instead of one opaque "preparing session".
+    # robot.connect() opens the follower bus AND its cameras in one call, so we
+    # can't cleanly split arm-connect from camera-warmup — they share this
+    # substep. (Both surface through the same current_phase global the status
+    # handler already returns; no new plumbing.)
+    current_phase = "connecting_robot"
+    phase_start_time = time.time()
     CONNECT_ATTEMPTS = 3
     for attempt in range(1, CONNECT_ATTEMPTS + 1):
         try:
@@ -998,6 +1156,9 @@ def record_with_web_events(
             raise
 
     if teleop is not None:
+        # Second detectable substep of the preparing window: the leader bus.
+        current_phase = "connecting_teleop"
+        phase_start_time = time.time()
         try:
             logger.info("🔧 TELEOP CONNECTION: Attempting to connect teleoperator...")
             # calibrate=False for the same reason as the robot connect above —

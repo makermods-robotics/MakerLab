@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import {
   AlertTriangle,
   ChevronDown,
+  Download as DownloadIcon,
   ExternalLink,
   Loader2,
   Lock,
@@ -9,6 +10,7 @@ import {
   Settings2,
   Trash2,
   Upload as UploadIcon,
+  Video,
   X,
 } from "lucide-react";
 import {
@@ -40,6 +42,7 @@ import { validateDatasetName } from "@/lib/datasetName";
 import UploadDatasetDialog from "@/components/landing/UploadDatasetDialog";
 import VisibilityToggle from "@/components/landing/VisibilityToggle";
 import { useDatasetUpload } from "@/hooks/useDatasetUpload";
+import { useDatasetDownload } from "@/hooks/useDatasetDownload";
 import {
   DatasetInfo,
   DatasetTask,
@@ -732,6 +735,71 @@ const RenameDatasetDialog: React.FC<{
   );
 };
 
+/**
+ * "Download to this machine" affordance for a Hub-only dataset (the info card's
+ * not-downloaded-locally branch). Starts a background download into the local
+ * cache and, while it runs, shows a "Downloading…" state that survives
+ * navigation (useDatasetDownload re-attaches by polling on mount). On completion
+ * it fires onDownloaded so the parent re-reads /datasets/info (now local) and
+ * refreshes the listing (source flips to "both").
+ */
+const HubDownloadRow: React.FC<{
+  repoId: string;
+  onDownloaded: () => void;
+}> = ({ repoId, onDownloaded }) => {
+  const { toast } = useToast();
+  const { downloading, start } = useDatasetDownload({
+    repoId,
+    onDone: () => {
+      toast({
+        title: "Downloaded to this machine",
+        description: `${repoId} is now in your local cache.`,
+      });
+      onDownloaded();
+    },
+    onError: (message) => {
+      toast({
+        title: "Download failed",
+        description: message,
+        variant: "destructive",
+      });
+    },
+  });
+
+  if (downloading) {
+    return (
+      <div className="flex items-center gap-1.5 text-gray-400">
+        <Loader2 className="h-3 w-3 animate-spin" />
+        <span>Downloading to this machine…</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex items-center justify-between gap-2">
+      <span className="text-gray-500">Not downloaded</span>
+      <Button
+        size="sm"
+        variant="outline"
+        onClick={async () => {
+          const err = await start();
+          if (err) {
+            toast({
+              title: "Couldn't start download",
+              description: err,
+              variant: "destructive",
+            });
+          }
+        }}
+        className="h-6 gap-1 border-blue-500/50 px-2 text-xs text-blue-700 dark:text-blue-300 hover:bg-blue-500/10"
+      >
+        <DownloadIcon className="h-3 w-3" />
+        Download to this machine
+      </Button>
+    </div>
+  );
+};
+
 interface DatasetInfoCardProps {
   repoId: string;
   /** Called after a successful rename with the new repo id, so the parent can
@@ -745,6 +813,16 @@ interface DatasetInfoCardProps {
   /** Invoked when the user clicks the card's delete affordance. The parent
    * routes this through its confirm dialog (nothing is deleted inline). */
   onDelete?: () => void;
+  /** Called after a Hub-only dataset finishes downloading to the local cache,
+   * so the parent can refresh the picker listing (source flips to "both"). The
+   * card also re-reads its own /datasets/info to flip out of the Hub-only
+   * fallback into the full local detail view. */
+  onDownloaded?: () => void;
+  /** "Record more episodes": invoked with the dataset's info so the parent can
+   * open the recording modal in RESUME mode (repo id passed verbatim, resume
+   * flag set). Offered only when a local copy exists — resuming appends to the
+   * on-disk directory. */
+  onResume?: (info: DatasetInfo) => void;
 }
 
 /**
@@ -758,12 +836,18 @@ const DatasetInfoCard: React.FC<DatasetInfoCardProps> = ({
   onRenamed,
   canDelete = false,
   onDelete,
+  onDownloaded,
+  onResume,
 }) => {
   const { baseUrl, fetchWithHeaders } = useApi();
   const [info, setInfo] = useState<DatasetInfo | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<{ notLocal: boolean } | null>(null);
   const [renameOpen, setRenameOpen] = useState(false);
+  // Bumped when a Hub-only dataset finishes downloading, to re-run the info
+  // fetch (now that the dataset is local, /datasets/info succeeds and the card
+  // flips from the Hub-only fallback to the full local detail view).
+  const [infoRefreshKey, setInfoRefreshKey] = useState(0);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -781,7 +865,7 @@ const DatasetInfoCard: React.FC<DatasetInfoCardProps> = ({
         setLoading(false);
       });
     return () => controller.abort();
-  }, [baseUrl, fetchWithHeaders, repoId]);
+  }, [baseUrl, fetchWithHeaders, repoId, infoRefreshKey]);
 
   return (
     <div className="rounded-md border border-gray-700 bg-gray-900/60 px-3 py-2 text-xs">
@@ -793,91 +877,176 @@ const DatasetInfoCard: React.FC<DatasetInfoCardProps> = ({
         </div>
       )}
 
-      {!loading && error && (
-        <p className="text-gray-500">
-          {error.notLocal
-            ? "Not in the local cache — details are only available for downloaded datasets."
-            : "Couldn't load dataset details."}
-        </p>
-      )}
-
-      {!loading && info && (
+      {/* No local cache (404) — a Hub dataset that hasn't been downloaded, e.g.
+          one typed straight into the picker. Still show the repo id and its Hub
+          state (via HubSyncRow) so the selection reads as a usable dataset —
+          local per-episode detail just isn't available until it's downloaded.
+          A non-404 error stays a bare "couldn't load" line. */}
+      {!loading && error && error.notLocal && (
         <div className="space-y-1.5">
-          <div className="flex items-start justify-between gap-2">
-            <div className="flex flex-wrap items-center gap-2 font-medium text-gray-200">
-              <span>
-                {info.total_episodes} episode
-                {info.total_episodes === 1 ? "" : "s"}
-                {" · "}
-                {formatCount(info.total_frames)} frames
-                {(() => {
-                  const d = formatDuration(info.total_frames, info.fps);
-                  return d ? ` · ${d}` : "";
-                })()}
-              </span>
-              {info.total_episodes === 0 && (
-                <WarningBadge>No episodes recorded</WarningBadge>
-              )}
-            </div>
-            <div className="-mr-1 -mt-0.5 flex shrink-0 items-center gap-0.5">
-              <button
-                type="button"
-                onClick={() => setRenameOpen(true)}
-                aria-label="Rename dataset"
-                title="Rename dataset"
-                className="rounded p-1 text-gray-500 hover:text-gray-200"
-              >
-                <Pencil className="h-3.5 w-3.5" />
-              </button>
-              {/* Delete — local-only datasets only (deleting the sole copy of a
-                  not-yet-uploaded dataset). Routed through the parent's confirm
-                  dialog; nothing is deleted inline. */}
-              {canDelete && onDelete && (
-                <button
-                  type="button"
-                  onClick={onDelete}
-                  aria-label="Delete dataset"
-                  title="Delete dataset"
-                  className="rounded p-1 text-gray-500 hover:text-red-400"
-                >
-                  <Trash2 className="h-3.5 w-3.5" />
-                </button>
-              )}
-            </div>
-          </div>
-
-          <Row label="Cameras">
-            {info.cameras.length > 0 ? (
-              info.cameras.join(", ")
-            ) : (
-              <WarningBadge>
-                No camera data — unusable for vision training
-              </WarningBadge>
-            )}
-          </Row>
-
-          <Row label="Robot">{info.robot_type ?? "unknown"}</Row>
-
-          {info.tasks.length > 0 && (
-            <Row label="Tasks">
-              <TaskList tasks={info.tasks} />
-            </Row>
-          )}
-
-          <Row label="Size">{formatBytes(info.size_bytes)}</Row>
-
+          <div className="font-medium text-gray-200 break-all">{repoId}</div>
+          <p className="text-gray-500">
+            Hub dataset — not downloaded locally. Training will fetch it from the
+            Hub on demand; per-episode details show once it's cached.
+          </p>
           <div className="mt-1.5 border-t border-gray-800 pt-1.5">
             <HubSyncRow repoId={repoId} />
           </div>
-
-          <RenameDatasetDialog
-            open={renameOpen}
-            onOpenChange={setRenameOpen}
-            repoId={repoId}
-            onRenamed={(newRepoId) => onRenamed?.(newRepoId)}
-          />
+          <div className="border-t border-gray-800 pt-1.5">
+            <HubDownloadRow
+              repoId={repoId}
+              onDownloaded={() => {
+                setInfoRefreshKey((k) => k + 1);
+                onDownloaded?.();
+              }}
+            />
+          </div>
         </div>
       )}
+
+      {!loading && error && !error.notLocal && (
+        <p className="text-gray-500">Couldn't load dataset details.</p>
+      )}
+
+      {!loading &&
+        info &&
+        (() => {
+          // ADDITIVE /datasets/info contract: "hub" = a meta/info.json summary
+          // of a not-yet-downloaded Hub dataset (no tasks/size; rename is a
+          // local directory move, so not applicable). Absent = "local".
+          const isHubOnly = info.source === "hub";
+          return (
+            <div className="space-y-1.5">
+              <div className="flex items-start justify-between gap-2">
+                <div className="flex flex-wrap items-center gap-2 font-medium text-gray-200">
+                  <span>
+                    {info.total_episodes} episode
+                    {info.total_episodes === 1 ? "" : "s"}
+                    {" · "}
+                    {formatCount(info.total_frames)} frames
+                    {(() => {
+                      const d = formatDuration(info.total_frames, info.fps);
+                      return d ? ` · ${d}` : "";
+                    })()}
+                  </span>
+                  {info.total_episodes === 0 && !isHubOnly && (
+                    <WarningBadge>No episodes recorded</WarningBadge>
+                  )}
+                </div>
+                <div className="-mr-1 -mt-0.5 flex shrink-0 items-center gap-0.5">
+                  {/* Rename moves the local directory — meaningless for a
+                      hub-only summary. */}
+                  {!isHubOnly && (
+                    <button
+                      type="button"
+                      onClick={() => setRenameOpen(true)}
+                      aria-label="Rename dataset"
+                      title="Rename dataset"
+                      className="rounded p-1 text-gray-500 hover:text-gray-200"
+                    >
+                      <Pencil className="h-3.5 w-3.5" />
+                    </button>
+                  )}
+                  {/* Delete/remove — semantics resolved by the parent
+                      (resolveDeleteAction) and routed through its confirm
+                      dialog; nothing is deleted inline. */}
+                  {canDelete && onDelete && (
+                    <button
+                      type="button"
+                      onClick={onDelete}
+                      aria-label="Delete dataset"
+                      title="Delete dataset"
+                      className="rounded p-1 text-gray-500 hover:text-red-400"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              <Row label="Cameras">
+                {info.cameras.length > 0 ? (
+                  info.cameras.join(", ")
+                ) : isHubOnly ? (
+                  // A hub summary may simply omit features — don't render the
+                  // scary unusable-for-training warning on incomplete data.
+                  "unknown"
+                ) : (
+                  <WarningBadge>
+                    No camera data — unusable for vision training
+                  </WarningBadge>
+                )}
+              </Row>
+
+              <Row label="Robot">{info.robot_type ?? "unknown"}</Row>
+
+              {info.tasks.length > 0 && (
+                <Row label="Tasks">
+                  <TaskList tasks={info.tasks} />
+                </Row>
+              )}
+
+              {info.size_bytes != null && (
+                <Row label="Size">{formatBytes(info.size_bytes)}</Row>
+              )}
+
+              {isHubOnly && (
+                <p className="text-gray-500">
+                  Hub dataset — not downloaded locally. Training will fetch it
+                  from the Hub on demand.
+                </p>
+              )}
+
+              <div className="mt-1.5 border-t border-gray-800 pt-1.5">
+                <HubSyncRow repoId={repoId} />
+              </div>
+
+              {/* Record more episodes — resume appends to the on-disk copy, so
+                  it's offered only when one exists (not in the hub view). */}
+              {!isHubOnly && onResume && (
+                <div className="flex items-center justify-between gap-2 border-t border-gray-800 pt-1.5">
+                  <span className="text-gray-500">Add more episodes</span>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => onResume(info)}
+                    className="h-6 gap-1 border-red-500/50 px-2 text-xs text-red-700 dark:text-red-300 hover:bg-red-500/10"
+                  >
+                    <Video className="h-3 w-3" />
+                    Record more episodes
+                  </Button>
+                </div>
+              )}
+
+              {/* Hub summary keeps the download affordance the sparse 404 view
+                  has — on completion the card re-fetches and flips to the full
+                  local detail. */}
+              {isHubOnly && (
+                <div className="border-t border-gray-800 pt-1.5">
+                  <HubDownloadRow
+                    repoId={repoId}
+                    onDownloaded={() => {
+                      setInfoRefreshKey((k) => k + 1);
+                      onDownloaded?.();
+                    }}
+                  />
+                  <p className="mt-1 text-gray-500">
+                    Download to record more episodes.
+                  </p>
+                </div>
+              )}
+
+              {!isHubOnly && (
+                <RenameDatasetDialog
+                  open={renameOpen}
+                  onOpenChange={setRenameOpen}
+                  repoId={repoId}
+                  onRenamed={(newRepoId) => onRenamed?.(newRepoId)}
+                />
+              )}
+            </div>
+          );
+        })()}
     </div>
   );
 };

@@ -1,7 +1,22 @@
 import React, { useState, useRef, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import { ChevronsUpDown, GitMerge, HardDrive, Plus } from "lucide-react";
+import {
+  ChevronsUpDown,
+  CloudDownload,
+  GitMerge,
+  HardDrive,
+  HardDriveDownload,
+  Plus,
+  Sparkles,
+  Video,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { useToast } from "@/hooks/use-toast";
 import LandingTopBar from "@/components/landing/LandingTopBar";
 import Footer from "@/components/Footer";
@@ -9,26 +24,46 @@ import RobotConfigManager from "@/components/landing/RobotConfigManager";
 import RecordingModal from "@/components/landing/RecordingModal";
 import DatasetPicker from "@/components/landing/DatasetPicker";
 import CreateDatasetDialog from "@/components/landing/CreateDatasetDialog";
+import AddDatasetFromHubDialog from "@/components/landing/AddDatasetFromHubDialog";
+import ImportDatasetFromDiskDialog from "@/components/landing/ImportDatasetFromDiskDialog";
+import AddModelFromHubDialog from "@/components/landing/AddModelFromHubDialog";
+import ImportModelFromDiskDialog from "@/components/landing/ImportModelFromDiskDialog";
 import DatasetInfoCard from "@/components/landing/DatasetInfoCard";
+import ModelPicker from "@/components/landing/ModelPicker";
+import ModelInfoCard from "@/components/landing/ModelInfoCard";
 import MergeDatasetsDialog from "@/components/landing/MergeDatasetsDialog";
 import ManageCachesDialog from "@/components/landing/ManageCachesDialog";
 import JobsSection from "@/components/jobs/JobsSection";
-import { POLICY_TYPE_OPTIONS } from "@/components/training/types";
-import {
-  fetchPolicyAvailability,
-  PolicyAvailability,
-} from "@/lib/policyAvailability";
 
 import UsageInstructionsModal from "@/components/landing/UsageInstructionsModal";
 import { useHfAuth } from "@/contexts/HfAuthContext";
 import { useApi } from "@/contexts/ApiContext";
 import { useRobots } from "@/hooks/useRobots";
 import { useDatasets } from "@/hooks/useDatasets";
+import { useModels } from "@/hooks/useModels";
 import { useSelectedDataset } from "@/hooks/useSelectedDataset";
-import { DatasetItem, deleteDataset } from "@/lib/replayApi";
+import { useSelectedModel } from "@/hooks/useSelectedModel";
+import {
+  DatasetInfo,
+  DatasetItem,
+  deleteDataset,
+  downloadDataset,
+  hideDataset,
+  removeCustomDataset,
+  saveCustomDataset,
+} from "@/lib/replayApi";
+import {
+  ModelItem,
+  deleteModel,
+  downloadModel,
+  hideModel,
+  removeCustomModel,
+  saveCustomModel,
+} from "@/lib/modelsApi";
 import { CameraConfig } from "@/components/recording/CameraConfiguration";
 import { isHostedSpace } from "@/lib/isHostedSpace";
 import { validateDatasetName } from "@/lib/datasetName";
+import { resolveDeleteAction } from "@/lib/deleteSemantics";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -68,6 +103,8 @@ const Landing = () => {
   const [showMergeDialog, setShowMergeDialog] = useState(false);
   const [showManageCachesDialog, setShowManageCachesDialog] = useState(false);
   const [showCreateDatasetDialog, setShowCreateDatasetDialog] = useState(false);
+  const [showAddFromHubDialog, setShowAddFromHubDialog] = useState(false);
+  const [showImportDatasetDialog, setShowImportDatasetDialog] = useState(false);
   const [pendingDeleteDataset, setPendingDeleteDataset] =
     useState<DatasetItem | null>(null);
   const { selectedDataset, setSelectedDataset } = useSelectedDataset();
@@ -81,6 +118,12 @@ const Landing = () => {
 
   // Recording modal state
   const [showRecordingModal, setShowRecordingModal] = useState(false);
+  // Non-null while the modal configures a RESUME session appending episodes to
+  // this existing dataset. Carries the /datasets/info summary so the modal can
+  // render its compatibility advisory; its repo_id goes to the backend
+  // VERBATIM (no username prepend, no name gate, no timestamp — the backend
+  // validates and skips stamping on resume). Cleared when the modal closes.
+  const [resumeInfo, setResumeInfo] = useState<DatasetInfo | null>(null);
   const [datasetName, setDatasetName] = useState("");
   const [singleTask, setSingleTask] = useState("");
   const [numEpisodes, setNumEpisodes] = useState(5);
@@ -94,25 +137,26 @@ const Landing = () => {
   const navigate = useNavigate();
   const { toast } = useToast();
 
-  // Which policy types this backend's lerobot pin can actually train.
-  // Buttons stay enabled until the (cached) answer arrives: most types are
-  // valid, so briefly optimistic beats greying the whole card on every visit.
-  const [policyAvailability, setPolicyAvailability] =
-    useState<PolicyAvailability | null>(null);
-  useEffect(() => {
-    let cancelled = false;
-    fetchPolicyAvailability(baseUrl, fetchWithHeaders)
-      .then((a) => {
-        if (!cancelled) setPolicyAvailability(a);
-      })
-      .catch(() => {
-        // Backend unreachable — leave all buttons enabled; training itself
-        // will surface the real error.
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [baseUrl, fetchWithHeaders]);
+  // Models panel (mirrors the Datasets panel): the merged /models listing plus
+  // the home-page model selection, persisted like the dataset selection.
+  const {
+    models,
+    loading: modelsLoading,
+    refresh: refreshModels,
+  } = useModels();
+  const { selectedModel, setSelectedModel } = useSelectedModel();
+  const [pendingDeleteModel, setPendingDeleteModel] = useState<ModelItem | null>(
+    null,
+  );
+  const [showAddModelFromHubDialog, setShowAddModelFromHubDialog] =
+    useState(false);
+  const [showImportModelDialog, setShowImportModelDialog] = useState(false);
+
+  // The ModelItem for the current selection (if it's in the known list). Gates
+  // the info card's upload/delete affordances to local-only models and routes
+  // the right item through the confirm dialog.
+  const selectedModelItem =
+    models.find((m) => m.id === selectedModel) ?? null;
 
   // Clear camera state and release streams when returning to landing page
   useEffect(() => {
@@ -143,16 +187,126 @@ const Landing = () => {
 
   const handleRecordingModalClose = (open: boolean) => {
     setShowRecordingModal(open);
-    if (!open && releaseStreamsRef.current) {
-      console.log("🧹 Modal closed: Releasing camera streams");
-      releaseStreamsRef.current();
+    if (!open) {
+      // A cancelled resume must not leak into the next plain "Record a
+      // dataset" session.
+      setResumeInfo(null);
+      if (releaseStreamsRef.current) {
+        console.log("🧹 Modal closed: Releasing camera streams");
+        releaseStreamsRef.current();
+      }
     }
   };
 
-  // Each model-type button is a direct entry into training: the Training page
-  // reads `policyType` from router state and preselects it in the config form.
-  const handleTrainingClick = (policyType: string) =>
-    navigate("/training", { state: { policyType } });
+  // "Record more episodes" on a local dataset's info card: open the recording
+  // modal in resume mode, seeding the task from the dataset's first task
+  // string (user-editable in the modal).
+  const handleResumeRecording = (info: DatasetInfo) => {
+    setResumeInfo(info);
+    if (info.tasks.length > 0 && info.tasks[0].task) {
+      setSingleTask(info.tasks[0].task);
+    }
+    openRecordingModal();
+  };
+
+  // Picking a model selects it as the home-page model (persisted).
+  const handlePickModel = (item: ModelItem) => {
+    setSelectedModel(item.id);
+    toast({ title: "Model selected", description: item.name });
+  };
+
+  // Deleting a local model removes its run output dir — destructive, so route
+  // the card's trash button through a styled confirm dialog.
+  const handleDeleteModel = (item: ModelItem) => {
+    setPendingDeleteModel(item);
+  };
+
+  // One confirm path for every model delete entry point (picker row + info
+  // card). resolveDeleteAction decides the semantics: local file delete
+  // (local-only run/checkpoint), local-copy removal ("both" — the hub row
+  // stays LISTED and SELECTED), unpin (pinned custom), or hide (own hub-only,
+  // persistent hidden-list — the Hub repo is never touched).
+  const confirmDeleteModel = async () => {
+    const item = pendingDeleteModel;
+    if (!item) return;
+    setPendingDeleteModel(null);
+    const res = resolveDeleteAction("model", item);
+
+    try {
+      if (res.action === "unpin") {
+        await removeCustomModel(baseUrl, fetchWithHeaders, item.id);
+        toast({ title: "Removed from list", description: item.name });
+      } else if (res.action === "hide") {
+        await hideModel(baseUrl, fetchWithHeaders, item.hf_repo_id ?? item.id);
+        toast({ title: "Removed from list", description: item.name });
+      } else {
+        const r = await deleteModel(baseUrl, fetchWithHeaders, item.id);
+        if (!r.deleted) return;
+        toast({
+          title:
+            res.action === "delete-local-copy"
+              ? "Local copy removed"
+              : "Model deleted",
+          description: item.name,
+        });
+      }
+      if (res.clearsSelection) {
+        if (selectedModel === item.id) setSelectedModel("");
+      } else if (
+        selectedModel === item.id &&
+        item.hf_repo_id &&
+        item.hf_repo_id !== item.id
+      ) {
+        // both -> hub flip: the local run id vanishes from the listing but the
+        // model still exists as its hub repo — repoint the kept selection so
+        // the card and picker keep resolving it.
+        setSelectedModel(item.hf_repo_id);
+      }
+      refreshModels();
+    } catch (e) {
+      toast({
+        title: res.action === "delete-local" ? "Delete failed" : "Couldn't remove",
+        description: e instanceof Error ? e.message : String(e),
+        variant: "destructive",
+      });
+    }
+  };
+
+  // "Add a model from Hugging Face": pin + select the typed Hub id (the models
+  // twin of handleAddFromHub), and optionally kick off a background download of
+  // the checkpoint into the local models dir. The download is fire-and-forget
+  // here — the info card for the now-selected model re-attaches to it and shows
+  // the "Downloading…" state.
+  const handleAddModelFromHub = async (repoId: string, download: boolean) => {
+    setSelectedModel(repoId);
+    toast({ title: "Model saved", description: repoId });
+    try {
+      await saveCustomModel(baseUrl, fetchWithHeaders, repoId);
+      refreshModels();
+    } catch {
+      // Non-fatal: the model is still selected for this session.
+    }
+    if (!download) return;
+    try {
+      await downloadModel(baseUrl, fetchWithHeaders, repoId);
+      toast({ title: "Download started", description: repoId });
+    } catch (e) {
+      toast({
+        title: "Couldn't start download",
+        description: e instanceof Error ? e.message : String(e),
+        variant: "destructive",
+      });
+    }
+  };
+
+  // "Import a model from disk": the dialog copied a checkpoint folder into the
+  // local models dir and returns the new id — select it and refresh the picker
+  // so it shows under "Local".
+  const handleImportedModelFromDisk = (repoId: string) => {
+    setSelectedModel(repoId);
+    refreshModels();
+    toast({ title: "Model imported", description: repoId });
+  };
 
   // Picking a dataset here selects it for training (the single source of truth);
   // Training reads it from the persisted selection.
@@ -161,14 +315,51 @@ const Landing = () => {
     toast({ title: "Dataset selected", description: item.repo_id });
   };
 
-  const handleOpenCustom = (repoId: string) => {
+  // Using a typed-in Hub dataset both selects it AND pins it, so it persists in
+  // the picker's Hugging Face list for next time (backend saved_custom). The pin
+  // is best-effort — selection still works if the save call fails.
+  const handleOpenCustom = async (repoId: string) => {
     setSelectedDataset(repoId);
-    toast({ title: "Dataset selected", description: repoId });
+    toast({ title: "Dataset saved", description: repoId });
+    try {
+      await saveCustomDataset(baseUrl, fetchWithHeaders, repoId);
+      refreshDatasets();
+    } catch {
+      // Non-fatal: the dataset is still selected for training this session.
+    }
   };
 
   const handleCreateDataset = (name: string) => {
     setDatasetName(name);
     openRecordingModal();
+  };
+
+  // "Add a dataset from Hugging Face": pin + select the typed Hub id (reusing
+  // handleOpenCustom), and optionally kick off a background download into the
+  // local cache. The download is fire-and-forget here — the info card for the
+  // now-selected dataset re-attaches to it and shows the "Downloading…" state.
+  const handleAddFromHub = async (repoId: string, download: boolean) => {
+    await handleOpenCustom(repoId);
+    if (!download) return;
+    try {
+      await downloadDataset(baseUrl, fetchWithHeaders, repoId);
+      toast({ title: "Download started", description: repoId });
+    } catch (e) {
+      toast({
+        title: "Couldn't start download",
+        description: e instanceof Error ? e.message : String(e),
+        variant: "destructive",
+      });
+    }
+  };
+
+  // "Import a dataset from disk": the dialog copied a local folder into the
+  // cache and returns the new repo id — select it and refresh the picker so it
+  // shows under "Local".
+  const handleImportedFromDisk = (repoId: string) => {
+    setSelectedDataset(repoId);
+    refreshDatasets();
+    toast({ title: "Dataset imported", description: repoId });
   };
 
   // Deleting a dataset is destructive and irreversible, so route the picker's
@@ -177,27 +368,51 @@ const Landing = () => {
     setPendingDeleteDataset(item);
   };
 
+  // One confirm path for every dataset delete entry point (picker row + info
+  // card), mirroring confirmDeleteModel. resolveDeleteAction decides the
+  // semantics; a "both" first press removes only the local copy — the row
+  // stays listed as a hub dataset and the selection is kept (repo ids don't
+  // change on the flip, unlike models).
   const confirmDeleteDataset = async () => {
     const item = pendingDeleteDataset;
     if (!item) return;
     setPendingDeleteDataset(null);
+    const res = resolveDeleteAction("dataset", item);
+
     try {
-      const res = await deleteDataset(baseUrl, fetchWithHeaders, item.repo_id);
-      if (res.success) {
-        toast({ title: "Dataset deleted", description: item.repo_id });
-        // If the deleted one was selected for training, clear the stale pick.
-        if (selectedDataset === item.repo_id) setSelectedDataset("");
-        refreshDatasets();
+      if (res.action === "unpin") {
+        await removeCustomDataset(baseUrl, fetchWithHeaders, item.repo_id);
+        toast({ title: "Removed from list", description: item.repo_id });
+      } else if (res.action === "hide") {
+        await hideDataset(baseUrl, fetchWithHeaders, item.repo_id);
+        toast({ title: "Removed from list", description: item.repo_id });
       } else {
+        const r = await deleteDataset(baseUrl, fetchWithHeaders, item.repo_id);
+        if (!r.success) {
+          toast({
+            title: "Delete failed",
+            description: r.message ?? "Could not delete the dataset.",
+            variant: "destructive",
+          });
+          return;
+        }
         toast({
-          title: "Delete failed",
-          description: res.message ?? "Could not delete the dataset.",
-          variant: "destructive",
+          title:
+            res.action === "delete-local-copy"
+              ? "Local copy removed"
+              : "Dataset deleted",
+          description: item.repo_id,
         });
       }
+      // Clear the stale pick only when the row fully vanished (hide / unpin /
+      // local-only delete) — a both->hub flip keeps the selection.
+      if (res.clearsSelection && selectedDataset === item.repo_id) {
+        setSelectedDataset("");
+      }
+      refreshDatasets();
     } catch (e) {
       toast({
-        title: "Delete failed",
+        title: res.action === "delete-local" ? "Delete failed" : "Couldn't remove",
         description: e instanceof Error ? e.message : String(e),
         variant: "destructive",
       });
@@ -222,7 +437,8 @@ const Landing = () => {
       });
       return;
     }
-    if (!datasetName || !singleTask) {
+    const isResume = resumeInfo !== null;
+    if ((!isResume && !datasetName) || !singleTask) {
       toast({
         title: "Missing dataset details",
         description: "Please enter a dataset name and task description.",
@@ -230,18 +446,26 @@ const Landing = () => {
       });
       return;
     }
-    const nameError = validateDatasetName(datasetName);
-    if (nameError) {
-      toast({
-        title: "Invalid dataset name",
-        description: nameError,
-        variant: "destructive",
-      });
-      return;
+    // THE ID-SHAPE TRAP: a resume must pass the selected dataset's on-disk
+    // repo_id VERBATIM — no username prepend, no bare-name validation gate
+    // (the backend validates the full repo id), and the backend skips its
+    // timestamp stamping on resume. Only a NEW dataset goes through the
+    // name-validate + namespace-prepend path.
+    if (!isResume) {
+      const nameError = validateDatasetName(datasetName);
+      if (nameError) {
+        toast({
+          title: "Invalid dataset name",
+          description: nameError,
+          variant: "destructive",
+        });
+        return;
+      }
     }
 
-    const datasetRepoId =
-      auth.status === "authenticated"
+    const datasetRepoId = isResume
+      ? resumeInfo.repo_id
+      : auth.status === "authenticated"
         ? `${auth.username}/${datasetName}`
         : datasetName;
 
@@ -312,7 +536,7 @@ const Landing = () => {
       fps: 30,
       video: true,
       push_to_hub: false,
-      resume: false,
+      resume: isResume,
       streaming_encoding: streamingEncoding,
       cameras: cameraDict,
     };
@@ -354,8 +578,7 @@ const Landing = () => {
                   datasets={datasets}
                   loading={datasetsLoading}
                   onPickExisting={handlePickExisting}
-                  onOpenCustom={handleOpenCustom}
-                  onCreateNew={handleCreateDataset}
+                  onDeleteItem={handleDeleteDataset}
                 >
                   <Button
                     variant="outline"
@@ -367,21 +590,50 @@ const Landing = () => {
                     >
                       {datasetsLoading
                         ? "Loading datasets…"
-                        : (selectedDataset ?? "Select or create a dataset…")}
+                        : (selectedDataset ?? "Select a dataset…")}
                     </span>
                     <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
                   </Button>
                 </DatasetPicker>
               </div>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setShowCreateDatasetDialog(true)}
-                className="h-8 shrink-0 border-gray-600 bg-gray-800 text-white hover:bg-gray-700 hover:text-white"
-              >
-                <Plus className="w-3.5 h-3.5 mr-1.5" />
-                New dataset
-              </Button>
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-8 shrink-0 border-gray-600 bg-gray-800 text-white hover:bg-gray-700 hover:text-white"
+                  >
+                    <Plus className="w-3.5 h-3.5 mr-1.5" />
+                    Add dataset
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent
+                  align="end"
+                  className="w-56 bg-gray-800 border-gray-700 text-white"
+                >
+                  <DropdownMenuItem
+                    onSelect={() => setShowCreateDatasetDialog(true)}
+                    className="text-white focus:bg-gray-700 focus:text-white"
+                  >
+                    <Video className="mr-2 h-4 w-4" />
+                    Record a dataset
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    onSelect={() => setShowAddFromHubDialog(true)}
+                    className="text-white focus:bg-gray-700 focus:text-white"
+                  >
+                    <CloudDownload className="mr-2 h-4 w-4" />
+                    Add from Hugging Face
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    onSelect={() => setShowImportDatasetDialog(true)}
+                    className="text-white focus:bg-gray-700 focus:text-white"
+                  >
+                    <HardDriveDownload className="mr-2 h-4 w-4" />
+                    Import from disk
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
             </div>
             {selectedDataset && (
               <DatasetInfoCard
@@ -393,14 +645,22 @@ const Landing = () => {
                   setSelectedDataset(newRepoId);
                   refreshDatasets();
                 }}
-                // Delete is offered only for local-only datasets (deleting the
-                // sole copy). Clicking routes through the confirm dialog.
-                canDelete={selectedDatasetItem?.source === "local"}
+                // Every known row now has delete semantics (local delete /
+                // local-copy removal / unpin / hide — see resolveDeleteAction),
+                // so the trash shows for any listed selection. Clicking routes
+                // through the shared confirm dialog.
+                canDelete={!!selectedDatasetItem}
                 onDelete={
                   selectedDatasetItem
                     ? () => handleDeleteDataset(selectedDatasetItem)
                     : undefined
                 }
+                // A Hub-only dataset just got downloaded — refresh the listing so
+                // its source flips to "both" and the card gets its local detail.
+                onDownloaded={refreshDatasets}
+                // "Record more episodes" — opens the recording modal in resume
+                // mode with this dataset's info (local datasets only).
+                onResume={handleResumeRecording}
               />
             )}
             <div className="flex items-center gap-4">
@@ -420,70 +680,101 @@ const Landing = () => {
               </button>
             </div>
           </div>
+          {/* Models browser — mirrors the Dataset panel: a Hub/Local selector
+              with a per-model info card, plus an "Add model" chooser (train via
+              the dedicated page's policy grid / add from the Hub / import a
+              checkpoint from disk). */}
           <div className="bg-gray-800 rounded-lg border border-gray-700 p-3 flex flex-col gap-2">
             <h3 className="font-semibold text-lg text-center h-10 flex items-center justify-center">
-              Create a model
+              Models
             </h3>
-            {/* Stable = tested on our hardware (see POLICY_TYPE_OPTIONS).
-                Untested types stay selectable, just visually subdued. */}
-            <div className="grid grid-cols-2 gap-2">
-              {POLICY_TYPE_OPTIONS.filter((p) => p.stable).map((policy) => {
-                const unavailable =
-                  policyAvailability?.[policy.value] === false;
-                return (
-                  // Tooltip lives on a wrapper span: the disabled Button
-                  // gets pointer-events-none, which would swallow `title`.
-                  <span
-                    key={policy.value}
-                    title={
-                      unavailable
-                        ? "Not available in this lerobot version"
-                        : `Train a ${policy.label} model`
-                    }
+            <div className="flex items-center gap-2">
+              <div className="flex-1 min-w-0">
+                <ModelPicker
+                  models={models}
+                  loading={modelsLoading}
+                  onPickExisting={handlePickModel}
+                  onDeleteItem={handleDeleteModel}
+                >
+                  <Button
+                    variant="outline"
+                    role="combobox"
+                    className="w-full justify-between bg-gray-800 border-gray-600 text-white hover:bg-gray-700"
                   >
-                    <Button
-                      onClick={() => handleTrainingClick(policy.value)}
-                      disabled={!selectedDataset || unavailable}
-                      size="sm"
-                      className="w-full bg-green-500 hover:bg-green-600 text-white px-2"
+                    <span
+                      className={`truncate ${selectedModel ? "text-white" : "text-gray-300"}`}
                     >
-                      <span className="truncate">{policy.label}</span>
-                    </Button>
-                  </span>
-                );
-              })}
-            </div>
-            <p className="text-xs text-gray-500 mt-1">
-              Untested in LeLab — use at your own risk
-            </p>
-            <div className="grid grid-cols-3 gap-2">
-              {POLICY_TYPE_OPTIONS.filter((p) => !p.stable).map((policy) => {
-                const unavailable =
-                  policyAvailability?.[policy.value] === false;
-                return (
-                  <span
-                    key={policy.value}
-                    title={
-                      unavailable
-                        ? "Not available in this lerobot version"
-                        : `Train a ${policy.label} model — untested in LeLab, use at your own risk`
-                    }
+                      {modelsLoading
+                        ? "Loading models…"
+                        : (selectedModelItem?.name ??
+                          selectedModel ??
+                          "Select a model…")}
+                    </span>
+                    <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                  </Button>
+                </ModelPicker>
+              </div>
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-8 shrink-0 border-gray-600 bg-gray-800 text-white hover:bg-gray-700 hover:text-white"
                   >
-                    <Button
-                      onClick={() => handleTrainingClick(policy.value)}
-                      disabled={!selectedDataset || unavailable}
-                      size="sm"
-                      variant="outline"
-                      className="w-full border-gray-600 bg-gray-900/40 text-gray-400 hover:bg-gray-700 hover:text-white px-2"
-                    >
-                      <span className="truncate">{policy.label}</span>
-                    </Button>
-                  </span>
-                );
-              })}
+                    <Plus className="w-3.5 h-3.5 mr-1.5" />
+                    Add model
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent
+                  align="end"
+                  className="w-56 bg-gray-800 border-gray-700 text-white"
+                >
+                  <DropdownMenuItem
+                    onSelect={() => navigate("/create-model")}
+                    className="text-white focus:bg-gray-700 focus:text-white"
+                  >
+                    <Sparkles className="mr-2 h-4 w-4" />
+                    Train a model
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    onSelect={() => setShowAddModelFromHubDialog(true)}
+                    className="text-white focus:bg-gray-700 focus:text-white"
+                  >
+                    <CloudDownload className="mr-2 h-4 w-4" />
+                    Add from Hugging Face
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    onSelect={() => setShowImportModelDialog(true)}
+                    className="text-white focus:bg-gray-700 focus:text-white"
+                  >
+                    <HardDriveDownload className="mr-2 h-4 w-4" />
+                    Import from disk
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
             </div>
-            {!selectedDataset && (
-              <p className="text-xs text-gray-500">Select a dataset first.</p>
+            {selectedModel && (
+              <ModelInfoCard
+                id={selectedModel}
+                // Upload + Delete are local-only, mirroring the dataset card's
+                // gating. A custom/unknown id won't match — no local item, so
+                // no local affordances, which is correct.
+                isLocal={selectedModelItem?.source === "local"}
+                // Every known row now has delete semantics (local delete /
+                // local-copy removal / unpin / hide — see resolveDeleteAction),
+                // so the trash shows for any listed selection. Clicking routes
+                // through the shared confirm dialog.
+                canDelete={!!selectedModelItem}
+                onDelete={
+                  selectedModelItem
+                    ? () => handleDeleteModel(selectedModelItem)
+                    : undefined
+                }
+                onUploaded={refreshModels}
+                // A Hub-only model just got downloaded — refresh the listing so
+                // its source flips to "both" and the card gets its local detail.
+                onDownloaded={refreshModels}
+              />
             )}
           </div>
         </div>
@@ -522,41 +813,112 @@ const Landing = () => {
         onCreateNew={handleCreateDataset}
       />
 
-      <AlertDialog
-        open={pendingDeleteDataset !== null}
-        onOpenChange={(o) => !o && setPendingDeleteDataset(null)}
-      >
-        <AlertDialogContent className="bg-gray-900 border-gray-800 text-white">
-          <AlertDialogHeader>
-            <AlertDialogTitle className="break-words">
-              Delete "
-              <span className="break-all">
-                {pendingDeleteDataset?.repo_id}
-              </span>
-              "?
-            </AlertDialogTitle>
-            <AlertDialogDescription className="text-gray-400">
-              This permanently removes the dataset from local disk — including
-              all recorded episodes and videos. You can't undo this.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel className="border-gray-600 bg-transparent text-gray-200 hover:bg-gray-800 hover:text-white">
-              Cancel
-            </AlertDialogCancel>
-            <AlertDialogAction
-              onClick={confirmDeleteDataset}
-              className="bg-red-500 hover:bg-red-600 text-white"
-            >
-              Delete
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      <AddDatasetFromHubDialog
+        open={showAddFromHubDialog}
+        onOpenChange={setShowAddFromHubDialog}
+        onAdd={handleAddFromHub}
+      />
+
+      <ImportDatasetFromDiskDialog
+        open={showImportDatasetDialog}
+        onOpenChange={setShowImportDatasetDialog}
+        onImported={handleImportedFromDisk}
+      />
+
+      <AddModelFromHubDialog
+        open={showAddModelFromHubDialog}
+        onOpenChange={setShowAddModelFromHubDialog}
+        onAdd={handleAddModelFromHub}
+      />
+
+      <ImportModelFromDiskDialog
+        open={showImportModelDialog}
+        onOpenChange={setShowImportModelDialog}
+        onImported={handleImportedModelFromDisk}
+      />
+
+      {/* One delete confirm per kind, shared by the picker rows and the info
+          cards, with copy driven by resolveDeleteAction (Delete / Remove local
+          copy / Remove-from-list). Rendered at Landing scope so it survives the
+          picker popover closing. */}
+      {(() => {
+        const res = pendingDeleteDataset
+          ? resolveDeleteAction("dataset", pendingDeleteDataset)
+          : null;
+        return (
+          <AlertDialog
+            open={pendingDeleteDataset !== null}
+            onOpenChange={(o) => !o && setPendingDeleteDataset(null)}
+          >
+            <AlertDialogContent className="bg-gray-900 border-gray-800 text-white">
+              <AlertDialogHeader>
+                <AlertDialogTitle className="break-words">
+                  {res?.titlePrefix} "
+                  <span className="break-all">
+                    {pendingDeleteDataset?.repo_id}
+                  </span>
+                  "?
+                </AlertDialogTitle>
+                <AlertDialogDescription className="text-gray-400">
+                  {res?.description}
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel className="border-gray-600 bg-transparent text-gray-200 hover:bg-gray-800 hover:text-white">
+                  Cancel
+                </AlertDialogCancel>
+                <AlertDialogAction
+                  onClick={confirmDeleteDataset}
+                  className="bg-red-500 hover:bg-red-600 text-white"
+                >
+                  {res?.confirmLabel}
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
+        );
+      })()}
+
+      {(() => {
+        const res = pendingDeleteModel
+          ? resolveDeleteAction("model", pendingDeleteModel)
+          : null;
+        return (
+          <AlertDialog
+            open={pendingDeleteModel !== null}
+            onOpenChange={(o) => !o && setPendingDeleteModel(null)}
+          >
+            <AlertDialogContent className="bg-gray-900 border-gray-800 text-white">
+              <AlertDialogHeader>
+                <AlertDialogTitle className="break-words">
+                  {res?.titlePrefix} "
+                  <span className="break-all">{pendingDeleteModel?.name}</span>
+                  "?
+                </AlertDialogTitle>
+                <AlertDialogDescription className="text-gray-400">
+                  {res?.description}
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel className="border-gray-600 bg-transparent text-gray-200 hover:bg-gray-800 hover:text-white">
+                  Cancel
+                </AlertDialogCancel>
+                <AlertDialogAction
+                  onClick={confirmDeleteModel}
+                  className="bg-red-500 hover:bg-red-600 text-white"
+                >
+                  {res?.confirmLabel}
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
+        );
+      })()}
 
       <RecordingModal
         open={showRecordingModal}
         onOpenChange={handleRecordingModalClose}
+        resumeInfo={resumeInfo}
         robot={selectedRecord}
         datasetName={datasetName}
         setDatasetName={setDatasetName}

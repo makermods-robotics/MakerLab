@@ -71,8 +71,11 @@ const ManageCachesDialog: React.FC<Props> = ({
     for (const d of cached) {
       getDatasetInfo(baseUrl, fetchWithHeaders, d.repo_id)
         .then((info) => {
-          if (!cancelled)
-            setSizes((prev) => ({ ...prev, [d.repo_id]: info.size_bytes }));
+          // size_bytes is null for a hub-summary response (shouldn't happen
+          // here — these rows are "both", so local info wins — but guard).
+          const size = info.size_bytes;
+          if (!cancelled && size != null)
+            setSizes((prev) => ({ ...prev, [d.repo_id]: size }));
         })
         .catch(() => {
           // Size unavailable — the row just shows no size.

@@ -29,10 +29,14 @@ Covers, with the Hub FULLY MOCKED (never a real network call):
 from __future__ import annotations
 
 import datetime as _dt
+import logging
+import threading
+import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import httpx
+import pytest
 
 import lelab.datasets as ds
 import lelab.server as server_mod
@@ -239,7 +243,13 @@ def test_dataset_listing_cache_invalidated_by_mutation(tmp_lerobot_home) -> None
         calls["n"] += 1
         return r
 
-    with patch("lelab.datasets.list_user_datasets", side_effect=_hub):
+    # Pins/hidden ids live outside tmp_lerobot_home, so the developer's real
+    # saved-custom/hidden entries would leak into the exact-equality asserts.
+    with (
+        patch("lelab.datasets.list_user_datasets", side_effect=_hub),
+        patch("lelab.datasets.get_saved_custom_datasets", return_value=[]),
+        patch("lelab.datasets.get_hidden_datasets", return_value=set()),
+    ):
         first = ds.list_all_datasets()
         assert [d["repo_id"] for d in first] == ["makermods/old"]
 
@@ -314,3 +324,47 @@ def test_hub_jobs_cache_invalidated_by_model_delete(client, monkeypatch) -> None
     client.get("/jobs/hub")
     # The delete dropped the cache, so the second listing re-fanned-out.
     assert api.list_models.call_count > before
+
+
+# --------------------------------------------------------------------------- #
+# TIMEOUT — the OVERALL fan-out deadline bounds a hung author (both sites).     #
+# The shared HfApi httpx client has timeout=None, so this budget is the only    #
+# timeout in the stack: a blackholed connection must be abandoned + named,      #
+# never left to stall the endpoint.                                             #
+# --------------------------------------------------------------------------- #
+def test_fan_out_model_authors_bounds_a_hung_author(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """server._fan_out_model_authors twin of the datasets test: with the budget
+    shrunk to 0.2s, a fast author returns while a hung author (blocked on an
+    Event never set during the call) is abandoned by the deadline — the call
+    returns fast, carries only the fast author's result, and logs a warning
+    naming the hung author."""
+    monkeypatch.setattr(server_mod, "_HUB_MODEL_FANOUT_TIMEOUT_S", 0.2)
+
+    # Never set DURING the call; released in the finally so the leaked worker
+    # thread exits and pytest terminates cleanly.
+    release = threading.Event()
+
+    def call(author: str) -> list[str]:
+        if author == "fast":
+            return [f"model-for-{author}"]
+        release.wait(timeout=30)  # the hung author
+        return ["late"]
+
+    try:
+        start = time.monotonic()
+        with caplog.at_level(logging.WARNING):
+            result = server_mod._fan_out_model_authors(["fast", "hung"], call)
+        elapsed = time.monotonic() - start
+
+        # Bounded by the 0.2s budget, not the 30s the hung worker would take.
+        assert elapsed < 3.0
+        # Only the finished author's result survives.
+        assert result == [["model-for-fast"]]
+        # The timeout warning names the author that didn't finish.
+        timeout_logs = [r.getMessage() for r in caplog.records if "exceeded" in r.getMessage()]
+        assert timeout_logs, "expected a fan-out timeout warning"
+        assert any("hung" in msg for msg in timeout_logs)
+    finally:
+        release.set()
