@@ -23,7 +23,10 @@ const formatCount = (n: number): string => {
   return String(n);
 };
 
-const formatBytes = (bytes: number): string => {
+const formatBytes = (bytes: number | null | undefined): string => {
+  // Null-safe: an unknown size renders nothing rather than "null B". Callers
+  // still gate the whole Size row on presence, so this is belt-and-suspenders.
+  if (bytes == null) return "";
   if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
   if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(0)} MB`;
   if (bytes >= 1024) return `${(bytes / 1024).toFixed(0)} KB`;
@@ -248,7 +251,12 @@ const ModelInfoCard: React.FC<ModelInfoCardProps> = ({
         <div className="space-y-1.5">
           <div className="flex items-start justify-between gap-2">
             <div className="min-w-0 flex-1 font-medium text-gray-200">
-              {policyTypeDisplayName(info.policy_type ?? "unknown")}
+              {/* Policy type when known; otherwise fall back to something real
+                  (display name / repo id / run id) — never the string "unknown"
+                  as the card's title. */}
+              {info.policy_type
+                ? policyTypeDisplayName(info.policy_type)
+                : info.name || info.hf_repo_id || info.id}
               {info.steps != null && (
                 <span className="text-gray-500">
                   {" · "}
@@ -277,7 +285,8 @@ const ModelInfoCard: React.FC<ModelInfoCardProps> = ({
             )}
           </div>
 
-          <Row label="Dataset">{info.dataset ?? "unknown"}</Row>
+          {/* Base dataset: omit when unknown rather than render "unknown". */}
+          {info.dataset && <Row label="Dataset">{info.dataset}</Row>}
 
           {info.size_bytes != null && (
             <Row label="Size">{formatBytes(info.size_bytes)}</Row>

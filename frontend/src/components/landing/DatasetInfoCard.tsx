@@ -74,7 +74,10 @@ const formatDuration = (frames: number, fps: number | null): string | null => {
   return m > 0 ? `~${h} h ${m} min` : `~${h} h`;
 };
 
-const formatBytes = (bytes: number): string => {
+const formatBytes = (bytes: number | null | undefined): string => {
+  // Null-safe: an unknown size renders nothing rather than "null B". Callers
+  // still gate the whole Size row on presence, so this is belt-and-suspenders.
+  if (bytes == null) return "";
   if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
   if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(0)} MB`;
   if (bytes >= 1024) return `${(bytes / 1024).toFixed(0)} KB`;
@@ -589,6 +592,15 @@ const HubSyncRow: React.FC<{ repoId: string }> = ({ repoId }) => {
     );
   }
 
+  // "absent" = neither on the Hub nor local — there's nothing local to upload,
+  // so show a plain not-found line with no upload affordance (this is the
+  // signal that used to be mislabeled "local_only").
+  if (status === "absent") {
+    return (
+      <span className="text-gray-500">Not on the Hub, no local copy</span>
+    );
+  }
+
   // local_only or unknown: offer upload. For "unknown" we still allow it —
   // the endpoint is a safe upsert and reports auth failures gracefully.
   return (
@@ -800,6 +812,98 @@ const HubDownloadRow: React.FC<{
   );
 };
 
+/**
+ * The info card's "no local detail" branch (/datasets/info returned 404). What
+ * to show depends on where the dataset actually lives, so the Hub status is
+ * fetched here and the cases render coherently — crucially NEVER claiming both
+ * "not downloaded locally" and "Local only" at once (the contradictory pair a
+ * naive 404-branch render produced for a stale pin that is neither on the Hub
+ * nor local):
+ *
+ *   - on_hub / unknown → a genuine Hub dataset not yet downloaded: offer download.
+ *   - local_only       → a local copy exists but /datasets/info couldn't read
+ *                        its details (incomplete/corrupt): say so, offer upload.
+ *   - absent           → neither on the Hub nor local: a deleted/renamed/stale
+ *                        selection. Say that plainly; no download/upload.
+ */
+const NotDownloadedView: React.FC<{
+  repoId: string;
+  onDownloaded: () => void;
+}> = ({ repoId, onDownloaded }) => {
+  const { baseUrl, fetchWithHeaders } = useApi();
+  const [status, setStatus] = useState<HubStatusValue | "loading">("loading");
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setStatus("loading");
+    getDatasetHubStatus(baseUrl, fetchWithHeaders, repoId, controller.signal)
+      .then((data) => setStatus(data.status))
+      .catch(() => {
+        if (!controller.signal.aborted) setStatus("unknown");
+      });
+    return () => controller.abort();
+  }, [baseUrl, fetchWithHeaders, repoId]);
+
+  const header = (
+    <div className="font-medium text-gray-200 break-all">{repoId}</div>
+  );
+
+  if (status === "loading") {
+    return (
+      <div className="space-y-1.5">
+        {header}
+        <p className="text-gray-500">Checking availability…</p>
+      </div>
+    );
+  }
+
+  // A local copy exists (hub-status said local_only) but its details couldn't be
+  // read — a corrupt/incomplete local dataset. Coherent: local, but unreadable.
+  if (status === "local_only") {
+    return (
+      <div className="space-y-1.5">
+        {header}
+        <p className="text-gray-500">
+          This dataset is on this machine, but its details couldn't be read — the
+          local copy looks incomplete or corrupt. Re-record or re-download it.
+        </p>
+        <div className="mt-1.5 border-t border-gray-800 pt-1.5">
+          <HubSyncRow repoId={repoId} />
+        </div>
+      </div>
+    );
+  }
+
+  // Neither on the Hub nor local — a stale selection (e.g. a pin to a dataset
+  // that was deleted/renamed, or a merge output that was never materialized).
+  if (status === "absent") {
+    return (
+      <div className="space-y-1.5">
+        {header}
+        <p className="text-gray-500">
+          This dataset couldn't be found — there's no local copy and it isn't on
+          the Hugging Face Hub. It may have been deleted or renamed.
+        </p>
+      </div>
+    );
+  }
+
+  // on_hub or unknown: a (probable) Hub dataset not yet downloaded.
+  return (
+    <div className="space-y-1.5">
+      {header}
+      <p className="text-gray-500">
+        {status === "on_hub"
+          ? "Hub dataset — not downloaded locally. Training will fetch it from the Hub on demand; per-episode details show once it's cached."
+          : "Not downloaded locally, and the Hub couldn't be reached to confirm. Training will try to fetch it from the Hub on demand."}
+      </p>
+      <div className="mt-1.5 border-t border-gray-800 pt-1.5">
+        <HubDownloadRow repoId={repoId} onDownloaded={onDownloaded} />
+      </div>
+    </div>
+  );
+};
+
 interface DatasetInfoCardProps {
   repoId: string;
   /** Called after a successful rename with the new repo id, so the parent can
@@ -877,31 +981,19 @@ const DatasetInfoCard: React.FC<DatasetInfoCardProps> = ({
         </div>
       )}
 
-      {/* No local cache (404) — a Hub dataset that hasn't been downloaded, e.g.
-          one typed straight into the picker. Still show the repo id and its Hub
-          state (via HubSyncRow) so the selection reads as a usable dataset —
-          local per-episode detail just isn't available until it's downloaded.
-          A non-404 error stays a bare "couldn't load" line. */}
+      {/* No local detail (404). Where the dataset actually lives decides what to
+          show — NotDownloadedView fetches the Hub status and renders coherently
+          (a genuine Hub dataset to download, a local-but-unreadable copy, or a
+          not-found stale selection), never the contradictory "not downloaded
+          locally" + "Local only" pair. A non-404 error stays a bare line below. */}
       {!loading && error && error.notLocal && (
-        <div className="space-y-1.5">
-          <div className="font-medium text-gray-200 break-all">{repoId}</div>
-          <p className="text-gray-500">
-            Hub dataset — not downloaded locally. Training will fetch it from the
-            Hub on demand; per-episode details show once it's cached.
-          </p>
-          <div className="mt-1.5 border-t border-gray-800 pt-1.5">
-            <HubSyncRow repoId={repoId} />
-          </div>
-          <div className="border-t border-gray-800 pt-1.5">
-            <HubDownloadRow
-              repoId={repoId}
-              onDownloaded={() => {
-                setInfoRefreshKey((k) => k + 1);
-                onDownloaded?.();
-              }}
-            />
-          </div>
-        </div>
+        <NotDownloadedView
+          repoId={repoId}
+          onDownloaded={() => {
+            setInfoRefreshKey((k) => k + 1);
+            onDownloaded?.();
+          }}
+        />
       )}
 
       {!loading && error && !error.notLocal && (
@@ -964,21 +1056,26 @@ const DatasetInfoCard: React.FC<DatasetInfoCardProps> = ({
                 </div>
               </div>
 
-              <Row label="Cameras">
-                {info.cameras.length > 0 ? (
-                  info.cameras.join(", ")
-                ) : isHubOnly ? (
-                  // A hub summary may simply omit features — don't render the
-                  // scary unusable-for-training warning on incomplete data.
-                  "unknown"
-                ) : (
-                  <WarningBadge>
-                    No camera data — unusable for vision training
-                  </WarningBadge>
-                )}
-              </Row>
+              {/* Cameras: show when known. For a LOCAL dataset with none, keep
+                  the warning (silence would hide that it's unusable for vision
+                  training). For a hub summary with none, omit the row — a hub
+                  summary may simply lack features, and "unknown" is noise. */}
+              {(info.cameras.length > 0 || !isHubOnly) && (
+                <Row label="Cameras">
+                  {info.cameras.length > 0 ? (
+                    info.cameras.join(", ")
+                  ) : (
+                    <WarningBadge>
+                      No camera data — unusable for vision training
+                    </WarningBadge>
+                  )}
+                </Row>
+              )}
 
-              <Row label="Robot">{info.robot_type ?? "unknown"}</Row>
+              {/* Robot type: omit when unknown rather than render "unknown". */}
+              {info.robot_type && (
+                <Row label="Robot">{info.robot_type}</Row>
+              )}
 
               {info.tasks.length > 0 && (
                 <Row label="Tasks">

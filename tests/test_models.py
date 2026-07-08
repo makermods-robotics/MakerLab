@@ -278,6 +278,59 @@ def test_list_hub_models_filters_and_dedupes() -> None:
     assert ids == {"user/act_model", "user/smolvla_ds_2026-01-01_10-00-00"}
 
 
+def test_list_all_models_surfaces_policy_type_from_name_only_tags(registry) -> None:
+    """BUG 2 regression: a hub repo named ``act_<stuff>`` carrying only the
+    org tags (makermods / LeLab), with NO ``lerobot``/policy-type tag, must
+    surface policy_type "act" end-to-end through list_all_models — via the
+    name-prefix fallback in _hub_policy_type. This is the exact shape whose
+    policy label went missing in the picker."""
+    from lelab.models import list_all_models
+
+    m_named = MagicMock()
+    m_named.id = "makermods/act_makermods_pick_up_red_cube_10_2026-07-04_17-09-13"
+    m_named.tags = ["makermods", "LeLab"]  # org tags only — no policy-type tag
+    m_named.last_modified = None
+    m_named.private = False
+
+    fake_api = MagicMock()
+    fake_api.list_models.return_value = [m_named]
+
+    with (
+        patch("lelab.models.cached_whoami", return_value={"name": "makermods", "orgs": []}),
+        patch("lelab.models.shared_hf_api", return_value=fake_api),
+    ):
+        result = list_all_models()
+
+    row = next(r for r in result if r["repo_id"] == m_named.id)
+    assert row["source"] == "hub"
+    assert row["policy_type"] == "act"
+
+
+def test_list_all_models_infers_pinned_model_policy_type_from_name(registry) -> None:
+    """A pinned custom model the Hub listing didn't return still gets its policy
+    type inferred from the repo name (act_… / smolvla_…) rather than dropping to
+    None — so the picker shows the label even for a pin-only row."""
+    from lelab.models import list_all_models
+
+    with (
+        patch("lelab.models.list_hub_models", return_value=[]),
+        patch(
+            "lelab.models.get_saved_custom_models",
+            return_value=["makermods/smolvla_makermods_sock_2026-07-08_01-47-15"],
+        ),
+    ):
+        result = list_all_models()
+
+    row = next(
+        r for r in result
+        if r.get("id") == "makermods/smolvla_makermods_sock_2026-07-08_01-47-15"
+    )
+    assert row["source"] == "hub"
+    assert row["hf_repo_id"] == "makermods/smolvla_makermods_sock_2026-07-08_01-47-15"
+    assert row["saved_custom"] is True
+    assert row["policy_type"] == "smolvla"
+
+
 # ---------------------------------------------------------------------------
 # get_model_info.
 # ---------------------------------------------------------------------------

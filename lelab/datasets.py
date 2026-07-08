@@ -162,14 +162,28 @@ def _fan_out_hub_authors(authors: list[str], call: Callable[[str], Any]) -> list
 
 
 def get_hub_status(repo_id: str) -> dict[str, Any]:
-    """Whether a dataset repo with this id exists on the Hub.
+    """Where a dataset repo with this id lives.
 
-    Returns ``{"repo_id": ..., "status": "on_hub" | "local_only" | "unknown",
-    "url": <hub url> | None}``. Never raises: offline, unauthenticated, or any
-    transport error degrades to ``"unknown"`` (no error spam — the card just
-    hides the badge). Definitive answers (exists / doesn't) are memoized per
-    repo_id for the process lifetime; ``"unknown"`` is not cached so transient
-    failures self-heal on the next check.
+    Returns ``{"repo_id": ..., "status": "on_hub" | "local_only" | "absent" |
+    "unknown", "url": <hub url> | None}``:
+
+    * ``on_hub``     — the repo exists on the Hub.
+    * ``local_only`` — NOT on the Hub, but a usable local copy exists (a
+      recorded/merged dataset the user hasn't uploaded yet) — the card offers
+      "Upload to Hub".
+    * ``absent``     — neither on the Hub NOR in the local cache: a stale
+      selection (a pin to a dataset that was deleted/renamed, or a merge output
+      that was never materialized). The old code returned ``local_only`` here,
+      which the info card read as "you have it locally" and rendered the
+      contradictory "not downloaded locally" + "Local only / Upload" pair; the
+      distinct status lets the card say "not found" instead.
+    * ``unknown``    — offline / unauthenticated / any transport error.
+
+    Never raises. Definitive Hub answers (``on_hub`` / ``local_only``) are
+    memoized per repo_id for the process lifetime; ``"unknown"`` and ``"absent"``
+    are NOT cached (a later record/merge/download can make an ``absent`` dataset
+    appear locally without a hub-status invalidation, and a transient failure
+    should self-heal) so both re-check on the next call.
     """
     url = f"https://huggingface.co/datasets/{repo_id}"
 
@@ -187,9 +201,20 @@ def get_hub_status(repo_id: str) -> dict[str, Any]:
         logger.info("hub-status repo_exists(%s) failed: %s", repo_id, exc)
         return {"repo_id": repo_id, "status": "unknown", "url": None}
 
-    status = "on_hub" if exists else "local_only"
+    if exists:
+        status = "on_hub"
+    elif is_dataset_available_locally(repo_id):
+        # Not on the Hub, but a usable local copy exists — genuinely local-only.
+        status = "local_only"
+    else:
+        # Neither on the Hub nor local: don't mislabel this "local_only".
+        status = "absent"
+
     with _HUB_STATUS_LOCK:
-        _HUB_STATUS_CACHE[repo_id] = status
+        # Cache only the definitive, stable answers; "absent" can flip to local
+        # without a hub-status invalidation, so leave it uncached (like "unknown").
+        if status in ("on_hub", "local_only"):
+            _HUB_STATUS_CACHE[repo_id] = status
     return {"repo_id": repo_id, "status": status, "url": url if exists else None}
 
 

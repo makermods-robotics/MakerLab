@@ -616,7 +616,12 @@ def list_all_models() -> list[dict[str, Any]]:
             merged[repo_id] = {
                 "id": repo_id,
                 "name": repo_id,
-                "policy_type": None,
+                # A pinned repo the Hub listing didn't return (private, GFW-dropped,
+                # or untagged) still has an inferable type from its name prefix
+                # (act_… / smolvla_…) — infer it here instead of dropping to None,
+                # so the picker shows the policy label. Mirrors the tag/name
+                # inference the hub listing does via _list_author_models.
+                "policy_type": _hub_policy_type(None, repo_id.split("/", 1)[-1]),
                 "dataset": None,
                 "steps": None,
                 "path": None,

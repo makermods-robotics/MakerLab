@@ -168,9 +168,11 @@ export async function getDatasetInfo(
   );
 }
 
-/** Whether a dataset with this id exists on the Hub. "unknown" is the
+/** Where a dataset with this id lives. "local_only" = a local copy exists but
+ * it's not on the Hub (offer upload); "absent" = neither on the Hub nor local
+ * (a stale pin / deleted / renamed selection); "unknown" is the
  * offline/unauthenticated degrade — the card shows no badge for it. */
-export type HubStatusValue = "on_hub" | "local_only" | "unknown";
+export type HubStatusValue = "on_hub" | "local_only" | "absent" | "unknown";
 
 export interface HubStatus {
   repo_id: string;

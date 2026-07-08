@@ -352,17 +352,47 @@ def test_get_hub_status_reports_on_hub_when_repo_exists() -> None:
     fake_api.repo_exists.assert_called_once_with("alice/pick", repo_type="dataset")
 
 
-def test_get_hub_status_reports_local_only_when_repo_missing() -> None:
+def test_get_hub_status_reports_local_only_when_missing_from_hub_but_local() -> None:
+    """Not on the Hub, but a usable local copy exists → "local_only" (offer
+    upload)."""
     from lelab import datasets as ds
 
     _clear_hub_status_cache()
     fake_api = MagicMock()
     fake_api.repo_exists.return_value = False
-    with patch("lelab.datasets.shared_hf_api", return_value=fake_api):
+    with (
+        patch("lelab.datasets.shared_hf_api", return_value=fake_api),
+        patch("lelab.datasets.is_dataset_available_locally", return_value=True),
+    ):
         result = ds.get_hub_status("alice/pick")
 
     assert result["status"] == "local_only"
     assert result["url"] is None
+
+
+def test_get_hub_status_reports_absent_when_neither_hub_nor_local() -> None:
+    """Neither on the Hub nor in the local cache → "absent", NOT "local_only".
+
+    This is the BUG-3 root cause: a stale pin (e.g. a merge output that was
+    deleted/renamed) used to report "local_only", which the info card read as
+    "you have it locally" and rendered the contradictory "not downloaded
+    locally" + "Local only / Upload" pair. "absent" is also NOT cached (a later
+    record/merge can make it appear locally), so a second call re-checks."""
+    from lelab import datasets as ds
+
+    _clear_hub_status_cache()
+    fake_api = MagicMock()
+    fake_api.repo_exists.return_value = False
+    with (
+        patch("lelab.datasets.shared_hf_api", return_value=fake_api),
+        patch("lelab.datasets.is_dataset_available_locally", return_value=False),
+    ):
+        result = ds.get_hub_status("makermods/sock")
+        assert result["status"] == "absent"
+        assert result["url"] is None
+        # Not cached: a second call re-invokes repo_exists.
+        ds.get_hub_status("makermods/sock")
+    assert fake_api.repo_exists.call_count == 2
 
 
 def test_get_hub_status_degrades_to_unknown_offline() -> None:
@@ -403,7 +433,10 @@ def test_invalidate_hub_status_forces_recheck() -> None:
     _clear_hub_status_cache()
     fake_api = MagicMock()
     fake_api.repo_exists.return_value = False
-    with patch("lelab.datasets.shared_hf_api", return_value=fake_api):
+    with (
+        patch("lelab.datasets.shared_hf_api", return_value=fake_api),
+        patch("lelab.datasets.is_dataset_available_locally", return_value=True),
+    ):
         assert ds.get_hub_status("alice/pick")["status"] == "local_only"
         # Simulate a successful upload: repo now exists, cache invalidated.
         ds.invalidate_hub_status("alice/pick")
