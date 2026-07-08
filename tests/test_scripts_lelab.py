@@ -19,8 +19,10 @@ are left to manual smoke testing."""
 
 from __future__ import annotations
 
+import logging
 import socket
 import threading
+import types
 
 import pytest
 
@@ -296,3 +298,177 @@ def test_ensure_path_symlinks_leaves_uv_tool_entry_untouched(tmp_path) -> None:
     assert (bin_dir / "makerlab").resolve() != (source_dir / "makerlab").resolve()
     # The other name, not uv-owned, is linked to the venv as usual.
     assert (bin_dir / "makerlab-station").resolve() == (source_dir / "makerlab-station").resolve()
+
+
+# --- Shutdown reliability: --stop, port preflight, process-tree teardown -----
+
+
+class _FakeConn:
+    """Minimal stand-in for a psutil connection tuple."""
+
+    def __init__(self, port: int, status: str) -> None:
+        self.laddr = types.SimpleNamespace(port=port)
+        self.status = status
+
+
+class _FakeProc:
+    """A psutil.Process stand-in for _find_lelab_pids / _identity_reason.
+
+    `process_iter` hands these back with `.info` populated; `.cwd()` and
+    `.net_connections()` model the two other lookups the launcher performs.
+    Set cwd=None to simulate a process whose cwd we can't read.
+    """
+
+    def __init__(
+        self,
+        pid: int,
+        cmdline: list[str],
+        name: str = "python",
+        cwd=None,
+        listening: tuple[int, ...] = (),
+    ) -> None:
+        self.pid = pid
+        self.info = {"pid": pid, "cmdline": cmdline, "name": name}
+        self._cwd = cwd
+        self._listening = listening
+
+    def cwd(self):
+        import lelab.scripts.lelab as launcher
+
+        if self._cwd is None:
+            raise launcher.psutil.NoSuchProcess(self.pid)
+        return self._cwd
+
+    def net_connections(self, kind: str = "inet"):
+        import lelab.scripts.lelab as launcher
+
+        return [_FakeConn(port, launcher.psutil.CONN_LISTEN) for port in self._listening]
+
+
+def test_stop_kills_identity_and_refuses_port_stranger(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The sharp-edge fix: `--stop` terminates the process we recognise as ours
+    (cmdline runs `lelab.server`) but must NOT kill an unrelated stranger that
+    merely happens to be listening on :8000 — it only warns about it."""
+    import lelab.scripts.lelab as launcher
+
+    ours = _FakeProc(100, ["python", "-m", "uvicorn", "lelab.server:app", "--reload"])
+    stranger = _FakeProc(200, ["node", "some-other-server.js"], name="node", listening=(8000,))
+
+    monkeypatch.setattr(launcher.psutil, "process_iter", lambda attrs=None: [ours, stranger])
+    monkeypatch.setattr(launcher.os, "getpid", lambda: 999)
+    terminated: list[int] = []
+    monkeypatch.setattr(launcher, "_terminate_tree", lambda pid, timeout=5: terminated.append(pid))
+
+    with caplog.at_level(logging.INFO):
+        launcher._run_stop()
+
+    # Only the identity-matched pid is terminated; the stranger is spared.
+    assert terminated == [100]
+    assert "held by pid 200" in caplog.text
+    assert "(node)" in caplog.text
+    assert "not a LeLab process" in caplog.text
+
+
+def test_stop_kills_orphaned_reload_worker_in_this_checkout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A spawn worker whose cwd is THIS project is a kill target; the same
+    worker in another directory is not ours and is left alone."""
+    import lelab.scripts.lelab as launcher
+
+    ours = _FakeProc(
+        300,
+        ["python", "-c", "from multiprocessing.spawn import spawn_main"],
+        cwd=str(launcher.PROJECT_ROOT),
+    )
+    other = _FakeProc(
+        400,
+        ["python", "-c", "from multiprocessing.spawn import spawn_main"],
+        cwd="/somewhere/else",
+    )
+
+    monkeypatch.setattr(launcher.psutil, "process_iter", lambda attrs=None: [ours, other])
+    monkeypatch.setattr(launcher.os, "getpid", lambda: 999)
+    terminated: list[int] = []
+    monkeypatch.setattr(launcher, "_terminate_tree", lambda pid, timeout=5: terminated.append(pid))
+
+    launcher._run_stop()
+
+    assert terminated == [300]
+
+
+def test_stop_reports_nothing_when_no_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import lelab.scripts.lelab as launcher
+
+    monkeypatch.setattr(launcher.psutil, "process_iter", lambda attrs=None: [])
+    monkeypatch.setattr(launcher.os, "getpid", lambda: 999)
+    monkeypatch.setattr(launcher, "_terminate_tree", lambda *_a, **_k: pytest.fail("should not kill"))
+
+    with caplog.at_level(logging.INFO):
+        launcher._run_stop()
+
+    assert "Nothing to stop" in caplog.text
+
+
+def test_ensure_port_available_message_mentions_makerlab_stop(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Port preflight fails fast and points the user at the actual command."""
+    import lelab.scripts.lelab as launcher
+
+    monkeypatch.setattr(launcher, "_is_port_open", lambda _port, _host="127.0.0.1": True)
+
+    with pytest.raises(SystemExit), caplog.at_level(logging.INFO):
+        launcher._ensure_port_available("Backend", 8000)
+
+    assert "already in use" in caplog.text
+    assert "makerlab --stop" in caplog.text
+
+
+def test_ensure_port_available_passes_when_free(monkeypatch: pytest.MonkeyPatch) -> None:
+    import lelab.scripts.lelab as launcher
+
+    monkeypatch.setattr(launcher, "_is_port_open", lambda _port, _host="127.0.0.1": False)
+    # Returns without raising.
+    launcher._ensure_port_available("Backend", 8000)
+
+
+def test_terminate_tree_terminates_parent_and_children(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tree teardown terminates the parent AND every descendant (so npm/vite
+    and uvicorn reload workers can't outlive the parent and hold the ports)."""
+    import lelab.scripts.lelab as launcher
+
+    terminated: list[int] = []
+    killed: list[int] = []
+
+    class _TreeProc:
+        def __init__(self, pid: int, kids: list[int] | None = None) -> None:
+            self.pid = pid
+            self._kids = kids or []
+
+        def children(self, recursive: bool = False) -> list:
+            return [_TreeProc(k) for k in self._kids]
+
+        def terminate(self) -> None:
+            terminated.append(self.pid)
+
+        def kill(self) -> None:  # pragma: no cover - alive list is empty here
+            killed.append(self.pid)
+
+    monkeypatch.setattr(launcher.psutil, "Process", lambda pid: _TreeProc(pid, kids=[2, 3]))
+    monkeypatch.setattr(launcher.psutil, "wait_procs", lambda procs, timeout=None: (procs, []))
+
+    launcher._terminate_tree(1)
+
+    # Parent (1) plus both children (2, 3) all get terminate(); nothing killed.
+    assert sorted(terminated) == [1, 2, 3]
+    assert killed == []
