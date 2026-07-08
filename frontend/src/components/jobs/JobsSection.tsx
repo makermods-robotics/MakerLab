@@ -12,22 +12,19 @@ import {
   deleteJob,
   dismissHubJob,
   getJob,
-  importModel,
   isHubJobActive,
   jobDisplayName,
   listHubJobs,
   listJobs,
   stopJob,
 } from "@/lib/jobsApi";
-import { ApiError } from "@/lib/apiClient";
 import { listJobCheckpoints } from "@/lib/checkpointsApi";
 import { useNavigate } from "react-router-dom";
 import JobCard from "./JobCard";
 import HubJobCard from "./HubJobCard";
 import HubModelCard from "./HubModelCard";
-import InferenceModal from "@/components/landing/InferenceModal";
 import ImportModelModal from "./ImportModelModal";
-import { useRobots } from "@/hooks/useRobots";
+import { useInferenceLaunch } from "@/hooks/useInferenceLaunch";
 import {
   Collapsible,
   CollapsibleContent,
@@ -59,11 +56,15 @@ const JobsSection: React.FC = () => {
   const [hubError, setHubError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
 
-  const { selectedRecord } = useRobots();
-  const [inferenceModalOpen, setInferenceModalOpen] = useState(false);
+  // Shared inference-launch machinery (also driven by the Landing Models
+  // panel's footer): play(job, step) opens the modal; importSource is the lazy
+  // auto-import for untracked repos; modal is the rendered InferenceModal.
+  const {
+    play: handlePlay,
+    importSource,
+    modal: inferenceModal,
+  } = useInferenceLaunch();
   const [importModalOpen, setImportModalOpen] = useState(false);
-  const [inferenceJob, setInferenceJob] = useState<JobRecord | null>(null);
-  const [inferenceStep, setInferenceStep] = useState<number | null>(null);
 
   const refresh = useCallback(async () => {
     // Settle the two fetches independently: a hub failure (network, HF outage,
@@ -192,44 +193,21 @@ const JobsSection: React.FC = () => {
     }
   };
 
-  const handlePlay = (job: JobRecord, step: number | null) => {
-    setInferenceJob(job);
-    setInferenceStep(step);
-    setInferenceModalOpen(true);
-  };
-
   // Lazy auto-import: an untracked Hub model card's Run inference / Fine-tune
   // buttons route through here. We first register the repo as an imported
-  // pseudo-job (idempotent — a re-import returns the existing record), then
-  // proceed exactly as if the user had clicked the action on the resulting
-  // imported-model card. The listing then re-renders the repo as a tracked
-  // imported card (see trackedRepoIds, which now also covers imported records),
-  // so the Hub card disappears on the next refresh.
-  //
-  // Husk repos (a cloud run that died before its first checkpoint save) have no
-  // usable model, so register_imported rejects them with a 400 — we catch it and
-  // show the plain "no checkpoints" answer instead of opening a broken modal.
+  // pseudo-job (idempotent — a re-import returns the existing record; husk
+  // repos get the "no checkpoints" toast — both owned by the shared
+  // useInferenceLaunch.importSource), then proceed exactly as if the user had
+  // clicked the action on the resulting imported-model card. The listing then
+  // re-renders the repo as a tracked imported card (see trackedRepoIds, which
+  // now also covers imported records), so the Hub card disappears on the next
+  // refresh.
   const handleLazyImportAction = async (
     repoId: string,
     action: "inference" | "finetune",
   ) => {
-    let record: JobRecord;
-    try {
-      record = await importModel(baseUrl, fetchWithHeaders, repoId);
-    } catch (e) {
-      const isHusk =
-        e instanceof ApiError && (e.status === 400 || e.status === 404);
-      toast({
-        title: isHusk ? "No checkpoints in this repo" : "Import failed",
-        description: isHusk
-          ? "The run likely died before its first checkpoint save."
-          : e instanceof Error
-            ? e.message
-            : String(e),
-        variant: "destructive",
-      });
-      return;
-    }
+    const record = await importSource(repoId);
+    if (!record) return;
     // The imported record now tracks this repo; drop the Hub card immediately
     // rather than waiting for the WS/refresh round-trip.
     refresh();
@@ -665,15 +643,7 @@ const JobsSection: React.FC = () => {
         )}
       </div>
 
-      {inferenceJob ? (
-        <InferenceModal
-          open={inferenceModalOpen}
-          onOpenChange={setInferenceModalOpen}
-          robot={selectedRecord}
-          jobId={inferenceJob.id}
-          initialStep={inferenceStep}
-        />
-      ) : null}
+      {inferenceModal}
 
       <ImportModelModal
         open={importModalOpen}

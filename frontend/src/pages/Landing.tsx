@@ -31,6 +31,7 @@ import ImportModelFromDiskDialog from "@/components/landing/ImportModelFromDiskD
 import DatasetInfoCard from "@/components/landing/DatasetInfoCard";
 import ModelPicker from "@/components/landing/ModelPicker";
 import ModelInfoCard from "@/components/landing/ModelInfoCard";
+import ModelLaunchFooter from "@/components/landing/ModelLaunchFooter";
 import MergeDatasetsDialog from "@/components/landing/MergeDatasetsDialog";
 import ManageCachesDialog from "@/components/landing/ManageCachesDialog";
 import JobsSection from "@/components/jobs/JobsSection";
@@ -43,6 +44,7 @@ import { useDatasets } from "@/hooks/useDatasets";
 import { useModels } from "@/hooks/useModels";
 import { useSelectedDataset } from "@/hooks/useSelectedDataset";
 import { useSelectedModel } from "@/hooks/useSelectedModel";
+import { useInferenceLaunch } from "@/hooks/useInferenceLaunch";
 import {
   DatasetInfo,
   DatasetItem,
@@ -157,6 +159,11 @@ const Landing = () => {
   // the right item through the confirm dialog.
   const selectedModelItem =
     models.find((m) => m.id === selectedModel) ?? null;
+
+  // Shared inference-launch machinery (the same hook JobsSection consumes):
+  // the Models panel footer's "Run inference" drives it, and `modal` renders
+  // the one InferenceModal instance for this page section.
+  const inferenceLaunch = useInferenceLaunch();
 
   // Clear camera state and release streams when returning to landing page
   useEffect(() => {
@@ -776,6 +783,16 @@ const Landing = () => {
                 onDownloaded={refreshModels}
               />
             )}
+            {/* Deploy footer — mirrors the dataset panel's footer row: pick a
+                checkpoint (defaults to latest) and run inference on the
+                selected model, via the same launch machinery the Jobs cards
+                use (shared useInferenceLaunch). */}
+            <ModelLaunchFooter
+              model={selectedModelItem}
+              onPlay={inferenceLaunch.play}
+              onImportSource={inferenceLaunch.importSource}
+            />
+            {inferenceLaunch.modal}
           </div>
         </div>
       </div>
