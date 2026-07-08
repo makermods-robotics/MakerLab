@@ -1890,24 +1890,26 @@ const Calibration = () => {
                         single leader + follower pair covers single AND bimanual
                         modes (no per-slot duplication). */}
                     <Button
-                      size="icon"
+                      size="sm"
                       variant="ghost"
-                      className="ml-auto h-6 w-6 text-slate-400 hover:text-white"
+                      className="ml-auto h-6 gap-1.5 px-2 text-xs text-slate-400 hover:text-white"
                       onClick={() => openCalibrationFolder("teleop")}
                       aria-label="Open leader calibrations folder"
                       title="Open leader calibrations folder"
                     >
                       <FolderOpen className="w-4 h-4" />
+                      Leader
                     </Button>
                     <Button
-                      size="icon"
+                      size="sm"
                       variant="ghost"
-                      className="h-6 w-6 text-slate-400 hover:text-white"
+                      className="h-6 gap-1.5 px-2 text-xs text-slate-400 hover:text-white"
                       onClick={() => openCalibrationFolder("robot")}
                       aria-label="Open follower calibrations folder"
                       title="Open follower calibrations folder"
                     >
                       <FolderOpen className="w-4 h-4" />
+                      Follower
                     </Button>
                   </div>
                   {(isBimanual
