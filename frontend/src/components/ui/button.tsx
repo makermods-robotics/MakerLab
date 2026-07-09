@@ -5,11 +5,11 @@ import { cva, type VariantProps } from "class-variance-authority"
 import { cn } from "@/lib/utils"
 
 const buttonVariants = cva(
-  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md font-display text-sm font-semibold tracking-[0.02em] ring-offset-background transition-all duration-[120ms] ease-std focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 active:scale-[0.98] disabled:pointer-events-none disabled:opacity-40 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0",
+  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-all duration-[120ms] ease-std focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 active:scale-[0.98] disabled:pointer-events-none disabled:opacity-40 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0",
   {
     variants: {
       variant: {
-        default: "bg-primary text-primary-foreground hover:opacity-85",
+        default: "bg-primary text-primary-foreground shadow-1 hover:opacity-90",
         destructive:
           "border border-destructive bg-transparent text-destructive hover:bg-destructive hover:text-destructive-foreground",
         outline:
@@ -18,10 +18,10 @@ const buttonVariants = cva(
           "border border-input bg-card text-foreground hover:bg-accent",
         ghost: "text-foreground hover:bg-accent",
         link: "text-foreground underline underline-offset-4 hover:opacity-70",
-        brand: "bg-brand text-brand-foreground hover:bg-brand-hover",
-        notch: "notch-sm bg-primary text-primary-foreground hover:opacity-85",
+        brand: "bg-primary text-primary-foreground shadow-1 hover:opacity-90",
+        notch: "bg-primary text-primary-foreground shadow-1 hover:opacity-90",
         "notch-brand":
-          "notch-sm bg-brand text-brand-foreground hover:bg-brand-hover",
+          "bg-primary text-primary-foreground shadow-1 hover:opacity-90",
       },
       size: {
         default: "h-10 px-4 py-2",
