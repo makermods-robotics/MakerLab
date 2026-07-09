@@ -18,7 +18,6 @@ import {
 } from "@/components/ui/collapsible";
 import { useToast } from "@/hooks/use-toast";
 import { useAvailableCameras } from "@/hooks/useAvailableCameras";
-import { useCameraStream } from "@/hooks/useCameraStream";
 import BackendCameraStream from "@/components/BackendCameraStream";
 
 // Sentinels distinguish "leave unset" (auto-detect / platform default) from an
@@ -64,11 +63,17 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
 }) => {
   const { toast } = useToast();
 
+  // Recording start pauses the previews via releaseStreamsRef; gate camera
+  // enumeration on the same flag so the getUserMedia/devicechange probing fully
+  // stops before cv2 opens the devices. Otherwise the enumeration probe can
+  // keep index 0 open and starve the recorder (OpenCVCamera(0) actual_fps=5.0).
+  const [streamsPaused, setStreamsPaused] = useState(false);
+
   const {
     cameras: availableCameras,
     isLoading: isLoadingCameras,
     refresh: refreshCameras,
-  } = useAvailableCameras();
+  } = useAvailableCameras({ enabled: !streamsPaused });
   const [selectedCameraIndex, setSelectedCameraIndex] = useState<string>("");
   const [cameraName, setCameraName] = useState("");
 
@@ -184,9 +189,11 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
   };
 
   // When the recording session is starting, the parent calls
-  // releaseStreamsRef.current() to make every CameraPreview drop its browser
-  // stream so cv2.VideoCapture can grab the camera exclusively.
-  const [streamsPaused, setStreamsPaused] = useState(false);
+  // releaseStreamsRef.current() to pause every preview: unmounting each backend
+  // MJPEG <img> drops its HTTP connection so the server releases the shared
+  // capture, letting cv2.VideoCapture grab the camera exclusively for recording.
+  // Flipping streamsPaused also disables useAvailableCameras above (which still
+  // probes via getUserMedia/enumerateDevices) — see its comment.
   const releaseAllCameraStreams = useCallback(() => {
     setStreamsPaused(true);
   }, []);
@@ -266,15 +273,22 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
         </div>
 
         {/* Live preview appears as soon as a camera is selected; naming +
-            confirmation happens alongside it. */}
+            confirmation happens alongside it. This is the recorder's own view
+            (the backend cv2 feed at this index), so what you preview is exactly
+            what records — no browser deviceId fuzzy-match. */}
         {selectedCamera && (
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div className="rounded-lg border border-border bg-card overflow-hidden">
               <CameraStreamBox
-                deviceId={selectedCamera.deviceId}
                 cameraIndex={selectedCamera.index}
                 paused={streamsPaused}
               />
+              <div className="border-t border-gray-700 px-2 py-1.5">
+                <span className="text-[11px] text-gray-400 truncate">
+                  Recorder's view — index {selectedCamera.index} (what actually
+                  records)
+                </span>
+              </div>
             </div>
 
             <div className="flex flex-col justify-center gap-4">
@@ -331,42 +345,28 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
 };
 
 interface CameraStreamBoxProps {
-  deviceId: string;
   paused: boolean;
-  /** cv2 index on the server — MJPEG fallback when there's no browser
-   * deviceId match (headless deployment: cameras plugged into the server). */
+  /** cv2 index on the server — the live backend MJPEG feed at this index is the
+   * recorder's own view, so what you preview is exactly what records. */
   cameraIndex?: number;
 }
 
-/** Live preview for a camera. Used both for the pre-add preview (as soon as
- * a camera is picked in the dropdown) and for each configured camera's card.
- * A camera with a browser deviceId match streams via getUserMedia (the hook
- * stops the stream on deviceId change and on unmount); one without a match
- * but with a known cv2 index falls back to the backend MJPEG stream. Pausing
- * (recording start / modal close) unmounts the MJPEG img, whose cleanup
- * clears the src so the HTTP connection drops and the server releases the
- * camera — mirroring the getUserMedia release semantics. */
+/** Live preview for a camera: the backend cv2 MJPEG feed at ``cameraIndex``.
+ * Used both for the pre-add preview (as soon as a camera is picked in the
+ * dropdown) and for each configured camera's card. This is exactly what the
+ * recorder sees at that index — no browser deviceId fuzzy-match. Pausing
+ * (recording start / modal close) unmounts the MJPEG img, whose cleanup clears
+ * the src so the HTTP connection drops and the server releases the shared
+ * capture — so cv2 can then grab the camera exclusively for recording. */
 const CameraStreamBox: React.FC<CameraStreamBoxProps> = ({
-  deviceId,
   paused,
   cameraIndex,
 }) => {
-  const { videoRef, hasError: streamError } = useCameraStream(deviceId, paused);
-
-  const showVideo = !paused && deviceId && !streamError;
   // BackendCameraStream owns its own failure/retry UI — no error latch here.
-  const showMjpeg = !paused && !deviceId && cameraIndex !== undefined;
+  const showMjpeg = !paused && cameraIndex !== undefined;
   return (
     <div className="aspect-[4/3] bg-secondary relative">
-      {showVideo ? (
-        <video
-          ref={videoRef}
-          autoPlay
-          muted
-          playsInline
-          className="w-full h-full object-cover"
-        />
-      ) : showMjpeg ? (
+      {showMjpeg ? (
         <BackendCameraStream
           cameraIndex={cameraIndex}
           className="w-full h-full object-cover"
@@ -375,11 +375,7 @@ const CameraStreamBox: React.FC<CameraStreamBoxProps> = ({
         <div className="w-full h-full flex flex-col items-center justify-center">
           <VideoOff className="w-8 h-8 text-muted-foreground mb-2" />
           <span className="text-muted-foreground text-sm">
-            {paused
-              ? "Preview paused"
-              : deviceId
-              ? "Preview failed"
-              : "No browser match"}
+            {paused ? "Preview paused" : "No camera index"}
           </span>
         </div>
       )}
@@ -403,7 +399,6 @@ const CameraPreview: React.FC<CameraPreviewProps> = ({
   return (
     <div className="bg-card rounded-lg border border-border overflow-hidden">
       <CameraStreamBox
-        deviceId={camera.device_id}
         cameraIndex={camera.camera_index}
         paused={paused}
       />
