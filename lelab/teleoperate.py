@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import contextlib
 import logging
 import math
 import threading
@@ -416,6 +417,19 @@ def force_disable_torque(device, label: str = "device") -> list[str]:
     """
     problems: list[str] = []
     for bus in _device_buses(device):
+        # The Dynamixel SDK port handler can be left flagged "in use" after a
+        # failed read/write in the control loop. LeRobot's normal
+        # bus.disconnect() clears this before disabling torque; mirror that here
+        # because this belt-and-braces path deliberately bypasses disconnect()
+        # to disable motors one by one.
+        port_handler = getattr(bus, "port_handler", None)
+        if port_handler is not None:
+            try:
+                port_handler.clearPort()
+            except Exception:
+                pass
+            with contextlib.suppress(Exception):
+                port_handler.is_using = False
         failed: list[str] = []
         for motor in getattr(bus, "motors", None) or {}:
             try:

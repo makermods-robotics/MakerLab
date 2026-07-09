@@ -299,6 +299,15 @@ class _FakeBus:
         self.disabled.append((motor, num_retry))
 
 
+class _FakePortHandler:
+    def __init__(self) -> None:
+        self.is_using = True
+        self.clear_calls = 0
+
+    def clearPort(self) -> None:
+        self.clear_calls += 1
+
+
 class _FakeArm:
     def __init__(self, bus: _FakeBus) -> None:
         self.bus = bus
@@ -314,6 +323,24 @@ def test_force_disable_torque_disables_every_motor() -> None:
     # Every motor is disabled individually, with retries.
     assert [motor for motor, _ in bus.disabled] == list(bus.motors)
     assert all(num_retry == 5 for _, num_retry in bus.disabled)
+
+
+def test_force_disable_torque_clears_busy_port_before_writing() -> None:
+    """After a camera/control-loop failure the SDK port handler can still be
+    marked in-use; clear that latch before direct torque writes or every motor
+    reports '[TxRxResult] Port is in use!'."""
+    from lelab.teleoperate import force_disable_torque
+
+    bus = _FakeBus()
+    port_handler = _FakePortHandler()
+    bus.port_handler = port_handler  # type: ignore[attr-defined]
+
+    problems = force_disable_torque(_FakeArm(bus), "follower arm")
+
+    assert problems == []
+    assert port_handler.clear_calls == 1
+    assert port_handler.is_using is False
+    assert [motor for motor, _ in bus.disabled] == list(bus.motors)
 
 
 def test_force_disable_torque_reports_failed_motor_and_port() -> None:
