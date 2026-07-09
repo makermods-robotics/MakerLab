@@ -73,7 +73,7 @@ const Inference: React.FC = () => {
               variant: next.exit_code === 0 ? "default" : "destructive",
             });
           }
-          navigate("/");
+          navigate("/training");
           return;
         }
         // Safety net: only fire after the rollout *main loop* has actually

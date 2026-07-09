@@ -62,6 +62,7 @@ interface CompletedDatasetState {
   dataset_repo_id?: string;
   repo_id?: string;
   repoId?: string;
+  saved_episodes?: number;
   num_episodes?: number;
   episodes?: number;
   recorded_episodes?: number;
@@ -80,7 +81,11 @@ const getCompletedRepoId = (completed: CompletedDatasetState) =>
   completed.dataset_repo_id ?? completed.repo_id ?? completed.repoId ?? null;
 
 const getCompletedEpisodes = (completed: CompletedDatasetState) =>
-  completed.num_episodes ?? completed.recorded_episodes ?? completed.episodes ?? null;
+  completed.saved_episodes ??
+  completed.num_episodes ??
+  completed.recorded_episodes ??
+  completed.episodes ??
+  null;
 
 const Collect: React.FC = () => {
   const navigate = useNavigate();

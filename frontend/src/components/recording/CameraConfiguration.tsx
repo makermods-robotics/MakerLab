@@ -283,8 +283,8 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
                 cameraIndex={selectedCamera.index}
                 paused={streamsPaused}
               />
-              <div className="border-t border-gray-700 px-2 py-1.5">
-                <span className="text-[11px] text-gray-400 truncate">
+              <div className="border-t border-border px-2 py-1.5">
+                <span className="text-[11px] text-muted-foreground truncate">
                   Recorder's view — index {selectedCamera.index} (what actually
                   records)
                 </span>
