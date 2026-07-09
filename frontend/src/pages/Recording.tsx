@@ -1,15 +1,8 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
 import { Button } from "@/components/ui/button";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 import { useToast } from "@/hooks/use-toast";
 import {
-  MoreHorizontal,
   RotateCcw,
   SkipForward,
   Play,
@@ -541,19 +534,22 @@ const Recording = () => {
     navigate("/");
   }, [backendStatus, recordingConfig, baseUrl, fetchWithHeaders, navigate]);
 
-  // Re-record is no longer keyboard-driven (the ArrowLeft binding was removed —
-  // a back-gesture keystroke shouldn't discard the in-progress episode), so it's
-  // reached only via the on-screen dropdown item and doesn't need to sit in the
-  // stable keydown-handler ref.
+  // Re-record is keyboard-driven again, on BACKSPACE (explicit user request;
+  // the old ArrowLeft binding was removed because a back-gesture keystroke
+  // discarding the in-progress episode felt accidental — Backspace is a
+  // deliberate "delete" gesture, and the handler still preventDefaults so it
+  // can never double as browser back-navigation).
   const anyExitDialogOpen = showDoneConfirm || showQuitConfirm;
   const handlersRef = useRef({
     handleExitEarly,
+    handleRerecordEpisode,
     requestDone,
     anyExitDialogOpen,
   });
   useEffect(() => {
     handlersRef.current = {
       handleExitEarly,
+      handleRerecordEpisode,
       requestDone,
       anyExitDialogOpen,
     };
@@ -576,6 +572,11 @@ const Recording = () => {
       if (e.key === " " || e.code === "Space" || e.key === "ArrowRight") {
         e.preventDefault();
         handlersRef.current.handleExitEarly();
+      } else if (e.key === "Backspace") {
+        // Deliberate delete gesture: discard and re-record the current episode.
+        // preventDefault also guarantees it never acts as browser back-nav.
+        e.preventDefault();
+        handlersRef.current.handleRerecordEpisode();
       } else if (e.key === "Escape") {
         if (handlersRef.current.anyExitDialogOpen) return;
         // Escape = finish & keep (the least destructive exit). Quit is an
@@ -721,32 +722,6 @@ const Recording = () => {
                 >
                   {muted ? <VolumeX className="w-5 h-5" /> : <Volume2 className="w-5 h-5" />}
                 </Button>
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-8 w-8 text-gray-400 hover:text-white hover:bg-gray-800"
-                      aria-label="More actions"
-                    >
-                      <MoreHorizontal className="w-5 h-5" />
-                    </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent
-                    align="end"
-                    onCloseAutoFocus={(e) => e.preventDefault()}
-                    className="bg-gray-900 border-gray-700 text-white"
-                  >
-                    <DropdownMenuItem
-                      onClick={handleRerecordEpisode}
-                      disabled={!backendStatus.available_controls.rerecord_episode}
-                      className="focus:bg-gray-800 focus:text-white"
-                    >
-                      <RotateCcw className="w-4 h-4 mr-2" />
-                      Re-record episode
-                    </DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>
               </div>
 
               <div className="text-center mb-6">
@@ -778,21 +753,37 @@ const Recording = () => {
                 />
               </div>
 
-              <Button
-                onClick={handleExitEarly}
-                disabled={
-                  !backendStatus.available_controls.exit_early ||
-                  optimisticPhase !== null ||
-                  currentPhase === "completed"
-                }
-                className={`w-full text-white font-semibold py-6 text-lg disabled:opacity-50 ${phaseColor.button}`}
-              >
-                <PrimaryIcon className="w-5 h-5 mr-2" />
-                {primaryLabel}
-                {currentPhase !== "completed" && (
-                  <span className="ml-3 px-2 py-0.5 rounded text-xs font-mono bg-black/30 text-white/70">SPACE / →</span>
-                )}
-              </Button>
+              {/* Primary advance + re-record side by side: retaking a bad take
+                  is a first-class action during collection, not a hidden menu
+                  item. Backspace mirrors the button (a deliberate delete
+                  gesture — see the keydown handler note). */}
+              <div className="flex gap-3">
+                <Button
+                  onClick={handleExitEarly}
+                  disabled={
+                    !backendStatus.available_controls.exit_early ||
+                    optimisticPhase !== null ||
+                    currentPhase === "completed"
+                  }
+                  className={`flex-1 text-white font-semibold py-6 text-lg disabled:opacity-50 ${phaseColor.button}`}
+                >
+                  <PrimaryIcon className="w-5 h-5 mr-2" />
+                  {primaryLabel}
+                  {currentPhase !== "completed" && (
+                    <span className="ml-3 px-2 py-0.5 rounded text-xs font-mono bg-black/30 text-white/70">SPACE / →</span>
+                  )}
+                </Button>
+                <Button
+                  onClick={handleRerecordEpisode}
+                  disabled={!backendStatus.available_controls.rerecord_episode}
+                  variant="outline"
+                  className="py-6 text-lg font-semibold border-gray-600 bg-transparent text-gray-200 hover:bg-gray-800 hover:text-white disabled:opacity-50"
+                >
+                  <RotateCcw className="w-5 h-5 mr-2" />
+                  Re-record
+                  <span className="ml-3 px-2 py-0.5 rounded text-xs font-mono bg-white/10 text-white/60">⌫</span>
+                </Button>
+              </div>
             </>
           )}
 
