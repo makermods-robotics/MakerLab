@@ -2,26 +2,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useApi } from "@/contexts/ApiContext";
 
 export interface AvailableCamera {
-  /** cv2 integer index at enumeration time — informational/fallback only:
-   * previews and saved configs address cameras by `uniqueId`; the index is the
-   * address of last resort for rows/platforms without a stable id. */
   index: number;
   name: string;
-  /** Browser MediaDeviceInfo.deviceId, matched by display name — AMBIGUOUS for
-   * identical camera models. LEGACY: its only remaining consumer is the
-   * unambiguous-match backfill for saved entries that predate unique_id (see
-   * lib/resyncCameras). Nothing else should key on it; delete it (and the
-   * browser-label matching below) once pre-unique_id configs have aged out. */
   deviceId: string;
   available: boolean;
-  /**
-   * PRIMARY KEY: stable hardware id (AVFoundation uniqueID on macOS; absent on
-   * platforms that don't expose one). Unlike `index`, it survives USB hotplug
-   * reshuffles — previews request /camera-preview/{uniqueId} and saved configs
-   * bind to it (the backend re-resolves the current index at record start and
-   * at every preview open). Undefined when the backend didn't provide one.
-   */
-  uniqueId?: string;
 }
 
 const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
@@ -29,25 +13,16 @@ const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
 interface UseAvailableCamerasOptions {
   /** When false, do nothing. Use to gate on modal open. */
   enabled?: boolean;
-  /** Whether to ask the browser for MediaDeviceInfo labels/deviceIds.
-   *
-   * Keep this off for surfaces that only need backend unique_id validation
-   * (teleop preview): the label unlock path may briefly call getUserMedia(),
-   * which can grab a real local camera and collide with the backend MJPEG
-   * stream. */
-  matchBrowserDevices?: boolean;
 }
 
 /**
- * Enumerates the server's cameras from `/available-cameras` (uniqueId is each
- * row's primary key; the cv2 index is informational) and merges each with the
- * matching browser deviceId (by AVFoundation localizedName) — the deviceId is
- * kept ONLY for the legacy unique_id backfill (see AvailableCamera.deviceId).
- * Refreshes on USB hotplug.
+ * Enumerates cv2 camera indices from `/available-cameras` and merges each
+ * with the matching browser deviceId (by AVFoundation localizedName) so
+ * callers can render a preview alongside the bound dropdowns. Refreshes on
+ * USB hotplug.
  */
 export function useAvailableCameras({
   enabled = true,
-  matchBrowserDevices = true,
 }: UseAvailableCamerasOptions = {}) {
   const { baseUrl, fetchWithHeaders } = useApi();
   const [cameras, setCameras] = useState<AvailableCamera[]>([]);
@@ -75,7 +50,7 @@ export function useAvailableCameras({
       // still list and recording works, there are just no live previews.
       let browserDevices: { deviceId: string; label: string }[] = [];
       const md = navigator.mediaDevices;
-      if (matchBrowserDevices && md) {
+      if (md) {
         let devices = await md.enumerateDevices();
         const hasLabels = devices.some((d) => d.kind === "videoinput" && d.label);
         // Only open a real stream if labels are still hidden (permission not yet
@@ -106,7 +81,6 @@ export function useAvailableCameras({
         index: number;
         name?: string;
         available: boolean;
-        unique_id?: string;
       }[] = data.cameras ?? [];
 
       // Browser's MediaDeviceInfo.label starts with AVFoundation's localizedName
@@ -131,7 +105,6 @@ export function useAvailableCameras({
           name: label,
           deviceId: match?.deviceId ?? "",
           available: cam.available,
-          uniqueId: cam.unique_id,
         };
       });
       setCameras(merged);
@@ -145,7 +118,7 @@ export function useAvailableCameras({
       setIsLoading(false);
       refreshingRef.current = false;
     }
-  }, [baseUrl, fetchWithHeaders, matchBrowserDevices]);
+  }, [baseUrl, fetchWithHeaders]);
 
   useEffect(() => {
     if (!enabled) return;

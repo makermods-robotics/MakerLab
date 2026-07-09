@@ -16,10 +16,13 @@ import asyncio
 import concurrent.futures
 import contextlib
 import io
+import json
 import logging
 import os
 import queue
 import re
+import subprocess
+import sys
 import threading
 import time
 import zipfile
@@ -29,7 +32,7 @@ from typing import Any, Literal
 import httpx
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from huggingface_hub.errors import HfHubHTTPError
 from pydantic import BaseModel
@@ -41,14 +44,11 @@ from starlette.types import Scope
 from lerobot.policies.factory import make_policy_config
 
 # Module objects (not from-imports) so live attribute access always sees the
-# current value: record REBINDS its recording_active global (a from-import would
-# freeze the startup value), and camera_enumeration.list_cameras is monkeypatched
-# in tests — both need attribute lookup at call time, not a bound name.
+# current value (e.g. globals a feature module rebinds at runtime need attribute
+# lookup at call time, not a bound name frozen at import).
 from . import (
-    camera_enumeration,
     datasets as dataset_browser,
     models as model_browser,
-    record as record_state,
 )
 
 # Import our custom calibration functionality
@@ -59,7 +59,6 @@ from .auto_calibrate import (
     auto_calibration_manager,
 )
 from .calibrate import CalibrationRequest, calibration_manager
-from .camera_preview import CameraOpenError, camera_preview_manager, preview_events
 from .identify import identify_arm_by_motion
 from .jobs import (
     DatasetNotOnHubError,
@@ -2147,120 +2146,168 @@ async def supply_voltage(port: str = ""):
     return await read_supply_voltage(port)
 
 
+# Runs in a fresh Python — see _avfoundation_cameras_in_cv2_order for why.
+# Mirrors OpenCV's macOS enumeration: video + muxed devices sorted by
+# uniqueID (cap_avfoundation_mac.mm), so the returned index matches what
+# cv2.VideoCapture will open.
+_AVF_ENUM_SCRIPT = """
+import json, objc
+from Foundation import NSBundle
+bundle = NSBundle.bundleWithPath_("/System/Library/Frameworks/AVFoundation.framework")
+bundle.load()
+types = []
+for name in (
+    "AVCaptureDeviceTypeBuiltInWideAngleCamera",
+    "AVCaptureDeviceTypeExternalUnknown",   # macOS < 14
+    "AVCaptureDeviceTypeExternal",          # macOS >= 14
+    "AVCaptureDeviceTypeContinuityCamera",  # macOS >= 14
+    "AVCaptureDeviceTypeDeskViewCamera",    # macOS >= 13
+):
+    loaded = {}
+    try:
+        objc.loadBundleVariables(bundle, loaded, [(name, b"@")])
+    except objc.error:
+        continue
+    if loaded.get(name) is not None:
+        types.append(loaded[name])
+cls = objc.lookUpClass("AVCaptureDeviceDiscoverySession")
+devs = []
+for mt in ("vide", "muxx"):
+    devs.extend(cls.discoverySessionWithDeviceTypes_mediaType_position_(types, mt, 0).devices() or [])
+devs.sort(key=lambda d: d.uniqueID())
+print(json.dumps([
+    {"index": i, "name": str(d.localizedName()), "unique_id": str(d.uniqueID())}
+    for i, d in enumerate(devs)
+]))
+"""
+
+
+def _avfoundation_cameras_in_cv2_order() -> list[dict[str, Any]]:
+    """Enumerate macOS cameras in a fresh Python subprocess.
+
+    AVFoundation's in-process device cache doesn't refresh on USB
+    hotplug. Both the deprecated ``+devicesWithMediaType:`` and a
+    long-lived ``AVCaptureDeviceDiscoverySession`` go stale, because
+    device-connection notifications are delivered via
+    ``NSNotificationCenter`` on a thread that needs an active
+    ``NSRunLoop`` — uvicorn workers don't run one. A fresh subprocess
+    re-initializes AVFoundation, which reads IOKit's live device state
+    at startup.
+    """
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", _AVF_ENUM_SCRIPT],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+        )
+    except (subprocess.SubprocessError, OSError) as e:
+        logger.warning("AVFoundation enumeration subprocess failed: %s", e)
+        return []
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError as e:
+        logger.warning("AVFoundation enumeration returned invalid JSON: %s", e)
+        return []
+
+
+def _generic_cv2_cameras(backend) -> list[dict[str, Any]]:
+    """Last-resort enumeration: probe cv2 indices with placeholder names."""
+    import cv2
+
+    cameras: list[dict[str, Any]] = []
+    for i in range(10):
+        cap = cv2.VideoCapture(i, backend)
+        opened = cap.isOpened()
+        cap.release()
+        if opened:
+            cameras.append({"index": i, "name": f"Camera {i}", "available": True})
+    return cameras
+
+
+def _windows_cameras() -> list[dict[str, Any]]:
+    """Enumerate Windows cameras with their real DirectShow names.
+
+    pygrabber lists DirectShow video devices in the same order cv2's DSHOW
+    backend indexes them (which recording is pinned to), so the returned index
+    matches what ``cv2.VideoCapture(i, CAP_DSHOW)`` opens. The real names let the
+    frontend match each index to the browser's ``MediaDeviceInfo.label`` for the
+    live preview. Falls back to generic names if pygrabber is unavailable.
+    """
+    try:
+        from pygrabber.dshow_graph import FilterGraph
+
+        names = FilterGraph().get_input_devices()
+    except Exception as e:  # ImportError, or a COM/DirectShow failure
+        logger.warning("pygrabber unavailable; using generic camera names: %s", e)
+        import cv2
+
+        return _generic_cv2_cameras(cv2.CAP_DSHOW)
+    return [{"index": i, "name": name, "available": True} for i, name in enumerate(names)]
+
+
+def _v4l2_camera_name(index: int) -> str | None:
+    """Real camera name for /dev/video{index} from sysfs (Linux, no deps)."""
+    try:
+        with open(f"/sys/class/video4linux/video{index}/name", encoding="utf-8") as f:
+            return f.read().strip() or None
+    except OSError:
+        return None
+
+
+def _linux_cameras() -> list[dict[str, Any]]:
+    """Enumerate Linux cameras, naming each from sysfs (no extra deps)."""
+    import cv2
+
+    cameras: list[dict[str, Any]] = []
+    for i in range(10):
+        cap = cv2.VideoCapture(i, cv2.CAP_V4L2)
+        opened = cap.isOpened()
+        cap.release()
+        if not opened:
+            continue
+        cameras.append({"index": i, "name": _v4l2_camera_name(i) or f"Camera {i}", "available": True})
+    return cameras
+
+
 @app.get("/available-cameras")
 def get_available_cameras():
-    """List cameras; ``unique_id`` is each row's PRIMARY KEY where the platform
-    exposes one — previews are requested by it (/camera-preview/{camera_id})
-    and saved configs bind to it. ``index`` (the cv2 integer, in the same
-    ordering cv2 will use to record) is demoted to informational: it is the
-    fallback address only for rows/platforms without a stable id.
+    """List cameras with the same index ordering cv2 will use to record.
 
-    Enumeration (and the id→current-index resolution used at record start and
-    preview open) lives in lelab/camera_enumeration.py, shared with the recording
-    start path. Each platform enumerates in the order its cv2 backend indexes
-    devices, pairing each index with the device's real name so the frontend can
-    match it to the browser's ``MediaDeviceInfo.label`` for the live preview:
-      - macOS: AVFoundation ``localizedName`` + ``unique_id`` (PyObjC subprocess);
+    Each platform enumerates in the order its cv2 backend indexes devices, and
+    pairs each index with the device's real name so the frontend can match it to
+    the browser's ``MediaDeviceInfo.label`` for the live preview:
+      - macOS: AVFoundation ``localizedName`` (via a PyObjC subprocess);
       - Windows: DirectShow FriendlyName (via pygrabber; recording pinned DSHOW);
       - Linux: the v4l2 device name from sysfs.
     Without real names the frontend can't match a camera and shows "No browser
     match" with an empty device_id (issues #12, #16).
     """
     try:
-        cameras = camera_enumeration.list_cameras()
+        import platform
+
+        system = platform.system()
+
+        if system == "Darwin":
+            cameras = _avfoundation_cameras_in_cv2_order()
+            for cam in cameras:
+                cam["available"] = True
+            return {"status": "success", "cameras": cameras}
+        if system == "Windows":
+            return {"status": "success", "cameras": _windows_cameras()}
+        if system == "Linux":
+            return {"status": "success", "cameras": _linux_cameras()}
+
+        import cv2
+
+        return {"status": "success", "cameras": _generic_cv2_cameras(cv2.CAP_ANY)}
+    except ImportError:
+        logger.warning("OpenCV not available for camera detection")
+        return {"status": "success", "cameras": []}
     except Exception as e:
         logger.error(f"Error detecting cameras: {e}")
         return {"status": "error", "message": str(e), "cameras": []}
-
-    # A camera the preview manager currently holds open can't be re-opened by
-    # the enumeration probe (the device is busy), so on Linux/Windows/generic it
-    # would silently drop from the list — the very disappearance that made a
-    # wedged wrist cam vanish mid-session. The manager knows it's alive, so add
-    # back any held-and-healthy index the probe missed. A *dead* held capture is
-    # force-released by the reader (see camera_preview._frames), so it is not
-    # reported here and the probe can re-open it fresh.
-    listed = {cam.get("index") for cam in cameras}
-    for index in camera_preview_manager.held_healthy_indices():
-        if index not in listed:
-            cameras.append({"index": index, "name": f"Camera {index}", "available": True})
-    cameras.sort(key=lambda cam: cam.get("index", 0))
-    return {"status": "success", "cameras": cameras}
-
-
-@app.get("/camera-preview/{camera_id}")
-def camera_preview_stream(camera_id: str):
-    """MJPEG preview stream of a camera attached to the *server* machine.
-
-    ``camera_id`` is the camera's stable hardware ``unique_id`` (the primary key
-    of /available-cameras rows, URL-encoded by the frontend). A purely NUMERIC
-    path segment is the back-compat/fallback lane — treated as a raw cv2 index,
-    for platforms and saved entries without stable ids. For id-addressed cameras
-    the cv2 index is re-resolved from a fresh enumeration on every capture open
-    (see lelab/camera_preview.py), so the stream can never show whatever device
-    slid into a stale index slot after a USB reshuffle.
-
-    Fallback for headless deployments (e.g. a Jetson on the LAN): the browser's
-    getUserMedia can't see the server's cameras, so the preview tiles render
-    ``<img src="/camera-preview/{camera_id}">`` instead. The capture is shared
-    and refcounted per camera_id (see lelab/camera_preview.py); recording
-    force-releases every preview on its start path.
-
-    Returns 409 while recording is active (it owns the cv2 devices) and 503 when
-    the camera can't be opened or the id matches no connected device.
-    Teleoperation drives the serial bus and opens no cv2 cameras, so a preview
-    during teleop does not contend — it is allowed.
-    """
-    if record_state.recording_active:
-        raise HTTPException(
-            status_code=409,
-            detail="Recording is active — the cameras are in use. Stop recording to preview them.",
-        )
-    try:
-        stream = camera_preview_manager.open_stream(camera_id)
-    except CameraOpenError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    return StreamingResponse(stream, media_type="multipart/x-mixed-replace; boundary=frame")
-
-
-@app.get("/camera-snapshot/{camera_id}")
-def camera_snapshot(camera_id: str):
-    """One JPEG still of a server-attached camera — the borrow-don't-reserve
-    preview lane.
-
-    Every preview surface polls this endpoint instead of holding standing
-    MJPEG streams: each still is served off the manager's lingering capture
-    (or a one-frame borrow, serialized by the open funnel and coalesced by a
-    short server-side cache), so any number of tiles can coexist without a
-    standing stream per tile. Same addressing and status contract as
-    /camera-preview: 409 while recording owns the devices, 503 when the camera
-    can't be opened, is session-latched, or yields no frame within the bounded
-    wait.
-    """
-    if record_state.recording_active:
-        raise HTTPException(
-            status_code=409,
-            detail="Recording is active — the cameras are in use. Stop recording to preview them.",
-        )
-    try:
-        jpeg = camera_preview_manager.snapshot(camera_id)
-    except CameraOpenError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    return Response(content=jpeg, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
-
-
-@app.get("/camera-preview-events")
-def camera_preview_events():
-    """Forensic event log of the preview manager (see camera_preview._EVENTS).
-
-    Every lifecycle transition — acquire/share/release, birth, first frame,
-    read-failure runs, watchdog kills, force-stops, funnel usurps, linger
-    start/expiry, and reader ABANDONMENTS (leaked threads whose wedged
-    cap.read() may hold a zombie AVCaptureSession that poisons later opens of
-    the same device) — with timestamps, so an intermittent black tile can be
-    diagnosed from its actual history: GET this right after a failure and read
-    the tail.
-    """
-    return preview_events()
 
 
 RobotSideLiteral = Literal["leader", "follower"]

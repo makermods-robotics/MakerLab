@@ -18,7 +18,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { AlertTriangle, CheckCircle, Loader2, Play } from "lucide-react";
+import { AlertTriangle, CheckCircle, Loader2, Play, VideoOff } from "lucide-react";
 import { RobotRecord } from "@/hooks/useRobots";
 import { useApi } from "@/contexts/ApiContext";
 import { useToast } from "@/hooks/use-toast";
@@ -35,8 +35,7 @@ import {
   AvailableCamera,
   useAvailableCameras,
 } from "@/hooks/useAvailableCameras";
-import CameraTile from "@/components/CameraTile";
-import { defaultFourccForCamera } from "@/lib/cameraDefaults";
+import { useCameraStream } from "@/hooks/useCameraStream";
 
 interface Props {
   open: boolean;
@@ -48,7 +47,36 @@ interface Props {
 
 const DEFAULT_FPS = 30;
 
-const cameraKey = (cam: AvailableCamera) => cam.uniqueId ?? String(cam.index);
+const cameraKey = (cam: AvailableCamera) => String(cam.index);
+
+/** Small getUserMedia preview for verifying which physical camera a role binds
+ * to. `paused` drops the browser stream so the rollout subprocess can open the
+ * same device via OpenCV without contending. */
+const CameraThumbnail: React.FC<{ deviceId: string; paused: boolean }> = ({
+  deviceId,
+  paused,
+}) => {
+  const { videoRef, hasError } = useCameraStream(deviceId, paused);
+  if (paused || hasError || !deviceId) {
+    return (
+      <div className="w-32 h-24 bg-gray-800 rounded border border-gray-700 flex flex-col items-center justify-center">
+        <VideoOff className="w-5 h-5 text-gray-500 mb-1" />
+        <span className="text-[10px] text-gray-500">
+          {paused ? "Released" : "No preview"}
+        </span>
+      </div>
+    );
+  }
+  return (
+    <video
+      ref={videoRef}
+      autoPlay
+      muted
+      playsInline
+      className="w-32 h-24 object-cover rounded border border-gray-700 bg-black"
+    />
+  );
+};
 
 /**
  * One camera as the modal sees it. The BiSO prefix round-trip lives here so the
@@ -142,10 +170,10 @@ const InferenceModal: React.FC<Props> = ({
   const [policyConfigLoading, setPolicyConfigLoading] = useState(false);
   const [policyConfigError, setPolicyConfigError] = useState<string | null>(null);
 
-  // Per camera DISPLAY name → user-selected physical camera key (uniqueId when
-  // available, otherwise raw cv2 index string). Keyed by the stripped display
-  // name (== requestKey), not the checkpoint feature key — see `cameraMappings`
-  // / the CameraMapping doc for the round-trip.
+  // Per camera DISPLAY name → user-selected physical camera key (the raw cv2
+  // index string). Keyed by the stripped display name (== requestKey), not the
+  // checkpoint feature key — see `cameraMappings` / the CameraMapping doc for
+  // the round-trip.
   const [cameraBindings, setCameraBindings] = useState<Record<string, string | null>>({});
   const { cameras: availableCameras } = useAvailableCameras({ enabled: open });
 
@@ -235,8 +263,8 @@ const InferenceModal: React.FC<Props> = ({
   // If the selected robot has cameras whose names match a policy-expected
   // camera, auto-bind them. Match against the DISPLAY name (the bare name the
   // user chose at record time — that's what the robot record stores), not the
-  // `left_`-prefixed checkpoint feature. Prefer stable unique_id, then the
-  // legacy browser device_id, then the saved camera_index fallback.
+  // `left_`-prefixed checkpoint feature. Prefer the stored browser device_id,
+  // then the saved camera_index fallback.
   useEffect(() => {
     if (!policyConfig) return;
     const robotCams = robot?.cameras ?? [];
@@ -250,11 +278,9 @@ const InferenceModal: React.FC<Props> = ({
           (c) => c.name.toLowerCase() === m.display.toLowerCase(),
         );
         if (!robotCam) continue;
-        const live = robotCam.unique_id
-          ? availableCameras.find((c) => c.uniqueId === robotCam.unique_id)
-          : robotCam.device_id
-            ? availableCameras.find((c) => c.deviceId === robotCam.device_id)
-            : availableCameras.find((c) => c.index === robotCam.camera_index);
+        const live = robotCam.device_id
+          ? availableCameras.find((c) => c.deviceId === robotCam.device_id)
+          : availableCameras.find((c) => c.index === robotCam.camera_index);
         if (live) {
           next[m.requestKey] = cameraKey(live);
           changed = true;
@@ -343,7 +369,6 @@ const InferenceModal: React.FC<Props> = ({
     const cameraDict: Record<string, {
       type: string;
       camera_index?: number;
-      unique_id?: string;
       width: number;
       height: number;
       fps?: number;
@@ -355,15 +380,12 @@ const InferenceModal: React.FC<Props> = ({
       const live = liveCameraByKey(key);
       if (!live) continue;
       const dims = policyConfig.image_features[m.feature];
-      const fourcc = defaultFourccForCamera(live);
       cameraDict[m.requestKey] = {
         type: "opencv",
         camera_index: live.index,
-        ...(live.uniqueId ? { unique_id: live.uniqueId } : {}),
         width: dims.width,
         height: dims.height,
         fps: DEFAULT_FPS,
-        ...(fourcc ? { fourcc } : {}),
       };
     }
     try {
@@ -606,17 +628,11 @@ const InferenceModal: React.FC<Props> = ({
                           )}
                         </SelectContent>
                       </Select>
-                      {/* ~1s snapshot cadence: binding verification (which
-                          physical camera is this role?) needs the same
-                          wave-and-identify responsiveness as the recording
-                          picker. */}
-                      <CameraTile
-                        size="sm"
-                        cameraId={selectedCamera?.uniqueId}
-                        cameraIndex={selectedCamera?.index}
+                      {/* getUserMedia preview so the user can verify which
+                          physical camera this role binds to. */}
+                      <CameraThumbnail
+                        deviceId={selectedCamera?.deviceId ?? ""}
                         paused={submitting}
-                        emptyLabel="No preview"
-                        snapshotIntervalMs={1000}
                       />
                     </div>
                   );

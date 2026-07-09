@@ -41,9 +41,7 @@ from tqdm.auto import tqdm as _base_tqdm
 
 from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
 
-from . import camera_enumeration
 from .arm_identity import ArmIdentityError, ArmSlot, verify_devices
-from .camera_preview import camera_preview_manager
 from .motor_power import apply_motor_power, clear_goal_velocity
 from .utils.config import (
     bimanual_base_id,
@@ -492,63 +490,6 @@ def _preflight_motor_power(port: str, follower_id: str, percent: int) -> list[st
         return [message]
 
 
-def _resolve_camera_index(
-    camera_name: str, camera_data: dict[str, Any], enumerated: list[dict[str, Any]] | None
-) -> tuple[int | None, list[dict[str, Any]] | None]:
-    """Resolve one inference camera to the cv2 index the rollout should open.
-
-    Inference runs in a subprocess, so unlike recording we can't pass a rich
-    ``OpenCVCameraConfig`` object in-process. We still apply the same identity
-    rule before building the CLI args: when a saved binding carries a stable
-    ``unique_id``, resolve it against the live enumeration right now; otherwise
-    fall back to the posted ``camera_index`` for older/platform-limited configs.
-    """
-    stored_index = camera_data.get("camera_index")
-    unique_id = camera_data.get("unique_id")
-    if not unique_id:
-        return stored_index, enumerated
-
-    resolved, enumerated = camera_enumeration.resolve_index(unique_id, enumerated, label=camera_name)
-    if resolved != stored_index:
-        logger.warning(
-            "📷 INFERENCE CAMERA REMAP: '%s' (unique_id %s) moved cv2 index %s -> %s since it was bound",
-            camera_name,
-            unique_id,
-            stored_index,
-            resolved,
-        )
-    return resolved, enumerated
-
-
-def _resolve_camera_configs(cameras: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    """Return camera configs with ``camera_index`` refreshed from ``unique_id``.
-
-    This mirrors record.py's pre-hardware resolution so inference does not run a
-    policy on the wrong physical camera after USB hotplug reshuffles cv2 indices.
-    ``unique_id`` itself is removed from the returned dict because lerobot's CLI
-    camera config does not understand it; the resolved ``camera_index`` is what
-    becomes ``index_or_path`` in :func:`_format_cameras_arg`.
-    """
-    enumerated: list[dict[str, Any]] | None = None
-    resolved: dict[str, dict[str, Any]] = {}
-    claimed: dict[int, str] = {}
-    for camera_name, cfg in cameras.items():
-        next_cfg = {k: v for k, v in cfg.items() if k != "unique_id"}
-        index, enumerated = _resolve_camera_index(camera_name, cfg, enumerated)
-        if index is not None:
-            if index in claimed:
-                other = claimed[index]
-                raise ValueError(
-                    f"Cameras '{other}' and '{camera_name}' resolve to the same physical "
-                    f"camera (cv2 index {index}) — re-select inference cameras so each "
-                    "maps to a distinct device."
-                )
-            claimed[index] = camera_name
-            next_cfg["camera_index"] = index
-        resolved[camera_name] = next_cfg
-    return resolved
-
-
 def _format_cameras_arg(cameras: dict[str, dict[str, Any]]) -> str:
     """Convert {name: {type, camera_index, width, height, fps}} into
     lerobot's CLI dict syntax. The frontend key `camera_index` is
@@ -664,7 +605,7 @@ def _single_robot_args(request: InferenceRequest, follower_id: str) -> list[str]
         f"--robot.id={follower_id}",
     ]
     if request.cameras:
-        args.append(f"--robot.cameras={_format_cameras_arg(_resolve_camera_configs(request.cameras))}")
+        args.append(f"--robot.cameras={_format_cameras_arg(request.cameras)}")
     return args
 
 
@@ -687,9 +628,7 @@ def _bimanual_robot_args(request: InferenceRequest, base: str, follower_staging:
         f"--robot.right_arm_config.port={request.right_follower_port}",
     ]
     if request.cameras:
-        args.append(
-            f"--robot.left_arm_config.cameras={_format_cameras_arg(_resolve_camera_configs(request.cameras))}"
-        )
+        args.append(f"--robot.left_arm_config.cameras={_format_cameras_arg(request.cameras)}")
     return args
 
 
@@ -824,39 +763,21 @@ def _run_inference_startup(request: InferenceRequest, cancel_event: threading.Ev
         logger.info("Inference startup abandoned during model download (stop requested)")
         return
 
-    # Latch previews OFF now that the download is done and we are about to claim
-    # the hardware. The rollout subprocess opens the cameras in its OWN process,
-    # so a backend preview open on the same device (the user navigating to the
-    # camera-config page mid-run) would put a second capture stack on one USB
-    # camera — the exact double-open that bricks teleop. Latch AFTER the download
-    # (previews stay live while a multi-GB pull runs, and a stop pressed during
-    # the download returns above without ever latching, so it can't leave a latch
-    # behind) and BEFORE any bus/camera is claimed. Every terminal path below —
-    # and the subprocess's end-of-life in handle_stop_inference /
-    # handle_inference_status — calls resume_previews (idempotent, so a
-    # double-resume is safe); no path may skip it or every tile stays dead until
-    # the backend restarts. Reused verbatim by inference: block_for_recording is
-    # the generalised latch (see camera_preview.block_for_recording).
-    camera_preview_manager.block_for_recording(reason="inference")
-
     # 2. Preflight + stage the arm (opens the serial bus). This is the first
     #    robot-touching step, deliberately AFTER the download.
     try:
         robot_args, identity_warnings = _prepare_robot(request)
     except ArmIdentityError as exc:
         # The connected arm doesn't match its assigned calibration; the message
-        # is already user-facing. Lift the preview latch we took above.
-        camera_preview_manager.resume_previews()
+        # is already user-facing.
         _fail_startup(str(exc))
         return
     except Exception as exc:
         logger.exception("Failed to prepare robot for inference")
-        camera_preview_manager.resume_previews()
         _fail_startup(f"Failed to start inference: {exc}")
         return
     if cancel_event.is_set():
         logger.info("Inference startup abandoned after preflight (stop requested)")
-        camera_preview_manager.resume_previews()
         return
 
     # 3. Spawn the rollout subprocess.
@@ -892,7 +813,6 @@ def _run_inference_startup(request: InferenceRequest, cancel_event: threading.Ev
         logger.exception("Failed to spawn rollout subprocess")
         with contextlib.suppress(Exception):
             log_handle.close()
-        camera_preview_manager.resume_previews()
         _fail_startup(f"Failed to start inference: {exc}")
         return
     try:
@@ -941,7 +861,6 @@ def _run_inference_startup(request: InferenceRequest, cancel_event: threading.Ev
             proc.wait(timeout=5)
         with contextlib.suppress(Exception):
             log_handle.close()
-        camera_preview_manager.resume_previews()
         return
 
     # Start the stdout pump only after committing, so it never advances the phase
@@ -1083,17 +1002,6 @@ def handle_stop_inference() -> dict[str, Any]:
             _inference_started_at = None
             _inference_rollout_started_at = None
             _inference_meta = {}
-            # Defensive: if the worker already latched (stop landed during the arm
-            # preflight, after the post-download latch), lift it now. The worker's
-            # own cancel-check paths also resume, and resume_previews is
-            # idempotent, so a double-resume is harmless; skipping it is not, so we
-            # never rely on the worker alone. _prepare_robot touches only the
-            # serial bus (not the cameras), so lifting the latch here can't race a
-            # live capture stack. A stop during the download hasn't latched yet →
-            # no-op. Called under _state_lock — resume_previews only briefly takes
-            # the manager's own _registry_lock (rollout→camera is the sole lock
-            # order anywhere), so the nesting can't deadlock.
-            camera_preview_manager.resume_previews()
             return {"success": True, "message": "Inference stopped"}
 
     try:
@@ -1113,11 +1021,6 @@ def handle_stop_inference() -> dict[str, Any]:
         _inference_started_at = None
         _inference_rollout_started_at = None
         _inference_meta = {}
-    # The subprocess (which owned the cameras in its own process) is gone — lift
-    # the preview latch the startup worker took after the download. Idempotent, so
-    # it's safe even if a terminal status poll already resumed. Outside the lock:
-    # resume_previews takes the manager's own registry lock, never _state_lock.
-    camera_preview_manager.resume_previews()
     return {"success": True, "message": "Inference stopped"}
 
 
@@ -1212,15 +1115,6 @@ def handle_inference_status() -> dict[str, Any]:
             _inference_started_at = None
             _inference_rollout_started_at = None
             _inference_meta = {}
-            # The subprocess (which held the cameras in its own process) has
-            # exited on its own — a crash, a duration timeout, or a stop we asked
-            # for. This is the end-of-life detection for every path where nobody
-            # called handle_stop_inference, so it MUST lift the preview latch the
-            # startup worker took after the download, or the tiles stay dead until
-            # a backend restart. Idempotent, so it's safe if a racing stop already
-            # resumed. Under _state_lock — see the note in handle_stop_inference on
-            # why the manager-lock nesting can't deadlock.
-            camera_preview_manager.resume_previews()
             # On a non-zero exit, mine the real error out of the log so the UI
             # can show it directly (hint + snippet) instead of sending the user
             # digging through the cache. `outcome` further distinguishes a true

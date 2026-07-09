@@ -16,7 +16,6 @@ import { DatasetInfo } from "@/lib/replayApi";
 import { CameraConfig } from "@/components/recording/CameraConfiguration";
 import { isHostedSpace } from "@/lib/isHostedSpace";
 import { validateDatasetName } from "@/lib/datasetName";
-import { defaultFourccForCamera } from "@/lib/cameraDefaults";
 
 const ON_SPACE = isHostedSpace();
 
@@ -185,17 +184,13 @@ const Landing = () => {
 
     const cameraDict = cameras.reduce(
       (acc, cam) => {
-        const fourcc = cam.fourcc ?? defaultFourccForCamera(cam);
         acc[cam.name] = {
           type: cam.type,
           camera_index: cam.camera_index,
-          // Stable hardware id; the backend re-resolves camera_index from it at
-          // record start so a hotplug reshuffle can't record the wrong camera.
-          ...(cam.unique_id ? { unique_id: cam.unique_id } : {}),
           width: cam.width,
           height: cam.height,
           fps: cam.fps,
-          ...(fourcc ? { fourcc } : {}),
+          ...(cam.fourcc ? { fourcc: cam.fourcc } : {}),
           ...(cam.backend ? { backend: cam.backend } : {}),
         };
         return acc;
@@ -205,7 +200,6 @@ const Landing = () => {
         {
           type: string;
           camera_index?: number;
-          unique_id?: string;
           width: number;
           height: number;
           fps?: number;

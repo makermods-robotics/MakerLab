@@ -30,9 +30,7 @@ from lerobot.datasets import LeRobotDataset
 # Import the main record functionality to reuse it
 from lerobot.scripts.lerobot_record import RecordConfig
 
-from . import camera_enumeration
 from .arm_identity import ArmIdentityError, verify_devices
-from .camera_preview import camera_preview_manager
 from .datasets import (
     _lerobot_cache_root,
     invalidate_dataset_listing_cache,
@@ -295,66 +293,17 @@ def _platform_backend():
     return Cv2Backends.ANY
 
 
-def _resolve_camera_index(
-    camera_name: str, camera_data: dict, enumerated: list | None
-) -> tuple[int, list | None]:
-    """Resolve the cv2 index to open for one camera.
-
-    A saved config stores ``camera_index`` (cv2's integer index) and, when the
-    platform exposed one at selection time, a hardware ``unique_id``. Integer
-    indices are not stable: a USB disappear/reappear reshuffles them, so a stale
-    index can silently open the WRONG physical camera under the "wrist"/"front"
-    name — and identical camera models can't be told apart by name. So when a
-    ``unique_id`` is present we RE-RESOLVE the current index by matching it
-    against a fresh enumeration at record start.
-
-    ``enumerated`` is the shared enumeration list, computed lazily on the first
-    camera that needs it and threaded back out so we enumerate at most once per
-    build. Returns ``(index, enumerated)``.
-
-    No ``unique_id`` on the entry (older config, or a platform without stable
-    ids) → the stored index is used unchanged (back-compat). A missing device is
-    a hard, legible error raised BEFORE any hardware is touched. The actual
-    lookup is camera_enumeration.resolve_index — the SINGLE id→index resolution,
-    shared with the preview manager; this wrapper only adds the legacy
-    stored-index lane and the remap log.
-    """
-    stored_index = camera_data.get("camera_index", 0)
-    unique_id = camera_data.get("unique_id")
-    if not unique_id:
-        return stored_index, enumerated
-
-    resolved, enumerated = camera_enumeration.resolve_index(unique_id, enumerated, label=camera_name)
-    if resolved != stored_index:
-        logger.warning(
-            "📷 CAMERA REMAP: '%s' (unique_id %s) moved cv2 index %s -> %s since it was saved",
-            camera_name,
-            unique_id,
-            stored_index,
-            resolved,
-        )
-    return resolved, enumerated
-
-
 def _build_camera_configs(cameras: dict, default_backend) -> dict:
     """Convert the frontend camera dict into OpenCVCameraConfig objects.
 
     `backend` (a Cv2Backends name) and `fourcc` (a 4-char code) are optional per
     camera; when omitted they fall back to `default_backend` and auto-detect.
-    Each camera's cv2 index is re-resolved from its `unique_id` when present (see
-    :func:`_resolve_camera_index`) so a hotplug reshuffle can't record the wrong
-    physical device; entries without a `unique_id` keep their stored index.
+    Cameras are addressed by their cv2 integer `camera_index`.
     """
     from lerobot.cameras.configs import Cv2Backends
     from lerobot.cameras.opencv import OpenCVCameraConfig
 
-    # Enumerated lazily by _resolve_camera_index only if some camera carries a
-    # unique_id, so the common (index-only) path stays enumeration-free.
-    enumerated: list | None = None
     camera_configs: dict = {}
-    # Final cv2 index -> the camera name that claimed it, so we can reject two
-    # roles resolving to the SAME physical device before any hardware is opened.
-    resolved_indexes: dict[int, str] = {}
     for camera_name, camera_data in cameras.items():
         if camera_data.get("type") != "opencv":
             logger.warning(
@@ -365,25 +314,9 @@ def _build_camera_configs(cameras: dict, default_backend) -> dict:
         backend_name = camera_data.get("backend")
         backend = Cv2Backends[backend_name] if backend_name else default_backend
         fourcc = camera_data.get("fourcc") or None
-        camera_index, enumerated = _resolve_camera_index(camera_name, camera_data, enumerated)
-
-        # Two cameras must never resolve to the same cv2 index: recording each
-        # role from the SAME device is never intended and silently ruins the
-        # dataset (both views identical). This catches the mixed legacy+unique_id
-        # drift case — one entry's stale stored index colliding with another's
-        # re-resolved index — as a legible pre-hardware error, not a confusing
-        # camera-busy failure mid-connect.
-        if camera_index in resolved_indexes:
-            other = resolved_indexes[camera_index]
-            raise ValueError(
-                f"Cameras '{other}' and '{camera_name}' resolve to the same physical "
-                f"camera (cv2 index {camera_index}) — open camera configuration and "
-                "re-select them so each maps to a distinct device."
-            )
-        resolved_indexes[camera_index] = camera_name
 
         camera_configs[camera_name] = OpenCVCameraConfig(
-            index_or_path=camera_index,
+            index_or_path=camera_data.get("camera_index", 0),
             backend=backend,
             fps=camera_data.get("fps"),
             width=camera_data.get("width"),
@@ -392,7 +325,7 @@ def _build_camera_configs(cameras: dict, default_backend) -> dict:
         )
         logger.info(
             f"✅ CAMERA CONFIG: {camera_name} -> OpenCVCameraConfig("
-            f"index={camera_index}, backend={backend.name}, "
+            f"index={camera_data.get('camera_index')}, backend={backend.name}, "
             f"{camera_data.get('width')}x{camera_data.get('height')}@{camera_data.get('fps')}fps, "
             f"fourcc={fourcc})"
         )
@@ -545,16 +478,6 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
     _attach_record_log_handler()
 
     try:
-        # Backend camera previews (GET /camera-preview/{camera_id}) hold the cv2
-        # devices this session is about to open — recording always wins, so
-        # force-release them now, before any robot/camera construction and
-        # before the worker's 2s browser-stream release sleep. block_for_recording
-        # (not stop_all) also LATCHES preview opens off until resume_previews below,
-        # so a tile retrying right after the release can't re-acquire the device
-        # and starve the recorder (actual_fps=5.0) — the window the route's
-        # recording_active 409 gate can't close atomically on its own.
-        camera_preview_manager.block_for_recording()
-
         # The name is already validated (validate_dataset_repo_id in the lock), so
         # no sanitization is needed here. Stamp the repo_id with a timestamp
         # (matches lerobot-record CLI behavior) so each session lands in a unique
@@ -598,17 +521,13 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                     request.num_episodes,
                 )
 
-                # Settle pause: block_for_recording already force-released every
-                # backend preview capture synchronously (and latched new opens
-                # off), but AVCaptureSession teardown is ASYNCHRONOUS on macOS —
-                # and a fresh session opened into that wake intermittently comes
-                # up wrong (lands the neighboring 640x360 format, or delivers no
-                # frames at all; forensically established 2026-07-09, and the
-                # idle-linger means previews are reliably alive right up to this
-                # force-release). Two seconds covers every turbulence window
-                # observed on the bench; the connect retry below remains the
-                # backstop for the tail.
+                # Give the frontend's camera streams time to release the
+                # underlying devices before lerobot tries to open them.
                 if request.cameras:
+                    logger.info(
+                        "Waiting for camera resources to be released (cameras: %s)",
+                        list(request.cameras.keys()),
+                    )
                     time.sleep(2.0)
 
                 # Bimanual: the sub-arm ids are BiSO staging aliases, so give the
@@ -688,19 +607,6 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                 phase_start_time = None
                 current_episode = 1
                 saved_episodes = 0
-                # Session over: let lerobot's OWN camera teardown settle before
-                # lifting the preview latch. record_with_web_events disconnected
-                # three AVCaptureSessions in its finally, that teardown is
-                # asynchronous, and the first preview open into its wake births
-                # frame-dead (observed forensically 2026-07-09: the first
-                # post-session preview open came up open_ok/no-frames and
-                # camped on the open funnel). Same quiet-zone as record START,
-                # pointing the other way.
-                if request.cameras:
-                    time.sleep(2.0)
-                # Lift the preview latch (see block_for_recording) so the
-                # config modal's tiles can re-open the devices.
-                camera_preview_manager.resume_previews()
                 logger.info("Recording session ended")
 
         recording_thread = threading.Thread(target=recording_worker, name="recording-worker", daemon=True)
@@ -715,9 +621,6 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
 
     except Exception as e:
         recording_active = False
-        # Failed before the worker ran (e.g. config build raised) after we
-        # latched previews off above — lift the latch so previews aren't stuck.
-        camera_preview_manager.resume_previews()
         logger.error(f"Failed to start recording: {e}")
         return {"success": False, "message": f"Failed to start recording: {str(e)}"}
 

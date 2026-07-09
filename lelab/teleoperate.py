@@ -528,9 +528,8 @@ def _connect_bimanual(request: TeleoperateRequest):
 
         # Each sub-arm auto-loaded its calibration in __init__ (id=<base>_side);
         # register it on the bus, then configure both sides. Teleop opens no
-        # cameras: whoever consumes frames owns the cameras, and teleop consumes
-        # none (only motor positions drive the URDF viewer), so lerobot gets no
-        # cameras and the shared preview manager owns camera display exclusively.
+        # cameras: it consumes no frames (only motor positions drive the URDF
+        # viewer), so lerobot gets no cameras and the browser handles any display.
         for arm in (robot.left_arm, robot.right_arm, teleop_device.left_arm, teleop_device.right_arm):
             arm.bus.write_calibration(arm.calibration)
         robot.configure()
@@ -651,10 +650,9 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
             robot.bus.write_calibration(robot.calibration)
             teleop_device.bus.write_calibration(teleop_device.calibration)
 
-            # Configure motors. Teleop opens no cameras: whoever consumes frames
-            # owns the cameras, and teleop consumes none (only motor positions
-            # drive the URDF viewer), so lerobot gets no cameras and the shared
-            # preview manager owns camera display exclusively.
+            # Configure motors. Teleop opens no cameras: it consumes no frames
+            # (only motor positions drive the URDF viewer), so lerobot gets no
+            # cameras and the browser handles any camera display.
             logger.info("Configuring motors...")
             robot.configure()
             teleop_device.configure()
