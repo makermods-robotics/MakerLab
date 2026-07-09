@@ -135,7 +135,25 @@ const Calibration = () => {
   const [deviceType, setDeviceType] = useState<string>("teleop");
   const [arm, setArm] = useState<"left" | "right">("left");
   const [port, setPort] = useState<string>("");
+  // `robot` is the last-fetched SERVER baseline. Client-initiated config edits on
+  // this page (ports, cameras, motor power) NEVER write straight to the record;
+  // they accumulate in local draft state and are persisted only when the user
+  // presses Save (a single batched POST). Dirtiness is the draft-vs-baseline diff.
   const [robot, setRobot] = useState<RobotRecord | null>(null);
+  // Draft overlay for the four port slots. A field present here (including "" for
+  // a cleared slot) overrides the baseline until Save. `draftPort` reads through
+  // the overlay so every port-derived value (dropdown, conflict checks, batch
+  // slots) reflects unsaved edits.
+  const [portDraft, setPortDraft] = useState<
+    Partial<Record<keyof RobotRecord, string>>
+  >({});
+  const draftPort = useCallback(
+    (field: keyof RobotRecord): string =>
+      portDraft[field] ?? ((robot?.[field] as string) || ""),
+    [portDraft, robot],
+  );
+  const [saving, setSaving] = useState(false);
+  const [quitPromptOpen, setQuitPromptOpen] = useState(false);
 
   const isBimanual = robot?.mode === "bimanual";
   // In single (or left) mode the primary leader/follower fields are used; in
@@ -197,7 +215,7 @@ const Calibration = () => {
   const otherArmPorts = robot
     ? portFields
         .filter((f) => f !== portField)
-        .map((f) => (robot[f] as string) || "")
+        .map((f) => draftPort(f))
         .filter(Boolean)
     : [];
 
@@ -266,11 +284,24 @@ const Calibration = () => {
   const [availablePorts, setAvailablePorts] = useState<string[]>([]);
   const [portsLoading, setPortsLoading] = useState(false);
   const [cameras, setCameras] = useState<CameraConfig[]>([]);
+  const releaseStreamsRef = useRef<(() => void) | null>(null);
   // Off by default so merely opening the calibration page never grabs a camera.
   // The user explicitly starts a scan, which is when cameras are turned on,
   // enumerated, and the browser permission prompt is requested.
   const [camerasActive, setCamerasActive] = useState(false);
-  const cameraSaveTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  const handleCamerasActiveChange = (active: boolean) => {
+    if (!active) {
+      releaseStreamsRef.current?.();
+    }
+    setCamerasActive(active);
+  };
+
+  useEffect(() => {
+    return () => {
+      releaseStreamsRef.current?.();
+    };
+  }, []);
 
   // Arm slots the multi-arm auto-cal picker can offer. Bimanual exposes all
   // four (left/right × leader/follower); single-arm exposes the leader +
@@ -425,36 +456,12 @@ const Calibration = () => {
     };
   }, [robotName, fetchRobot]);
 
-  // Persist camera changes back to the robot record (debounced).
+  // Camera edits (adds/removes/edits AND CameraConfiguration's automatic
+  // resync corrections) update the local draft only. Nothing is written to the
+  // robot record until Save. `cameras` is the draft; `robot.cameras` the baseline.
   const handleCamerasChange = (next: CameraConfig[]) => {
     setCameras(next);
-    if (!robotName) return;
-    if (cameraSaveTimerRef.current) {
-      clearTimeout(cameraSaveTimerRef.current);
-    }
-    cameraSaveTimerRef.current = setTimeout(async () => {
-      try {
-        await fetchWithHeaders(
-          `${baseUrl}/robots/${encodeURIComponent(robotName)}`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ cameras: next }),
-          },
-        );
-      } catch (e) {
-        console.error("Failed to save cameras to robot record:", e);
-      }
-    }, 500);
   };
-
-  useEffect(() => {
-    return () => {
-      if (cameraSaveTimerRef.current) {
-        clearTimeout(cameraSaveTimerRef.current);
-      }
-    };
-  }, []);
 
   const [calibrationStatus, setCalibrationStatus] = useState<CalibrationStatus>(
     {
@@ -601,12 +608,12 @@ const Calibration = () => {
         // so a single-arm robot's stale right_* ports don't trigger a release.
         const conflictingField = robot
           ? portFields.find(
-              (f) => f !== portField && (robot[f] as string) === data.port,
+              (f) => f !== portField && draftPort(f) === data.port,
             )
           : undefined;
         // The port THIS slot currently holds — handed to the other slot on a
         // swap. Null/empty means the swap degenerates to a take-with-warning.
-        const currentPort = robot ? (robot[portField] as string) || "" : "";
+        const currentPort = draftPort(portField);
 
         // Stage the result and open the confirmation dialog. No assignment or
         // persist happens here — that's deferred to handleConfirmPortAssign.
@@ -692,11 +699,11 @@ const Calibration = () => {
   const handleSelectPort = (nextPort: string) => {
     const conflictingField = robot
       ? portFields.find(
-          (f) => f !== portField && (robot[f] as string) === nextPort,
+          (f) => f !== portField && draftPort(f) === nextPort,
         )
       : undefined;
     if (conflictingField) {
-      const currentPort = robot ? (robot[portField] as string) || "" : "";
+      const currentPort = draftPort(portField);
       setPortAssignPrompt({
         source: "manual",
         port: nextPort,
@@ -717,8 +724,8 @@ const Calibration = () => {
   // Each arm's port as designated on the robot record (assigned in the per-arm
   // flow above). Raw value — may name a port that isn't currently plugged in.
   const slotSavedPort = useCallback(
-    (slot: ArmSlot) => ((robot?.[slot.portField] as string) || "").trim(),
-    [robot],
+    (slot: ArmSlot) => draftPort(slot.portField).trim(),
+    [draftPort],
   );
 
   // The port the batch will actually use: the saved port ONLY if it's currently
@@ -1088,9 +1095,9 @@ const Calibration = () => {
   // uses the right_* fields). Port is a dropdown, so overwriting it is safe.
   useEffect(() => {
     if (!robot) return;
-    setPort((robot[portField] as string) || "");
+    setPort(draftPort(portField) || "");
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [deviceType, arm, robot]);
+  }, [deviceType, arm, robot, portDraft]);
 
   // Refresh the robot record when a calibration completes so the checklist
   // flips to ✓ for the side that was just saved, and advance Device Type to
@@ -1113,78 +1120,31 @@ const Calibration = () => {
     })();
   }, [calibrationStatus.status, fetchRobot]);
 
-  // Write the port for the current side straight into the robot record, so a
-  // re-detected USB port (which shuffles on reboot/reconnect) sticks without
-  // needing a full re-calibration. Mirrors the camera write-back above.
-  // An empty string is a valid value: it CLEARS the assignment (arm
-  // disconnected), which the backend merge accepts and never treats as a
-  // port conflict.
+  // Stage the current side's port into the local draft (no network write). A
+  // re-detected USB port (which shuffles on reboot/reconnect) is recorded here
+  // and only committed on Save. An empty string is a valid value: it CLEARS the
+  // assignment (arm disconnected). The batched Save sends every dirty port slot
+  // together so the backend's duplicate-port guard sees the merged record.
   const persistPort = useCallback(
-    async (nextPort: string) => {
+    (nextPort: string) => {
       if (!robotName) return;
-      // Skip redundant writes when the value already matches the record.
-      if (robot && robot[portField] === nextPort) return;
-      try {
-        const res = await fetchWithHeaders(
-          `${baseUrl}/robots/${encodeURIComponent(robotName)}`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ [portField]: nextPort }),
-          },
-        );
-        const data = await res.json();
-        if (res.ok && data.robot) {
-          setRobot(data.robot);
-        } else if (!res.ok) {
-          // Backstop for the same-port-on-two-arms guard (409).
-          toast({
-            title: "Couldn't assign port",
-            description: data.message || "Failed to save the port.",
-            variant: "destructive",
-          });
-        }
-      } catch (e) {
-        console.error("Failed to save port to robot record:", e);
-      }
+      setPortDraft((prev) => ({ ...prev, [portField]: nextPort }));
     },
-    [robotName, portField, robot, baseUrl, fetchWithHeaders, toast],
+    [robotName, portField],
   );
 
-  // Persist several port slots at once (used by Detect's reassign path: clear
-  // the stale slot AND set the current one in a single upsert). The backend's
-  // duplicate-port guard evaluates the prospective merged record, so a body
-  // that both clears and assigns passes. Returns the updated record on success,
-  // or null on failure (after surfacing the backend's message as a toast).
+  // Stage several port slots at once into the draft (used by Detect's reassign
+  // path: clear the stale slot AND set the current one in one edit). Both land
+  // in the same batched Save request, so the backend's duplicate-port guard —
+  // which evaluates the prospective merged record — passes for a legitimate
+  // swap. Returns the applied patch (truthy) so callers can gate their toast.
   const persistPorts = useCallback(
-    async (patch: Partial<Record<keyof RobotRecord, string>>) => {
+    (patch: Partial<Record<keyof RobotRecord, string>>) => {
       if (!robotName) return null;
-      try {
-        const res = await fetchWithHeaders(
-          `${baseUrl}/robots/${encodeURIComponent(robotName)}`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(patch),
-          },
-        );
-        const data = await res.json();
-        if (res.ok && data.robot) {
-          setRobot(data.robot);
-          return data.robot as RobotRecord;
-        }
-        toast({
-          title: "Couldn't assign port",
-          description: data.message || "Failed to save the port.",
-          variant: "destructive",
-        });
-        return null;
-      } catch (e) {
-        console.error("Failed to save ports to robot record:", e);
-        return null;
-      }
+      setPortDraft((prev) => ({ ...prev, ...patch }));
+      return patch;
     },
-    [robotName, baseUrl, fetchWithHeaders, toast],
+    [robotName],
   );
 
   // --- Motor power (per-robot, persisted) -------------------------------
@@ -1209,10 +1169,11 @@ const Calibration = () => {
   // (safety) behavior change; see config.py DEFAULT_MOTOR_POWER.
   const DEFAULT_TORQUE_LIMIT_REF = 380; // lelab/vendor/.../calibration_defaults.py
 
-  // Local slider position (in PERCENT) while dragging; persisted to the robot
-  // record on release so we don't fire a POST per pixel. Applied to the
-  // follower's motors at the start of each teleop/record/inference session.
-  // Fallback matches backend DEFAULT_MOTOR_POWER (38% = Torque_Limit 380).
+  // Local slider position (in PERCENT). Held as a draft and committed to the
+  // robot record only on Save (previously it POSTed on slider release). Applied
+  // to the follower's motors at the start of each teleop/record/inference
+  // session. Fallback matches backend DEFAULT_MOTOR_POWER (38% = Torque_Limit
+  // 380); re-syncs from the baseline whenever the saved value changes.
   const [powerDraft, setPowerDraft] = useState(38);
   useEffect(() => {
     setPowerDraft(robot?.motor_power ?? 38);
@@ -1220,29 +1181,110 @@ const Calibration = () => {
 
   // Slider is in raw Torque_Limit units; convert to the percent the draft holds.
   const torqueLimitDraft = Math.round(powerDraft) * TORQUE_LIMIT_PER_PERCENT;
+  // The integer percent the draft would persist, clamped to the backend's 10-100.
+  const motorPercent = Math.min(100, Math.max(10, Math.round(powerDraft)));
 
-  const commitMotorPower = useCallback(async () => {
+  // --- Draft dirtiness + batched Save ------------------------------------
+  // A field is dirty when its draft differs from the last-fetched baseline.
+  // Save is the ONLY path that writes the record; it POSTs every dirty field in
+  // one request (batching matters for ports: the backend's duplicate-port guard
+  // evaluates the merged record, so clearing one slot and assigning another must
+  // arrive together). Server-side writes elsewhere (calibration completion,
+  // config assignment via the library) are out of scope and untouched.
+  const camerasDirty = useMemo(
+    () =>
+      !!robot &&
+      JSON.stringify(cameras ?? []) !== JSON.stringify(robot.cameras ?? []),
+    [cameras, robot],
+  );
+  const portsDirty = useMemo(
+    () =>
+      !!robot &&
+      Object.entries(portDraft).some(
+        ([f, v]) => (v ?? "") !== ((robot[f as keyof RobotRecord] as string) || ""),
+      ),
+    [portDraft, robot],
+  );
+  const motorDirty = !!robot && motorPercent !== robot.motor_power;
+  const isDirty = camerasDirty || portsDirty || motorDirty;
+
+  const handleSave = useCallback(async () => {
     if (!robotName || !robot) return;
-    // Persist the nearest integer percent, clamped to the backend's 10-100.
-    const percentInt = Math.min(100, Math.max(10, Math.round(powerDraft)));
-    if (percentInt === robot.motor_power) return;
+    const patch: Record<string, unknown> = {};
+    if (camerasDirty) patch.cameras = cameras;
+    if (motorDirty) patch.motor_power = motorPercent;
+    if (portsDirty) {
+      for (const [f, v] of Object.entries(portDraft)) {
+        if ((v ?? "") !== ((robot[f as keyof RobotRecord] as string) || "")) {
+          patch[f] = v ?? "";
+        }
+      }
+    }
+    if (Object.keys(patch).length === 0) return;
+    setSaving(true);
     try {
       const res = await fetchWithHeaders(
         `${baseUrl}/robots/${encodeURIComponent(robotName)}`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ motor_power: percentInt }),
+          body: JSON.stringify(patch),
         },
       );
       const data = await res.json();
       if (res.ok && data.robot) {
+        // Adopt the server record as the new baseline and clear the drafts.
+        // powerDraft re-syncs via its effect when motor_power changes.
         setRobot(data.robot);
+        setPortDraft({});
+        setCameras((data.robot as RobotRecord).cameras ?? []);
+        toast({ title: "Changes saved" });
+      } else {
+        // Surface the backend guard (e.g. duplicate-port 409) and stay put.
+        toast({
+          title: "Couldn't save changes",
+          description: data.message || "Failed to save the configuration.",
+          variant: "destructive",
+        });
       }
     } catch (e) {
-      console.error("Failed to save motor power:", e);
+      toast({
+        title: "Couldn't save changes",
+        description: String(e),
+        variant: "destructive",
+      });
+    } finally {
+      setSaving(false);
     }
-  }, [robotName, robot, powerDraft, baseUrl, fetchWithHeaders]);
+  }, [
+    robotName,
+    robot,
+    camerasDirty,
+    motorDirty,
+    portsDirty,
+    cameras,
+    motorPercent,
+    portDraft,
+    baseUrl,
+    fetchWithHeaders,
+    toast,
+  ]);
+
+  // Quit returns to wherever the page's back-navigation goes (same as the
+  // header's back arrow: navigate(-1)). Unsaved drafts prompt for confirmation
+  // first so an accidental exit never silently discards edits.
+  const handleQuit = useCallback(() => {
+    if (isDirty) {
+      setQuitPromptOpen(true);
+      return;
+    }
+    navigate(-1);
+  }, [isDirty, navigate]);
+
+  const confirmQuit = useCallback(() => {
+    setQuitPromptOpen(false);
+    navigate(-1);
+  }, [navigate]);
 
   const getStatusDisplay = () => {
     switch (calibrationStatus.status) {
@@ -1300,7 +1342,7 @@ const Calibration = () => {
           <Button
             variant="ghost"
             size="icon"
-            onClick={() => navigate(-1)}
+            onClick={handleQuit}
             className="text-slate-400 hover:text-white hover:bg-slate-800"
           >
             <ArrowLeft className="w-5 h-5" />
@@ -1747,9 +1789,6 @@ const Calibration = () => {
                             Number(e.target.value) / TORQUE_LIMIT_PER_PERCENT,
                           );
                         }}
-                        onPointerUp={commitMotorPower}
-                        onKeyUp={commitMotorPower}
-                        onBlur={commitMotorPower}
                         list="motorTorqueTicks"
                         className="flex-1 h-1.5 accent-blue-500 cursor-pointer"
                         aria-label="Motor torque limit (Torque_Limit register, 0-1000 scale)"
@@ -2270,7 +2309,7 @@ const Calibration = () => {
                 <Switch
                   id="cameras-toggle"
                   checked={camerasActive}
-                  onCheckedChange={setCamerasActive}
+                  onCheckedChange={handleCamerasActiveChange}
                   className="data-[state=checked]:bg-green-500"
                   aria-label="Turn cameras on or off"
                 />
@@ -2281,6 +2320,7 @@ const Calibration = () => {
                 <CameraConfiguration
                   cameras={cameras}
                   onCamerasChange={handleCamerasChange}
+                  releaseStreamsRef={releaseStreamsRef}
                 />
               ) : (
                 <div className="rounded-lg border border-slate-700 bg-slate-900/40 p-6 text-center space-y-3">
@@ -2312,6 +2352,67 @@ const Calibration = () => {
             </CardContent>
           </Card>
         )}
+
+        {/* Sticky Save / Quit bar. Save is the ONLY path that writes the robot
+            record — every port, camera, and motor-power edit stays a local draft
+            until pressed. Quit returns to the previous page, confirming first if
+            there are unsaved drafts. */}
+        {robotName && (
+          <div className="sticky bottom-0 z-10 mt-6 -mx-4 flex items-center justify-between gap-3 border-t border-slate-700 bg-slate-900/95 px-4 py-3 backdrop-blur">
+            <span
+              className={`text-sm ${
+                isDirty ? "text-amber-300" : "text-slate-500"
+              }`}
+            >
+              {isDirty ? "Unsaved changes" : "All changes saved"}
+            </span>
+            <div className="flex gap-2">
+              <Button
+                variant="outline"
+                onClick={handleQuit}
+                className="border-slate-600 text-slate-300 hover:text-white hover:bg-slate-800 rounded-full px-6"
+              >
+                Quit
+              </Button>
+              <Button
+                onClick={handleSave}
+                disabled={!isDirty || saving}
+                className="bg-blue-600 hover:bg-blue-700 text-white rounded-full px-8"
+              >
+                {saving ? (
+                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                ) : (
+                  <CheckCircle className="w-4 h-4 mr-2" />
+                )}
+                {saving ? "Saving…" : "Save"}
+              </Button>
+            </div>
+          </div>
+        )}
+
+        <AlertDialog open={quitPromptOpen} onOpenChange={setQuitPromptOpen}>
+          <AlertDialogContent className="bg-slate-900 border-slate-800 text-white">
+            <AlertDialogHeader>
+              <AlertDialogTitle>Discard unsaved changes?</AlertDialogTitle>
+              <AlertDialogDescription className="text-slate-400">
+                You have unsaved configuration changes (ports, cameras, or motor
+                torque). Leaving now discards them — nothing was written to the
+                robot. Save first to keep them.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter className="flex gap-2 justify-end">
+              <AlertDialogCancel className="border-slate-600 text-slate-700 dark:text-slate-300">
+                Keep editing
+              </AlertDialogCancel>
+              <AlertDialogAction
+                className="bg-red-600 hover:bg-red-700 text-white"
+                onClick={confirmQuit}
+              >
+                Discard &amp; quit
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
       </div>
     </div>
   );
