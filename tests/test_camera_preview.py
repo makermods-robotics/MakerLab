@@ -160,6 +160,13 @@ def _wait_until(predicate, timeout: float, interval: float = 0.01) -> bool:
     return predicate()
 
 
+@pytest.fixture(autouse=True)
+def _synchronous_teardown(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Disable the idle linger by default: most tests assert the classic
+    release-frees-the-device contract. Linger-specific tests re-enable it."""
+    monkeypatch.setattr(camera_preview, "_IDLE_LINGER", 0.0)
+
+
 @pytest.fixture
 def fake_captures(monkeypatch: pytest.MonkeyPatch) -> list[FakeVideoCapture]:
     """Patch cv2.VideoCapture (as seen by lelab.camera_preview) with a fake
@@ -340,19 +347,19 @@ def test_read_failure_streak_force_releases_shared_capture_and_reopens_fresh(
 
 
 # ---------------------------------------------------------------------------
-# Capture format configuration — every preview forces MJPG/640x480@30 before the
-# first read so three USB-2 cameras can coexist (uncompressed ~18 MB/s/camera
-# saturates a ~35 MB/s hub; the starved third camera opens but delivers zero
-# frames). Applied unconditionally; a set() the device rejects is harmless.
+# Capture format configuration — every preview asks for 640x480@30 before the
+# first read. FOURCC is deliberately NOT forced by default (_PREVIEW_FOURCC is
+# None): some AVFoundation/UVC stacks open fine after an MJPG request and then
+# never deliver frames, so forced compression must be an explicit opt-in.
 # ---------------------------------------------------------------------------
 
 
-def test_open_configures_mjpg_size_fps_before_first_read(
+def test_open_configures_size_fps_before_first_read(
     fake_captures: list[FakeVideoCapture],
 ) -> None:
-    """A freshly opened preview capture is configured MJPG / 640x480 / 30fps, in
-    lerobot's property order (FOURCC first — it can change the available
-    resolution/FPS — then size, then FPS), BEFORE any frame is read."""
+    """A freshly opened preview capture is configured 640x480 / 30fps (size then
+    FPS, lerobot's property order) BEFORE any frame is read — and no FOURCC is
+    forced by default."""
     manager = CameraPreviewManager()
     gen = manager.open_stream(0)
     next(gen)  # force at least one read so sets_before_first_read is captured
@@ -361,13 +368,11 @@ def test_open_configures_mjpg_size_fps_before_first_read(
     assert cap.sets_before_first_read is not None
     props_in_order = [prop for prop, _ in cap.sets_before_first_read]
     assert props_in_order == [
-        cv2.CAP_PROP_FOURCC,
         cv2.CAP_PROP_FRAME_WIDTH,
         cv2.CAP_PROP_FRAME_HEIGHT,
         cv2.CAP_PROP_FPS,
     ]
     values = dict(cap.sets_before_first_read)
-    assert values[cv2.CAP_PROP_FOURCC] == cv2.VideoWriter_fourcc(*"MJPG")
     assert values[cv2.CAP_PROP_FRAME_WIDTH] == 640
     assert values[cv2.CAP_PROP_FRAME_HEIGHT] == 480
     assert values[cv2.CAP_PROP_FPS] == 30
@@ -376,12 +381,35 @@ def test_open_configures_mjpg_size_fps_before_first_read(
     assert cap.released
 
 
+def test_open_sets_fourcc_first_when_explicitly_configured(
+    monkeypatch: pytest.MonkeyPatch, fake_captures: list[FakeVideoCapture]
+) -> None:
+    """When a bench opts in to a forced FOURCC, it is set FIRST (it can change
+    the available resolution/FPS options), then size, then FPS."""
+    monkeypatch.setattr(camera_preview, "_PREVIEW_FOURCC", "MJPG")
+    manager = CameraPreviewManager()
+    gen = manager.open_stream(0)
+    next(gen)
+    cap = fake_captures[0]
+    assert cap.sets_before_first_read is not None
+    props_in_order = [prop for prop, _ in cap.sets_before_first_read]
+    assert props_in_order == [
+        cv2.CAP_PROP_FOURCC,
+        cv2.CAP_PROP_FRAME_WIDTH,
+        cv2.CAP_PROP_FRAME_HEIGHT,
+        cv2.CAP_PROP_FPS,
+    ]
+    assert dict(cap.sets_before_first_read)[cv2.CAP_PROP_FOURCC] == cv2.VideoWriter_fourcc(*"MJPG")
+    gen.close()
+    assert cap.released
+
+
 def test_open_streams_normally_when_format_set_is_rejected(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A capture whose set() returns False (a built-in camera with no MJPG mode)
-    keeps its auto-negotiated format and streams normally — property-set failures
-    must never fail the open."""
+    """A capture whose set() returns False (a built-in camera that rejects the
+    format) keeps its auto-negotiated format and streams normally — property-set
+    failures must never fail the open."""
     captures: list[FakeVideoCapture] = []
 
     def factory(index: int, backend: int | None = None) -> FakeVideoCapture:
@@ -394,9 +422,9 @@ def test_open_streams_normally_when_format_set_is_rejected(
     manager = CameraPreviewManager()
     gen = manager.open_stream(0)
     assert b"--frame" in next(gen)  # streams despite every set() returning False
-    # The sets were still attempted (all four), before the first read.
+    # The sets were still attempted (size + fps), before the first read.
     assert captures[0].sets_before_first_read is not None
-    assert len(captures[0].sets_before_first_read) == 4
+    assert len(captures[0].sets_before_first_read) == 3
     gen.close()
     assert captures[0].released
 
@@ -766,6 +794,280 @@ def test_funnel_failed_first_open_releases_promptly(monkeypatch: pytest.MonkeyPa
     gen_b.close()
 
 
+def test_force_release_of_queued_birth_never_opens_the_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reader stopped while queued at the turnstile must NEVER go on to open
+    the device. block_for_recording stops it precisely because the session owner
+    is about to open that camera itself — an unserialized open/configure/release
+    cycle behind the recorder's back is the exact contention the latch exists to
+    prevent. The stopped birth takes the no-handle exit: legible cancel error,
+    dead, deregistered, release confirmed, and cv2.VideoCapture never called."""
+    gate_a = threading.Event()
+    captures: list[FakeVideoCapture] = []
+
+    def factory(index: int, backend: int | None = None) -> FakeVideoCapture:
+        # A owns the funnel (gated first read); anything after A is healthy.
+        cap = (
+            GatedFrameCapture(index, backend, gate=gate_a)
+            if not captures
+            else FakeVideoCapture(index, backend)
+        )
+        captures.append(cap)
+        return cap
+
+    monkeypatch.setattr(camera_preview.cv2, "VideoCapture", factory)
+    manager = CameraPreviewManager()
+
+    gen_a = manager.open_stream(0)  # A opens, parks in its gated first read
+    b_box: dict[str, object] = {}
+
+    def open_b() -> None:
+        try:
+            b_box["gen"] = manager.open_stream(1)
+        except CameraOpenError as exc:
+            b_box["error"] = exc
+
+    tb = threading.Thread(target=open_b, name="open-b")
+    tb.start()
+    try:
+        # B is registered and queued behind A — its birth has not begun.
+        assert _wait_until(lambda: "1" in manager._captures, timeout=2.0)
+        entry_b = manager._captures["1"]
+        assert entry_b.birth_started_ts is None
+
+        # Recording claims the devices while B is still queued (A, wedged in its
+        # gated read, is abandoned — that path is covered elsewhere).
+        manager.block_for_recording(timeout=0.2)
+
+        # B's client gets a legible failure, B's reader confirms release...
+        assert _wait_until(lambda: "error" in b_box or "gen" in b_box, timeout=5.0)
+        assert "error" in b_box, "queued birth must fail once stopped, not stream"
+        assert entry_b.released.wait(2.0)
+        tb.join(timeout=5.0)
+        assert not tb.is_alive()
+        # ...and — the point — the device at index 1 was NEVER opened.
+        assert [c.index for c in captures] == [0]
+    finally:
+        gate_a.set()  # let A's abandoned reader unwind (never hang pytest)
+        manager.resume_previews()
+        tb.join(timeout=5.0)
+        gen_a.close()
+
+
+def test_queued_open_is_not_billed_the_holders_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A client whose camera is queued at the turnstile must not have its
+    _OPEN_TIMEOUT consumed by the holder ahead of it: the per-camera budget
+    starts when ITS reader owns the turnstile (birth_started_ts); queue time is
+    bounded only by the end-to-end backstop. With the old single clock, the
+    third tile of a simultaneous mount 503'd while still healthy in the queue."""
+    monkeypatch.setattr(camera_preview, "_OPEN_TIMEOUT", 0.3)
+    # Generous backstop so it demonstrably isn't what keeps B's client waiting.
+    monkeypatch.setattr(camera_preview, "_QUEUED_OPEN_BACKSTOP", 30.0)
+    gate_a = threading.Event()
+    captures: list[FakeVideoCapture] = []
+
+    def factory(index: int, backend: int | None = None) -> FakeVideoCapture:
+        cap = (
+            GatedFrameCapture(index, backend, gate=gate_a)
+            if not captures
+            else FakeVideoCapture(index, backend)
+        )
+        captures.append(cap)
+        return cap
+
+    monkeypatch.setattr(camera_preview.cv2, "VideoCapture", factory)
+    manager = CameraPreviewManager()
+
+    gen_a = manager.open_stream(0)  # A owns the funnel (gated first read)
+    b_box: dict[str, object] = {}
+
+    def open_b() -> None:
+        try:
+            b_box["gen"] = manager.open_stream(1)
+        except CameraOpenError as exc:
+            b_box["error"] = exc
+
+    tb = threading.Thread(target=open_b, name="open-b")
+    tb.start()
+    try:
+        assert _wait_until(lambda: "1" in manager._captures, timeout=2.0)
+        # Hold A well past B's whole _OPEN_TIMEOUT. B's client must still be
+        # waiting (queue time bills to the backstop), not failed with a 503.
+        assert not _wait_until(lambda: ("error" in b_box) or ("gen" in b_box), timeout=0.8)
+
+        # A publishes its first frame -> turnstile passes to B -> B's own open
+        # begins now and completes well inside its own fresh budget.
+        gate_a.set()
+        assert _wait_until(lambda: "gen" in b_box, timeout=5.0), b_box.get("error")
+        assert b"--frame" in next(b_box["gen"])
+        b_box["gen"].close()
+    finally:
+        gate_a.set()
+        tb.join(timeout=5.0)
+        gen_a.close()
+
+
+def test_frame_dead_birth_fails_fast_and_releases(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A capture that opens fine but never delivers a frame (a session born
+    into another session's teardown wake) must give up at the FIRST-FRAME
+    deadline — releasing the device and freeing the funnel for the next open —
+    rather than camping for the (deliberately patient) mid-stream limits.
+    The clients' retry loops then re-roll the open, which heals it."""
+    monkeypatch.setattr(camera_preview, "_FIRST_FRAME_DEADLINE", 0.2)
+    captures: list[FakeVideoCapture] = []
+
+    def factory(index: int, backend: int | None = None) -> FakeVideoCapture:
+        cap = FakeVideoCapture(index, backend)
+        cap.opened = True
+        cap.read = lambda: (False, None)  # opens fine, never a frame
+        captures.append(cap)
+        return cap
+
+    monkeypatch.setattr(camera_preview.cv2, "VideoCapture", factory)
+    manager = CameraPreviewManager()
+    gen = manager.open_stream(0)  # open succeeds (open_ok before first read)
+    # The stream ends without ever yielding a frame once the deadline trips...
+    with pytest.raises(StopIteration):
+        next(gen)
+    # ...and the device is actually released for the retry to re-roll.
+    assert _wait_until(lambda: captures[0].released, timeout=2.0)
+    assert "0" not in manager._captures
+    kinds = [e["kind"] for e in camera_preview.preview_events()["events"] if e["camera_id"] == "0"]
+    assert "first_frame_timeout" in kinds
+
+
+def test_idle_linger_reuses_live_capture_across_polls(
+    monkeypatch: pytest.MonkeyPatch, fake_captures: list[FakeVideoCapture]
+) -> None:
+    """THE churn fix: with the linger armed, a release followed by a re-acquire
+    (a snapshot tile's next poll) reuses the still-running capture — no device
+    teardown, no fresh open, so the teardown-then-open turbulence that births
+    frame-dead sessions never happens."""
+    monkeypatch.setattr(camera_preview, "_IDLE_LINGER", 30.0)
+    manager = CameraPreviewManager()
+    first = manager.snapshot(0)
+    assert first[:2] == b"\xff\xd8"
+    assert not fake_captures[0].released  # lingering, not torn down
+    assert "0" in manager._captures  # still registered for reuse
+    # Next poll (cache expired) must reuse the same live capture.
+    monkeypatch.setattr(camera_preview, "_SNAPSHOT_CACHE_TTL", 0.0)
+    second = manager.snapshot(0)
+    assert second[:2] == b"\xff\xd8"
+    assert len(fake_captures) == 1  # no second open, ever
+    manager.stop_all(timeout=1.0)  # cleanup
+
+
+def test_idle_linger_expiry_frees_the_device(
+    monkeypatch: pytest.MonkeyPatch, fake_captures: list[FakeVideoCapture]
+) -> None:
+    """No re-acquire within the linger → deferred teardown actually frees the
+    device and deregisters the entry (nothing leaks)."""
+    monkeypatch.setattr(camera_preview, "_IDLE_LINGER", 0.15)
+    manager = CameraPreviewManager()
+    gen = manager.open_stream(0)
+    assert b"--frame" in next(gen)
+    gen.close()
+    assert not fake_captures[0].released  # lingering
+    assert _wait_until(lambda: fake_captures[0].released, timeout=3.0)  # expiry fired
+    assert manager._captures == {}
+
+
+def test_block_for_recording_tears_down_lingering_captures(
+    monkeypatch: pytest.MonkeyPatch, fake_captures: list[FakeVideoCapture]
+) -> None:
+    """Recording always wins: a lingering (idle but alive) capture is force-
+    released immediately by the session latch — the linger never makes the
+    recorder wait."""
+    monkeypatch.setattr(camera_preview, "_IDLE_LINGER", 60.0)
+    manager = CameraPreviewManager()
+    gen = manager.open_stream(0)
+    assert b"--frame" in next(gen)
+    gen.close()
+    assert not fake_captures[0].released  # lingering with a long timer
+    manager.block_for_recording(timeout=1.0)
+    assert _wait_until(lambda: fake_captures[0].released, timeout=2.0)
+    manager.resume_previews()
+
+
+def test_snapshot_borrows_device_for_one_frame_and_releases(
+    fake_captures: list[FakeVideoCapture],
+) -> None:
+    """The borrow-don't-reserve lane: a snapshot opens the device, takes one
+    frame, and (with the linger disabled, as here) RELEASES it — no standing
+    capture."""
+    manager = CameraPreviewManager()
+    jpeg = manager.snapshot(0)
+    assert jpeg[:2] == b"\xff\xd8"  # JPEG SOI — a real encoded frame
+    # The one-shot client was the only refcount holder: device freed.
+    assert _wait_until(lambda: fake_captures[0].released, timeout=2.0)
+    assert manager._captures == {}
+
+
+def test_snapshot_shares_a_live_stream_without_second_open(
+    fake_captures: list[FakeVideoCapture],
+) -> None:
+    """With a stream already running, a snapshot serves that capture's newest
+    frame — no second device open, and the stream survives the snapshot."""
+    manager = CameraPreviewManager()
+    gen = manager.open_stream(0)
+    assert b"--frame" in next(gen)
+    jpeg = manager.snapshot(0)
+    assert jpeg[:2] == b"\xff\xd8"
+    assert len(fake_captures) == 1  # shared, not re-opened
+    assert not fake_captures[0].released  # the stream still owns the device
+    assert b"--frame" in next(gen)  # and still yields frames
+    gen.close()
+
+
+def test_snapshot_cache_coalesces_polls(fake_captures: list[FakeVideoCapture]) -> None:
+    """Polls within _SNAPSHOT_CACHE_TTL are served from the cache: N tiles
+    refreshing together cost ONE device borrow, not N."""
+    manager = CameraPreviewManager()
+    first = manager.snapshot(0)
+    assert _wait_until(lambda: fake_captures[0].released, timeout=2.0)
+    second = manager.snapshot(0)  # within TTL: cache hit, no new open
+    assert second == first
+    assert len(fake_captures) == 1
+
+
+def test_snapshot_no_frame_raises_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A camera that opens but never delivers answers a legible CameraOpenError
+    within the bounded snapshot wait — not a hang, not an empty 200."""
+    monkeypatch.setattr(camera_preview, "_SNAPSHOT_FRAME_TIMEOUT", 0.3)
+    gate = threading.Event()
+
+    def factory(index: int, backend: int | None = None) -> FakeVideoCapture:
+        return BlockingReadCapture(index, backend, gate=gate)
+
+    monkeypatch.setattr(camera_preview.cv2, "VideoCapture", factory)
+    manager = CameraPreviewManager()
+    try:
+        with pytest.raises(CameraOpenError) as exc:
+            manager.snapshot(0)
+        assert "no frame" in str(exc.value)
+    finally:
+        gate.set()  # let the wedged reader unwind (never hang pytest)
+
+
+def test_preview_events_record_stream_lifecycle(
+    fake_captures: list[FakeVideoCapture],
+) -> None:
+    """The forensic ring buffer captures a stream's full life: acquire → birth →
+    open → first frame → release → reader exit. Filter by a distinctive id;
+    the buffer is module-global and other tests write to it too."""
+    manager = CameraPreviewManager()
+    gen = manager.open_stream(7)
+    assert b"--frame" in next(gen)
+    gen.close()
+    assert _wait_until(lambda: fake_captures[0].released, timeout=2.0)
+    kinds = [e["kind"] for e in camera_preview.preview_events()["events"] if e["camera_id"] == "7"]
+    for expected in ("acquire", "birth_start", "open_ok", "first_frame", "client_release", "reader_released"):
+        assert expected in kinds, f"missing {expected} in {kinds}"
+
+
 # ---------------------------------------------------------------------------
 # camera_id addressing — the unique_id is canonical; the cv2 index is resolved
 # fresh on every capture open
@@ -855,6 +1157,39 @@ def test_same_unique_id_shares_one_capture(
     assert fake_captures[0].released
 
 
+def test_burst_opens_share_one_enumeration_and_release_invalidates(
+    monkeypatch: pytest.MonkeyPatch, fake_captures: list[FakeVideoCapture]
+) -> None:
+    """Two DIFFERENT cameras opened within a burst share one enumeration (the
+    slow subprocess runs once, not once per tile — see _ENUM_CACHE_TTL), but any
+    capture release drops the snapshot so the very next open re-resolves against
+    live state — reopen-after-reshuffle correctness outranks burst sharing."""
+    calls: list[int] = []
+
+    def _list():
+        calls.append(1)
+        return [
+            {"index": 3, "name": "USB Camera", "unique_id": "uvc-7749-front"},
+            {"index": 5, "name": "USB Camera", "unique_id": "uvc-7749-wrist"},
+        ]
+
+    monkeypatch.setattr(camera_preview.camera_enumeration, "list_cameras", _list)
+    manager = CameraPreviewManager()
+
+    gen_front = manager.open_stream("uvc-7749-front")
+    gen_wrist = manager.open_stream("uvc-7749-wrist")  # same burst: snapshot hit
+    assert [c.index for c in fake_captures] == [3, 5]
+    assert len(calls) == 1  # one enumeration served both births
+
+    # Last client of the wrist camera detaches -> its reader releases -> the
+    # snapshot is invalidated -> the reopen must re-enumerate, not trust it.
+    gen_wrist.close()
+    gen_wrist2 = manager.open_stream("uvc-7749-wrist")
+    assert len(calls) == 2
+    gen_wrist2.close()
+    gen_front.close()
+
+
 # ---------------------------------------------------------------------------
 # GET /camera-preview/{index} — status codes and exclusivity
 # ---------------------------------------------------------------------------
@@ -865,6 +1200,29 @@ def test_camera_preview_409_while_recording(client: TestClient, monkeypatch: pyt
     response = client.get("/camera-preview/0")
     assert response.status_code == 409
     assert "Recording" in response.json()["detail"]
+
+
+def test_camera_snapshot_409_while_recording(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(record, "recording_active", True)
+    response = client.get("/camera-snapshot/0")
+    assert response.status_code == 409
+    assert "Recording" in response.json()["detail"]
+
+
+def test_camera_snapshot_returns_jpeg(client: TestClient, fake_captures: list[FakeVideoCapture]) -> None:
+    response = client.get("/camera-snapshot/0")
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/jpeg"
+    assert response.content[:2] == b"\xff\xd8"
+    # One-shot (linger disabled in tests): the endpoint borrowed and released.
+    assert _wait_until(lambda: fake_captures[0].released, timeout=2.0)
+
+
+def test_camera_preview_events_endpoint(client: TestClient) -> None:
+    response = client.get("/camera-preview-events")
+    assert response.status_code == 200
+    body = response.json()
+    assert "events" in body and "live_reader_threads" in body
 
 
 def test_camera_preview_allowed_while_teleoperating(

@@ -22,10 +22,11 @@ backend's cv2 cameras as multipart/x-mixed-replace MJPEG (GET
 
 Cameras are addressed by ``camera_id`` — the stable hardware ``unique_id``
 where the platform exposes one (see lelab/camera_enumeration.py). The cv2
-integer index is a private detail resolved FRESH on every capture open
-(camera_enumeration.resolve_index), so a preview keyed by id can never show
-whatever device slid into a stale integer slot after a USB hotplug reshuffle —
-even mid-session across a release/reopen. A purely-numeric ``camera_id`` is the
+integer index is a private detail resolved at every capture open
+(camera_enumeration.resolve_index; opens within a short burst share one
+enumeration snapshot — see _ENUM_CACHE_TTL), so a preview keyed by id can
+never show whatever device slid into a stale integer slot after a USB hotplug
+reshuffle — even mid-session across a release/reopen. A purely-numeric ``camera_id`` is the
 back-compat/fallback lane for platforms and saved entries without stable ids:
 it is used directly as the cv2 index, unresolved, exactly as before.
 
@@ -54,6 +55,7 @@ import logging
 import platform
 import threading
 import time
+from collections import deque
 
 import cv2
 
@@ -61,17 +63,53 @@ from . import camera_enumeration
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Forensic event log. Direct-cv2 probes (2026-07-09) proved the OS/hardware
+# handle everything this module does — 3 concurrent streams @30fps, zero-gap
+# reopen churn, stacked same-device captures — yet tiles still intermittently
+# black-screen through the manager. So every lifecycle transition is recorded
+# here (cheap ring buffer, thread-safe) and served by GET
+# /camera-preview-events, so a black tile can be diagnosed from its actual
+# state history instead of re-theorized. The leading suspect this exists to
+# catch: an ABANDONED reader (wedged in cap.read(), never releasable) leaking
+# a live AVCaptureSession that poisons subsequent opens of the same device
+# until the process restarts.
+_EVENTS: deque = deque(maxlen=500)
+_EVENTS_LOCK = threading.Lock()
+_EVENTS_T0 = time.monotonic()
+
+
+def _log_event(kind: str, camera_id: str, **details) -> None:
+    with _EVENTS_LOCK:
+        _EVENTS.append(
+            {
+                "t": round(time.monotonic() - _EVENTS_T0, 3),
+                "kind": kind,
+                "camera_id": camera_id,
+                "thread": threading.current_thread().name,
+                **details,
+            }
+        )
+
+
+def preview_events() -> dict:
+    """Snapshot of the event ring + leaked-reader census for the debug endpoint.
+
+    ``live_reader_threads`` lists cam-preview-* threads that are still alive —
+    one past the registry's knowledge is a wedged cap.read() holding a zombie
+    AVCaptureSession inside this process (the restart-fixes-it smell)."""
+    with _EVENTS_LOCK:
+        events = list(_EVENTS)
+    reader_threads = [
+        t.name for t in threading.enumerate() if t.name.startswith("cam-preview-") and t.is_alive()
+    ]
+    return {"events": events, "live_reader_threads": reader_threads}
+
+
 # A preview is a thumbnail, not a recording: ~15 fps at JPEG quality 70 keeps
 # per-client bandwidth modest without visible stutter.
 TARGET_FPS = 15.0
 JPEG_QUALITY = 70
-
-# A capture whose reader fails this many reads *in a row* is treated as dead: the
-# reader releases its own handle and exits, every client stream ends, and the
-# next open_stream re-opens a fresh handle. Sized to ride out brief
-# USB/AVFoundation hiccups (~2s at TARGET_FPS) without tearing down a
-# momentarily-stuttering but otherwise healthy preview.
-_MAX_READ_FAILURES = 30
 
 # Frame-age watchdog: if the reader publishes no new frame within this many
 # seconds, a waiting consumer declares the capture DEAD, deregisters it, and
@@ -79,8 +117,18 @@ _MAX_READ_FAILURES = 30
 # cap.read() (physically unplugged mid-stream, wedged AVFoundation) — the read
 # never returns, so no failure streak ever accrues, but frames stop arriving.
 # Must comfortably exceed the frame interval so a healthy-but-slow camera is not
-# reaped.
-_FRAME_DEADLINE = 2.5
+# reaped. One minute is intentionally very patient: on marginal shared USB buses
+# a camera can pause during format negotiation, teleop startup, or a brief hub
+# hiccup and then recover; declaring it dead too early makes the frontend look
+# like the camera "dropped" even though the device is still alive.
+_FRAME_DEADLINE = 60.0
+
+# A capture whose reader fails reads *in a row* for roughly the same one-minute
+# window is treated as dead: the reader releases its own handle and exits, every
+# client stream ends, and the next open_stream re-opens a fresh handle. Keep this
+# time-equivalent with _FRAME_DEADLINE so read-failure streaks are not the hidden
+# two-second tripwire while the frame-age watchdog is patient.
+_MAX_READ_FAILURES = int(_FRAME_DEADLINE * TARGET_FPS)
 
 # How long a consumer's open (open_stream priming) waits for its reader thread to
 # report open success/failure before giving up with a CameraOpenError. Longer
@@ -90,11 +138,13 @@ _OPEN_TIMEOUT = 15.0
 
 # Open funnel (turnstile) — cameras are opened ONE AT A TIME. Live pages mount up
 # to three preview tiles at once; without this, all three reader threads race into
-# cv2.VideoCapture open + MJPG/size/fps negotiation simultaneously, and on a shared
+# cv2.VideoCapture open + size/fps negotiation simultaneously, and on a shared
 # USB-2 hub the concurrent negotiations trip each other — we watched a third camera
 # open "successfully", stream zero frames, wedge, and get abandoned. Steady-state
-# bandwidth is already solved (MJPG forced per capture); the funnel removes the
-# remaining stampede at BIRTH. It lets at most one reader run
+# bandwidth is NOT the concern here: on macOS these UVC cameras stream MJPEG on
+# the wire behind AVFoundation's '420v' formats (verified 2026-07-09: 29.8 fps
+# at 1280x720, impossible raw on USB-2), a few MB/s per camera — the funnel
+# exists solely for the stampede at BIRTH. It lets at most one reader run
 # resolve→open→configure→first-frame at a time; a reader leaves the instant it
 # publishes its first frame (or fails conclusively), so steady-state reads never
 # queue and single-camera opens see an empty funnel and pass immediately.
@@ -116,6 +166,71 @@ _OPEN_TIMEOUT = 15.0
 # at _FRAME_DEADLINE) — that is the deliberate price of never usurping a healthy
 # slow birth.
 _FUNNEL_HOLD_DEADLINE = _OPEN_TIMEOUT + _FRAME_DEADLINE
+
+# Absolute backstop on how long a client's open may wait END TO END, funnel
+# queue included. The per-camera open budget (_OPEN_TIMEOUT) starts only when
+# the reader owns the turnstile and begins its own resolve→open
+# (birth_started_ts); while queued behind other births a client waits against
+# this backstop instead. Without the split, the third tile of a simultaneous
+# three-tile mount was timed out — and 503'd — for queue time that was never
+# its own open. Sized for the worst legitimate queue on a three-camera rig:
+# two full funnel holds ahead plus this camera's own open.
+_QUEUED_OPEN_BACKSTOP = 2 * _FUNNEL_HOLD_DEADLINE + _OPEN_TIMEOUT
+
+# First-frame deadline: a capture that opened fine but has delivered NO frame
+# within this window is a frame-dead session (opened into another session's
+# asynchronous teardown wake — the bench's recurring failure mode), and every
+# observation says it never heals with time, only with a fresh open. The reader
+# gives up, releases, and lets the clients' retry loops re-roll — measured
+# healthy first frames arrive in 0.1–5s, and re-rolls have healed every
+# frame-dead session observed. Deliberately much tighter than the mid-stream
+# patience knobs (_FRAME_DEADLINE / _MAX_READ_FAILURES): a dead BIRTH holds the
+# open funnel hostage, so it must fail fast; an established stream stalling is
+# a different, patient-friendly situation.
+_FIRST_FRAME_DEADLINE = 8.0
+
+# One-shot still frames (GET /camera-snapshot/{camera_id}). A standing MJPEG
+# preview holds its capture (and historically a USB bandwidth reservation) for
+# as long as it streams; snapshots let N tiles coexist by borrowing the device
+# for one frame at a time (the open funnel serializes the borrows) or — with
+# the idle linger below — by reading the newest frame off an already-running
+# capture. _SNAPSHOT_FRAME_TIMEOUT bounds how long one snapshot waits for its
+# frame — generous because a cold camera can take several seconds to its first
+# frame (observed ~5s on this bench), but far below the streaming watchdog so a
+# no-frame camera answers 503 in bounded time. _SNAPSHOT_CACHE_TTL coalesces
+# poll bursts (several clients of one camera refreshing together) into one
+# read; sized at 1s so the fast interactive surfaces (pickers/teleop polling
+# ~1s) see ~1fps rather than a stale image — with the idle linger keeping the
+# capture alive, a cache miss costs a latest-frame read, not a device open.
+_SNAPSHOT_FRAME_TIMEOUT = 12.0
+_SNAPSHOT_CACHE_TTL = 1.0
+
+# Enumeration snapshot shared across a mount burst. Every id-addressed open
+# re-resolves id→index; on macOS that spawns the AVFoundation enumeration
+# subprocess. Three tiles mounting together used to run it three times BACK TO
+# BACK through the funnel. Births within this TTL share one snapshot instead.
+# Correctness: a MISS in the snapshot always falls through to one fresh
+# enumeration before failing, so a stale snapshot can never wrongly fail a
+# resolve. A HIT can hand out a stale index only if the bus reshuffled within
+# the TTL *and* the id still exists elsewhere — a window the next open (fresh
+# snapshot) self-corrects; at 3s it is far smaller than the reshuffle-churn it
+# removes.
+_ENUM_CACHE_TTL = 3.0
+
+# Idle linger: when the LAST client releases a capture, keep its reader (and
+# the device) alive this long before actually tearing down, so a re-acquire
+# reuses the running capture instead of a fresh open. THE churn fix, from the
+# forensic log (2026-07-09): fresh AVCaptureSessions started right after other
+# sessions' asynchronous teardowns intermittently come up frame-dead
+# (open_ok → read failures, no first frame, on hardware direct-probes prove
+# healthy), while steady-state streaming never fails. Poll-driven snapshot
+# tiles (1-8s cadence) and retrying stream tiles both used to generate exactly
+# that teardown-then-open storm; with the linger they ride one continuously
+# live capture instead. Recording/inference are unaffected: their
+# block_for_recording force-stop tears lingering captures down immediately,
+# refcounts notwithstanding. Sized comfortably above the snapshot poll
+# interval; 0 disables (synchronous teardown — used by most unit tests).
+_IDLE_LINGER = 20.0
 
 # How long a force-release / last-detach waits for the reader to confirm it
 # released its own capture before abandoning it. Bounds every wait on the
@@ -142,39 +257,32 @@ _CV2_BACKEND = {
     "Windows": cv2.CAP_DSHOW,
 }.get(platform.system(), cv2.CAP_ANY)
 
-# USB-2 bandwidth constraint — load-bearing tuning, do NOT strip in a refactor.
-# A cv2 capture opened with no format configuration negotiates the camera's
-# default, which for USB webcams is uncompressed YUYV: at 640x480@30 that is
-# ~18 MB/s PER camera. A single USB-2 hub shares only ~35 MB/s, so two live
-# previews saturate the bus and a third camera opens successfully but delivers
-# ZERO frames forever (the frame-age watchdog then correctly reaps it). Forcing
-# in-camera MJPEG (JPEG-compressed, ~10-20x less bandwidth) lets three cameras
-# on one hub coexist. This mirrors the recording path, which already sets
-# fourcc=MJPG via lerobot's OpenCVCamera; on this exact bench machine that same
-# call sequence measurably fixed recording bandwidth.
-_PREVIEW_FOURCC = "MJPG"
+# Preview capture format. We intentionally do NOT force a FOURCC by default:
+# some AVFoundation/UVC stacks open successfully after MJPG is requested, then
+# never deliver frames. On machines with real USB-3/10Gbps headroom, letting the
+# backend auto-negotiate is safer than making MJPG a hidden failure mode. Saved
+# recording/inference camera configs can still request MJPG explicitly when a
+# particular bench needs compressed USB-2 bandwidth.
+_PREVIEW_FOURCC: str | None = None
 _PREVIEW_WIDTH = 640
 _PREVIEW_HEIGHT = 480
 _PREVIEW_FPS = 30
 
 
 def _configure_preview_capture(cap: cv2.VideoCapture, camera_id: str) -> None:
-    """Force MJPG / 640x480@30 on a freshly opened preview capture, BEFORE its
-    first read. See _PREVIEW_* above for why this is load-bearing (USB-2 hub
-    bandwidth). Applied UNCONDITIONALLY to every preview capture, built-in
-    cameras included: the preview manager is keyed by camera id only and stays
-    config-agnostic (no per-camera fourcc plumbing). A ``set`` the device does
-    not support (e.g. a MacBook built-in with no MJPG mode) returns False and
-    simply leaves that property auto-negotiated — never fatal, so the return
-    values are ignored and a set failure never fails the open.
+    """Configure a freshly opened preview capture BEFORE its first read.
+
+    Preview asks for size/fps but leaves FOURCC auto-negotiated unless
+    ``_PREVIEW_FOURCC`` is set. Some backends claim to accept MJPG and then
+    deliver no frames, so forced compression must not be the default preview
+    behavior.
 
     Property order mirrors lerobot's OpenCVCamera._configure_capture_settings:
     FOURCC first (it can change the available resolution/FPS options), then frame
-    size, then FPS. AVFoundation's cv2 backend historically part-ignores FOURCC;
-    that is fine — on this bench the same sequence via lerobot's OpenCVCamera
-    measurably fixed recording bandwidth on this machine.
+    size, then FPS.
     """
-    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*_PREVIEW_FOURCC))
+    if _PREVIEW_FOURCC:
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*_PREVIEW_FOURCC))
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, _PREVIEW_WIDTH)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, _PREVIEW_HEIGHT)
     cap.set(cv2.CAP_PROP_FPS, _PREVIEW_FPS)
@@ -186,7 +294,7 @@ def _configure_preview_capture(cap: cv2.VideoCapture, camera_id: str) -> None:
         logger.debug(
             "Camera %s preview requested %s/%dx%d@%d; negotiated %s/%dx%d@%.0f",
             camera_id,
-            _PREVIEW_FOURCC,
+            _PREVIEW_FOURCC or "AUTO",
             _PREVIEW_WIDTH,
             _PREVIEW_HEIGHT,
             _PREVIEW_FPS,
@@ -227,6 +335,10 @@ class _SharedCapture:
         # its methods.
         self.cap: cv2.VideoCapture | None = None
         self.refcount = 0
+        # Bumped on every acquire and every refcount-0 release; a pending idle-
+        # linger expiry captured an older generation and no-ops (see
+        # _linger_expire). Guarded by the manager's _registry_lock.
+        self.linger_gen = 0
         # One short retry if the fresh open reports busy (see _REOPEN_RETRY_*).
         self.retry_open_on_busy = retry_open_on_busy
 
@@ -242,6 +354,11 @@ class _SharedCapture:
         self.last_frame_ts = 0.0
         self.opened = False  # reader finished its open attempt (result in open_ok)
         self.open_ok = False
+        # Monotonic time the reader actually began its birth — owned the
+        # turnstile and started resolve→open. None while still queued behind
+        # other births. _acquire keys its open-timeout off this so queue time
+        # never counts against this camera's own open budget. Guarded by _cond.
+        self.birth_started_ts: float | None = None
         self.open_error: CameraOpenError | None = None
         self.dead = False  # reader has exited / capture declared dead
         # Set by stop_all / block_for_recording / the watchdog / last-detach so
@@ -265,6 +382,36 @@ class _SharedCapture:
         # deadline-bounded (see _FUNNEL_HOLD_DEADLINE) so a wedged birth can never
         # permanently gate the next one. Empty funnel = immediate passage.
         self._manager._enter_funnel(self)
+        if self.stop.is_set():
+            # Stopped while queued at (or just claiming) the turnstile —
+            # force-released for a recording/inference claim, or the last
+            # client detached before the birth began. NEVER open now: a
+            # block_for_recording stop here means the session owner is about
+            # to open this very device, and an unserialized open/release
+            # cycle behind its back is exactly the contention the funnel and
+            # the latch exist to prevent. Take the no-handle exit: hand the
+            # turnstile on (no-op if we never claimed it), publish a legible
+            # cancel error for any waiter, mark dead, deregister, confirm
+            # released.
+            self._manager._leave_funnel(self)
+            with self._cond:
+                self.open_error = CameraOpenError(
+                    f"Camera {self.camera_id} preview open was cancelled before it started."
+                )
+                self.opened = True
+                self.dead = True
+                self._cond.notify_all()
+            self._manager._deregister_if_current(self)
+            self.released.set()
+            _log_event("birth_cancelled", self.camera_id)
+            return
+        with self._cond:
+            # Birth begins NOW (turnstile owned): stamp the start and wake any
+            # client waiting in _acquire so it switches from the queue backstop
+            # to this camera's own _OPEN_TIMEOUT budget.
+            self.birth_started_ts = time.monotonic()
+            self._cond.notify_all()
+        _log_event("birth_start", self.camera_id)
         try:
             index = self._manager._resolve_cv2_index(self.camera_id)
             cap = self._open_cv2(index)
@@ -283,10 +430,10 @@ class _SharedCapture:
                 self._cond.notify_all()
             self._manager._deregister_if_current(self)
             self.released.set()
+            _log_event("open_failed", self.camera_id, error=str(exc))
             return
-        # Configure format BEFORE the first read (and before publishing open_ok):
-        # forces in-camera MJPEG so three USB-2 cameras can coexist. Never fails
-        # the open — see _configure_preview_capture.
+        # Configure size/fps BEFORE the first read (and before publishing
+        # open_ok). Never fails the open — see _configure_preview_capture.
         _configure_preview_capture(cap, self.camera_id)
         with self._cond:
             self.cap = cap
@@ -295,6 +442,7 @@ class _SharedCapture:
             self.opened = True
             self.last_frame_ts = time.monotonic()
             self._cond.notify_all()
+        _log_event("open_ok", self.camera_id, index=index)
         self._read_loop(cap)
 
     def _open_cv2(self, index: int) -> cv2.VideoCapture:
@@ -317,6 +465,7 @@ class _SharedCapture:
         interval = 1.0 / TARGET_FPS
         failures = 0
         first_frame_published = False
+        loop_started = time.monotonic()
         try:
             while not self.stop.is_set():
                 started = time.monotonic()
@@ -337,14 +486,33 @@ class _SharedCapture:
                             # nest the funnel lock under another) and idempotent.
                             first_frame_published = True
                             self._manager._leave_funnel(self)
+                            _log_event("first_frame", self.camera_id)
                 else:
                     failures += 1
+                    if failures == 1:
+                        # Log the START of a failure run (not every miss): a
+                        # black tile whose events show read_fail_start with no
+                        # first_frame is a device delivering nothing — the
+                        # exact signature under investigation.
+                        _log_event("read_fail_start", self.camera_id, had_first_frame=first_frame_published)
+                    if not first_frame_published and time.monotonic() - loop_started > _FIRST_FRAME_DEADLINE:
+                        # Frame-dead birth (see _FIRST_FRAME_DEADLINE): fail
+                        # fast and free the funnel — the clients' retry loops
+                        # re-roll the open, which heals it.
+                        logger.warning(
+                            "Camera %s delivered no first frame within %.0fs; releasing for a retry",
+                            self.camera_id,
+                            _FIRST_FRAME_DEADLINE,
+                        )
+                        _log_event("first_frame_timeout", self.camera_id)
+                        break
                     if failures >= _MAX_READ_FAILURES:
                         logger.warning(
                             "Camera %s failed %d consecutive reads; reader releasing shared capture",
                             self.camera_id,
                             failures,
                         )
+                        _log_event("read_fail_streak", self.camera_id, failures=failures)
                         break
                 # Pace to ~TARGET_FPS. Waiting on the stop event (not a plain
                 # sleep) lets stop_all cut the frame interval short.
@@ -367,6 +535,7 @@ class _SharedCapture:
                 self._cond.notify_all()
             self._manager._deregister_if_current(self)
             self.released.set()
+            _log_event("reader_released", self.camera_id)
 
 
 class CameraPreviewManager:
@@ -409,6 +578,16 @@ class CameraPreviewManager:
         # Lets the *next* open give a just-released (possibly still-busy) device
         # one short retry. Guarded by _registry_lock.
         self._last_release: dict[str, float] = {}
+        # Enumeration snapshot shared across a mount burst (see _ENUM_CACHE_TTL).
+        # Guarded by _registry_lock — held only for the read/store; the
+        # enumeration itself (the slow subprocess) always runs unlocked. Readers
+        # take _registry_lock here while holding the funnel; nothing ever takes
+        # the funnel while holding _registry_lock, so the lock order is acyclic.
+        self._enum_cache: list | None = None
+        self._enum_cache_ts = 0.0
+        # camera_id → (monotonic time, jpeg bytes) of the last one-shot still
+        # (see _SNAPSHOT_CACHE_TTL). Guarded by _registry_lock.
+        self._snapshot_cache: dict[str, tuple[float, bytes]] = {}
         # Open funnel (turnstile): the reader thread of at most one capture may be
         # in resolve→open→configure→first-frame at a time, so concurrent births
         # don't stampede a shared USB-2 hub (see _FUNNEL_HOLD_DEADLINE). Its own
@@ -461,6 +640,49 @@ class CameraPreviewManager:
             # the generator has already run its finally, so nothing leaks.
             raise CameraOpenError(f"Camera {camera_id} could not be opened.") from exc
         return gen
+
+    def snapshot(self, camera_id: str | int) -> bytes:
+        """One JPEG frame of ``camera_id`` without holding a standing stream.
+
+        The config page's borrow-don't-reserve lane (see _SNAPSHOT_FRAME_TIMEOUT
+        above for why): shares a live capture's newest frame when one is already
+        streaming (no extra device open); otherwise acquires the capture, waits
+        (bounded) for its first frame, and releases it — with the idle linger,
+        that release keeps the capture warm for the next poll. Poll bursts
+        within _SNAPSHOT_CACHE_TTL are served from the cache, so N tiles
+        refreshing together cost one borrow, not N.
+
+        Raises :class:`CameraOpenError` when the camera can't be opened, is
+        latched to a recording/inference session, or produces no frame within
+        the bounded wait (endpoint → 503, same contract as open_stream).
+        """
+        camera_id = str(camera_id)
+        with self._registry_lock:
+            cached = self._snapshot_cache.get(camera_id)
+            if cached is not None and (time.monotonic() - cached[0]) <= _SNAPSHOT_CACHE_TTL:
+                return cached[1]
+        # _acquire shares an already-streaming capture (refcount bump only) or
+        # births a fresh one through the funnel; either way _release below drops
+        # our count (into the idle linger when we were the only client).
+        entry = self._acquire(camera_id)
+        try:
+            with entry._cond:
+                deadline = time.monotonic() + _SNAPSHOT_FRAME_TIMEOUT
+                while entry.latest_jpeg is None and not entry.dead and not entry.stop.is_set():
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    entry._cond.wait(remaining)
+                jpeg = entry.latest_jpeg
+        finally:
+            self._release(entry)
+        if jpeg is None:
+            raise CameraOpenError(
+                f"Camera {camera_id} produced no frame within {_SNAPSHOT_FRAME_TIMEOUT:.0f}s."
+            )
+        with self._registry_lock:
+            self._snapshot_cache[camera_id] = (time.monotonic(), jpeg)
+        return jpeg
 
     def stop_all(self, timeout: float = 1.0) -> None:
         """Stop every preview stream and release every capture.
@@ -530,6 +752,7 @@ class CameraPreviewManager:
         if not entries:
             return
         for entry in entries:
+            _log_event("force_stop", entry.camera_id)
             entry.stop.set()
             with self._registry_lock:
                 if self._captures.get(entry.camera_id) is entry:
@@ -551,6 +774,10 @@ class CameraPreviewManager:
                     entry.camera_id,
                     timeout,
                 )
+                # THE zombie-creation moment: this reader's thread and its live
+                # AVCaptureSession now leak inside the process, possibly
+                # poisoning future opens of this device until restart.
+                _log_event("reader_abandoned", entry.camera_id, grace_s=timeout)
 
     def held_healthy_indices(self) -> list[int]:
         """Indices whose shared capture is currently open and not dead/stopping.
@@ -570,31 +797,66 @@ class CameraPreviewManager:
             if e.open_ok and not e.dead and not e.stop.is_set() and e.cap is not None and e.index is not None
         )
 
-    @staticmethod
-    def _resolve_cv2_index(camera_id: str) -> int:
-        """The cv2 index to open for ``camera_id`` — resolved NOW, per open.
+    def _resolve_cv2_index(self, camera_id: str) -> int:
+        """The cv2 index to open for ``camera_id`` — resolved at open time.
 
         Numeric fallback lane: a purely-numeric id is the index itself (legacy
         callers / platforms without stable ids). Otherwise the id is resolved
-        against a FRESH enumeration via camera_enumeration.resolve_index (the
+        against a live enumeration via camera_enumeration.resolve_index (the
         single id→index lookup, shared with record start), so a reopen after a
         hotplug reshuffle lands on the device's new index instead of streaming
-        whatever slid into the old slot. An unknown id becomes a legible
-        :class:`CameraOpenError` (endpoint → 503).
+        whatever slid into the old slot. Births within _ENUM_CACHE_TTL of the
+        last enumeration share that snapshot (a simultaneous multi-tile mount
+        runs the enumeration subprocess once, not once per camera); a MISS
+        in the snapshot always falls through to one fresh enumeration before
+        failing. An unknown id becomes a legible :class:`CameraOpenError`
+        (endpoint → 503).
         """
         if camera_id.isdigit():
             return int(camera_id)
+        cams = self._cached_enumeration()
+        if cams is not None:
+            index = camera_enumeration.find_camera_index(cams, camera_id)
+            if index is not None:
+                return index
+            # Not in the snapshot: never fail from a cache — the device may
+            # have (re)appeared since it was taken. Enumerate fresh below.
         try:
-            index, _ = camera_enumeration.resolve_index(camera_id)
+            index, enumerated = camera_enumeration.resolve_index(camera_id)
         except camera_enumeration.CameraNotConnectedError as exc:
             raise CameraOpenError(str(exc)) from exc
+        self._store_enumeration(enumerated)
         return index
+
+    def _cached_enumeration(self) -> list | None:
+        """The shared enumeration snapshot, or None once it has aged past
+        _ENUM_CACHE_TTL (or none was ever stored)."""
+        with self._registry_lock:
+            if self._enum_cache is not None and (time.monotonic() - self._enum_cache_ts) <= _ENUM_CACHE_TTL:
+                return self._enum_cache
+        return None
+
+    def _store_enumeration(self, enumerated: list) -> None:
+        """Store a fresh enumeration for the burst window. An empty result (a
+        failed probe) is never cached — the next resolve should try again."""
+        if not enumerated:
+            return
+        with self._registry_lock:
+            self._enum_cache = enumerated
+            self._enum_cache_ts = time.monotonic()
 
     def _mark_released(self, camera_id: str) -> None:
         """Record that a reader just released ``camera_id``'s capture, so the next
-        open of the same id is eligible for the busy-retry (see _REOPEN_RETRY_*)."""
+        open of the same id is eligible for the busy-retry (see _REOPEN_RETRY_*).
+
+        Also drops the shared enumeration snapshot: a capture ending (device
+        died, watchdog, force-release) is the signature of bus churn, and the
+        very next open MUST re-resolve against live state — reopen-after-
+        reshuffle correctness outranks burst sharing. Bursts only ever share a
+        snapshot no capture death has cast doubt on."""
         with self._registry_lock:
             self._last_release[camera_id] = time.monotonic()
+            self._enum_cache = None
 
     def _deregister_if_current(self, entry: _SharedCapture) -> None:
         """Drop ``entry`` from the registry iff it is still the live entry for its
@@ -617,6 +879,9 @@ class CameraPreviewManager:
         with self._registry_lock:
             if self._captures.get(entry.camera_id) is entry:
                 del self._captures[entry.camera_id]
+            # A wedged capture is bus-churn evidence: the next birth must
+            # re-enumerate, not trust a snapshot (see _mark_released).
+            self._enum_cache = None
         with entry._cond:
             entry.dead = True
             entry._cond.notify_all()
@@ -625,6 +890,7 @@ class CameraPreviewManager:
             entry.camera_id,
             _FRAME_DEADLINE,
         )
+        _log_event("watchdog_declared_dead", entry.camera_id, deadline_s=_FRAME_DEADLINE)
 
     def _enter_funnel(self, entry: "_SharedCapture") -> None:
         """Admit ``entry``'s reader into the open turnstile, waiting its turn.
@@ -665,6 +931,7 @@ class CameraPreviewManager:
                         self._funnel_holder.camera_id,
                         _FUNNEL_HOLD_DEADLINE,
                     )
+                    _log_event("funnel_usurped", entry.camera_id, holder=self._funnel_holder.camera_id)
                     self._funnel_holder = entry
                     self._funnel_holder_deadline = now + _FUNNEL_HOLD_DEADLINE
                     return
@@ -707,6 +974,7 @@ class CameraPreviewManager:
             # retries; the route's recording_active check already answers 409
             # for every non-racing open.
             if self._blocked:
+                _log_event("acquire_rejected_latched", camera_id, owner=self._block_reason)
                 raise CameraOpenError(
                     f"Camera {camera_id} is reserved for the active {self._block_reason} session."
                 )
@@ -720,14 +988,28 @@ class CameraPreviewManager:
                 entry = _SharedCapture(self, camera_id, retry_open_on_busy=retry)
                 self._captures[camera_id] = entry
             entry.refcount += 1
+            # Invalidate any pending idle-linger expiry: this capture has a
+            # client again, so the deferred teardown must not fire.
+            entry.linger_gen += 1
+            refcount_now = entry.refcount
+        _log_event("acquire" if created else "acquire_shared", camera_id, refcount=refcount_now)
         if created:
             entry.start()  # launch the reader; it owns the cv2 open
         # Wait (bounded) for the reader to report its open result. This is the
         # synchronous open the endpoint needs for its 503, but it can never block
-        # forever: _OPEN_TIMEOUT caps it and a failed/timed-out open self-cleans.
+        # forever. Two clocks, so a camera queued at the funnel behind other
+        # births is not billed for time that was never its own open: until the
+        # reader stamps birth_started_ts (turnstile owned, resolve→open running)
+        # the wait is bounded only by the end-to-end _QUEUED_OPEN_BACKSTOP; once
+        # the birth starts, by birth_started_ts + _OPEN_TIMEOUT (backstop-capped).
+        # A failed/timed-out open self-cleans either way.
         with entry._cond:
-            deadline = time.monotonic() + _OPEN_TIMEOUT
+            backstop = time.monotonic() + _QUEUED_OPEN_BACKSTOP
             while not entry.opened:
+                if entry.birth_started_ts is not None:
+                    deadline = min(entry.birth_started_ts + _OPEN_TIMEOUT, backstop)
+                else:
+                    deadline = backstop
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break
@@ -740,20 +1022,60 @@ class CameraPreviewManager:
         return entry
 
     def _release(self, entry: _SharedCapture) -> None:
+        linger = _IDLE_LINGER
         with self._registry_lock:
+            # Decrement, the last-client check, and the deregistration stay in
+            # ONE critical section (an acquire between them could re-adopt an
+            # entry this thread is about to tear down); the event is logged
+            # after, from captured values.
             entry.refcount -= 1
-            if entry.refcount > 0:
+            refcount_now = entry.refcount
+            if refcount_now <= 0:
+                if linger > 0:
+                    # Idle linger (see _IDLE_LINGER): keep the capture alive
+                    # and REGISTERED so a near-future acquire reuses it instead
+                    # of running a fresh open into the teardown turbulence that
+                    # intermittently births frame-dead sessions. The generation
+                    # stamp lets a later acquire cancel this deferred teardown.
+                    entry.linger_gen += 1
+                    linger_gen = entry.linger_gen
+                else:
+                    # Synchronous teardown (linger disabled): deregister before
+                    # signalling the reader so a new client never latches onto
+                    # a capture that is being torn down.
+                    if self._captures.get(entry.camera_id) is entry:
+                        del self._captures[entry.camera_id]
+        _log_event("client_release", entry.camera_id, refcount=refcount_now)
+        if refcount_now > 0:
+            return
+        if linger > 0:
+            _log_event("linger_start", entry.camera_id, linger_s=linger)
+            timer = threading.Timer(linger, self._linger_expire, args=(entry, linger_gen))
+            timer.daemon = True
+            timer.start()
+            return
+        self._teardown(entry)
+
+    def _linger_expire(self, entry: _SharedCapture, linger_gen: int) -> None:
+        """Deferred last-client teardown (idle linger lapsed with no re-acquire).
+
+        A stale generation means a client re-acquired (and possibly re-released,
+        arming a NEWER timer) after this timer was armed — this one must no-op or
+        it would tear down a capture that has clients again."""
+        with self._registry_lock:
+            if entry.refcount > 0 or entry.linger_gen != linger_gen:
                 return
-            # Last client: deregister before signalling the reader so a new
-            # client never latches onto a capture that is being torn down.
-            last = self._captures.get(entry.camera_id) is entry
-            if last:
+            if self._captures.get(entry.camera_id) is entry:
                 del self._captures[entry.camera_id]
-        # Tell the reader to stop and release its own capture, then wait a bounded
-        # grace for it to confirm. The consumer never touches cv2, so this thread
-        # is never inside read(); a reader wedged in read() is abandoned when the
-        # grace lapses rather than joined. Waiting lets a subsequent same-index
-        # open find the device actually free instead of transiently busy.
+        _log_event("linger_expired", entry.camera_id)
+        self._teardown(entry)
+
+    def _teardown(self, entry: _SharedCapture) -> None:
+        """Tell the reader to stop and release its own capture, then wait a bounded
+        grace for it to confirm. The caller never touches cv2, so this thread is
+        never inside read(); a reader wedged in read() is abandoned when the grace
+        lapses rather than joined. Waiting lets a subsequent same-index open find
+        the device actually free instead of transiently busy."""
         entry.stop.set()
         # Wake a reader parked in the open turnstile (last client vanished before
         # the birth ever produced a frame) so it sees the stop without waiting out

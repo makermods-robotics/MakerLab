@@ -59,7 +59,7 @@ from .auto_calibrate import (
     auto_calibration_manager,
 )
 from .calibrate import CalibrationRequest, calibration_manager
-from .camera_preview import CameraOpenError, camera_preview_manager
+from .camera_preview import CameraOpenError, camera_preview_manager, preview_events
 from .identify import identify_arm_by_motion
 from .jobs import (
     DatasetNotOnHubError,
@@ -2220,6 +2220,47 @@ def camera_preview_stream(camera_id: str):
     except CameraOpenError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return StreamingResponse(stream, media_type="multipart/x-mixed-replace; boundary=frame")
+
+
+@app.get("/camera-snapshot/{camera_id}")
+def camera_snapshot(camera_id: str):
+    """One JPEG still of a server-attached camera — the borrow-don't-reserve
+    preview lane.
+
+    Every preview surface polls this endpoint instead of holding standing
+    MJPEG streams: each still is served off the manager's lingering capture
+    (or a one-frame borrow, serialized by the open funnel and coalesced by a
+    short server-side cache), so any number of tiles can coexist without a
+    standing stream per tile. Same addressing and status contract as
+    /camera-preview: 409 while recording owns the devices, 503 when the camera
+    can't be opened, is session-latched, or yields no frame within the bounded
+    wait.
+    """
+    if record_state.recording_active:
+        raise HTTPException(
+            status_code=409,
+            detail="Recording is active — the cameras are in use. Stop recording to preview them.",
+        )
+    try:
+        jpeg = camera_preview_manager.snapshot(camera_id)
+    except CameraOpenError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return Response(content=jpeg, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+
+@app.get("/camera-preview-events")
+def camera_preview_events():
+    """Forensic event log of the preview manager (see camera_preview._EVENTS).
+
+    Every lifecycle transition — acquire/share/release, birth, first frame,
+    read-failure runs, watchdog kills, force-stops, funnel usurps, linger
+    start/expiry, and reader ABANDONMENTS (leaked threads whose wedged
+    cap.read() may hold a zombie AVCaptureSession that poisons later opens of
+    the same device) — with timestamps, so an intermittent black tile can be
+    diagnosed from its actual history: GET this right after a failure and read
+    the tail.
+    """
+    return preview_events()
 
 
 RobotSideLiteral = Literal["leader", "follower"]
