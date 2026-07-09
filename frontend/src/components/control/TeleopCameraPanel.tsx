@@ -8,34 +8,33 @@ import { useRobots } from "@/hooks/useRobots";
 import CameraFeed from "./CameraFeed";
 
 /**
- * Optional live camera panel for the teleoperation page. Off by default so we
- * never call getUserMedia just by landing on the page (same consent pattern as
- * the calibration camera toggle). Teleoperation opens no cv2 cameras, so the
- * browser can stream them directly while the arm runs.
+ * Optional live camera panel for the teleoperation page. Off by default (same
+ * consent pattern as the calibration camera toggle). Teleoperation opens no cv2
+ * cameras — it drives the serial bus — so previewing the server's camera feeds
+ * while the arm runs does not contend for the devices.
  *
- * A strict mirror of the selected robot's configured cameras: one live feed per
- * camera on the robot record (e.g. "wrist_cam", "webcam"), stacked vertically.
- * If the robot has none configured it shows nothing — teleop never surfaces a
- * device that wasn't deliberately added to the robot.
+ * Each feed is the live backend cv2 MJPEG stream at the camera's index, so it
+ * shows exactly the camera the robot record maps to (no browser deviceId
+ * fuzzy-match). A strict mirror of the selected robot's configured cameras: one
+ * feed per camera on the record (e.g. "wrist_cam", "webcam"), stacked
+ * vertically. If the robot has none configured it shows nothing — teleop never
+ * surfaces a device that wasn't deliberately added to the robot.
  */
 const TeleopCameraPanel: React.FC = () => {
   const [enabled, setEnabled] = useState(false);
-  // Bumped by the retry button to remount the feeds (a fresh getUserMedia
+  // Bumped by the retry button to remount the feeds (a fresh backend-stream
   // attempt) — useful if a camera was unplugged and reconnected.
   const [reloadKey, setReloadKey] = useState(0);
   const { selectedRecord, isLoading: robotsLoading } = useRobots();
 
-  // Feeds come solely from the robot's configured cameras; each carries a stored
-  // browser device_id we stream directly. A configured camera whose device is
-  // currently absent still shows (name + failed-preview placeholder), so the
-  // user can tell it's expected but not detected.
+  // Feeds come solely from the robot's configured cameras; each is streamed
+  // from the server by its cv2 index. A configured camera the server can't open
+  // still shows (name + BackendCameraStream's retry placeholder), so the user
+  // can tell it's expected but not detected.
   const configured = selectedRecord?.cameras ?? [];
   const feeds = configured.map((c) => ({
     key: c.id,
     name: c.name,
-    deviceId: c.device_id,
-    // MJPEG fallback for headless deployments: no browser deviceId match, but
-    // the server knows the camera by its cv2 index.
     cameraIndex: c.camera_index,
   }));
 
@@ -77,7 +76,6 @@ const TeleopCameraPanel: React.FC = () => {
             {feeds.map((feed) => (
               <CameraFeed
                 key={`${feed.key}:${reloadKey}`}
-                deviceId={feed.deviceId}
                 cameraIndex={feed.cameraIndex}
                 label={feed.name}
               />

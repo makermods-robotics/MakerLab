@@ -5,6 +5,11 @@ import { UrdfProvider } from "@/contexts/UrdfContext";
 import { DragAndDropProvider } from "@/contexts/DragAndDropContext";
 import { Toaster } from "@/components/ui/toaster";
 import Landing from "@/pages/Landing";
+import Home from "@/pages/Home";
+import Collect from "@/pages/Collect";
+import TrainDeploy from "@/pages/TrainDeploy";
+import Market from "@/pages/Market";
+import StageLayout from "@/components/shell/StageLayout";
 import Teleoperation from "@/pages/Teleoperation";
 import Calibration from "@/pages/Calibration";
 import Recording from "@/pages/Recording";
@@ -37,11 +42,16 @@ function App() {
                       <TeleopStopNotice />
                       <UpdateNotice />
                       <Routes>
-                        <Route path="/" element={<Landing />} />
+                        <Route path="/" element={<Home />} />
+                        <Route element={<StageLayout />}>
+                          <Route path="/collect" element={<Collect />} />
+                          <Route path="/training" element={<TrainDeploy />} />
+                          <Route path="/market" element={<Market />} />
+                        </Route>
+                        <Route path="/legacy" element={<Landing />} />
                         <Route path="/teleoperation" element={<Teleoperation />} />
                         <Route path="/recording" element={<Recording />} />
                         <Route path="/upload" element={<Upload />} />
-                        <Route path="/training" element={<Training />} />
                         <Route path="/training/:jobId" element={<Training />} />
                         <Route path="/inference" element={<Inference />} />
                         <Route path="/calibration" element={<Calibration />} />
