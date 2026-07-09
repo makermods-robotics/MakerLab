@@ -25,12 +25,6 @@ const VisualizerPanel: React.FC<VisualizerPanelProps> = ({
       )}
     >
       <Card variant="flat" className="flex flex-1 flex-col overflow-hidden p-4">
-        <div className="mb-4 flex items-center justify-between gap-4">
-          <div>
-            <div className="eyebrow">[ Control ]</div>
-            <h2 className="mt-2 text-xl">Teleoperation</h2>
-          </div>
-        </div>
         {/* No standing torque warning here: stops are graceful (the arm
             drives back to its session-start pose before torque releases) and
             the stop toast explains the behavior at the moment it happens.

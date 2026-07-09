@@ -137,9 +137,12 @@ const Home: React.FC = () => {
         target?.isContentEditable;
       if (isTyping) return;
 
-      if (event.key === "Enter" && robots[0]) {
+      if (event.key === "Enter" && robots.length > 0) {
         event.preventDefault();
-        openRobot(robots[0]);
+        // Prefer the robot the user last worked with; fall back to the first.
+        const preferred =
+          robots.find((r) => r.name === selectedName) ?? robots[0];
+        openRobot(preferred);
       }
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "n") {
         event.preventDefault();
@@ -153,7 +156,7 @@ const Home: React.FC = () => {
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [isExiting, navigate, openRobot, robots, settingsState]);
+  }, [isExiting, navigate, openRobot, robots, selectedName, settingsState]);
 
   return (
     <main className="relative min-h-screen overflow-hidden bg-background text-foreground">
