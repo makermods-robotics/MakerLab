@@ -1,0 +1,472 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WIREFRAME Concept D Resolve</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: #fff;
+      color: #333;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      font-size: 14px;
+      line-height: 1.35;
+    }
+    button, input, select, textarea {
+      font: inherit;
+      color: #333;
+      background: #fff;
+      border: 1px solid #999;
+    }
+    button { cursor: pointer; padding: 7px 10px; }
+    .wf-strip {
+      position: fixed;
+      z-index: 50;
+      top: 0;
+      left: 0;
+      right: 0;
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      padding: 8px;
+      background: #eee;
+      border-bottom: 1px solid #999;
+      overflow-x: auto;
+      white-space: nowrap;
+    }
+    .wf-strip strong { margin-right: 6px; }
+    .wf-strip button.active, .stage-btn.active, .tab.active { background: #333; color: #fff; }
+    .app { min-height: 100vh; padding: 49px 0 78px; }
+    .app.live { padding-bottom: 0; }
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      height: 54px;
+      padding: 0 22px;
+      border-bottom: 1px solid #999;
+      background: #fff;
+    }
+    .live .topbar, .live .stagebar { display: none; }
+    .logo { font-weight: 700; letter-spacing: 0; }
+    .robot-area { position: relative; display: flex; align-items: center; gap: 8px; min-width: 230px; justify-content: flex-end; }
+    .empty-chip { color: #333; }
+    .chip { display: inline-flex; align-items: center; gap: 6px; padding: 8px 10px; border: 1px solid #999; background: #eee; }
+    .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; border: 1px solid #999; background: #333; }
+    .dot.hollow { background: #fff; }
+    .gear { width: 36px; height: 36px; padding: 0; background: #eee; }
+    .dropdown {
+      position: absolute;
+      top: 43px;
+      right: 44px;
+      z-index: 20;
+      width: 340px;
+      padding: 12px;
+      background: #fff;
+      border: 1px solid #999;
+      display: none;
+    }
+    .dropdown.open { display: block; }
+    .tabs { display: flex; gap: 6px; margin-bottom: 10px; }
+    .tab { flex: 1; background: #eee; }
+    .tab-panel { display: none; }
+    .tab-panel.active { display: block; }
+    .row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px; border: 1px solid #999; margin-bottom: 8px; background: #fff; }
+    .muted { color: #333; font-size: 12px; }
+    .stagebar {
+      position: fixed;
+      z-index: 40;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      display: flex;
+      justify-content: center;
+      gap: 8px;
+      padding: 10px;
+      background: #eee;
+      border-top: 1px solid #999;
+    }
+    .stage-btn { width: 160px; background: #fff; text-align: center; }
+    .stage-btn b { display: block; }
+    .stage-btn span { display: block; font-size: 11px; margin-top: 2px; }
+    main { padding: 22px; }
+    .screen { display: none; }
+    .screen.active { display: block; }
+    h1, h2, h3 { margin: 0 0 12px; line-height: 1.1; letter-spacing: 0; }
+    h1 { font-size: 24px; }
+    h2 { font-size: 18px; }
+    h3 { font-size: 15px; }
+    .grid { display: grid; gap: 16px; }
+    .two { grid-template-columns: 2fr 1fr; }
+    .two-even { grid-template-columns: 1fr 1fr; }
+    .three { grid-template-columns: repeat(3, 1fr); }
+    .market-grid { grid-template-columns: repeat(4, 1fr); }
+    .panel, .card, .placeholder, .note {
+      border: 1px solid #999;
+      background: #fff;
+      padding: 14px;
+    }
+    .fill { background: #eee; }
+    .placeholder {
+      min-height: 130px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      background: #eee;
+    }
+    .note {
+      border-style: dashed;
+      background: #fff;
+      margin-top: 14px;
+    }
+    .note strong { display: block; margin-bottom: 4px; }
+    .cards { display: grid; gap: 10px; }
+    .rig-card { min-height: 92px; }
+    .ghost { border-style: dashed; background: #fff; }
+    .drawer {
+      border: 1px solid #999;
+      background: #eee;
+      padding: 14px;
+      min-height: 610px;
+    }
+    label { display: block; margin: 10px 0 4px; }
+    input, select, textarea { width: 100%; padding: 8px; }
+    .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+    .primary { background: #333; color: #fff; }
+    .toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
+    .toolbar .left, .toolbar .right { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .toolbar > input { width: 340px; }
+    .visualizer { min-height: 410px; }
+    .camera-strip { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px; }
+    .camera { min-height: 115px; }
+    .banner { border: 1px solid #999; background: #eee; padding: 12px; margin-bottom: 16px; display: flex; justify-content: space-between; gap: 12px; align-items: center; }
+    .live-page {
+      min-height: calc(100vh - 49px);
+      padding: 28px 28px 44px;
+      display: grid;
+      gap: 18px;
+      grid-template-rows: auto 1fr auto;
+    }
+    .live-meter { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; }
+    .big { font-size: 44px; font-weight: 700; text-align: center; padding: 24px; border: 1px solid #999; background: #eee; }
+    .skill-section { margin-bottom: 18px; }
+    .columns { display: grid; grid-template-columns: 1.1fr .9fr; gap: 14px; }
+    .mini { font-size: 12px; border: 1px solid #999; padding: 3px 6px; background: #eee; display: inline-block; margin: 0 4px 4px 0; }
+    .job-card, .model-card { border: 1px solid #999; padding: 12px; margin-bottom: 10px; background: #fff; }
+    .job-group { border: 1px solid #999; padding: 10px; margin-bottom: 10px; background: #eee; }
+    .job-group summary { cursor: pointer; font-weight: 700; margin-bottom: 10px; }
+    .key-row { display: flex; gap: 8px; align-items: center; margin-top: 9px; }
+    .key-row select { flex: 1; }
+    .settings-overlay {
+      position: fixed;
+      z-index: 45;
+      top: 49px;
+      right: 0;
+      bottom: 0;
+      width: 370px;
+      display: none;
+      border-left: 1px solid #999;
+      background: #eee;
+      padding: 16px;
+      overflow: auto;
+    }
+    .settings-overlay.open { display: block; }
+    @media (max-width: 900px) {
+      .two, .two-even, .three, .market-grid, .columns, .live-meter { grid-template-columns: 1fr; }
+      .stagebar { overflow-x: auto; justify-content: flex-start; }
+      .stage-btn { min-width: 150px; }
+      .dropdown, .settings-overlay { left: 10px; right: 10px; width: auto; }
+      .robot-area { min-width: 0; }
+    }
+  </style>
+</head>
+<body>
+  <nav class="wf-strip" aria-label="Wireframe screen switcher">
+    <strong>WIREFRAME Concept D Resolve — screen:</strong>
+    <button data-go="rig-picker">rig-picker</button>
+    <button data-go="rig-settings">rig-settings</button>
+    <button data-go="collect">collect</button>
+    <button data-go="live-record">live-record</button>
+    <button data-go="post-record">post-record</button>
+    <button data-go="train-deploy">train-deploy</button>
+    <button data-go="live-inference">live-inference</button>
+    <button data-go="market">market</button>
+    <button data-go="robot-dropdown">robot-dropdown</button>
+  </nav>
+
+  <div id="app" class="app">
+    <header class="topbar">
+      <div class="logo">MakerLab</div>
+      <div class="robot-area" id="robotArea">
+        <span class="empty-chip" id="emptyChip">No rig open</span>
+        <button class="chip" id="robotChip" type="button"><span class="dot"></span><span>SO-101 bench rig</span><span>▾</span></button>
+        <button class="gear" id="gearBtn" type="button" aria-label="Robot settings">⚙</button>
+        <div class="dropdown" id="robotDropdown">
+          <div class="tabs">
+            <button class="tab active" type="button" data-tab="single">Single</button>
+            <button class="tab" type="button" data-tab="bimanual">Bimanual</button>
+          </div>
+          <div class="tab-panel active" data-panel="single">
+            <div class="row"><span><span class="dot"></span> SO-101 bench rig<br><span class="muted">calibrated · ports OK · 2 cameras</span></span><button type="button" data-go="collect">Open</button></div>
+            <div class="row"><span><span class="dot hollow"></span> Travel arm<br><span class="muted">needs calibration · 1 camera</span></span><button type="button" data-go="collect">Open</button></div>
+          </div>
+          <div class="tab-panel" data-panel="bimanual">
+            <div class="row"><span><span class="dot"></span> Dual SO-101 desk<br><span class="muted">calibrated · left/right ports OK · 3 cameras</span></span><button type="button" data-go="collect">Open</button></div>
+            <div class="row"><span><span class="dot hollow"></span> Folding station<br><span class="muted">right arm missing · 2 cameras</span></span><button type="button" data-go="collect">Open</button></div>
+          </div>
+          <button class="ghost" type="button">+ New config</button>
+        </div>
+      </div>
+    </header>
+
+    <aside class="settings-overlay" id="settingsOverlay">
+      <h2>Robot Settings</h2>
+      <label>Left / single arm port</label><div class="row"><span>/dev/tty.usbmodem101</span><button type="button">Detect (wiggle)</button></div>
+      <label>Right arm port</label><div class="row"><span>/dev/tty.usbmodem202</span><button type="button">Detect (wiggle)</button></div>
+      <label>Calibration file</label><div class="row"><span>so101-bench-2026.json</span><button type="button">Calibrate now</button></div>
+      <label>Canonical cameras</label><div class="row"><span>front · wrist</span><button type="button">Refresh</button></div>
+      <label>Motor power</label><select><option>On while app is open</option><option>Off</option></select>
+      <div class="actions"><button class="primary" type="button" id="closeSettings">Save</button><button type="button" id="dismissSettings">Close</button></div>
+    </aside>
+
+    <main>
+      <section class="screen" data-screen="rig-picker" data-stage="rig">
+        <h1>Rig</h1>
+        <div class="grid two">
+          <div class="panel">
+            <h2>Open a robot like a repo</h2>
+            <div class="cards">
+              <div class="card rig-card"><h3>SO-101 bench rig <span class="mini">single</span></h3><p>calibrated · ports OK · 2 cameras</p><p class="muted">last used today</p></div>
+              <div class="card rig-card"><h3>Dual SO-101 desk <span class="mini">bimanual</span></h3><p>calibrated · ports OK · 3 cameras</p><p class="muted">last used yesterday</p></div>
+              <div class="card rig-card"><h3>Travel arm <span class="mini">single</span></h3><p>needs calibration · 1 camera</p><p class="muted">last used last week</p></div>
+              <div class="card rig-card ghost"><h3>+ New rig</h3><p>Create a robot config from connected hardware.</p></div>
+              <div class="row ghost"><span>Import from Market</span><span>SO-101 templates and shared rigs</span></div>
+            </div>
+          </div>
+          <div class="panel fill">
+            <h2>No rig selected</h2>
+            <p>Select a recent rig to configure ports, calibration, cameras, and motor power before opening it.</p>
+            <div class="note"><strong>NOTE:</strong>First-run state doubles as the Rig stage content. The robot chip area stays empty until a rig is opened.</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="screen" data-screen="rig-settings" data-stage="rig">
+        <h1>Rig</h1>
+        <div class="grid two">
+          <div class="panel">
+            <h2>Recent rigs</h2>
+            <div class="cards">
+              <div class="card rig-card fill"><h3>SO-101 bench rig <span class="mini">single</span></h3><p>selected · calibrated · ports OK · 2 cameras</p><p class="muted">last used today</p></div>
+              <div class="card rig-card"><h3>Dual SO-101 desk <span class="mini">bimanual</span></h3><p>calibrated · ports OK · 3 cameras</p><p class="muted">last used yesterday</p></div>
+              <div class="card rig-card ghost"><h3>+ New rig</h3><p>Create a robot config.</p></div>
+            </div>
+            <div class="note"><strong>NOTE:</strong>Returning to Rig later shows this picker with the active rig highlighted. Switching rigs re-targets every stage instantly.</div>
+          </div>
+          <aside class="drawer">
+            <h2>SO-101 bench rig settings</h2>
+            <label>Arm port</label><div class="row"><span>/dev/tty.usbmodem101</span><button type="button">Detect (wiggle)</button></div>
+            <label>Calibration file</label><div class="row"><span>so101-bench-2026.json</span><button type="button">Calibrate now</button></div>
+            <label>Cameras</label><div class="row"><span>front camera · wrist camera</span><button type="button">Refresh</button></div>
+            <label>Motor power</label><select><option>On while app is open</option><option>Only while teleop/recording</option><option>Off</option></select>
+            <div class="actions"><button type="button">Save</button><button class="primary" type="button" data-go="collect">Open rig →</button></div>
+          </aside>
+        </div>
+      </section>
+
+      <section class="screen" data-screen="collect" data-stage="collect">
+        <div class="toolbar"><div><h1>Collect</h1><p>Record — show the robot the task by doing it.</p></div></div>
+        <div class="grid two">
+          <div>
+            <div class="placeholder visualizer">3D arm visualizer / URDF placeholder<br>live during teleop; practicing animates this panel</div>
+            <div class="camera-strip">
+              <div class="placeholder camera">front camera feed</div>
+              <div class="placeholder camera">wrist camera feed</div>
+            </div>
+          </div>
+          <div class="grid">
+            <div class="card">
+              <h2>Teleoperate</h2>
+              <p>Start/Stop practice toggle</p>
+              <div class="actions"><button class="primary" type="button">Start practice</button><button type="button">Stop</button></div>
+              <p class="muted">joints streaming · nothing saved</p>
+            </div>
+            <div class="card">
+              <h2>Record</h2>
+              <label>Dataset</label><select><option>pick-cube</option><option>+ New dataset</option></select>
+              <label>Task prompt</label><textarea rows="3">Pick up the cube and place it in the tray.</textarea>
+              <div class="grid two-even">
+                <div><label>Episodes target</label><input value="10"></div>
+                <div><label>Episode / reset seconds</label><input value="30 / 5"></div>
+              </div>
+              <div class="actions"><button class="primary" type="button" data-go="live-record">Start recording</button></div>
+            </div>
+            <div class="note"><strong>NOTE:</strong>Teleop-before-record is the expected rhythm; both cards share the same hardware session with no reconnect.</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="screen" data-screen="live-record">
+        <div class="live-page">
+          <div class="toolbar"><div><h1>Recording session</h1><p>Stage chrome hidden while recording.</p></div><button type="button">mute</button></div>
+          <div class="live-meter">
+            <div class="big">03:18</div>
+            <div class="big">Episode 7 / 10</div>
+            <div class="big">recording</div>
+          </div>
+          <div class="grid two-even">
+            <div class="placeholder">front camera feed</div>
+            <div class="placeholder">wrist camera feed</div>
+          </div>
+          <div class="actions">
+            <button type="button">Re-record episode</button>
+            <button type="button">Skip ahead (next episode)</button>
+            <button class="primary" type="button" data-go="post-record">Stop early</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="screen" data-screen="post-record" data-stage="collect">
+        <div class="banner"><strong>pick-cube +8 episodes</strong><button class="primary" type="button" data-go="train-deploy">Train on this dataset</button></div>
+        <div class="grid two">
+          <div>
+            <div class="placeholder visualizer">3D arm visualizer / URDF placeholder</div>
+            <div class="camera-strip"><div class="placeholder camera">front camera feed</div><div class="placeholder camera">wrist camera feed</div></div>
+          </div>
+          <div class="grid">
+            <div class="card"><h2>Teleoperate</h2><p class="muted">joints streaming · nothing saved</p><div class="actions"><button type="button">Start practice</button></div></div>
+            <div class="card"><h2>Record</h2><p>Dataset: pick-cube</p><p>Episodes now available for training.</p><div class="actions"><button type="button">Record more</button></div></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="screen" data-screen="train-deploy" data-stage="train">
+        <div class="toolbar">
+          <div class="left"><h1>Train & Deploy</h1><select><option>Skill: pick-cube / dataset v3</option><option>Skill: fold-sock / dataset v1</option></select></div>
+          <div class="right"><button class="primary" type="button">New training run</button><select><option>ACT</option><option>SmolVLA</option></select></div>
+        </div>
+        <section class="skill-section panel">
+          <h2>Skill: pick-cube</h2>
+          <p class="muted">source dataset v3 · version history stays runnable after retrains</p>
+          <div class="columns">
+            <div>
+              <h3>Jobs</h3>
+              <details class="job-group" open>
+                <summary>Local jobs (1)</summary>
+                <div class="job-card"><span class="mini">Running ▸</span><h3>ACT pick-cube local run</h3><p>started 18m ago</p><div class="key-row"><select><option>step 8,000</option><option>step 6,000</option></select><button type="button" data-go="live-inference">▶ test</button></div><div class="actions"><button type="button">Continue</button><button type="button">Download</button><button type="button">✎</button><button type="button">⌫</button></div></div>
+              </details>
+              <details class="job-group" open>
+                <summary>Online jobs (6)</summary>
+                <div class="job-card"><span class="mini">Done ✓</span><h3>SmolVLA pick-cube online</h3><p>ended 2h ago</p><div class="key-row"><select><option>checkpoint final</option><option>step 20,000</option></select><button type="button" data-go="live-inference">▶ test</button></div><div class="actions"><button type="button">Resume</button><button type="button">Download</button><button type="button">✎</button><button type="button">⌫</button></div></div>
+                <div class="job-card"><span class="mini">Failed ✕</span><h3>ACT pick-cube local retry</h3><p>ended yesterday</p><div class="actions"><button type="button">Resume</button><button type="button">Download logs</button></div></div>
+              </details>
+            </div>
+            <div>
+              <h3>Models</h3>
+              <div class="model-card"><span class="mini">Uploaded</span><h3>isaac/pick-cube-act-v3</h3><p>repo id: hf.co/isaac/pick-cube-act-v3</p><div class="actions"><button type="button" data-go="live-inference">▶ Run</button><button type="button">Fine-tune</button><button type="button">Hub</button><button type="button">⌫</button></div></div>
+              <div class="model-card"><span class="mini">Finetuned</span><h3>pick-cube-smolvla-v2</h3><p>trained from dataset v2; still runnable</p><div class="actions"><button type="button" data-go="live-inference">▶ Run</button><button type="button">Fine-tune</button><button type="button">Hub</button><button type="button">⌫</button></div></div>
+            </div>
+          </div>
+        </section>
+        <div class="note"><strong>NOTE:</strong>The checkpoint dropdown plus test button deploys that checkpoint to the active rig even while training is still running.</div>
+      </section>
+
+      <section class="screen" data-screen="live-inference">
+        <div class="live-page">
+          <div><h1>Live inference</h1><p>Model: ACT pick-cube local run · checkpoint step 8,000 · target rig: SO-101 bench rig</p></div>
+          <div class="grid two-even"><div class="placeholder">front camera feed</div><div class="placeholder">wrist camera feed</div></div>
+          <div class="live-meter"><div class="big">01:42</div><div class="big">running</div><div class="big">progress 64%</div></div>
+          <div class="actions"><button class="primary" type="button" data-go="train-deploy">Stop</button></div>
+        </div>
+      </section>
+
+      <section class="screen" data-screen="market" data-stage="market">
+        <div class="toolbar">
+          <div><h1>Market</h1><p>Skills marketplace — get skills & data.</p></div>
+          <input aria-label="Search" value="Search skills, datasets, policies">
+        </div>
+        <div class="actions"><button class="primary" type="button">All</button><button type="button">Skills</button><button type="button">Datasets</button><button type="button">Policies</button></div>
+        <div class="grid market-grid" style="margin-top:14px">
+          <div class="card"><h2>fold-sock</h2><p><span class="mini">120 ep</span><span class="mini">ACT</span><span class="mini">SmolVLA</span></p><p>SO-101 single/bimanual · Ada · 1.2k downloads</p><div class="actions"><button class="primary" type="button">Get</button></div></div>
+          <div class="card"><h2>pick-cube</h2><p><span class="mini">80 ep</span><span class="mini">ACT</span></p><p>SO-101 single · MakerLab · 930 downloads</p><div class="actions"><button type="button">Installed ✓</button></div></div>
+          <div class="card"><h2>stack-blocks</h2><p><span class="mini">200 ep</span><span class="mini">dataset</span></p><p>SO-101 bimanual · Rowan · 610 downloads</p><div class="actions"><button class="primary" type="button">Get</button></div></div>
+          <div class="card"><h2>open-drawer</h2><p><span class="mini">SmolVLA</span><span class="mini">policy</span></p><p>SO-101 single · Mina · 388 downloads</p><div class="actions"><button class="primary" type="button">Get</button></div></div>
+        </div>
+        <div class="note"><strong>NOTE:</strong>Installed datasets appear in Collect's dataset picker; installed policies appear in Train & Deploy Models.</div>
+      </section>
+
+      <section class="screen" data-screen="robot-dropdown" data-stage="collect">
+        <div class="grid two">
+          <div>
+            <h1>Collect</h1>
+            <div class="placeholder visualizer">3D arm visualizer / URDF placeholder</div>
+            <div class="camera-strip"><div class="placeholder camera">front camera feed</div><div class="placeholder camera">wrist camera feed</div></div>
+          </div>
+          <div class="card"><h2>Robot chip dropdown open</h2><p>Use the chip in the top bar. Single/Bimanual tabs switch with click handlers.</p><div class="note"><strong>NOTE:</strong>Opening another saved config here would re-target collect, train, deploy, and inference to that hardware.</div></div>
+        </div>
+      </section>
+    </main>
+
+    <nav class="stagebar" aria-label="Resolve stage bar">
+      <button class="stage-btn" type="button" data-go="rig-picker" data-stage-btn="rig"><b>① RIG</b><span>set up your robot</span></button>
+      <button class="stage-btn" type="button" data-go="collect" data-stage-btn="collect"><b>② COLLECT</b><span>teach by demonstration</span></button>
+      <button class="stage-btn" type="button" data-go="train-deploy" data-stage-btn="train"><b>③ TRAIN & DEPLOY</b><span>turn demos into skills</span></button>
+      <button class="stage-btn" type="button" data-go="market" data-stage-btn="market"><b>④ MARKET</b><span>get skills & data</span></button>
+    </nav>
+  </div>
+
+  <script>
+    const screens = Array.from(document.querySelectorAll('.screen'));
+    const app = document.getElementById('app');
+    const robotChip = document.getElementById('robotChip');
+    const gearBtn = document.getElementById('gearBtn');
+    const emptyChip = document.getElementById('emptyChip');
+    const dropdown = document.getElementById('robotDropdown');
+    const settings = document.getElementById('settingsOverlay');
+    const liveScreens = new Set(['live-record', 'live-inference']);
+    const noRigScreens = new Set(['rig-picker', 'rig-settings']);
+
+    function setScreen(name) {
+      screens.forEach(screen => screen.classList.toggle('active', screen.dataset.screen === name));
+      document.querySelectorAll('[data-go]').forEach(btn => btn.classList.toggle('active', btn.dataset.go === name));
+      app.classList.toggle('live', liveScreens.has(name));
+      const noRig = noRigScreens.has(name);
+      robotChip.style.display = noRig || liveScreens.has(name) ? 'none' : 'inline-flex';
+      gearBtn.style.display = noRig || liveScreens.has(name) ? 'none' : 'inline-block';
+      emptyChip.style.display = noRig ? 'inline' : 'none';
+      dropdown.classList.toggle('open', name === 'robot-dropdown');
+      if (liveScreens.has(name)) settings.classList.remove('open');
+      const activeScreen = screens.find(screen => screen.dataset.screen === name);
+      const stage = activeScreen ? activeScreen.dataset.stage : '';
+      document.querySelectorAll('[data-stage-btn]').forEach(btn => btn.classList.toggle('active', btn.dataset.stageBtn === stage));
+    }
+
+    document.addEventListener('click', event => {
+      const go = event.target.closest('[data-go]');
+      if (go) setScreen(go.dataset.go);
+    });
+
+    robotChip.addEventListener('click', () => {
+      dropdown.classList.toggle('open');
+    });
+    gearBtn.addEventListener('click', () => {
+      settings.classList.toggle('open');
+    });
+    document.getElementById('closeSettings').addEventListener('click', () => settings.classList.remove('open'));
+    document.getElementById('dismissSettings').addEventListener('click', () => settings.classList.remove('open'));
+
+    document.querySelectorAll('[data-tab]').forEach(tab => {
+      tab.addEventListener('click', () => {
+        const name = tab.dataset.tab;
+        document.querySelectorAll('[data-tab]').forEach(item => item.classList.toggle('active', item === tab));
+        document.querySelectorAll('[data-panel]').forEach(panel => panel.classList.toggle('active', panel.dataset.panel === name));
+      });
+    });
+
+    setScreen('rig-picker');
+  </script>
+</body>
+</html>

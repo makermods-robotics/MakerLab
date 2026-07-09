@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Train & Deploy — MakerLab</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/shad.css">
+<style>
+  body[data-stage="train"] .page-head h1 { font-weight: 600; }
+  .train-config { margin: -4px 0 18px; }
+  .train-config .card-content { padding-bottom: 6px; }
+  .config-grid { display: grid; grid-template-columns: 1.45fr 1fr .72fr .58fr auto; gap: 10px; align-items: end; }
+  .skill-head { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin: 2px 0 12px; }
+  .skill-note { color: var(--muted-foreground); font-size: 12.5px; }
+  .label-style {
+    color: var(--muted-foreground);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+  }
+  .train-grid { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(300px, .9fr); gap: 16px; align-items: start; }
+  .column { display: grid; gap: 10px; align-content: start; }
+  details.job-group + details.job-group { margin-top: 6px; }
+  details.job-group summary {
+    list-style: none;
+    cursor: pointer;
+    padding: 2px 0;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  details.job-group summary::-webkit-details-marker { display: none; }
+  details.job-group summary::before { content: "▾"; color: var(--muted-foreground); font-size: 10px; }
+  details.job-group:not([open]) summary::before { content: "▸"; }
+  .job-stack { display: grid; gap: 10px; margin-top: 8px; }
+  .train-card .card-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .train-card h2 { font-size: 15px; font-weight: 600; letter-spacing: -0.02em; }
+  .meta-line { color: var(--muted-foreground); font-family: "JetBrains Mono", monospace; font-size: 11px; }
+  .key-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; }
+  .action-row { flex-wrap: wrap; justify-content: flex-start; }
+  .model-stack { display: grid; gap: 10px; }
+  .model-card .media { height: 110px; min-height: 110px; }
+  .model-foot { flex-wrap: wrap; justify-content: space-between; }
+  .footnote { color: var(--muted-foreground); font-size: 12.5px; margin-top: 14px; }
+  @media (max-width: 900px) {
+    .train-grid { grid-template-columns: 1fr; }
+    .config-grid { grid-template-columns: 1fr 1fr; }
+    .config-grid .btn { justify-self: start; }
+  }
+  @media (max-width: 620px) {
+    .page-head { align-items: flex-start; flex-direction: column; }
+    .skill-head { align-items: flex-start; flex-direction: column; gap: 4px; }
+    .config-grid, .key-row { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body data-stage="train">
+
+<main class="page">
+  <div class="page-head">
+    <div>
+      <h1>Train &amp; Deploy</h1>
+      <p class="gloss">turn demos into skills</p>
+    </div>
+    <button class="btn" data-config-toggle aria-expanded="false">New training run</button>
+  </div>
+
+  <section class="card train-config" data-config-panel hidden>
+    <div class="card-content">
+      <div class="config-grid">
+        <div class="field">
+          <label class="label">Dataset</label>
+          <select class="select">
+            <option>pick-cube · 32 episodes</option>
+          </select>
+        </div>
+        <div class="field">
+          <label class="label">Policy</label>
+          <select class="select">
+            <option>ACT</option>
+            <option>SmolVLA</option>
+            <option>Diffusion</option>
+          </select>
+        </div>
+        <div class="field">
+          <label class="label">Steps</label>
+          <input class="input" value="50 000">
+        </div>
+        <div class="field">
+          <label class="label">Batch</label>
+          <input class="input" value="64">
+        </div>
+        <button class="btn">Start training</button>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="skill-head">
+      <span class="label-style">Skill: pick-cube</span>
+      <span class="skill-note">source dataset v3 — versions stay runnable after retrains</span>
+    </div>
+
+    <div class="train-grid">
+      <div class="column">
+        <details class="job-group" open>
+          <summary class="label-style">Local jobs (1)</summary>
+          <div class="job-stack">
+            <article class="card train-card">
+              <div class="card-header">
+                <div>
+                  <h2>ACT · pick-cube</h2>
+                  <p class="meta-line">started 18m ago · step 8 400 / 50 000</p>
+                </div>
+                <span class="badge"><span class="dot"></span>running</span>
+              </div>
+              <div class="card-content">
+                <div class="key-row">
+                  <select class="select" aria-label="Checkpoint">
+                    <option>step 8 000</option>
+                    <option>step 6 000</option>
+                    <option>final</option>
+                  </select>
+                  <a class="btn" href="inference-live.html">▶ Test on bench-01</a>
+                </div>
+              </div>
+              <div class="card-footer action-row">
+                <button class="btn outline">Continue</button>
+                <button class="btn outline">Download</button>
+              </div>
+            </article>
+          </div>
+        </details>
+
+        <details class="job-group" open>
+          <summary class="label-style">Online jobs (3)</summary>
+          <div class="job-stack">
+            <article class="card train-card">
+              <div class="card-header">
+                <div>
+                  <h2>SmolVLA · pick-cube</h2>
+                  <p class="meta-line">ended 2h ago</p>
+                </div>
+                <span class="badge ok">done ✓</span>
+              </div>
+              <div class="card-content">
+                <div class="key-row">
+                  <select class="select" aria-label="Checkpoint">
+                    <option>final</option>
+                    <option>step 48 000</option>
+                    <option>step 40 000</option>
+                  </select>
+                  <a class="btn" href="inference-live.html">▶ Test on bench-01</a>
+                </div>
+              </div>
+              <div class="card-footer action-row">
+                <button class="btn outline">Continue</button>
+                <button class="btn outline">Download</button>
+              </div>
+            </article>
+
+            <article class="card train-card">
+              <div class="card-header">
+                <div>
+                  <h2>ACT · pick-cube · v2</h2>
+                  <p class="meta-line">ended yesterday · step 50 000 / 50 000</p>
+                </div>
+                <span class="badge ok">done ✓</span>
+              </div>
+              <div class="card-content">
+                <div class="key-row">
+                  <select class="select" aria-label="Checkpoint">
+                    <option>final</option>
+                    <option>step 42 000</option>
+                    <option>step 32 000</option>
+                  </select>
+                  <a class="btn" href="inference-live.html">▶ Test on bench-01</a>
+                </div>
+              </div>
+              <div class="card-footer action-row">
+                <button class="btn outline">Continue</button>
+                <button class="btn outline">Download</button>
+              </div>
+            </article>
+
+            <article class="card train-card">
+              <div class="card-header">
+                <div>
+                  <h2>Diffusion · pick-cube</h2>
+                  <p class="meta-line">failed 41m ago · worker lost camera batch</p>
+                </div>
+                <span class="badge err">failed ✕</span>
+              </div>
+              <div class="card-footer action-row">
+                <button class="btn outline">Resume</button>
+                <button class="btn outline">Logs</button>
+              </div>
+            </article>
+          </div>
+        </details>
+      </div>
+
+      <aside class="column">
+        <span class="label-style">Models</span>
+        <div class="model-stack">
+          <article class="card train-card model-card">
+            <div class="card-header">
+              <div>
+                <h2>pick-cube-act-v3</h2>
+                <p class="meta-line">hf.co/isaac/pick-cube-act-v3</p>
+              </div>
+              <span class="badge outline">Uploaded</span>
+            </div>
+            <div class="card-content">
+              <div class="media" data-label="rollout preview"></div>
+            </div>
+            <div class="card-footer model-foot">
+              <a class="btn" href="inference-live.html">▶ Run on bench-01</a>
+              <button class="btn outline">Fine-tune</button>
+            </div>
+          </article>
+
+          <article class="card train-card model-card">
+            <div class="card-header">
+              <div>
+                <h2>pick-cube-smolvla-v3</h2>
+                <p class="meta-line">hf.co/isaac/pick-cube-smolvla-v3</p>
+              </div>
+              <span class="badge outline">Uploaded</span>
+            </div>
+            <div class="card-content">
+              <div class="media" data-label="rollout preview"></div>
+            </div>
+            <div class="card-footer model-foot">
+              <a class="btn" href="inference-live.html">▶ Run on bench-01</a>
+              <button class="btn outline">Fine-tune</button>
+            </div>
+          </article>
+        </div>
+      </aside>
+    </div>
+
+    <p class="footnote">Testing a checkpoint deploys it to the active robot — even while the job is still training.</p>
+  </section>
+</main>
+
+<script src="assets/shad.js"></script>
+<script>
+  const toggle = document.querySelector('[data-config-toggle]');
+  const panel = document.querySelector('[data-config-panel]');
+  toggle.addEventListener('click', () => {
+    const next = panel.hidden;
+    panel.hidden = !next;
+    toggle.setAttribute('aria-expanded', String(next));
+  });
+</script>
+</body>
+</html>

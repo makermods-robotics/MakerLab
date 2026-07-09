@@ -1,0 +1,292 @@
+/* MakerLab prototype — shared design system (tokens from frontend/src/index.css) */
+
+:root {
+  --background: #0A0A0A;
+  --foreground: #F5F5F5;
+  --card: #141414;
+  --border: #262626;
+  --input: #404040;
+  --muted-fg: #A3A3A3;
+  --accent: #262626;
+  --brand: #FF7A40;
+  --brand-fg: #0A0A0A;
+  --brand-hover: #FF9460;
+  --brand-tint: #3A1F12;
+  --ok: #22C55E;
+  --warn: #F59E0B;
+  --destructive: #EF4444;
+  --shadow-2: 0 4px 12px rgba(0,0,0,.6), 0 2px 4px rgba(0,0,0,.4);
+  --arm-color: #C8C8C8;
+  --logo-filter: none;
+  --notch-sm: polygon(8px 0, 100% 0, 100% calc(100% - 8px), calc(100% - 8px) 100%, 0 100%, 0 8px);
+  --notch-md: polygon(14px 0, 100% 0, 100% calc(100% - 14px), calc(100% - 14px) 100%, 0 100%, 0 14px);
+}
+@media (prefers-color-scheme: light) {
+  :root {
+    --background: #FAFAFA;
+    --foreground: #0A0A0A;
+    --card: #FFFFFF;
+    --border: #E5E5E5;
+    --input: #D4D4D4;
+    --muted-fg: #737373;
+    --accent: #E5E5E5;
+    --brand: #FF6B2C;
+    --brand-fg: #0A0A0A;
+    --brand-hover: #E55418;
+    --brand-tint: #FFE3D2;
+    --ok: #16A34A;
+    --warn: #D97706;
+    --destructive: #DC2626;
+    --shadow-2: 0 4px 12px rgba(10,10,10,.08), 0 2px 4px rgba(10,10,10,.04);
+    --arm-color: #4A4A4A;
+    --logo-filter: brightness(0);
+  }
+}
+
+* { box-sizing: border-box; margin: 0; }
+html { height: 100%; }
+body {
+  min-height: 100%;
+  background: var(--background);
+  color: var(--foreground);
+  font-family: "Space Grotesk", system-ui, sans-serif;
+  font-size: 14px;
+  line-height: 1.4;
+  -webkit-font-smoothing: antialiased;
+}
+.display { font-family: "Chakra Petch", system-ui, sans-serif; }
+.mono { font-family: "JetBrains Mono", ui-monospace, Menlo, monospace; }
+a { color: inherit; }
+button { font: inherit; color: inherit; cursor: pointer; }
+
+.eyebrow {
+  font-family: "Chakra Petch", sans-serif;
+  font-size: 11px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .14em;
+  color: var(--muted-fg);
+}
+
+/* ---------- app chrome: top bar ---------- */
+.topbar {
+  position: sticky; top: 0; z-index: 30;
+  display: flex; align-items: center; justify-content: space-between;
+  height: 52px; padding: 0 20px;
+  background: color-mix(in srgb, var(--background) 88%, transparent);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--border);
+}
+.topbar .brand { display: flex; align-items: center; gap: 9px; text-decoration: none; }
+.topbar .brand img { height: 17px; width: auto; filter: var(--logo-filter); }
+.topbar .brand span { font-family: "Chakra Petch", sans-serif; font-weight: 700; font-size: 14px; letter-spacing: .06em; }
+.rig-area { position: relative; display: flex; align-items: center; gap: 7px; }
+.rig-chip {
+  display: inline-flex; align-items: center; gap: 7px;
+  background: var(--card); border: 1px solid var(--border);
+  padding: 6px 12px; font-size: 12.5px; font-weight: 500;
+  clip-path: var(--notch-sm);
+}
+.rig-chip:hover { border-color: var(--input); background: var(--accent); }
+.rig-chip .dot { width: 6px; height: 6px; }
+.rig-chip .caret { color: var(--muted-fg); font-size: 10px; }
+.gear-btn {
+  width: 30px; height: 30px; display: grid; place-items: center;
+  background: none; border: 1px solid transparent; color: var(--muted-fg);
+}
+.gear-btn:hover { color: var(--foreground); border-color: var(--border); background: var(--card); }
+
+/* rig dropdown */
+.rig-menu {
+  position: absolute; top: 40px; right: 0; z-index: 40;
+  width: 330px;
+  background: var(--card); border: 1px solid var(--border);
+  box-shadow: var(--shadow-2);
+  display: none;
+}
+.rig-menu.open { display: block; }
+.rig-menu .tabs { display: grid; grid-template-columns: 1fr 1fr; border-bottom: 1px solid var(--border); }
+.rig-menu .tab {
+  padding: 9px; text-align: center; background: none; border: 0;
+  font-family: "Chakra Petch", sans-serif; font-size: 11px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .1em; color: var(--muted-fg);
+}
+.rig-menu .tab.active { color: var(--foreground); box-shadow: inset 0 -2px 0 var(--brand); }
+.rig-menu .panel { display: none; padding: 6px; }
+.rig-menu .panel.active { display: block; }
+.rig-menu .rig-row {
+  width: 100%; display: grid; grid-template-columns: 12px 1fr auto; align-items: center; gap: 9px;
+  padding: 8px 9px; background: none; border: 0; text-align: left; border-radius: 4px;
+  text-decoration: none;
+}
+.rig-menu .rig-row:hover { background: var(--accent); }
+.rig-menu .rig-row b { font-weight: 500; font-size: 13px; display: block; }
+.rig-menu .rig-row small { color: var(--muted-fg); font-size: 11.5px; }
+.rig-menu .foot { border-top: 1px solid var(--border); padding: 8px; }
+.rig-menu .foot a {
+  display: block; text-align: center; padding: 8px; font-size: 12.5px;
+  color: var(--muted-fg); text-decoration: none; border: 1px dashed var(--border);
+}
+.rig-menu .foot a:hover { color: var(--foreground); border-color: var(--input); }
+
+/* ---------- app chrome: stage bar ---------- */
+.stagebar {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 30;
+  display: flex; justify-content: center; gap: 6px;
+  padding: 10px 12px 12px;
+  background: color-mix(in srgb, var(--background) 90%, transparent);
+  backdrop-filter: blur(8px);
+  border-top: 1px solid var(--border);
+}
+.stage-btn {
+  width: 172px; padding: 8px 12px 7px;
+  background: none; border: 1px solid transparent;
+  text-align: left; text-decoration: none;
+  clip-path: var(--notch-sm);
+}
+.stage-btn b {
+  display: block;
+  font-family: "Chakra Petch", sans-serif; font-size: 12px; font-weight: 700; letter-spacing: .07em;
+  color: var(--muted-fg);
+}
+.stage-btn small { display: block; margin-top: 1px; font-size: 10.5px; color: var(--muted-fg); opacity: .7; }
+.stage-btn:hover { background: var(--card); border-color: var(--border); }
+.stage-btn.active { background: var(--card); border-color: var(--border); }
+.stage-btn.active b { color: var(--brand); }
+.stage-btn .num { color: var(--brand); margin-right: 5px; }
+.stage-btn.active small { opacity: 1; }
+
+/* pages leave room for the fixed stage bar */
+main.page { max-width: 1120px; margin: 0 auto; padding: 26px 24px 110px; }
+body.live .stagebar, body.live .topbar .rig-area { display: none; }
+
+.page-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 18px; margin-bottom: 20px; }
+.page-head h1 { font-family: "Chakra Petch", sans-serif; font-size: 22px; font-weight: 700; letter-spacing: .01em; }
+.page-head .gloss { color: var(--muted-fg); font-size: 13px; margin-top: 3px; }
+
+/* ---------- components ---------- */
+.card {
+  background: var(--card); border: 1px solid var(--border);
+  clip-path: var(--notch-sm); padding: 16px;
+}
+.card h2 { font-family: "Chakra Petch", sans-serif; font-size: 14.5px; font-weight: 700; letter-spacing: .02em; margin-bottom: 4px; }
+.card .sub { color: var(--muted-fg); font-size: 12.5px; }
+
+.btn {
+  background: var(--card); border: 1px solid var(--input); color: var(--foreground);
+  font-size: 12.5px; padding: 8px 13px; white-space: nowrap;
+}
+.btn:hover { background: var(--accent); }
+.btn.ghost { border-color: var(--border); color: var(--muted-fg); }
+.btn.ghost:hover { color: var(--foreground); }
+.btn.danger { border-color: var(--destructive); color: var(--destructive); background: none; }
+.btn-brand {
+  background: var(--brand); border: 0; color: var(--brand-fg);
+  font-family: "Chakra Petch", sans-serif; font-weight: 600; font-size: 13px; letter-spacing: .02em;
+  padding: 9px 16px; clip-path: var(--notch-sm);
+  text-decoration: none; display: inline-block;
+}
+.btn-brand:hover { background: var(--brand-hover); }
+button:focus-visible, a:focus-visible, select:focus-visible, input:focus-visible {
+  outline: 2px solid var(--brand); outline-offset: 1px;
+}
+
+.dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--ok); flex: none; }
+.dot.warn { background: var(--warn); }
+.dot.err { background: var(--destructive); }
+.dot.run { background: var(--brand); }
+
+.tag {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 9.5px; letter-spacing: .08em; text-transform: uppercase;
+  color: var(--muted-fg); border: 1px solid var(--border); padding: 1.5px 5px;
+  white-space: nowrap;
+}
+.tag.brand { color: var(--brand); border-color: color-mix(in srgb, var(--brand) 45%, transparent); }
+.tag.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, transparent); }
+.tag.err { color: var(--destructive); border-color: color-mix(in srgb, var(--destructive) 45%, transparent); }
+
+/* media placeholder — every "picture goes here" slot in the prototype */
+.media {
+  position: relative;
+  background:
+    linear-gradient(to right, var(--border) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--border) 1px, transparent 1px);
+  background-size: 24px 24px;
+  background-color: color-mix(in srgb, var(--card) 60%, var(--background));
+  border: 1px solid var(--border);
+  display: grid; place-items: center;
+  min-height: 120px;
+  overflow: hidden;
+}
+.media::after {
+  content: attr(data-label);
+  font-family: "JetBrains Mono", monospace;
+  font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase;
+  color: var(--muted-fg);
+  background: var(--card);
+  border: 1px solid var(--border);
+  padding: 4px 9px;
+}
+
+.field-input {
+  background: var(--background); border: 1px solid var(--input); color: var(--foreground);
+  font-family: "JetBrains Mono", monospace; font-size: 11.5px; padding: 8px 10px;
+  min-width: 0;
+}
+select.field-input, textarea.field-input { font-family: "Space Grotesk", sans-serif; font-size: 12.5px; }
+.field { display: grid; gap: 5px; }
+.field > label { font-size: 12px; color: var(--muted-fg); }
+
+/* handoff banner */
+.banner[hidden] { display: none; }
+.banner {
+  display: flex; align-items: center; justify-content: space-between; gap: 14px;
+  background: var(--brand-tint);
+  border: 1px solid color-mix(in srgb, var(--brand) 40%, transparent);
+  clip-path: var(--notch-sm);
+  padding: 13px 16px; margin-bottom: 18px;
+}
+.banner b { font-family: "Chakra Petch", sans-serif; font-size: 13.5px; letter-spacing: .01em; }
+.banner small { display: block; color: var(--muted-fg); font-size: 12px; margin-top: 1px; }
+
+/* ---------- rig settings drawer (shared) ---------- */
+.scrim {
+  position: fixed; inset: 0; z-index: 50;
+  background: rgba(0,0,0,.45);
+  opacity: 0; pointer-events: none; transition: opacity .22s;
+}
+.drawer {
+  position: fixed; top: 0; right: 0; bottom: 0; z-index: 51;
+  width: min(420px, 100vw);
+  background: var(--card); border-left: 1px solid var(--border); box-shadow: var(--shadow-2);
+  transform: translateX(102%);
+  transition: transform .26s cubic-bezier(.32,.72,.24,1);
+  display: flex; flex-direction: column; overflow-y: auto;
+}
+body.drawer-open .scrim { opacity: 1; pointer-events: auto; }
+body.drawer-open .drawer { transform: none; }
+.drawer-head { padding: 20px 22px 14px; border-bottom: 1px solid var(--border); display: flex; align-items: flex-start; justify-content: space-between; }
+.drawer-head h2 { font-family: "Chakra Petch", sans-serif; font-size: 17px; font-weight: 700; margin-top: 2px; }
+.icon-btn { background: none; border: 0; color: var(--muted-fg); font-size: 16px; padding: 4px 6px; }
+.icon-btn:hover { color: var(--foreground); }
+.drawer-body { padding: 6px 22px 20px; flex: 1; }
+.field-group { padding: 15px 0 17px; border-bottom: 1px solid var(--border); }
+.field-group:last-child { border-bottom: 0; }
+.field-group .eyebrow { margin-bottom: 10px; display: block; }
+.field-row { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+.field-row:first-of-type { margin-top: 0; }
+.field-label { width: 74px; flex: none; font-size: 12.5px; color: var(--muted-fg); }
+.field-row .field-input { flex: 1; }
+.cam-row { display: flex; align-items: center; gap: 9px; margin-top: 8px; font-size: 12.5px; }
+.cam-row .meta { margin-left: auto; font-family: "JetBrains Mono", monospace; font-size: 11px; color: var(--muted-fg); }
+.power { display: flex; align-items: center; gap: 12px; }
+.power input[type=range] { flex: 1; accent-color: var(--brand); }
+.power output { font-family: "JetBrains Mono", monospace; font-size: 11.5px; color: var(--muted-fg); width: 38px; }
+.drawer-foot { padding: 16px 22px 20px; border-top: 1px solid var(--border); display: flex; gap: 10px; justify-content: flex-end; background: var(--card); }
+
+@media (prefers-reduced-motion: reduce) { .drawer, .scrim { transition: none; } }
+
+@media (max-width: 760px) {
+  .stagebar { justify-content: flex-start; overflow-x: auto; }
+  .stage-btn { flex: none; width: 150px; }
+  main.page { padding: 18px 14px 110px; }
+}
