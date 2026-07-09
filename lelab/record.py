@@ -327,9 +327,9 @@ def _resolve_camera_index(
     resolved, enumerated = camera_enumeration.resolve_index(unique_id, enumerated, label=camera_name)
     if resolved != stored_index:
         logger.warning(
-            "📷 CAMERA REMAP: '%s' (unique_id …%s) moved cv2 index %s -> %s since it was saved",
+            "📷 CAMERA REMAP: '%s' (unique_id %s) moved cv2 index %s -> %s since it was saved",
             camera_name,
-            unique_id[-7:],
+            unique_id,
             stored_index,
             resolved,
         )
@@ -416,6 +416,15 @@ def create_record_config(request: RecordingRequest) -> RecordConfig:
     # Create dataset config
     dataset_config = DatasetRecordConfig(
         repo_id=request.dataset_repo_id,
+        # Explicit local root, ALWAYS. For fresh sessions this is identical to
+        # the root=None default (HF_LEROBOT_HOME/<repo_id>), but lerobot's
+        # resume path REFUSES root=None (it would write into the revision-safe
+        # Hub snapshot cache) — and every lelab helper that discards/deletes
+        # sessions already resolves datasets against this exact location, so
+        # pinning it here keeps create, resume, and cleanup on one path. The
+        # repo_id is final by now (the fresh-session timestamp is stamped
+        # before this runs).
+        root=str(_lerobot_cache_root() / request.dataset_repo_id),
         single_task=request.single_task,
         num_episodes=request.num_episodes,
         episode_time_s=request.episode_time_s,
@@ -589,15 +598,18 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                     request.num_episodes,
                 )
 
-                # Brief settle pause: block_for_recording already force-released
-                # every backend preview capture synchronously (and latched new
-                # opens off), but the OS-level device release is asynchronous on
-                # macOS/AVFoundation. The connect retry below (transient
-                # actual_fps failures) is the real defense; this only shaves the
-                # common case. The old 2s pause waited for browser getUserMedia
-                # streams that no longer exist — previews are backend MJPEG now.
+                # Settle pause: block_for_recording already force-released every
+                # backend preview capture synchronously (and latched new opens
+                # off), but AVCaptureSession teardown is ASYNCHRONOUS on macOS —
+                # and a fresh session opened into that wake intermittently comes
+                # up wrong (lands the neighboring 640x360 format, or delivers no
+                # frames at all; forensically established 2026-07-09, and the
+                # idle-linger means previews are reliably alive right up to this
+                # force-release). Two seconds covers every turbulence window
+                # observed on the bench; the connect retry below remains the
+                # backstop for the tail.
                 if request.cameras:
-                    time.sleep(0.5)
+                    time.sleep(2.0)
 
                 # Bimanual: the sub-arm ids are BiSO staging aliases, so give the
                 # identity guard the real library stems (in arm-iteration order:
@@ -676,8 +688,18 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                 phase_start_time = None
                 current_episode = 1
                 saved_episodes = 0
-                # Session over: lift the preview latch (see block_for_recording)
-                # so the config modal's tiles can re-open the devices.
+                # Session over: let lerobot's OWN camera teardown settle before
+                # lifting the preview latch. record_with_web_events disconnected
+                # three AVCaptureSessions in its finally, that teardown is
+                # asynchronous, and the first preview open into its wake births
+                # frame-dead (observed forensically 2026-07-09: the first
+                # post-session preview open came up open_ok/no-frames and
+                # camped on the open funnel). Same quiet-zone as record START,
+                # pointing the other way.
+                if request.cameras:
+                    time.sleep(2.0)
+                # Lift the preview latch (see block_for_recording) so the
+                # config modal's tiles can re-open the devices.
                 camera_preview_manager.resume_previews()
                 logger.info("Recording session ended")
 
@@ -1310,24 +1332,44 @@ def record_with_web_events(
             break
         except Exception as e:
             msg = str(e)
-            # macOS returns the read-back value in the message ("failed to set
-            # fps=30 (actual_fps=5.0)"); treat that specific failure as transient.
-            transient_fps = "failed to set fps" in msg
+            # Transient camera-session turbulence, all observed on this bench and
+            # all curable by a clean re-connect (an AVCaptureSession opened into
+            # another session's asynchronous teardown intermittently comes up
+            # wrong — forensically established 2026-07-09):
+            #   * "failed to set fps=30 (actual_fps=5.0)" — cold-open fps read-back
+            #   * "do not match configured"   — session landed the neighboring
+            #     native format (e.g. 640x360 instead of 640x480)
+            #   * "timed out waiting for frame" — session came up frame-dead
+            #     (opens fine, background reader never receives a frame)
+            transient_camera = any(
+                marker in msg.lower()
+                for marker in (
+                    "failed to set fps",
+                    "do not match configured",
+                    "timed out waiting for frame",
+                )
+            )
             logger.error(f"❌ ROBOT CONNECTION: Failed to connect robot: {e}")
             # If robot connection fails due to camera conflict, provide clear error
-            if "camera" in msg.lower() or "device" in msg.lower() or "busy" in msg.lower() or transient_fps:
+            if (
+                "camera" in msg.lower()
+                or "device" in msg.lower()
+                or "busy" in msg.lower()
+                or transient_camera
+            ):
                 logger.error(
-                    "💡 ROBOT CONNECTION: Camera connection failure - resource conflict or cold-open fps read"
+                    "💡 ROBOT CONNECTION: Camera connection failure - resource conflict or cold-open session turbulence"
                 )
                 logger.error(
                     "💡 ROBOT CONNECTION: Make sure frontend camera streams are released before recording"
                 )
-            if attempt < connect_attempts and transient_fps:
+            if attempt < connect_attempts and transient_camera:
                 # Drop any half-open handles from this failed attempt so the retry
-                # starts from a clean device, then let the OS release settle.
+                # starts from a clean device, then let the OS release settle past
+                # the turbulence window before re-rolling the connect.
                 with contextlib.suppress(Exception):
                     robot.disconnect()
-                time.sleep(1.5)
+                time.sleep(2.0)
                 continue
             raise
 

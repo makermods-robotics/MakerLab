@@ -353,7 +353,9 @@ def test_resolve_camera_index_missing_device_raises_legible_error(
     with pytest.raises(camera_enumeration.CameraNotConnectedError) as exc:
         _resolve_camera_index("wrist", {"camera_index": 0, "unique_id": "uvc-7749-e450209"}, None)
     assert "not connected" in str(exc.value)
-    assert "e450209" in str(exc.value)  # the id tail is surfaced to the user
+    # The FULL unique_id is surfaced — on macOS the port path that distinguishes
+    # identical cameras is at the FRONT of the id, so no truncation.
+    assert "uvc-7749-e450209" in str(exc.value)
 
 
 def test_build_camera_configs_resolves_index_from_unique_id(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -234,6 +234,6 @@ def resolve_index(
     if index is None:
         who = f"Camera '{label}'" if label else "Camera"
         raise CameraNotConnectedError(
-            f"{who} (id …{unique_id[-7:]}) is not connected — plug it in or re-select cameras."
+            f"{who} (id {unique_id}) is not connected — plug it in or re-select cameras."
         )
     return index, enumerated
