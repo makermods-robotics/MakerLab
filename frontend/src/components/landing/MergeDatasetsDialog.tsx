@@ -90,13 +90,32 @@ const MergeDatasetsDialog: React.FC<Props> = ({
       return next;
     });
 
+  // A bare output name (no "/") inherits the sources' namespace when they all
+  // share one. Without this, typing "merged" created a namespace-less dataset
+  // at the cache root — inconsistent with every other dataset, and rename can
+  // never fix it (rename only touches the final path segment). Mixed-namespace
+  // sources make no single answer right, so a bare name then stays bare and
+  // the user can type the full id explicitly.
+  const sourceNamespaces = [...selected].map((id) =>
+    id.includes("/") ? id.split("/")[0] : null,
+  );
+  const commonNamespace =
+    sourceNamespaces.length > 0 &&
+    sourceNamespaces[0] !== null &&
+    sourceNamespaces.every((ns) => ns === sourceNamespaces[0])
+      ? sourceNamespaces[0]
+      : null;
   const trimmedOutput = output.trim();
-  const outputError = trimmedOutput ? validateDatasetRepoId(trimmedOutput) : null;
+  const effectiveOutput =
+    trimmedOutput && !trimmedOutput.includes("/") && commonNamespace
+      ? `${commonNamespace}/${trimmedOutput}`
+      : trimmedOutput;
+  const outputError = effectiveOutput ? validateDatasetRepoId(effectiveOutput) : null;
   const canMerge =
     selected.size >= 2 &&
-    trimmedOutput.length > 0 &&
+    effectiveOutput.length > 0 &&
     outputError === null &&
-    !selected.has(trimmedOutput) &&
+    !selected.has(effectiveOutput) &&
     status?.state !== "running";
 
   const handleMerge = async () => {
@@ -107,7 +126,7 @@ const MergeDatasetsDialog: React.FC<Props> = ({
         baseUrl,
         fetchWithHeaders,
         [...selected],
-        trimmedOutput,
+        effectiveOutput,
       );
       if (!res.started) {
         setStartError(res.message);
@@ -117,7 +136,7 @@ const MergeDatasetsDialog: React.FC<Props> = ({
       setStatus({
         state: "running",
         error: null,
-        output_repo_id: trimmedOutput,
+        output_repo_id: effectiveOutput,
         logs: [],
       });
     } catch (e) {
@@ -184,6 +203,12 @@ const MergeDatasetsDialog: React.FC<Props> = ({
               />
               {outputError && (
                 <p className="mt-1 text-xs text-red-400">{outputError}</p>
+              )}
+              {!outputError && effectiveOutput !== trimmedOutput && (
+                <p className="mt-1 text-xs text-slate-400">
+                  Will be created as{" "}
+                  <code className="text-sky-300">{effectiveOutput}</code>
+                </p>
               )}
             </div>
             {startError ? (
