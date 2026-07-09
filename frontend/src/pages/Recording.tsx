@@ -1,18 +1,10 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
 import { Button } from "@/components/ui/button";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 import { useToast } from "@/hooks/use-toast";
 import {
-  MoreHorizontal,
   RotateCcw,
   SkipForward,
-  Play,
   Volume2,
   VolumeX,
 } from "lucide-react";
@@ -36,8 +28,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { AppShell } from "@/components/shell/AppShell";
 import { Card } from "@/components/ui/card";
-import { Eyebrow } from "@/components/ui/eyebrow";
-import { StatusPill, type SessionPhase } from "@/components/ui/status-pill";
+import { Badge, BadgeDot } from "@/components/ui/badge";
 import { buttonVariants } from "@/components/ui/button";
 
 interface RecordingConfig {
@@ -108,7 +99,7 @@ const Recording = () => {
   // Guards against React StrictMode double-invocation of the start effect.
   const startInitiatedRef = useRef(false);
   // Stop the session exactly once, however the user leaves. Set true when a
-  // session ends normally (poll navigates to /upload), fails to start, or is
+  // session ends normally (poll navigates to /collect), fails to start, or is
   // stopped via the on-page Stop button — so the page-leave safety net below
   // (back button / unmount / pagehide) never fires a spurious second stop on a
   // completed or never-started session.
@@ -234,7 +225,7 @@ const Recording = () => {
             // did, the post-recording page shows a "nothing was saved" variant.
             discarded_empty: status.discarded_empty || false,
           };
-          navigate("/upload", { state: { datasetInfo } });
+          navigate("/collect", { state: { completedDataset: datasetInfo } });
         }
       } catch (error) {
         console.error("Error polling recording status:", error);
@@ -549,15 +540,6 @@ const Recording = () => {
 
   const sessionElapsedTime = backendStatus.session_elapsed_seconds || 0;
 
-  const pillPhase: SessionPhase =
-    currentPhase === "recording"
-      ? "recording"
-      : currentPhase === "resetting"
-      ? "resetting"
-      : currentPhase === "preparing"
-      ? "setup"
-      : "idle";
-
   const statusLabel =
     currentPhase === "recording"
       ? `recording · ep ${currentEpisode}/${totalEpisodes}`
@@ -567,14 +549,33 @@ const Recording = () => {
       ? "preparing session"
       : "session complete";
 
-  const primaryLabel =
-    currentPhase === "recording"
-      ? "End episode"
-      : currentPhase === "resetting"
-      ? "Start next episode"
-      : "Advance";
+  const cameraNames = Object.keys(
+    (recordingConfig as RecordingConfig & { cameras?: Record<string, unknown> })
+      .cameras ?? {}
+  );
 
-  const PrimaryIcon = currentPhase === "recording" ? SkipForward : Play;
+  const phaseBadge =
+    currentPhase === "recording" ? (
+      <Badge>
+        <BadgeDot pulse />
+        recording
+      </Badge>
+    ) : currentPhase === "resetting" ? (
+      <Badge variant="warn">
+        <BadgeDot />
+        resetting
+      </Badge>
+    ) : currentPhase === "preparing" ? (
+      <Badge variant="outline">
+        <BadgeDot />
+        preparing
+      </Badge>
+    ) : (
+      <Badge variant="outline">
+        <BadgeDot />
+        complete
+      </Badge>
+    );
 
   return (
     <AppShell
@@ -582,78 +583,67 @@ const Recording = () => {
       logoLink={false}
       status={
         <div role="status" aria-live="polite">
-          <StatusPill
-            phase={pillPhase}
-            label={statusLabel}
-            pulse={currentPhase !== "completed"}
-          />
+          {phaseBadge}
         </div>
       }
       actions={
         <Button
-          onClick={requestStopRecording}
-          disabled={!backendStatus.available_controls.stop_recording}
-          variant="destructive"
-          size="sm"
+          variant="ghost"
+          size="icon"
+          onClick={toggleMute}
+          aria-label={muted ? "Unmute" : "Mute"}
         >
-          Stop
+          {muted ? <VolumeX /> : <Volume2 />}
         </Button>
       }
     >
-      <div className="grid-bg flex min-h-[calc(100vh-52px)] items-center justify-center px-4 py-8">
-        <Card variant="notch" className="w-full max-w-md p-8">
-          <div className="flex items-center justify-between gap-4">
-            <Eyebrow>
-              [ episode {String(currentEpisode).padStart(2, "0")} ·{" "}
-              {recordingConfig.dataset_repo_id} ]
-            </Eyebrow>
-            <div className="flex items-center gap-1">
-              <Button
-                variant="ghost"
-                size="icon"
-                onClick={toggleMute}
-                aria-label={muted ? "Unmute" : "Mute"}
-                className="h-8 w-8"
-              >
-                {muted ? <VolumeX className="w-5 h-5" /> : <Volume2 className="w-5 h-5" />}
-              </Button>
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-8 w-8"
-                    aria-label="More actions"
-                  >
-                    <MoreHorizontal className="w-5 h-5" />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent
-                  align="end"
-                  onCloseAutoFocus={(e) => e.preventDefault()}
-                >
-                  <DropdownMenuItem
-                    onClick={handleRerecordEpisode}
-                    disabled={!backendStatus.available_controls.rerecord_episode}
-                  >
-                    <RotateCcw className="w-4 h-4 mr-2" />
-                    Re-record episode
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
+      <div className="grid-bg min-h-[calc(100vh-52px)] px-4 pb-36 pt-6">
+        <div className="mx-auto w-full max-w-[1440px]">
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={requestStopRecording}
+            disabled={!backendStatus.available_controls.stop_recording}
+            className="-ml-3 mb-4 text-muted-foreground hover:text-foreground"
+          >
+            ← Collect (discard)
+          </Button>
+
+          <div className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
+            <div className="space-y-3">
+              <h1 className="font-display text-3xl font-bold leading-tight tracking-normal text-foreground md:text-5xl">
+                Recording — {recordingConfig.single_task}
+              </h1>
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge variant="secondary">{recordingConfig.dataset_repo_id}</Badge>
+                <span className="font-mono text-xs text-muted-foreground">/</span>
+                <Badge variant="outline">{recordingConfig.fps} fps</Badge>
+              </div>
             </div>
+            <div className="self-start md:self-center">{phaseBadge}</div>
           </div>
 
-          <div className="mt-8 text-center">
-            <div className="font-mono text-6xl font-bold leading-none text-foreground">
-              {formatTime(phaseElapsedTime)}
+          <div className="my-6 grid gap-6 border-y border-border py-5 md:grid-cols-[minmax(190px,0.85fr)_minmax(240px,1fr)_auto] md:items-end">
+            <div className="space-y-1">
+              <div className="font-mono text-[10px] uppercase tracking-[0.1em] text-muted-foreground">
+                Elapsed
+              </div>
+              <div className="font-mono text-5xl font-medium leading-none tracking-normal text-foreground md:text-7xl">
+                {formatTime(sessionElapsedTime)}
+              </div>
             </div>
-            <div className="mt-2 font-mono text-sm text-muted-foreground">
-              / {formatTime(phaseTimeLimit)}
+            <div className="space-y-1">
+              <div className="font-mono text-[10px] uppercase tracking-[0.1em] text-muted-foreground">
+                Dataset progress
+              </div>
+              <div className="font-display text-4xl font-bold leading-none tracking-normal text-foreground md:text-6xl">
+                Episode {currentEpisode} / {totalEpisodes}
+              </div>
             </div>
+            <div className="md:justify-self-end">{phaseBadge}</div>
           </div>
 
-          <div className="mt-6 h-1 w-full bg-secondary">
+          <div className="h-1 w-full bg-secondary" aria-label={statusLabel}>
             <div
               className="h-1 bg-primary transition-all duration-500"
               style={{
@@ -662,44 +652,84 @@ const Recording = () => {
             />
           </div>
 
-          <Button
-            onClick={handleExitEarly}
-            disabled={
-              !backendStatus.available_controls.exit_early ||
-              optimisticPhase !== null ||
-              currentPhase === "completed"
-            }
-            variant="brand"
-            className="mt-8 w-full py-6 text-base"
-          >
-            <PrimaryIcon className="w-5 h-5 mr-2" />
-            {primaryLabel}
-          </Button>
-
-          {currentPhase !== "completed" && (
-            <div className="mt-3 text-center font-mono text-xs text-muted-foreground">
-              [ space / → ] {primaryLabel.toLowerCase()}
+          <Card className="mt-6 p-5">
+            <div className="mb-4 flex items-center justify-between gap-3">
+              <div>
+                <h2 className="font-display text-lg font-semibold text-foreground">
+                  Camera status
+                </h2>
+                <p className="font-mono text-xs text-muted-foreground">
+                  session owns the configured cameras
+                </p>
+              </div>
+              <Badge variant="secondary">{cameraNames.length} active</Badge>
             </div>
-          )}
-
-          <div className="mt-6 flex items-center justify-center gap-4 font-mono text-xs text-muted-foreground">
-            <span aria-label={`Episode ${currentEpisode} of ${totalEpisodes}`}>
-              ep <span className="text-foreground">{currentEpisode}</span> /{" "}
-              {totalEpisodes}
-            </span>
-            <span
-              aria-label={`Total session time ${formatTime(sessionElapsedTime)}`}
-            >
-              {formatTime(sessionElapsedTime)}
-            </span>
-          </div>
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {cameraNames.length > 0 ? (
+                cameraNames.map((name) => (
+                  <div
+                    key={name}
+                    className="flex items-center justify-between gap-3 rounded-lg border border-border bg-background px-4 py-3"
+                  >
+                    <span className="truncate font-medium text-foreground">
+                      {name}
+                    </span>
+                    <Badge>
+                      <BadgeDot pulse />
+                      recording
+                    </Badge>
+                  </div>
+                ))
+              ) : (
+                <div className="rounded-lg border border-dashed border-border bg-background px-4 py-3 text-sm text-muted-foreground">
+                  No cameras configured for this session.
+                </div>
+              )}
+            </div>
+          </Card>
 
           {currentPhase === "completed" && (
-            <p className="mt-6 text-center text-sm text-muted-foreground">
-              Recording complete — redirecting to upload…
+            <p className="mt-6 text-sm text-muted-foreground">
+              Recording complete — returning to Collect…
             </p>
           )}
-        </Card>
+        </div>
+      </div>
+
+      <div className="fixed bottom-0 left-0 right-0 z-30 border-t border-border bg-background/90 px-4 py-4 backdrop-blur-[8px]">
+        <div className="mx-auto flex max-w-[1440px] flex-col gap-3 md:flex-row md:items-center md:justify-between">
+          <div className="font-mono text-xs text-muted-foreground">
+            episodes save to {recordingConfig.dataset_repo_id}
+          </div>
+          <div className="flex flex-wrap justify-end gap-2">
+            <Button
+              onClick={handleRerecordEpisode}
+              disabled={!backendStatus.available_controls.rerecord_episode}
+              variant="ghost"
+            >
+              <RotateCcw />
+              Re-record
+            </Button>
+            <Button
+              onClick={handleExitEarly}
+              disabled={
+                !backendStatus.available_controls.exit_early ||
+                optimisticPhase !== null ||
+                currentPhase === "completed"
+              }
+              variant="outline"
+            >
+              <SkipForward />
+              Skip ahead
+            </Button>
+            <Button
+              onClick={requestStopRecording}
+              disabled={!backendStatus.available_controls.stop_recording}
+            >
+              Finish early
+            </Button>
+          </div>
+        </div>
       </div>
 
       <AlertDialog open={showStopConfirm} onOpenChange={setShowStopConfirm}>
@@ -708,7 +738,7 @@ const Recording = () => {
             <AlertDialogTitle>Stop recording?</AlertDialogTitle>
             <AlertDialogDescription>
               Saved episodes are kept. The arm returns to its starting position, then goes limp, and
-              you'll be taken to the upload page.
+              you'll be taken back to Collect.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

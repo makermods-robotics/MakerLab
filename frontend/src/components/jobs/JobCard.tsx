@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Badge, BadgeDot } from "@/components/ui/badge";
 import {
   Dialog,
   DialogContent,
@@ -15,10 +16,6 @@ import { JobRecord, jobDisplayName, renameJob } from "@/lib/jobsApi";
 import {
   Square,
   Trash2,
-  AlertTriangle,
-  CheckCircle2,
-  Loader2,
-  XCircle,
   ExternalLink,
   Pencil,
   Play,
@@ -43,6 +40,7 @@ interface Props {
   // Runs this job was resumed from, nearest-parent first. Rendered nested and
   // hidden from the top-level list so a resumed lineage reads as one entry.
   ancestors?: JobRecord[];
+  selectedRobotName?: string | null;
 }
 
 function relativeTime(epochSec: number): string {
@@ -53,23 +51,7 @@ function relativeTime(epochSec: number): string {
   return `${Math.floor(diff / 86400)}d ago`;
 }
 
-const statePresentation: Record<
-  JobRecord["state"],
-  {
-    label: string;
-    color: string;
-    Icon: React.ComponentType<{ className?: string }>;
-  }
-> = {
-  running: { label: "Running", color: "text-ok", Icon: Loader2 },
-  done: { label: "Done", color: "text-muted-foreground", Icon: CheckCircle2 },
-  failed: { label: "Failed", color: "text-destructive", Icon: XCircle },
-  interrupted: {
-    label: "Interrupted",
-    color: "text-warn",
-    Icon: AlertTriangle,
-  },
-};
+const formatStep = (step: number) => step.toLocaleString();
 
 const JobCard: React.FC<Props> = ({
   job,
@@ -78,12 +60,11 @@ const JobCard: React.FC<Props> = ({
   onPlay,
   onRenamed,
   ancestors = [],
+  selectedRobotName,
 }) => {
   const navigate = useNavigate();
   const { baseUrl, fetchWithHeaders } = useApi();
   const { toast } = useToast();
-  const present = statePresentation[job.state];
-  const Icon = present.Icon;
   const isRunning = job.state === "running";
   const isImported = job.runner === "imported";
   // A Hub-backed import (vs a local-folder import) — provenance stays visible
@@ -93,7 +74,6 @@ const JobCard: React.FC<Props> = ({
   // visible as muted subtext when an alias is set.
   const displayName = jobDisplayName(job);
   const importedSource = job.hf_repo_id || job.output_dir;
-  const stateLabel = isImported ? "Imported" : present.label;
   const isStarting = isRunning && job.metrics.total_steps === 0;
   const progressPct =
     job.metrics.total_steps > 0
@@ -103,15 +83,27 @@ const JobCard: React.FC<Props> = ({
         )
       : 0;
 
-  const subtitle = isImported
+  const stepMeta =
+    job.metrics.total_steps > 0
+      ? `step ${formatStep(job.metrics.current_step)} / ${formatStep(
+          job.metrics.total_steps,
+        )}`
+      : null;
+  const timeMeta = isImported
     ? importedSource
     : isStarting
-      ? "starting…"
+      ? "starting..."
       : isRunning
         ? `started ${relativeTime(job.started_at)}`
         : job.ended_at != null
-          ? `ended ${relativeTime(job.ended_at)}`
-          : present.label.toLowerCase();
+          ? `${job.state === "failed" ? "failed" : "ended"} ${relativeTime(
+              job.ended_at,
+            )}`
+          : job.state;
+  const subtitle = isImported
+    ? importedSource
+    : [timeMeta, stepMeta].filter(Boolean).join(" · ");
+  const robotLabel = selectedRobotName ?? "robot";
 
   // Checkpoints across the resume lineage (this run + the runs it resumed
   // from), each tagged with its owning job so inference/continue route to the
@@ -337,7 +329,8 @@ const JobCard: React.FC<Props> = ({
           logFreq: selectedJob.config.log_freq,
           saveFreq: selectedJob.config.save_freq,
           runner,
-          flavor: runner === "hf_cloud" ? (selectedJob.hf_flavor ?? undefined) : undefined,
+          flavor:
+            runner === "hf_cloud" ? (selectedJob.hf_flavor ?? undefined) : undefined,
         },
       },
     });
@@ -419,30 +412,85 @@ const JobCard: React.FC<Props> = ({
   const showInferenceRow =
     lineageCheckpoints.length > 0 && selectedStep != null;
 
+  const handleLogs = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    navigate(`/training/${job.id}`);
+  };
+
+  const showLogs =
+    !isImported && (job.state === "failed" || job.state === "interrupted");
+  const hasFooterActions =
+    (showInferenceRow && isImported) ||
+    canContinue ||
+    canResumeCloud ||
+    canFinetune ||
+    canDownload ||
+    showLogs ||
+    !!missingExtra;
+
+  const statusBadge = isImported ? (
+    <Badge variant="outline">Imported</Badge>
+  ) : job.state === "running" ? (
+    <Badge>
+      <BadgeDot pulse />
+      running
+    </Badge>
+  ) : job.state === "done" ? (
+    <Badge variant="ok">done ✓</Badge>
+  ) : job.state === "failed" ? (
+    <Badge variant="destructive">failed ✕</Badge>
+  ) : (
+    <Badge variant="warn">interrupted</Badge>
+  );
+
   return (
     <Card
       variant="flat"
       onClick={() => {
         if (!isImported) navigate(`/training/${job.id}`);
       }}
-      className={`rounded-xl transition-colors ${
+      className={`rounded-xl bg-card transition-colors ${
         isImported ? "" : "cursor-pointer hover:border-input"
       }`}
     >
-      <CardContent className="p-4 space-y-3">
-        <div className="flex items-start justify-between gap-2">
-          <div className="flex items-center gap-2">
+      <CardContent className="p-4">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
             <div
-              className={`flex items-center gap-1.5 text-xs font-semibold ${present.color}`}
+              className="truncate text-[15px] font-semibold text-foreground"
+              title={displayName}
             >
-              <Icon
-                className={`w-3.5 h-3.5 ${isRunning ? "animate-spin" : ""}`}
-              />
-              {stateLabel}
+              {displayName}
+            </div>
+            {/* When aliased, keep the true identity visible: the run id for
+                trainings (imported models already show their repo id / path in
+                the subtitle below). */}
+            {!isImported && job.display_name ? (
+              <div
+                className="truncate font-mono text-[11px] text-muted-foreground"
+                title={job.id}
+              >
+                {job.id}
+              </div>
+            ) : null}
+            {/* Imported subtitles are file paths — truncate the *start* (rtl
+                flips the ellipsis to the left) so the more useful tail stays
+                visible. The leading LRM keeps the path's first "/" from being
+                bidi-reordered to the wrong end. */}
+            <div
+              className="truncate font-mono text-[11px] text-muted-foreground"
+              title={subtitle}
+              style={
+                isImported
+                  ? { direction: "rtl", textAlign: "left" }
+                  : undefined
+              }
+            >
+              {isImported ? "\u200e" + subtitle : subtitle}
             </div>
             {isHubImport ? (
               <div
-                className="flex items-center gap-1 text-[11px] font-medium text-info"
+                className="mt-1 flex items-center gap-1 text-[11px] font-medium text-muted-foreground"
                 title="Imported from a Hugging Face Hub repo"
               >
                 <Upload className="w-3 h-3" />
@@ -450,119 +498,119 @@ const JobCard: React.FC<Props> = ({
               </div>
             ) : null}
           </div>
-          <div className="flex items-center gap-0.5">
-            <Button
-              variant="ghost"
-              size="icon"
-              onClick={openRename}
-              className="h-7 w-7"
-              aria-label="Rename model"
-              title="Rename"
-            >
-              <Pencil className="w-3.5 h-3.5" />
-            </Button>
-            {job.runner === "hf_cloud" && job.hf_job_url ? (
+          <div className="flex shrink-0 items-start gap-2">
+            {statusBadge}
+            <div className="flex items-center gap-0.5">
               <Button
                 variant="ghost"
                 size="icon"
-                asChild
+                onClick={openRename}
                 className="h-7 w-7"
-                aria-label="Open Hub job page"
+                aria-label="Rename model"
+                title="Rename"
               >
-                <a
-                  href={job.hf_job_url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  onClick={(e) => e.stopPropagation()}
+                <Pencil className="w-3.5 h-3.5" />
+              </Button>
+              {job.runner === "hf_cloud" && job.hf_job_url ? (
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  asChild
+                  className="h-7 w-7"
+                  aria-label="Open Hub job page"
                 >
-                  <ExternalLink className="w-3.5 h-3.5" />
-                </a>
-              </Button>
-            ) : null}
-            {/* A running cloud run is steered from its Hub page (the link
-                above), so it gets no local action button. Everything else —
-                including a FINISHED cloud run — gets stop/delete, so dead
-                cloud runs are removable instead of link-only. */}
-            {!(job.runner === "hf_cloud" && job.hf_job_url && isRunning) ? (
-              <Button
-                variant="ghost"
-                size="icon"
-                onClick={handleAction}
-                className={`h-7 w-7 ${
-                  isRunning ? "" : "hover:text-destructive"
-                }`}
-                aria-label={isRunning ? "Stop job" : "Delete job"}
-              >
-                {isRunning ? (
-                  <Square className="w-3.5 h-3.5" />
-                ) : (
-                  <Trash2 className="w-3.5 h-3.5" />
-                )}
-              </Button>
-            ) : null}
-          </div>
-        </div>
-        <div>
-          <div
-            className="text-foreground font-semibold truncate"
-            title={displayName}
-          >
-            {displayName}
-          </div>
-          {/* When aliased, keep the true identity visible: the run id for
-              trainings (imported models already show their repo id / path in
-              the subtitle below). */}
-          {!isImported && job.display_name ? (
-            <div className="font-mono text-[11px] text-muted-foreground truncate" title={job.id}>
-              {job.id}
+                  <a
+                    href={job.hf_job_url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <ExternalLink className="w-3.5 h-3.5" />
+                  </a>
+                </Button>
+              ) : null}
+              {/* A running cloud run is steered from its Hub page (the link
+                  above), so it gets no local action button. Everything else —
+                  including a FINISHED cloud run — gets stop/delete, so dead
+                  cloud runs are removable instead of link-only. */}
+              {!(job.runner === "hf_cloud" && job.hf_job_url && isRunning) ? (
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={handleAction}
+                  className={`h-7 w-7 ${
+                    isRunning ? "" : "hover:text-destructive"
+                  }`}
+                  aria-label={isRunning ? "Stop job" : "Delete job"}
+                >
+                  {isRunning ? (
+                    <Square className="w-3.5 h-3.5" />
+                  ) : (
+                    <Trash2 className="w-3.5 h-3.5" />
+                  )}
+                </Button>
+              ) : null}
             </div>
-          ) : null}
-          {/* Imported subtitles are file paths — truncate the *start* (rtl
-              flips the ellipsis to the left) so the more useful tail stays
-              visible. The leading LRM keeps the path's first "/" from being
-              bidi-reordered to the wrong end. */}
-          <div
-            className="font-mono text-xs text-muted-foreground truncate"
-            title={subtitle}
-            style={
-              isImported ? { direction: "rtl", textAlign: "left" } : undefined
-            }
-          >
-            {isImported ? "\u200e" + subtitle : subtitle}
           </div>
         </div>
+        {isImported ? (
+          <div
+            className="media-slot mt-3 h-[110px] min-h-[110px] rounded-md"
+            data-label="rollout preview"
+          />
+        ) : null}
         {showProgressBar ? (
-          <div className="relative h-5 w-full overflow-hidden rounded-md bg-secondary border border-border">
+          <div className="relative mt-3 h-5 w-full overflow-hidden rounded-md border border-border bg-secondary">
             <div
               className="h-full bg-primary transition-[width] duration-500"
               style={{ width: `${progressPct}%` }}
             />
-            <div className="absolute inset-0 flex items-center justify-center text-xs font-semibold text-foreground tabular-nums">
-              {isStarting ? "Training starting…" : `${progressPct.toFixed(1)}%`}
+            <div className="absolute inset-0 flex items-center justify-center text-xs font-semibold tabular-nums text-foreground">
+              {isStarting
+                ? "Training starting..."
+                : `${progressPct.toFixed(1)}%`}
             </div>
           </div>
         ) : null}
         {showInferenceRow ? (
-          <div className="flex flex-wrap items-center gap-2">
+          <div
+            className={`mt-3 grid gap-2 ${
+              isImported ? "grid-cols-1" : "grid-cols-[minmax(0,1fr)_auto]"
+            }`}
+          >
             <CheckpointDropdown
               checkpoints={checkpoints}
               selectedStep={selectedStep}
               onChange={setSelectedStep}
             />
-            <Button
-              size="icon"
-              onClick={handlePlay}
-              className="h-8 w-8"
-              aria-label="Run inference with this checkpoint"
-            >
-              <Play className="w-4 h-4" />
-            </Button>
+            {!isImported ? (
+              <Button
+                onClick={handlePlay}
+                className="h-9 px-3"
+                aria-label="Run inference with this checkpoint"
+              >
+                <Play className="w-4 h-4" /> Test on {robotLabel}
+              </Button>
+            ) : null}
+          </div>
+        ) : null}
+        {hasFooterActions ? (
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            {showInferenceRow && isImported ? (
+              <Button
+                onClick={handlePlay}
+                className="h-9 px-3"
+                aria-label="Run inference with this model"
+              >
+                <Play className="w-4 h-4" /> Run on {robotLabel}
+              </Button>
+            ) : null}
             {canContinue ? (
               <Button
                 size="sm"
-                variant="outline"
+                variant="ghost"
                 onClick={handleContinue}
-                className="h-8 gap-1 border-info/50 text-info hover:bg-info/10"
+                className="h-8 gap-1"
                 aria-label="Continue training from this checkpoint"
               >
                 <FastForward className="w-3.5 h-3.5" /> Continue
@@ -571,9 +619,9 @@ const JobCard: React.FC<Props> = ({
             {canResumeCloud ? (
               <Button
                 size="sm"
-                variant="outline"
+                variant="ghost"
                 onClick={handleResumeCloud}
-                className="h-8 gap-1 border-info/50 text-info hover:bg-info/10"
+                className="h-8 gap-1"
                 aria-label="Resume this cloud run from its last checkpoint"
                 title="Resume: launch a new cloud job continuing from this checkpoint"
               >
@@ -583,9 +631,9 @@ const JobCard: React.FC<Props> = ({
             {canFinetune ? (
               <Button
                 size="sm"
-                variant="outline"
+                variant="ghost"
                 onClick={handleFinetune}
-                className="h-8 gap-1 border-info/50 text-info hover:bg-info/10"
+                className="h-8 gap-1"
                 aria-label="Fine-tune a new run from this model's weights"
                 title="Fine-tune a new run from this model's weights"
               >
@@ -595,7 +643,7 @@ const JobCard: React.FC<Props> = ({
             {canDownload ? (
               <Button
                 size="sm"
-                variant="outline"
+                variant="ghost"
                 onClick={handleDownload}
                 className="h-8 gap-1"
                 aria-label="Download this checkpoint"
@@ -604,21 +652,32 @@ const JobCard: React.FC<Props> = ({
                 <Download className="w-3.5 h-3.5" /> Download
               </Button>
             ) : null}
+            {showLogs ? (
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={handleLogs}
+                className="h-8"
+                aria-label="Open job logs"
+              >
+                Logs
+              </Button>
+            ) : null}
+            {missingExtra ? (
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setExtraDialogOpen(true);
+                }}
+                className="h-8 gap-1.5 text-warn hover:bg-warn/10"
+              >
+                <Download className="w-3.5 h-3.5" /> Install{" "}
+                {missingExtra.installTarget}
+              </Button>
+            ) : null}
           </div>
-        ) : null}
-        {missingExtra ? (
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={(e) => {
-              e.stopPropagation();
-              setExtraDialogOpen(true);
-            }}
-            className="h-8 gap-1.5 border-warn/50 text-warn hover:bg-warn/10"
-          >
-            <Download className="w-3.5 h-3.5" /> Install{" "}
-            {missingExtra.installTarget}
-          </Button>
         ) : null}
       </CardContent>
       <Dialog open={renameOpen} onOpenChange={setRenameOpen}>

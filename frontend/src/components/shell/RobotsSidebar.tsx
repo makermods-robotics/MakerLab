@@ -29,6 +29,10 @@ const RobotsSidebar: React.FC = () => {
     createRobot,
   } = useRobots();
   const [createOpen, setCreateOpen] = useState(false);
+  // The store keeps records as a name-keyed map; render in stable name order.
+  const robots = Object.values(records).sort((a, b) =>
+    a.name.localeCompare(b.name)
+  );
 
   return (
     <aside className="fixed inset-y-0 left-0 z-30 flex w-72 flex-col border-r border-border bg-background">
@@ -37,12 +41,12 @@ const RobotsSidebar: React.FC = () => {
       </div>
       <div className="eyebrow px-6 pb-2">Robots</div>
       <nav className="flex-1 overflow-y-auto px-3" aria-label="Robots">
-        {records.length === 0 && (
+        {robots.length === 0 && (
           <p className="px-3 py-2 text-sm text-muted-foreground">
             No robots yet — create one to start.
           </p>
         )}
-        {records.map((r) => {
+        {robots.map((r) => {
           const active = r.name === selectedName;
           return (
             <div
