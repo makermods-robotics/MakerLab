@@ -29,6 +29,13 @@ const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
 interface UseAvailableCamerasOptions {
   /** When false, do nothing. Use to gate on modal open. */
   enabled?: boolean;
+  /** Whether to ask the browser for MediaDeviceInfo labels/deviceIds.
+   *
+   * Keep this off for surfaces that only need backend unique_id validation
+   * (teleop preview): the label unlock path may briefly call getUserMedia(),
+   * which can grab a real local camera and collide with the backend MJPEG
+   * stream. */
+  matchBrowserDevices?: boolean;
 }
 
 /**
@@ -40,6 +47,7 @@ interface UseAvailableCamerasOptions {
  */
 export function useAvailableCameras({
   enabled = true,
+  matchBrowserDevices = true,
 }: UseAvailableCamerasOptions = {}) {
   const { baseUrl, fetchWithHeaders } = useApi();
   const [cameras, setCameras] = useState<AvailableCamera[]>([]);
@@ -67,7 +75,7 @@ export function useAvailableCameras({
       // still list and recording works, there are just no live previews.
       let browserDevices: { deviceId: string; label: string }[] = [];
       const md = navigator.mediaDevices;
-      if (md) {
+      if (matchBrowserDevices && md) {
         let devices = await md.enumerateDevices();
         const hasLabels = devices.some((d) => d.kind === "videoinput" && d.label);
         // Only open a real stream if labels are still hidden (permission not yet
@@ -137,7 +145,7 @@ export function useAvailableCameras({
       setIsLoading(false);
       refreshingRef.current = false;
     }
-  }, [baseUrl, fetchWithHeaders]);
+  }, [baseUrl, fetchWithHeaders, matchBrowserDevices]);
 
   useEffect(() => {
     if (!enabled) return;

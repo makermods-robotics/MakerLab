@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useMemo } from "react";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import {
@@ -30,6 +30,33 @@ import CameraTile from "@/components/CameraTile";
  * numeric fallback lane the /camera-preview endpoint accepts for
  * platforms/rows without stable ids. */
 const cameraKey = (cam: AvailableCamera) => cam.uniqueId ?? String(cam.index);
+
+/** Whether a live camera row is already represented by a saved config entry.
+ * Identity is deliberately tiered: stable hardware id wins; browser deviceId is
+ * the legacy bridge; raw cv2 index is only the platform fallback. Never let a
+ * stale index override distinct unique_ids — that is how a replugged different
+ * camera gets greyed out as "already added" after index reshuffling. */
+const samePhysicalCamera = (saved: CameraConfig, live: AvailableCamera) => {
+  if (saved.unique_id || live.uniqueId) {
+    return Boolean(saved.unique_id && live.uniqueId && saved.unique_id === live.uniqueId);
+  }
+  if (saved.device_id || live.deviceId) {
+    return Boolean(saved.device_id && live.deviceId && saved.device_id === live.deviceId);
+  }
+  return saved.camera_index === live.index;
+};
+
+/** Renders a camera's stable unique_id in small monospace, full value visible.
+ * USB ids (15–17 chars) fit inline; only the 36-char built-in UUID can overflow,
+ * in which case CSS `truncate` clips the TAIL (never the head — on macOS the
+ * differing port path is at the FRONT of the id, so head-truncation would erase
+ * exactly what distinguishes two identical cameras) and the `title` attribute
+ * exposes the full value on hover. One code path, no length heuristics. */
+const CameraId = ({ id }: { id: string }) => (
+  <span className="font-mono truncate inline-block max-w-full align-bottom" title={id}>
+    {id}
+  </span>
+);
 
 // Sentinels distinguish "leave unset" (auto-detect / platform default) from an
 // explicit choice. Radix Select disallows an empty-string value, so we map these
@@ -99,12 +126,31 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
   // two live cameras share a display name (see resyncCameras rule 2). Drives the
   // "re-select to bind identity" nudge below.
   const [needsReselect, setNeedsReselect] = useState(false);
+  // Names of saved cameras whose unique_id matches NO connected device — the
+  // camera was unplugged or moved to a different port (on macOS a port move
+  // mints a new identity). Without this nudge the only symptom is a preview
+  // tile silently retrying a 503 forever. Derived (not effect state) so the
+  // banner clears the instant a re-select rebinds the entry, not on the next
+  // devicechange. resyncCameras is pure and the lists are tiny.
+  const missingCameras = useMemo(
+    () => resyncCameras(cameras, availableCameras).missing.map((cam) => cam.name),
+    [cameras, availableCameras]
+  );
 
   // The camera currently picked in the dropdown (not yet added). Drives the
   // immediate live preview shown before the camera is named.
   const selectedCamera = selectedCameraKey
     ? availableCameras.find((cam) => cameraKey(cam) === selectedCameraKey)
     : undefined;
+
+  useEffect(() => {
+    if (
+      selectedCameraKey &&
+      !availableCameras.some((cam) => cameraKey(cam) === selectedCameraKey)
+    ) {
+      setSelectedCameraKey("");
+    }
+  }, [availableCameras, selectedCameraKey]);
 
   // cv2's AVFoundation order is uniqueID-sorted, so plugging/unplugging a
   // device between sessions shifts indices. Re-resolve each seeded camera's
@@ -148,16 +194,9 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
       return;
     }
 
-    // Block duplicates by stable unique_id first (THE camera identity), then
-    // browser deviceId, then cv2 index — a stale camera_index in a seeded
-    // camera can otherwise let the same physical device sneak in under a
-    // different index.
-    const isDuplicate = cameras.some(
-      (cam) =>
-        (selectedCamera.uniqueId && cam.unique_id === selectedCamera.uniqueId) ||
-        (selectedCamera.deviceId && cam.device_id === selectedCamera.deviceId) ||
-        cam.camera_index === selectedCamera.index,
-    );
+    // Block duplicates by stable identity. The raw index is a last-resort lane
+    // only; if either side has a unique_id, a stale matching index is ignored.
+    const isDuplicate = cameras.some((cam) => samePhysicalCamera(cam, selectedCamera));
     if (isDuplicate) {
       toast({
         title: "Camera Already Added",
@@ -275,11 +314,8 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
               {availableCameras.map((camera) => {
                 // Identity first: unique_id decides "already added"; deviceId
                 // and index are fallbacks for rows/entries without stable ids.
-                const alreadyAdded = cameras.some(
-                  (cam) =>
-                    (camera.uniqueId && cam.unique_id === camera.uniqueId) ||
-                    (camera.deviceId && cam.device_id === camera.deviceId) ||
-                    cam.camera_index === camera.index,
+                const alreadyAdded = cameras.some((cam) =>
+                  samePhysicalCamera(cam, camera),
                 );
                 return (
                   <SelectItem
@@ -290,10 +326,14 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
                   >
                     <div className="flex flex-col">
                       <span className="font-medium">{camera.name}</span>
-                      <span className="text-xs text-gray-400">
-                        {camera.uniqueId
-                          ? `ID …${camera.uniqueId.slice(-7)}`
-                          : `Index ${camera.index}`}
+                      <span className="text-xs text-gray-400 truncate">
+                        {camera.uniqueId ? (
+                          <>
+                            ID <CameraId id={camera.uniqueId} />
+                          </>
+                        ) : (
+                          `Index ${camera.index}`
+                        )}
                         {alreadyAdded && " · already added"}
                       </span>
                     </div>
@@ -317,13 +357,18 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
                 cameraId={cameraKey(selectedCamera)}
                 paused={streamsPaused}
                 emptyLabel="No camera selected"
+                snapshotIntervalMs={1000}
               />
               <div className="border-t border-gray-700 px-2 py-1.5">
                 <span className="text-[11px] text-gray-400 truncate">
                   Recorder's view —{" "}
-                  {selectedCamera.uniqueId
-                    ? `ID …${selectedCamera.uniqueId.slice(-7)}`
-                    : `index ${selectedCamera.index}`}{" "}
+                  {selectedCamera.uniqueId ? (
+                    <>
+                      ID <CameraId id={selectedCamera.uniqueId} />
+                    </>
+                  ) : (
+                    `index ${selectedCamera.index}`
+                  )}{" "}
                   (what actually records)
                 </span>
               </div>
@@ -361,6 +406,17 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
           <h4 className="text-md font-medium text-gray-300">
             Configured Cameras ({cameras.length})
           </h4>
+
+          {missingCameras.length > 0 && (
+            <div className="rounded-md border border-amber-700 bg-amber-900/40 px-3 py-2 text-xs text-amber-100">
+              {missingCameras.join(", ")}{" "}
+              {missingCameras.length === 1 ? "is" : "are"} not connected — the
+              saved identity matches no camera on this machine. Moving a camera
+              to a different USB port gives it a new identity. Plug it back
+              into its original port, or re-select it above (while watching its
+              live preview) to bind the new one.
+            </div>
+          )}
 
           {needsReselect && (
             <div className="rounded-md border border-amber-700 bg-amber-900/40 px-3 py-2 text-xs text-amber-100">
@@ -543,11 +599,16 @@ const CameraPreview: React.FC<CameraPreviewProps> = ({
                 Overriding the backend can reorder camera indices on macOS.
               </p>
             </div>
-            <div className="text-xs text-gray-500">
-              Type: {camera.type} |{" "}
-              {camera.unique_id
-                ? `ID: …${camera.unique_id.slice(-7)}`
-                : `Device: ${camera.device_id?.substring(0, 10)}...`}
+            <div className="text-xs text-gray-500 flex items-center gap-1 min-w-0">
+              <span className="shrink-0">Type: {camera.type} | </span>
+              {camera.unique_id ? (
+                <>
+                  <span className="shrink-0">ID:</span>
+                  <CameraId id={camera.unique_id} />
+                </>
+              ) : (
+                <span>Device: {camera.device_id?.substring(0, 10)}...</span>
+              )}
             </div>
           </CollapsibleContent>
         </Collapsible>

@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { VideoOff } from "lucide-react";
 import BackendCameraStream from "@/components/BackendCameraStream";
+import BackendCameraSnapshot from "@/components/BackendCameraSnapshot";
 
 interface CameraTileProps {
   /** Preferred camera address: the stable hardware unique_id. The backend
@@ -22,6 +23,18 @@ interface CameraTileProps {
   emptyLabel?: string;
   /** Optional caption rendered under the tile inside a bordered card. */
   label?: string;
+  /** Feed mode. "snapshot" (default, used by EVERY current surface) = a still
+   * refreshed on an interval, served off the backend's lingering capture — no
+   * standing browser stream, no per-tile server capture lifetime, immune to
+   * the session-teardown collisions that standing streams kept losing to.
+   * "stream" = live backend MJPEG; kept as an escape hatch for a surface that
+   * ever genuinely needs full-motion video. */
+  mode?: "stream" | "snapshot";
+  /** Snapshot refresh period. Default suits passive tiles; interactive
+   * surfaces (wave-and-identify pickers, teleop monitoring) pass ~1000ms —
+   * the backend serves each poll from its live lingering capture, so fast
+   * polling costs no extra device opens. */
+  snapshotIntervalMs?: number;
 }
 
 /**
@@ -42,6 +55,8 @@ const CameraTile: React.FC<CameraTileProps> = ({
   size = "md",
   emptyLabel = "No camera selected",
   label,
+  mode = "snapshot",
+  snapshotIntervalMs,
 }) => {
   // The address BackendCameraStream requests: unique_id first; a stringified
   // cv2 index is the fallback lane (the backend treats purely-numeric ids as
@@ -110,7 +125,15 @@ const CameraTile: React.FC<CameraTileProps> = ({
   const tile = (
     <div ref={rootRef} className={boxClass}>
       {showMjpeg ? (
-        <BackendCameraStream cameraId={address} className={streamClass} />
+        mode === "snapshot" ? (
+          <BackendCameraSnapshot
+            cameraId={address}
+            className={streamClass}
+            intervalMs={snapshotIntervalMs}
+          />
+        ) : (
+          <BackendCameraStream cameraId={address} className={streamClass} />
+        )
       ) : (
         <div className="w-full h-full flex flex-col items-center justify-center">
           <VideoOff className={`text-gray-500 ${iconClass}`} />

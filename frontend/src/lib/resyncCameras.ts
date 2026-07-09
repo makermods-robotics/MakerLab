@@ -24,6 +24,14 @@ export interface ResyncResult<T> {
    * user to re-select them (an explicit pick against the live preview is the one
    * unambiguous binding). */
   needsReselect: boolean;
+  /** Seeded cameras whose saved unique_id matched NO connected device. On macOS
+   * the unique_id is the USB port path, so this happens whenever the camera is
+   * unplugged OR moved to a different port (a move mints a new identity). The
+   * entries are left untouched — their tiles 503 until the device returns or the
+   * user re-selects — but the caller should SAY so, because otherwise the only
+   * symptom is a silently retrying tile. Empty when the enumeration itself was
+   * empty (a failed probe must not scream "everything is missing"). */
+  missing: T[];
 }
 
 /**
@@ -54,7 +62,7 @@ export function resyncCameras<T extends SeededCamera>(
   available: AvailableCamera[],
 ): ResyncResult<T> {
   if (available.length === 0 || cameras.length === 0) {
-    return { cameras, changed: false, needsReselect: false };
+    return { cameras, changed: false, needsReselect: false, missing: [] };
   }
 
   // Count display names so we can tell whether a name (hence a device_id match,
@@ -66,14 +74,21 @@ export function resyncCameras<T extends SeededCamera>(
 
   let changed = false;
   let needsReselect = false;
+  const missing: T[] = [];
 
   const next = cameras.map((cam) => {
     if (cam.unique_id) {
       // Trust the stable id: re-resolve the current index from it, never rewrite
-      // the id. A miss (camera unplugged) leaves the entry as-is — the backend
-      // raises a legible "not connected" error at record start.
+      // the id. A miss (camera unplugged, or moved to another port — which mints
+      // a NEW id) leaves the entry as-is but is REPORTED via `missing`, so the
+      // caller can tell the user instead of leaving a silently-503ing tile. The
+      // backend still raises a legible "not connected" error at record start.
       const byId = available.find((m) => m.uniqueId === cam.unique_id);
-      if (byId && byId.index !== cam.camera_index) {
+      if (!byId) {
+        missing.push(cam);
+        return cam;
+      }
+      if (byId.index !== cam.camera_index) {
         changed = true;
         return { ...cam, camera_index: byId.index };
       }
@@ -98,5 +113,5 @@ export function resyncCameras<T extends SeededCamera>(
     return { ...cam, camera_index: match.index, unique_id: match.uniqueId };
   });
 
-  return { cameras: changed ? next : cameras, changed, needsReselect };
+  return { cameras: changed ? next : cameras, changed, needsReselect, missing };
 }

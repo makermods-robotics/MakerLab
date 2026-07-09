@@ -71,7 +71,16 @@ const resumeMismatches = (
 ): string[] => {
   const out: string[] = [];
 
-  const configured = cameras.map((c) => c.name).sort();
+  // Compare dataset keys against the camera names AS THE DATASET WILL SEE
+  // THEM: a bimanual session's cameras ride the LEFT arm and lerobot's BiSO
+  // wrapper prefixes each dataset feature with `left_` (record names stay
+  // unprefixed everywhere in the UI — naming a camera `left_front` in the
+  // record would produce the double-prefixed `left_left_front`; see the
+  // matching note in InferenceModal). Comparing raw record names against
+  // dataset keys made every bimanual resume a false "cameras differ" warning.
+  const datasetKey = (name: string) =>
+    robot?.mode === "bimanual" ? `left_${name}` : name;
+  const configured = cameras.map((c) => datasetKey(c.name)).sort();
   const recorded = [...info.cameras].sort();
   if (
     recorded.length > 0 &&
@@ -80,7 +89,7 @@ const resumeMismatches = (
   ) {
     out.push(
       `Cameras differ — dataset has [${recorded.join(", ") || "none"}], ` +
-        `this session has [${configured.join(", ") || "none"}].`,
+        `this session records [${configured.join(", ") || "none"}].`,
     );
   }
 
