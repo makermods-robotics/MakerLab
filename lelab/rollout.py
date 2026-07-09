@@ -41,6 +41,7 @@ from tqdm.auto import tqdm as _base_tqdm
 
 from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
 
+from . import camera_enumeration
 from .arm_identity import ArmIdentityError, ArmSlot, verify_devices
 from .camera_preview import camera_preview_manager
 from .motor_power import apply_motor_power, clear_goal_velocity
@@ -491,6 +492,63 @@ def _preflight_motor_power(port: str, follower_id: str, percent: int) -> list[st
         return [message]
 
 
+def _resolve_camera_index(
+    camera_name: str, camera_data: dict[str, Any], enumerated: list[dict[str, Any]] | None
+) -> tuple[int | None, list[dict[str, Any]] | None]:
+    """Resolve one inference camera to the cv2 index the rollout should open.
+
+    Inference runs in a subprocess, so unlike recording we can't pass a rich
+    ``OpenCVCameraConfig`` object in-process. We still apply the same identity
+    rule before building the CLI args: when a saved binding carries a stable
+    ``unique_id``, resolve it against the live enumeration right now; otherwise
+    fall back to the posted ``camera_index`` for older/platform-limited configs.
+    """
+    stored_index = camera_data.get("camera_index")
+    unique_id = camera_data.get("unique_id")
+    if not unique_id:
+        return stored_index, enumerated
+
+    resolved, enumerated = camera_enumeration.resolve_index(unique_id, enumerated, label=camera_name)
+    if resolved != stored_index:
+        logger.warning(
+            "📷 INFERENCE CAMERA REMAP: '%s' (unique_id %s) moved cv2 index %s -> %s since it was bound",
+            camera_name,
+            unique_id,
+            stored_index,
+            resolved,
+        )
+    return resolved, enumerated
+
+
+def _resolve_camera_configs(cameras: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Return camera configs with ``camera_index`` refreshed from ``unique_id``.
+
+    This mirrors record.py's pre-hardware resolution so inference does not run a
+    policy on the wrong physical camera after USB hotplug reshuffles cv2 indices.
+    ``unique_id`` itself is removed from the returned dict because lerobot's CLI
+    camera config does not understand it; the resolved ``camera_index`` is what
+    becomes ``index_or_path`` in :func:`_format_cameras_arg`.
+    """
+    enumerated: list[dict[str, Any]] | None = None
+    resolved: dict[str, dict[str, Any]] = {}
+    claimed: dict[int, str] = {}
+    for camera_name, cfg in cameras.items():
+        next_cfg = {k: v for k, v in cfg.items() if k != "unique_id"}
+        index, enumerated = _resolve_camera_index(camera_name, cfg, enumerated)
+        if index is not None:
+            if index in claimed:
+                other = claimed[index]
+                raise ValueError(
+                    f"Cameras '{other}' and '{camera_name}' resolve to the same physical "
+                    f"camera (cv2 index {index}) — re-select inference cameras so each "
+                    "maps to a distinct device."
+                )
+            claimed[index] = camera_name
+            next_cfg["camera_index"] = index
+        resolved[camera_name] = next_cfg
+    return resolved
+
+
 def _format_cameras_arg(cameras: dict[str, dict[str, Any]]) -> str:
     """Convert {name: {type, camera_index, width, height, fps}} into
     lerobot's CLI dict syntax. The frontend key `camera_index` is
@@ -606,7 +664,7 @@ def _single_robot_args(request: InferenceRequest, follower_id: str) -> list[str]
         f"--robot.id={follower_id}",
     ]
     if request.cameras:
-        args.append(f"--robot.cameras={_format_cameras_arg(request.cameras)}")
+        args.append(f"--robot.cameras={_format_cameras_arg(_resolve_camera_configs(request.cameras))}")
     return args
 
 
@@ -629,7 +687,9 @@ def _bimanual_robot_args(request: InferenceRequest, base: str, follower_staging:
         f"--robot.right_arm_config.port={request.right_follower_port}",
     ]
     if request.cameras:
-        args.append(f"--robot.left_arm_config.cameras={_format_cameras_arg(request.cameras)}")
+        args.append(
+            f"--robot.left_arm_config.cameras={_format_cameras_arg(_resolve_camera_configs(request.cameras))}"
+        )
     return args
 
 

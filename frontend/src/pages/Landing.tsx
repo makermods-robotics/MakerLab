@@ -16,6 +16,7 @@ import { DatasetInfo } from "@/lib/replayApi";
 import { CameraConfig } from "@/components/recording/CameraConfiguration";
 import { isHostedSpace } from "@/lib/isHostedSpace";
 import { validateDatasetName } from "@/lib/datasetName";
+import { defaultFourccForCamera } from "@/lib/cameraDefaults";
 
 const ON_SPACE = isHostedSpace();
 
@@ -184,6 +185,7 @@ const Landing = () => {
 
     const cameraDict = cameras.reduce(
       (acc, cam) => {
+        const fourcc = cam.fourcc ?? defaultFourccForCamera(cam);
         acc[cam.name] = {
           type: cam.type,
           camera_index: cam.camera_index,
@@ -193,7 +195,7 @@ const Landing = () => {
           width: cam.width,
           height: cam.height,
           fps: cam.fps,
-          ...(cam.fourcc ? { fourcc: cam.fourcc } : {}),
+          ...(fourcc ? { fourcc } : {}),
           ...(cam.backend ? { backend: cam.backend } : {}),
         };
         return acc;

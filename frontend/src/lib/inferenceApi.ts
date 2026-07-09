@@ -8,9 +8,11 @@ export interface StartInferenceRequest {
   cameras: Record<string, {
     type: string;
     camera_index?: number;
+    unique_id?: string;
     width: number;
     height: number;
     fps?: number;
+    fourcc?: string;
   }>;
   duration_s: number;
   // Follower torque limit for the session (10-100% of full power).

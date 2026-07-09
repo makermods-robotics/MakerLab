@@ -342,6 +342,63 @@ def test_format_cameras_arg_handles_multiple_cameras() -> None:
     assert "wrist: {" in result
 
 
+def test_resolve_inference_camera_configs_remaps_by_unique_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Inference should mirror recording: a stable unique_id resolves to the
+    live cv2 index before the rollout CLI receives index_or_path."""
+    from lelab import camera_enumeration
+    from lelab.rollout import _resolve_camera_configs
+
+    monkeypatch.setattr(
+        camera_enumeration,
+        "list_cameras",
+        lambda: [{"index": 2, "name": "USB Camera", "unique_id": "uvc-7749-front"}],
+    )
+
+    result = _resolve_camera_configs(
+        {"front": {"type": "opencv", "camera_index": 0, "unique_id": "uvc-7749-front", "fps": 30}}
+    )
+
+    assert result["front"]["camera_index"] == 2
+    assert "unique_id" not in result["front"]
+
+
+def test_resolve_inference_camera_configs_missing_unique_id_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from lelab import camera_enumeration
+    from lelab.rollout import _resolve_camera_configs
+
+    monkeypatch.setattr(
+        camera_enumeration,
+        "list_cameras",
+        lambda: [{"index": 0, "name": "USB Camera", "unique_id": "other"}],
+    )
+
+    with pytest.raises(camera_enumeration.CameraNotConnectedError):
+        _resolve_camera_configs({"front": {"camera_index": 0, "unique_id": "uvc-7749-front"}})
+
+
+def test_resolve_inference_camera_configs_rejects_duplicate_physical_camera(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from lelab import camera_enumeration
+    from lelab.rollout import _resolve_camera_configs
+
+    monkeypatch.setattr(
+        camera_enumeration,
+        "list_cameras",
+        lambda: [{"index": 0, "name": "USB Camera", "unique_id": "uvc-7749-wrist"}],
+    )
+
+    with pytest.raises(ValueError, match="same physical camera"):
+        _resolve_camera_configs(
+            {
+                "front": {"camera_index": 0},
+                "wrist": {"camera_index": 9, "unique_id": "uvc-7749-wrist"},
+            }
+        )
+
+
 def test_handle_stop_inference_when_idle_returns_409() -> None:
     from lelab.rollout import handle_stop_inference
 

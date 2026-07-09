@@ -31,8 +31,12 @@ import {
 } from "@/lib/checkpointsApi";
 import { startInference } from "@/lib/inferenceApi";
 import CheckpointDropdown from "@/components/jobs/CheckpointDropdown";
-import { useAvailableCameras } from "@/hooks/useAvailableCameras";
+import {
+  AvailableCamera,
+  useAvailableCameras,
+} from "@/hooks/useAvailableCameras";
 import CameraTile from "@/components/CameraTile";
+import { defaultFourccForCamera } from "@/lib/cameraDefaults";
 
 interface Props {
   open: boolean;
@@ -43,6 +47,8 @@ interface Props {
 }
 
 const DEFAULT_FPS = 30;
+
+const cameraKey = (cam: AvailableCamera) => cam.uniqueId ?? String(cam.index);
 
 /**
  * One camera as the modal sees it. The BiSO prefix round-trip lives here so the
@@ -136,10 +142,11 @@ const InferenceModal: React.FC<Props> = ({
   const [policyConfigLoading, setPolicyConfigLoading] = useState(false);
   const [policyConfigError, setPolicyConfigError] = useState<string | null>(null);
 
-  // Per camera DISPLAY name → user-selected physical camera index (or null).
-  // Keyed by the stripped display name (== requestKey), not the checkpoint
-  // feature key — see `cameraMappings` / the CameraMapping doc for the round-trip.
-  const [cameraBindings, setCameraBindings] = useState<Record<string, number | null>>({});
+  // Per camera DISPLAY name → user-selected physical camera key (uniqueId when
+  // available, otherwise raw cv2 index string). Keyed by the stripped display
+  // name (== requestKey), not the checkpoint feature key — see `cameraMappings`
+  // / the CameraMapping doc for the round-trip.
+  const [cameraBindings, setCameraBindings] = useState<Record<string, string | null>>({});
   const { cameras: availableCameras } = useAvailableCameras({ enabled: open });
 
   // `lerobot-rollout` drives any Robot generically, including `bi_so_follower`,
@@ -154,6 +161,14 @@ const InferenceModal: React.FC<Props> = ({
   const cameraMap = React.useMemo(
     () => cameraMappings(Object.keys(policyConfig?.image_features ?? {}), isBimanual),
     [policyConfig, isBimanual],
+  );
+
+  const liveCameraByKey = React.useCallback(
+    (key: string | null | undefined) =>
+      key == null
+        ? undefined
+        : availableCameras.find((cam) => cameraKey(cam) === key),
+    [availableCameras],
   );
 
   // Load checkpoints when modal opens.
@@ -197,7 +212,7 @@ const InferenceModal: React.FC<Props> = ({
         // bimanual mode). Preserve any prior selection that's still relevant.
         const mappings = cameraMappings(Object.keys(cfg.image_features), isBimanual);
         setCameraBindings((prev) => {
-          const next: Record<string, number | null> = {};
+          const next: Record<string, string | null> = {};
           for (const m of mappings) {
             next[m.requestKey] = prev[m.requestKey] ?? null;
           }
@@ -220,8 +235,8 @@ const InferenceModal: React.FC<Props> = ({
   // If the selected robot has cameras whose names match a policy-expected
   // camera, auto-bind them. Match against the DISPLAY name (the bare name the
   // user chose at record time — that's what the robot record stores), not the
-  // `left_`-prefixed checkpoint feature. Prefer matching by browser device_id
-  // (stable across cv2 index drift); fall back to the saved camera_index.
+  // `left_`-prefixed checkpoint feature. Prefer stable unique_id, then the
+  // legacy browser device_id, then the saved camera_index fallback.
   useEffect(() => {
     if (!policyConfig) return;
     const robotCams = robot?.cameras ?? [];
@@ -235,18 +250,34 @@ const InferenceModal: React.FC<Props> = ({
           (c) => c.name.toLowerCase() === m.display.toLowerCase(),
         );
         if (!robotCam) continue;
-        const live =
-          (robotCam.device_id &&
-            availableCameras.find((c) => c.deviceId === robotCam.device_id)) ||
-          availableCameras.find((c) => c.index === robotCam.camera_index);
+        const live = robotCam.unique_id
+          ? availableCameras.find((c) => c.uniqueId === robotCam.unique_id)
+          : robotCam.device_id
+            ? availableCameras.find((c) => c.deviceId === robotCam.device_id)
+            : availableCameras.find((c) => c.index === robotCam.camera_index);
         if (live) {
-          next[m.requestKey] = live.index;
+          next[m.requestKey] = cameraKey(live);
           changed = true;
         }
       }
       return changed ? next : prev;
     });
   }, [policyConfig, robot, availableCameras, cameraMap]);
+
+  useEffect(() => {
+    if (!policyConfig || availableCameras.length === 0) return;
+    setCameraBindings((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      for (const [name, key] of Object.entries(prev)) {
+        if (key != null && !liveCameraByKey(key)) {
+          next[name] = null;
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [policyConfig, availableCameras, liveCameraByKey]);
 
   const selectedRef =
     selectedStep != null
@@ -280,7 +311,7 @@ const InferenceModal: React.FC<Props> = ({
     checkpointIsBimanual !== isBimanual;
 
   const allCamerasBound = cameraMap.every(
-    (m) => cameraBindings[m.requestKey] != null,
+    (m) => liveCameraByKey(cameraBindings[m.requestKey]) != null,
   );
 
   const canStart =
@@ -310,18 +341,29 @@ const InferenceModal: React.FC<Props> = ({
     // re-prefixes with `left_` — reconstructing the checkpoint's `left_<name>`
     // feature. Resolution still comes from the checkpoint feature's dims.
     const cameraDict: Record<string, {
-      type: string; camera_index?: number; width: number; height: number; fps?: number;
+      type: string;
+      camera_index?: number;
+      unique_id?: string;
+      width: number;
+      height: number;
+      fps?: number;
+      fourcc?: string;
     }> = {};
     for (const m of cameraMap) {
-      const idx = cameraBindings[m.requestKey];
-      if (idx == null) continue;
+      const key = cameraBindings[m.requestKey];
+      if (key == null) continue;
+      const live = liveCameraByKey(key);
+      if (!live) continue;
       const dims = policyConfig.image_features[m.feature];
+      const fourcc = defaultFourccForCamera(live);
       cameraDict[m.requestKey] = {
         type: "opencv",
-        camera_index: idx,
+        camera_index: live.index,
+        ...(live.uniqueId ? { unique_id: live.uniqueId } : {}),
         width: dims.width,
         height: dims.height,
         fps: DEFAULT_FPS,
+        ...(fourcc ? { fourcc } : {}),
       };
     }
     try {
@@ -366,8 +408,7 @@ const InferenceModal: React.FC<Props> = ({
   };
 
   const onCameraBindingChange = (name: string, value: string) => {
-    const idx = Number(value);
-    setCameraBindings((prev) => ({ ...prev, [name]: idx }));
+    setCameraBindings((prev) => ({ ...prev, [name]: value }));
   };
 
   return (
@@ -530,6 +571,7 @@ const InferenceModal: React.FC<Props> = ({
                 {cameraMap.map((m) => {
                   const dims = policyConfig.image_features[m.feature];
                   const value = cameraBindings[m.requestKey];
+                  const selectedCamera = liveCameraByKey(value);
                   return (
                     <div key={m.requestKey} className="flex items-center gap-3">
                       <div className="flex-1">
@@ -541,7 +583,7 @@ const InferenceModal: React.FC<Props> = ({
                         </p>
                       </div>
                       <Select
-                        value={value != null ? String(value) : undefined}
+                        value={value ?? undefined}
                         onValueChange={(v) => onCameraBindingChange(m.requestKey, v)}
                       >
                         <SelectTrigger className="bg-gray-800 border-gray-700 text-white w-56">
@@ -555,8 +597,8 @@ const InferenceModal: React.FC<Props> = ({
                           ) : (
                             availableCameras.map((cam) => (
                               <SelectItem
-                                key={cam.index}
-                                value={String(cam.index)}
+                                key={cameraKey(cam)}
+                                value={cameraKey(cam)}
                               >
                                 #{cam.index} — {cam.name}
                               </SelectItem>
@@ -564,11 +606,17 @@ const InferenceModal: React.FC<Props> = ({
                           )}
                         </SelectContent>
                       </Select>
+                      {/* ~1s snapshot cadence: binding verification (which
+                          physical camera is this role?) needs the same
+                          wave-and-identify responsiveness as the recording
+                          picker. */}
                       <CameraTile
                         size="sm"
-                        cameraIndex={value ?? undefined}
+                        cameraId={selectedCamera?.uniqueId}
+                        cameraIndex={selectedCamera?.index}
                         paused={submitting}
                         emptyLabel="No preview"
+                        snapshotIntervalMs={1000}
                       />
                     </div>
                   );
