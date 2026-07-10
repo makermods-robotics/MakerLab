@@ -2054,6 +2054,9 @@ const Calibration = () => {
                           excludeConfigField={excludeConfigField}
                           robotName={robotName}
                           onAssigned={fetchRobot}
+                          onLibraryChanged={() =>
+                            setCalibReloadToken((t) => t + 1)
+                          }
                           reloadToken={calibReloadToken}
                         />
                       </div>

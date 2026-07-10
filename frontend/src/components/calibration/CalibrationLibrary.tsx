@@ -53,8 +53,17 @@ interface CalibrationLibraryProps {
   /** Called after a successful reassignment so the parent can refetch the robot. */
   onAssigned?: () => void | Promise<void>;
   /**
+   * Called after an operation that changes the FILE LIBRARY itself (rename /
+   * delete / import). Each arm row renders its own CalibrationLibrary with a
+   * private config list, so without this the SIBLING instances (e.g. the other
+   * same-side arm in bimanual mode) keep showing stale filenames — the parent
+   * should bump `reloadToken` here to refresh every instance.
+   */
+  onLibraryChanged?: () => void;
+  /**
    * Bump to force a re-fetch of the saved-config list — e.g. after a
-   * calibration completes and may have written a brand-new named file.
+   * calibration completes and may have written a brand-new named file, or a
+   * sibling instance renamed/deleted/imported one (see onLibraryChanged).
    */
   reloadToken?: number;
 }
@@ -74,6 +83,7 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
   excludeConfig,
   excludeConfigField,
   onAssigned,
+  onLibraryChanged,
   reloadToken,
 }) => {
   const { baseUrl, fetchWithHeaders } = useApi();
@@ -189,6 +199,8 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
           // Refetch the robot so the arm's status flips to uncalibrated.
           await onAssigned?.();
         }
+        // Refresh sibling arm rows' config lists (see onLibraryChanged doc).
+        onLibraryChanged?.();
       } else {
         toast({
           title: "Delete failed",
@@ -203,7 +215,7 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
         variant: "destructive",
       });
     }
-  }, [baseUrl, fetchWithHeaders, device, pendingDelete, toast, onAssigned]);
+  }, [baseUrl, fetchWithHeaders, device, pendingDelete, toast, onAssigned, onLibraryChanged]);
 
   const assignToRobot = useCallback(async () => {
     if (!selected || !robotName) return;
@@ -312,6 +324,9 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
         setSelected(data.name);
         // A robot referencing this config was repointed server-side; refetch it.
         await onAssigned?.();
+        // Sibling arm rows hold their own (now stale) config lists — tell the
+        // parent so it bumps reloadToken and every instance re-fetches.
+        onLibraryChanged?.();
       } else {
         // 409/400 keep the dialog open with the message for a retry.
         setRenameError(data.message || "Rename failed.");
@@ -330,6 +345,7 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
     toast,
     refresh,
     onAssigned,
+    onLibraryChanged,
   ]);
 
   const empty = configs.length === 0;
@@ -422,6 +438,8 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
           onImported={async (name) => {
             await refresh();
             setSelected(name);
+            // Refresh sibling arm rows' config lists (see onLibraryChanged doc).
+            onLibraryChanged?.();
           }}
         />
       </div>
