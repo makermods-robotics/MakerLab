@@ -15,6 +15,7 @@
 import asyncio
 import concurrent.futures
 import contextlib
+import ctypes
 import io
 import json
 import logging
@@ -2256,18 +2257,56 @@ def _v4l2_camera_name(index: int) -> str | None:
         return None
 
 
-def _linux_cameras() -> list[dict[str, Any]]:
-    """Enumerate Linux cameras, naming each from sysfs (no extra deps)."""
-    import cv2
+# struct v4l2_capability from <linux/videodev2.h>, and the QUERYCAP ioctl
+# request code (_IOR('V', 0, struct v4l2_capability), 104 bytes).
+_VIDIOC_QUERYCAP = 0x80685600
+_V4L2_CAP_VIDEO_CAPTURE = 0x00000001
 
+
+class _V4l2Capability(ctypes.Structure):
+    _fields_ = [
+        ("driver", ctypes.c_char * 16),
+        ("card", ctypes.c_char * 32),
+        ("bus_info", ctypes.c_char * 32),
+        ("version", ctypes.c_uint32),
+        ("capabilities", ctypes.c_uint32),
+        ("device_caps", ctypes.c_uint32),
+        ("reserved", ctypes.c_uint32 * 3),
+    ]
+
+
+def _linux_cameras() -> list[dict[str, Any]]:
+    """Enumerate Linux capture devices via VIDIOC_QUERYCAP, without opening them.
+
+    The previous cv2.VideoCapture probe claimed each device's format on open,
+    which fails EBUSY while browser previews hold the cameras — V4L2 is
+    single-streamer, so cameras vanished from the list whenever previews were
+    live. QUERYCAP is a metadata query: it answers on busy devices (the Linux
+    equivalent of the macOS AVFoundation name enumeration, which never opens
+    devices either) and its device_caps distinguishes real capture nodes from
+    the UVC metadata nodes (/dev/video1/3/5...) that cv2 could only rule out
+    by failing to open them, one warning line each.
+    """
+    libc = ctypes.CDLL(None, use_errno=True)
     cameras: list[dict[str, Any]] = []
     for i in range(10):
-        cap = cv2.VideoCapture(i, cv2.CAP_V4L2)
-        opened = cap.isOpened()
-        cap.release()
-        if not opened:
+        try:
+            fd = os.open(f"/dev/video{i}", os.O_RDWR | os.O_NONBLOCK)
+        except OSError:
             continue
-        cameras.append({"index": i, "name": _v4l2_camera_name(i) or f"Camera {i}", "available": True})
+        try:
+            cap = _V4l2Capability()
+            if libc.ioctl(fd, ctypes.c_ulong(_VIDIOC_QUERYCAP), ctypes.byref(cap)) != 0:
+                continue
+            # device_caps is per-node (capabilities is the union across the
+            # whole device, so metadata nodes advertise VIDEO_CAPTURE there).
+            caps = cap.device_caps or cap.capabilities
+            if not caps & _V4L2_CAP_VIDEO_CAPTURE:
+                continue
+            name = cap.card.decode(errors="replace").strip() or _v4l2_camera_name(i) or f"Camera {i}"
+            cameras.append({"index": i, "name": name, "available": True})
+        finally:
+            os.close(fd)
     return cameras
 
 
@@ -2280,7 +2319,8 @@ def get_available_cameras():
     the browser's ``MediaDeviceInfo.label`` for the live preview:
       - macOS: AVFoundation ``localizedName`` (via a PyObjC subprocess);
       - Windows: DirectShow FriendlyName (via pygrabber; recording pinned DSHOW);
-      - Linux: the v4l2 device name from sysfs.
+      - Linux: the VIDIOC_QUERYCAP card name (sysfs fallback); QUERYCAP works
+        on busy devices, so live previews never hide cameras from the list.
     Without real names the frontend can't match a camera and shows "No browser
     match" with an empty device_id (issues #12, #16).
     """
