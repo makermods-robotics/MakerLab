@@ -601,3 +601,29 @@ def test_handle_start_inference_bimanual_builds_bi_so_follower_command(monkeypat
     assert "--robot.calibration_dir=/staging/follower" in cmd
     # Two sub-arms → two seeded newlines (single-arm seeds only one).
     assert captured["stdin"].written == b"\n\n"
+
+
+def test_preflight_torque_limit_connect_failure_degrades_to_warning(monkeypatch):
+    """A bus that can't connect must degrade to a returned warning naming the
+    requested raw value — not raise (regression: the handler referenced the
+    removed ``percent`` variable and died with NameError)."""
+    from makerlab import rollout
+
+    class _DeadBusRobot:
+        class bus:  # noqa: N801 - mimics the lerobot attribute
+            @staticmethod
+            def connect():
+                raise RuntimeError("port busy")
+
+            @staticmethod
+            def disconnect(disable_torque=False):
+                pass
+
+    monkeypatch.setattr(rollout, "SO101Follower", lambda cfg: _DeadBusRobot())
+    monkeypatch.setattr(rollout, "SO101FollowerConfig", lambda **kw: None)
+
+    messages = rollout._preflight_torque_limit("/dev/fake", "fid", 640)
+
+    assert len(messages) == 1
+    assert "640" in messages[0]
+    assert "port busy" in messages[0]

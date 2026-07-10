@@ -95,6 +95,7 @@ const Collect: React.FC = () => {
   const { selectedRecord } = useRobots();
   const {
     datasets,
+    loading: datasetsLoading,
     refresh: refreshDatasets,
   } = useDatasets();
   const { selectedDataset, setSelectedDataset } = useSelectedDataset();
@@ -609,9 +610,12 @@ const Collect: React.FC = () => {
 
       <section id="dataset-library" className="mt-4 scroll-mt-4">
         <DatasetLibrary
+          datasets={datasets}
+          loading={datasetsLoading}
           selectedRepoId={selectedDataset}
           onSelect={handleSelectDataset}
           onMerge={() => setShowMergeDialog(true)}
+          onDelete={setPendingDeleteDataset}
           open={datasetLibraryOpen}
           onOpenChange={setDatasetLibraryOpen}
         />

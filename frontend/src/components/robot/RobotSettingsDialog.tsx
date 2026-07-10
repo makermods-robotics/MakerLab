@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Trash2 } from "lucide-react";
 import {
   Dialog,
@@ -22,7 +22,7 @@ import {
   useRobotSettingsState,
   closeRobotSettings,
 } from "@/components/robot/robotSettingsStore";
-import { useRobots } from "@/hooks/useRobots";
+import { refreshRobots, useRobots } from "@/hooks/useRobots";
 import RobotSettingsPanel from "@/components/robot/RobotSettingsPanel";
 
 /**
@@ -35,6 +35,14 @@ const RobotSettingsDialog = () => {
   const { open, robotName } = useRobotSettingsState();
   const { deleteRobot } = useRobots();
   const [confirmOpen, setConfirmOpen] = useState(false);
+
+  // The panel edits /robots out-of-band; refresh the shared store on every
+  // close so already-mounted pages immediately see new torque/ports/cameras.
+  const wasOpen = useRef(false);
+  useEffect(() => {
+    if (wasOpen.current && !open) refreshRobots();
+    wasOpen.current = open;
+  }, [open]);
 
   const handleDelete = async () => {
     setConfirmOpen(false);

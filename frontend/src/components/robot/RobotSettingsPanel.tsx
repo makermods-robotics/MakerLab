@@ -232,6 +232,7 @@ const RobotSettingsPanel = ({ robotName, variant }: RobotSettingsPanelProps) => 
   // enumerated, and the browser permission prompt is requested.
   const [camerasActive, setCamerasActive] = useState(false);
   const cameraSaveTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const pendingCameraSaveRef = useRef<(() => void) | null>(null);
 
   const fetchRobot = useCallback(async (): Promise<RobotRecord | null> => {
     if (!robotName) return null;
@@ -302,7 +303,7 @@ const RobotSettingsPanel = ({ robotName, variant }: RobotSettingsPanelProps) => 
     if (cameraSaveTimerRef.current) {
       clearTimeout(cameraSaveTimerRef.current);
     }
-    cameraSaveTimerRef.current = setTimeout(async () => {
+    const save = async () => {
       try {
         await fetchWithHeaders(
           `${baseUrl}/robots/${encodeURIComponent(robotName)}`,
@@ -315,14 +316,25 @@ const RobotSettingsPanel = ({ robotName, variant }: RobotSettingsPanelProps) => 
       } catch (e) {
         console.error("Failed to save cameras to robot record:", e);
       }
+    };
+    pendingCameraSaveRef.current = save;
+    cameraSaveTimerRef.current = setTimeout(() => {
+      cameraSaveTimerRef.current = null;
+      pendingCameraSaveRef.current = null;
+      save();
     }, 500);
   };
 
+  // Flush (not drop) a pending debounced camera save on unmount — closing the
+  // dialog right after editing cameras must still persist the change.
   useEffect(() => {
     return () => {
       if (cameraSaveTimerRef.current) {
         clearTimeout(cameraSaveTimerRef.current);
+        cameraSaveTimerRef.current = null;
       }
+      pendingCameraSaveRef.current?.();
+      pendingCameraSaveRef.current = null;
     };
   }, []);
 

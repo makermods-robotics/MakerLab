@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { ChevronRight, GitMerge } from "lucide-react";
+import { ChevronRight, GitMerge, Trash2 } from "lucide-react";
 
 import { MarketListingCard } from "@/components/market/MarketListingCard";
 import { Badge } from "@/components/ui/badge";
@@ -11,16 +11,20 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { useHfAuth } from "@/contexts/HfAuthContext";
-import { useDatasets } from "@/hooks/useDatasets";
 import { DatasetItem } from "@/lib/replayApi";
 import { cn } from "@/lib/utils";
 
 type DatasetFilter = "all" | "local" | "yours" | "public" | "private";
 
 interface DatasetLibraryProps {
+  // The parent's useDatasets instance — sharing it keeps the library in sync
+  // with rename/merge/delete refreshes triggered elsewhere on the page.
+  datasets: DatasetItem[];
+  loading: boolean;
   selectedRepoId: string | null;
   onSelect: (repoId: string) => void;
   onMerge: () => void;
+  onDelete?: (dataset: DatasetItem) => void;
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
 }
@@ -75,13 +79,15 @@ function matchesFilter(
 }
 
 export function DatasetLibrary({
+  datasets,
+  loading,
   selectedRepoId,
   onSelect,
   onMerge,
+  onDelete,
   open,
   onOpenChange,
 }: DatasetLibraryProps) {
-  const { datasets, loading } = useDatasets();
   const { auth } = useHfAuth();
   const [filter, setFilter] = useState<DatasetFilter>("all");
   const [internalOpen, setInternalOpen] = useState(false);
@@ -178,13 +184,26 @@ export function DatasetLibrary({
                         onSelect(dataset.repo_id);
                       }}
                     >
-                      {(hasLocalCopy || dataset.private) && (
-                        <div className="absolute right-3 top-3 z-10 flex flex-wrap justify-end gap-1.5">
+                      {(hasLocalCopy ||
+                        dataset.private ||
+                        (onDelete && dataset.source !== "hub")) && (
+                        <div className="absolute right-3 top-3 z-10 flex flex-wrap items-center justify-end gap-1.5">
                           {hasLocalCopy && (
                             <Badge variant="secondary">local copy</Badge>
                           )}
                           {dataset.private && (
                             <Badge variant="outline">private</Badge>
+                          )}
+                          {onDelete && dataset.source !== "hub" && (
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-6 px-1.5 text-destructive hover:text-destructive"
+                              aria-label={`Delete ${dataset.repo_id}`}
+                              onClick={() => onDelete(dataset)}
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </Button>
                           )}
                         </div>
                       )}

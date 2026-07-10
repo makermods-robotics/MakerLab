@@ -59,6 +59,8 @@ interface RobotsState {
   // fetch succeeded. Lets the UI distinguish "backend has no robots" from
   // "couldn't reach the backend" — otherwise both render as an empty list.
   loadError: string | null;
+  // Bumped by refreshRobots() to force every mounted hook to refetch.
+  refreshNonce: number;
 }
 
 let state: RobotsState = {
@@ -66,12 +68,20 @@ let state: RobotsState = {
   selectedName: readSelected(),
   isLoading: false,
   loadError: null,
+  refreshNonce: 0,
 };
 const listeners = new Set<() => void>();
 
 const setState = (patch: Partial<RobotsState>) => {
   state = { ...state, ...patch };
   listeners.forEach((l) => l());
+};
+
+/** Force every mounted useRobots instance to refetch /robots — call after
+ * out-of-band edits, e.g. the robot settings dialog writing ports/cameras/
+ * torque, so already-mounted pages (Collect) don't send stale values. */
+export const refreshRobots = () => {
+  setState({ refreshNonce: state.refreshNonce + 1 });
 };
 
 const subscribe = (l: () => void) => {
@@ -103,10 +113,8 @@ export const useRobots = () => {
   const { toast } = useToast();
   const location = useLocation();
 
-  const { records, selectedName, isLoading, loadError } = useSyncExternalStore(
-    subscribe,
-    getSnapshot
-  );
+  const { records, selectedName, isLoading, loadError, refreshNonce } =
+    useSyncExternalStore(subscribe, getSnapshot);
 
   // Re-fetch records when location changes (RobotConfigManager mounts only on Landing,
   // so this fires on initial mount and on back-navigation to Landing)
@@ -143,7 +151,7 @@ export const useRobots = () => {
     return () => {
       cancelled = true;
     };
-  }, [baseUrl, fetchWithHeaders, location.key]);
+  }, [baseUrl, fetchWithHeaders, location.key, refreshNonce]);
 
   const selectRobot = useCallback((name: string) => {
     setSelectedShared(name);

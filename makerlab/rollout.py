@@ -299,7 +299,7 @@ def _preflight_torque_limit(port: str, follower_id: str, value: int) -> list[str
             robot.bus.disconnect(disable_torque=False)
     except Exception as exc:
         message = (
-            f"Could not set motor power to {percent}% on {port}: {exc}. "
+            f"Could not set torque limit to {value} on {port}: {exc}. "
             "The arm runs at its previous limit (full power after a power-up)."
         )
         logger.warning(message)
