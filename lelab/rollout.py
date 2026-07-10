@@ -43,6 +43,7 @@ from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
 
 from .arm_identity import ArmIdentityError, ArmSlot, verify_devices
 from .motor_power import apply_motor_power, clear_goal_velocity
+from .record import _DEFAULT_FOURCC
 from .utils.config import (
     bimanual_base_id,
     list_robot_records,
@@ -493,12 +494,21 @@ def _preflight_motor_power(port: str, follower_id: str, percent: int) -> list[st
 def _format_cameras_arg(cameras: dict[str, dict[str, Any]]) -> str:
     """Convert {name: {type, camera_index, width, height, fps}} into
     lerobot's CLI dict syntax. The frontend key `camera_index` is
-    remapped to lerobot's `index_or_path`."""
+    remapped to lerobot's `index_or_path`.
+
+    Like recording (`record._build_camera_configs`), opencv cameras default to
+    MJPG when the request doesn't pin a fourcc: without it, Linux/V4L2
+    negotiates raw YUYV and a 3-camera rig exhausts the USB bus at STREAMON —
+    the third camera fails during inference only, since recording already
+    defaults to MJPG. An explicit fourcc from the UI still wins.
+    """
     parts = []
     for name, cfg in cameras.items():
         remapped = {
             ("index_or_path" if k == "camera_index" else k): v for k, v in cfg.items() if v is not None
         }
+        if cfg.get("type") == "opencv" and not cfg.get("fourcc"):
+            remapped["fourcc"] = _DEFAULT_FOURCC
         body = ", ".join(f"{k}: {v}" for k, v in remapped.items())
         parts.append(f"{name}: {{{body}}}")
     return "{" + ", ".join(parts) + "}"
