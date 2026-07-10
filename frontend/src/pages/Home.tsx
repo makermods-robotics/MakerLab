@@ -96,6 +96,7 @@ const Home: React.FC = () => {
     selectRobot,
     createRobot,
     isLoading,
+    loadError,
   } = useRobots();
   const [createOpen, setCreateOpen] = useState(false);
   const [exitingName, setExitingName] = useState<string | null>(null);
@@ -239,6 +240,25 @@ const Home: React.FC = () => {
                 {robots.map((robot) => (
                   <RobotRow key={robot.name} robot={robot} onSelect={openRobot} />
                 ))}
+              </div>
+            ) : loadError ? (
+              <div className="rounded-lg border border-destructive/40 bg-destructive/5 px-4 py-5 text-center shadow-1">
+                <p className="text-sm font-medium text-foreground">
+                  Couldn&apos;t reach the backend
+                </p>
+                <p className="mt-1 truncate font-mono text-[11px] text-muted-foreground">
+                  {loadError}
+                </p>
+                <p className="mt-2 text-xs text-muted-foreground">
+                  Check that the MakerLab server is running, then retry.
+                </p>
+                <Button
+                  className="mt-4"
+                  variant="outline"
+                  onClick={() => window.location.reload()}
+                >
+                  Retry
+                </Button>
               </div>
             ) : (
               <div className="rounded-lg border border-dashed border-border bg-card px-4 py-5 text-center shadow-1">

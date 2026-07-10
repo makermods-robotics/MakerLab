@@ -55,12 +55,17 @@ interface RobotsState {
   records: Record<string, RobotRecord>;
   selectedName: string | null;
   isLoading: boolean;
+  // The API base URL of the last failed /robots fetch, or null when the last
+  // fetch succeeded. Lets the UI distinguish "backend has no robots" from
+  // "couldn't reach the backend" — otherwise both render as an empty list.
+  loadError: string | null;
 }
 
 let state: RobotsState = {
   records: {},
   selectedName: readSelected(),
   isLoading: false,
+  loadError: null,
 };
 const listeners = new Set<() => void>();
 
@@ -98,7 +103,7 @@ export const useRobots = () => {
   const { toast } = useToast();
   const location = useLocation();
 
-  const { records, selectedName, isLoading } = useSyncExternalStore(
+  const { records, selectedName, isLoading, loadError } = useSyncExternalStore(
     subscribe,
     getSnapshot
   );
@@ -112,11 +117,12 @@ export const useRobots = () => {
       setState({ isLoading: true });
       try {
         const res = await fetchWithHeaders(`${baseUrl}/robots`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
         if (cancelled) return;
         const next: Record<string, RobotRecord> = {};
         for (const r of data.robots ?? []) next[r.name] = r;
-        setState({ records: next });
+        setState({ records: next, loadError: null });
         // Drop the selection if the underlying record vanished (deleted from another tab)
         if (state.selectedName && !(state.selectedName in next)) {
           setSelectedShared(null);
@@ -124,6 +130,9 @@ export const useRobots = () => {
       } catch (e) {
         if (!cancelled) {
           console.error("Failed to fetch robots:", e);
+          // Surface the failure so the UI can show "couldn't reach the backend"
+          // instead of a silent empty list that looks like "no robots yet".
+          setState({ loadError: baseUrl });
         }
       } finally {
         pendingFetches -= 1;
@@ -286,6 +295,7 @@ export const useRobots = () => {
     selectedRecord,
     availableNames,
     isLoading,
+    loadError,
     selectRobot,
     clearSelection,
     createRobot,
