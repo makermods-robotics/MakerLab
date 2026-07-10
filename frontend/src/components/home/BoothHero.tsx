@@ -1,9 +1,11 @@
 import React, { useEffect, useRef } from "react";
 
 /**
- * OpenBooth wireframe hero — bimanual SO-101 line-drawn arms passing blocks
- * inside the booth. Pure SVG driven by requestAnimationFrame with 2-link IK;
- * colors come from the design tokens so it adapts to theme. Respects
+ * OpenBooth wireframe hero — bimanual SO-101 line-drawn arms passing a block
+ * inside the booth, seen from a corner at a low elevation (flat axonometric:
+ * verticals stay vertical, the floor is a shallow diamond). Pure SVG driven by
+ * requestAnimationFrame with 2-link IK in the arms' working plane; colors come
+ * from the design tokens so it adapts to theme. Respects
  * prefers-reduced-motion (renders a fixed pose).
  */
 
@@ -23,87 +25,158 @@ const ease = (u: number) =>
 
 const STYLE = `
   .bo-line { stroke: hsl(var(--muted-foreground)); stroke-opacity: .45; stroke-width: 1.2; fill: none; }
-  .bo-line.soft { stroke-opacity: .22; }
+  .bo-line.soft { stroke-opacity: .2; }
   .bo-link { stroke: hsl(var(--foreground)); stroke-width: 7; stroke-linecap: round; }
   .bo-joint { fill: hsl(var(--background)); stroke: hsl(var(--foreground)); stroke-width: 2; }
   .bo-base { fill: hsl(var(--muted)); stroke: hsl(var(--foreground)); stroke-width: 1.5; }
   .bo-grip { stroke: hsl(var(--foreground)); stroke-width: 4; stroke-linecap: round; fill: none; }
-  .bo-block { fill: hsl(var(--foreground)); }
-  .bo-block.ghost { fill: hsl(var(--muted-foreground)); opacity: .4; }
+  .bo-block { fill: hsl(var(--foreground)); stroke: none; }
+  .bo-block.ghost { fill: hsl(var(--muted-foreground)); }
   .bo-label { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 10px; fill: hsl(var(--muted-foreground)); letter-spacing: .08em; }
 `;
 
+/**
+ * Corner axonometric projection, low camera: world x runs right-down, world z
+ * runs left-down, world y is straight up. S controls the elevation (pitch) —
+ * small S = camera close to the tabletop.
+ */
+const C = 0.9;
+const S = 0.26;
+const OX = 400;
+const OY = 168;
+
+const pt = (x: number, y: number, z: number): readonly [number, number] => [
+  OX + (x - z) * C,
+  OY + (x + z) * S - y,
+];
+
+const pts = (...ps: Array<readonly [number, number]>) =>
+  ps.map((p) => `${p[0]},${p[1]}`).join(" ");
+
+/** Booth floor extent and the depth of the plane the arms work in. */
+const W = 300;
+const D = 300;
+const AZ = 150;
+const WALL_H = 128;
+
+/** Project a point in the arms' working plane (u along x, v = height). */
+const pp = (u: number, v: number) => pt(u, v, AZ);
+
+/**
+ * Small extruded block (top + two visible faces). Returns an updater so the
+ * carried block can move each frame; static blocks just never update.
+ */
+function makeBlock(parent: Element, cls: string, ghost = false) {
+  const g = el("g", ghost ? { opacity: 0.35 } : {}, parent);
+  const faceL = el("polygon", { class: cls, "fill-opacity": 0.55 }, g);
+  const faceR = el("polygon", { class: cls, "fill-opacity": 0.75 }, g);
+  const top = el("polygon", { class: cls }, g);
+  const s = 8; // half-size in world units
+  const h = 13;
+  const place = (x: number, y: number, z: number) => {
+    const tNE = pt(x + s, y + h, z - s);
+    const tNW = pt(x - s, y + h, z - s);
+    const tSE = pt(x + s, y + h, z + s);
+    const tSW = pt(x - s, y + h, z + s);
+    const bSW = pt(x - s, y, z + s);
+    const bSE = pt(x + s, y, z + s);
+    const bNE = pt(x + s, y, z - s);
+    top.setAttribute("points", pts(tNW, tNE, tSE, tSW));
+    // faces adjacent to the near (south-west / south-east) corner
+    faceL.setAttribute("points", pts(tSW, tSE, bSE, bSW));
+    faceR.setAttribute("points", pts(tSE, tNE, bNE, bSE));
+    return g;
+  };
+  return { place, g };
+}
+
 interface ArmOpts {
-  sx: number;
-  sy: number;
+  bu: number; // base position along the working plane
   L1: number;
   L2: number;
-  G: number;
+  G: number; // wrist standoff above the grip target
   elbow?: number;
 }
 
 function makeArm(parent: Element, opts: ArmOpts) {
   const g = el("g", {}, parent);
-  const { sx, sy, L1, L2, G } = opts;
-  el("rect", { class: "bo-base", x: sx - 9, y: sy, width: 18, height: 26, rx: 3 }, g);
+  const { bu, L1, L2, G } = opts;
+
+  // Pedestal: a squat extruded base under the shoulder joint.
+  makeBlock(g, "bo-base").place(bu, 0, AZ);
+
   const link1 = el("line", { class: "bo-link" }, g);
   const link2 = el("line", { class: "bo-link" }, g);
   const wristSeg = el("line", { class: "bo-grip" }, g);
   const f1 = el("polyline", { class: "bo-grip" }, g);
   const f2 = el("polyline", { class: "bo-grip" }, g);
-  el("circle", { class: "bo-joint", r: 5, cx: sx, cy: sy }, g);
+  const SHOULDER_H = 16;
+  const [bx, by] = pp(bu, SHOULDER_H);
+  el("circle", { class: "bo-joint", r: 5, cx: bx, cy: by }, g);
   const jE = el("circle", { class: "bo-joint", r: 4.5 }, g);
   const jW = el("circle", { class: "bo-joint", r: 4 }, g);
 
-  return function pose(tx: number, ty: number, grip: number) {
-    const wx = tx,
-      wy = ty - G;
-    let dx = wx - sx,
-      dy = wy - sy;
-    let d = Math.hypot(dx, dy);
+  const setLine = (
+    n: Element,
+    a: readonly [number, number],
+    b: readonly [number, number]
+  ) => {
+    n.setAttribute("x1", String(a[0]));
+    n.setAttribute("y1", String(a[1]));
+    n.setAttribute("x2", String(b[0]));
+    n.setAttribute("y2", String(b[1]));
+  };
+
+  /** Pose toward a target (tu, tv) in the working plane; v is height. */
+  return function pose(tu: number, tv: number, grip: number) {
+    const wu = tu;
+    const wv = tv + G;
+    let du = wu - bu;
+    let dv = wv - SHOULDER_H;
+    let d = Math.hypot(du, dv);
     const max = L1 + L2 - 1;
     if (d > max) {
-      dx *= max / d;
-      dy *= max / d;
+      du *= max / d;
+      dv *= max / d;
       d = max;
     }
-    const alpha = Math.atan2(dy, dx);
-    const cosA = Math.min(1, Math.max(-1, (L1 * L1 + d * d - L2 * L2) / (2 * L1 * d)));
-    const a1 = alpha - Math.acos(cosA) * (opts.elbow ?? 1);
-    const ex = sx + L1 * Math.cos(a1),
-      ey = sy + L1 * Math.sin(a1);
-    link1.setAttribute("x1", String(sx));
-    link1.setAttribute("y1", String(sy));
-    link1.setAttribute("x2", String(ex));
-    link1.setAttribute("y2", String(ey));
-    link2.setAttribute("x1", String(ex));
-    link2.setAttribute("y1", String(ey));
-    link2.setAttribute("x2", String(sx + dx));
-    link2.setAttribute("y2", String(sy + dy));
-    wristSeg.setAttribute("x1", String(sx + dx));
-    wristSeg.setAttribute("y1", String(sy + dy));
-    wristSeg.setAttribute("x2", String(tx));
-    wristSeg.setAttribute("y2", String(ty - 8));
+    const alpha = Math.atan2(dv, du);
+    const cosA = Math.min(
+      1,
+      Math.max(-1, (L1 * L1 + d * d - L2 * L2) / (2 * L1 * d))
+    );
+    // Elbow bends upward: add the interior angle on the side that lifts it.
+    const a1 = alpha + Math.acos(cosA) * (opts.elbow ?? 1);
+    const eu = bu + L1 * Math.cos(a1);
+    const ev = SHOULDER_H + L1 * Math.sin(a1);
+
+    const B = pp(bu, SHOULDER_H);
+    const E = pp(eu, ev);
+    const Wp = pp(bu + du, SHOULDER_H + dv);
+    setLine(link1, B, E);
+    setLine(link2, E, Wp);
+    setLine(wristSeg, Wp, pp(tu, tv + 8));
+
     const spread = 3 + grip * 6;
     f1.setAttribute(
       "points",
-      `${tx - spread},${ty - 9} ${tx - spread},${ty} ${tx - spread + 2.5},${ty + 2}`
+      pts(pp(tu - spread, tv + 9), pp(tu - spread, tv), pp(tu - spread + 2.5, tv - 2))
     );
     f2.setAttribute(
       "points",
-      `${tx + spread},${ty - 9} ${tx + spread},${ty} ${tx + spread - 2.5},${ty + 2}`
+      pts(pp(tu + spread, tv + 9), pp(tu + spread, tv), pp(tu + spread - 2.5, tv - 2))
     );
-    jE.setAttribute("cx", String(ex));
-    jE.setAttribute("cy", String(ey));
-    jW.setAttribute("cx", String(sx + dx));
-    jW.setAttribute("cy", String(sy + dy));
+    jE.setAttribute("cx", String(E[0]));
+    jE.setAttribute("cy", String(E[1]));
+    jW.setAttribute("cx", String(Wp[0]));
+    jW.setAttribute("cy", String(Wp[1]));
   };
 }
 
 interface Frame {
   t: number;
-  x: number;
-  y: number;
+  u: number;
+  v: number;
   g: number;
 }
 
@@ -117,35 +190,37 @@ function sample(frames: Frame[], t: number, P: number) {
   const u = span === 0 ? 0 : Math.min(1, (tt - a.t) / span);
   const e = ease(u);
   return {
-    x: a.x + (b.x - a.x) * e,
-    y: a.y + (b.y - a.y) * e,
+    u: a.u + (b.u - a.u) * e,
+    v: a.v + (b.v - a.v) * e,
     g: a.g + (b.g - a.g) * e,
   };
 }
 
-const FLOOR = 384;
 const PERIOD = 12;
+const PICK_U = 23;
+const MID_U = 150;
+const DROP_U = 277;
 
 const FRAMES_L: Frame[] = [
-  { t: 0.0, x: 250, y: 320, g: 1 },
-  { t: 1.0, x: 239, y: FLOOR, g: 1 },
-  { t: 1.5, x: 239, y: FLOOR, g: 0 },
-  { t: 2.6, x: 320, y: 300, g: 0 },
-  { t: 3.8, x: 400, y: FLOOR, g: 0 },
-  { t: 4.3, x: 400, y: FLOOR, g: 1 },
-  { t: 5.6, x: 250, y: 320, g: 1 },
-  { t: 11.4, x: 250, y: 323, g: 1 },
+  { t: 0.0, u: 30, v: 74, g: 1 },
+  { t: 1.0, u: PICK_U, v: 2, g: 1 },
+  { t: 1.5, u: PICK_U, v: 2, g: 0 },
+  { t: 2.6, u: 88, v: 96, g: 0 },
+  { t: 3.8, u: MID_U, v: 2, g: 0 },
+  { t: 4.3, u: MID_U, v: 2, g: 1 },
+  { t: 5.6, u: 30, v: 74, g: 1 },
+  { t: 11.4, u: 30, v: 70, g: 1 },
 ];
 
 const FRAMES_R: Frame[] = [
-  { t: 0.0, x: 550, y: 320, g: 1 },
-  { t: 5.4, x: 550, y: 323, g: 1 },
-  { t: 6.4, x: 400, y: FLOOR, g: 1 },
-  { t: 6.9, x: 400, y: FLOOR, g: 0 },
-  { t: 8.0, x: 480, y: 300, g: 0 },
-  { t: 9.2, x: 561, y: FLOOR, g: 0 },
-  { t: 9.7, x: 561, y: FLOOR, g: 1 },
-  { t: 11.0, x: 550, y: 320, g: 1 },
+  { t: 0.0, u: 270, v: 74, g: 1 },
+  { t: 5.4, u: 270, v: 70, g: 1 },
+  { t: 6.4, u: MID_U, v: 2, g: 1 },
+  { t: 6.9, u: MID_U, v: 2, g: 0 },
+  { t: 8.0, u: 212, v: 96, g: 0 },
+  { t: 9.2, u: DROP_U, v: 2, g: 0 },
+  { t: 9.7, u: DROP_U, v: 2, g: 1 },
+  { t: 11.0, u: 270, v: 74, g: 1 },
 ];
 
 const BoothHero: React.FC<{ className?: string }> = ({ className }) => {
@@ -166,64 +241,119 @@ const BoothHero: React.FC<{ className?: string }> = ({ className }) => {
     el("stop", { offset: 0, "stop-color": "#60A5FA", "stop-opacity": 0.1 }, grad);
     el("stop", { offset: 1, "stop-color": "#60A5FA", "stop-opacity": 0.03 }, grad);
 
+    // Floor: shallow diamond (the low camera flattens it).
+    const fA = pt(0, 0, 0);
+    const fB = pt(W, 0, 0);
+    const fC = pt(W, 0, D);
+    const fD = pt(0, 0, D);
+    el(
+      "polygon",
+      { points: pts(fA, fB, fC, fD), fill: "url(#bo-wash)", class: "bo-line" },
+      svg
+    );
+    // Iso floor grid.
+    for (let gx = 60; gx < W; gx += 60)
+      el(
+        "line",
+        {
+          x1: pt(gx, 0, 0)[0], y1: pt(gx, 0, 0)[1],
+          x2: pt(gx, 0, D)[0], y2: pt(gx, 0, D)[1],
+          class: "bo-line soft",
+        },
+        svg
+      );
+    for (let gz = 60; gz < D; gz += 60)
+      el(
+        "line",
+        {
+          x1: pt(0, 0, gz)[0], y1: pt(0, 0, gz)[1],
+          x2: pt(W, 0, gz)[0], y2: pt(W, 0, gz)[1],
+          class: "bo-line soft",
+        },
+        svg
+      );
+
+    // Back walls meeting at the far corner; verticals stay vertical.
     el(
       "polygon",
       {
-        points: "210,70 590,70 590,310 710,390 90,390 210,310",
-        fill: "url(#bo-wash)",
-        stroke: "none",
+        points: pts(fA, fB, pt(W, WALL_H, 0), pt(0, WALL_H, 0)),
+        class: "bo-line",
+        fill: "none",
       },
       svg
     );
-    el("rect", { x: 210, y: 70, width: 380, height: 240, class: "bo-line" }, svg);
-    el("polyline", { points: "210,70 90,30 90,390 210,310", class: "bo-line" }, svg);
-    el("polyline", { points: "590,70 710,30 710,390 590,310", class: "bo-line" }, svg);
-    el("line", { x1: 90, y1: 30, x2: 710, y2: 30, class: "bo-line" }, svg);
-    el("line", { x1: 90, y1: 390, x2: 710, y2: 390, class: "bo-line" }, svg);
-    el("line", { x1: 210, y1: 310, x2: 590, y2: 310, class: "bo-line soft" }, svg);
-    el("line", { x1: 150, y1: 350, x2: 650, y2: 350, class: "bo-line soft" }, svg);
+    el(
+      "polygon",
+      {
+        points: pts(fA, fD, pt(0, WALL_H, D), pt(0, WALL_H, 0)),
+        class: "bo-line",
+        fill: "none",
+      },
+      svg
+    );
+    // Soft top rails hinting at the booth frame.
+    el(
+      "line",
+      {
+        x1: pt(W, WALL_H, 0)[0], y1: pt(W, WALL_H, 0)[1],
+        x2: pt(W, WALL_H, D)[0], y2: pt(W, WALL_H, D)[1],
+        class: "bo-line soft",
+      },
+      svg
+    );
+    el(
+      "line",
+      {
+        x1: pt(0, WALL_H, D)[0], y1: pt(0, WALL_H, D)[1],
+        x2: pt(W, WALL_H, D)[0], y2: pt(W, WALL_H, D)[1],
+        class: "bo-line soft",
+      },
+      svg
+    );
+
     el(
       "text",
       { x: 400, y: 24, "text-anchor": "middle", class: "bo-label" },
       svg
     ).textContent = "[ OpenBooth ]";
 
-    el("rect", { class: "bo-block ghost", x: 196, y: 370, width: 14, height: 14, rx: 2.5 }, svg);
-    el("rect", { class: "bo-block ghost", x: 214, y: 370, width: 14, height: 14, rx: 2.5 }, svg);
-    el("rect", { class: "bo-block ghost", x: 576, y: 370, width: 14, height: 14, rx: 2.5 }, svg);
-    const blockA = el("rect", { class: "bo-block", x: 232, y: 370, width: 14, height: 14, rx: 2.5 }, svg);
+    // Staging blocks (ghosts) and the live block.
+    makeBlock(svg, "bo-block ghost", true).place(10, 0, AZ + 38);
+    makeBlock(svg, "bo-block ghost", true).place(30, 0, AZ + 22);
+    makeBlock(svg, "bo-block ghost", true).place(DROP_U + 16, 0, AZ + 30);
+    const live = makeBlock(svg, "bo-block");
 
-    const poseL = makeArm(svg, { sx: 285, sy: 314, L1: 74, L2: 62, G: 24 });
-    const poseR = makeArm(svg, { sx: 515, sy: 314, L1: 74, L2: 62, G: 24, elbow: -1 });
+    const poseL = makeArm(svg, { bu: 60, L1: 80, L2: 66, G: 22 });
+    const poseR = makeArm(svg, { bu: 240, L1: 80, L2: 66, G: 22 });
 
     const frame = (t: number) => {
       const pl = sample(FRAMES_L, t, PERIOD);
       const pr = sample(FRAMES_R, t, PERIOD);
-      poseL(pl.x, pl.y, pl.g);
-      poseR(pr.x, pr.y, pr.g);
+      poseL(pl.u, pl.v, pl.g);
+      poseR(pr.u, pr.v, pr.g);
       const tt = t % PERIOD;
-      let bx = 232,
-        by = 370,
+      let bu = PICK_U,
+        bv = 0,
         o = 1;
       if (tt >= 1.5 && tt < 4.3) {
-        bx = pl.x - 7;
-        by = pl.y - 12;
+        bu = pl.u;
+        bv = Math.max(0, pl.v - 11);
       } else if (tt >= 4.3 && tt < 6.9) {
-        bx = 393;
-        by = 370;
+        bu = MID_U;
+        bv = 0;
       } else if (tt >= 6.9 && tt < 9.7) {
-        bx = pr.x - 7;
-        by = pr.y - 12;
+        bu = pr.u;
+        bv = Math.max(0, pr.v - 11);
       } else if (tt >= 9.7) {
-        bx = 554;
-        by = 370;
+        bu = DROP_U;
+        bv = 0;
         o = Math.max(0, 1 - (tt - 11.2) / 0.6);
       } else {
         o = Math.min(1, tt / 0.4);
       }
-      blockA.setAttribute("x", String(bx));
-      blockA.setAttribute("y", String(by));
-      blockA.setAttribute("opacity", String(o));
+      live.place(bu, bv, AZ);
+      live.g.setAttribute("opacity", String(o));
     };
 
     if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {

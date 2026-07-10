@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { Download, Grid2X2, Plus } from "lucide-react";
+import { Grid2X2, Plus, Sparkles } from "lucide-react";
 import BoothHero from "@/components/home/BoothHero";
 import CreateRobotDialog from "@/components/landing/CreateRobotDialog";
 import { Badge } from "@/components/ui/badge";
@@ -215,13 +215,21 @@ const Home: React.FC = () => {
               onClick={() => setCreateOpen(true)}
             />
             <ActionCard
-              icon={<Download className="h-4 w-4" />}
-              label="Import from Hub"
-              to="/market"
+              icon={<Sparkles className="h-4 w-4" />}
+              label="Make new skill"
+              onClick={() => {
+                if (robots.length === 0) {
+                  setCreateOpen(true);
+                  return;
+                }
+                const preferred =
+                  robots.find((r) => r.name === selectedName) ?? robots[0];
+                openRobot(preferred);
+              }}
             />
             <ActionCard
               icon={<Grid2X2 className="h-4 w-4" />}
-              label="Browse Market"
+              label="Browse skills"
               to="/market"
             />
           </nav>
@@ -298,7 +306,7 @@ const Home: React.FC = () => {
         <div
           data-exiting={isExiting}
           aria-hidden={!isExiting}
-          className="absolute inset-0 px-4 pb-4 pt-5 opacity-0 transition-opacity delay-200 duration-300 data-[exiting=true]:opacity-100"
+          className="pointer-events-none absolute inset-0 px-4 pb-4 pt-5 opacity-0 transition-opacity delay-200 duration-300 data-[exiting=true]:pointer-events-auto data-[exiting=true]:opacity-100"
         >
           <div className="flex items-center gap-2 px-2 pb-4">
             <img
