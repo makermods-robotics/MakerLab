@@ -11,10 +11,8 @@ import {
 import VisualizerPanel from "@/components/control/VisualizerPanel";
 import CameraFeed from "@/components/control/CameraFeed";
 import { DatasetLibrary } from "@/components/collect/DatasetLibrary";
+import { openRobotSettings } from "@/components/robot/robotSettingsStore";
 import { useTeleopSession } from "@/components/collect/useTeleopSession";
-import CameraConfiguration, {
-  CameraConfig,
-} from "@/components/recording/CameraConfiguration";
 import CreateDatasetDialog from "@/components/landing/CreateDatasetDialog";
 import DatasetInfoCard from "@/components/landing/DatasetInfoCard";
 import MergeDatasetsDialog from "@/components/landing/MergeDatasetsDialog";
@@ -27,14 +25,6 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Badge, BadgeDot } from "@/components/ui/badge";
-import { Checkbox } from "@/components/ui/checkbox";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 import { NumberInput } from "@/components/ui/number-input";
 import {
@@ -103,7 +93,6 @@ const Collect: React.FC = () => {
 
   const [showCreateDatasetDialog, setShowCreateDatasetDialog] = useState(false);
   const [showMergeDialog, setShowMergeDialog] = useState(false);
-  const [showCameraDialog, setShowCameraDialog] = useState(false);
   const [datasetLibraryOpen, setDatasetLibraryOpen] = useState(false);
   const [pendingDeleteDataset, setPendingDeleteDataset] =
     useState<DatasetItem | null>(null);
@@ -112,21 +101,16 @@ const Collect: React.FC = () => {
   const [numEpisodes, setNumEpisodes] = useState(5);
   const [episodeTimeS, setEpisodeTimeS] = useState(60);
   const [resetTimeS, setResetTimeS] = useState(15);
-  const [streamingEncoding, setStreamingEncoding] = useState(true);
-  const [cameras, setCameras] = useState<CameraConfig[]>([]);
   const [streamsPaused, setStreamsPaused] = useState(false);
-  const configReleaseStreamsRef = useRef<(() => void) | null>(null);
   const releaseStreamsRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
-    setCameras(selectedRecord ? [...(selectedRecord.cameras ?? [])] : []);
     setStreamsPaused(false);
-  }, [selectedRecord?.name, selectedRecord]);
+  }, [selectedRecord?.name]);
 
   useEffect(() => {
     releaseStreamsRef.current = () => {
       setStreamsPaused(true);
-      configReleaseStreamsRef.current?.();
     };
   }, []);
 
@@ -145,9 +129,10 @@ const Collect: React.FC = () => {
       : null;
 
   const cameraSummary = useMemo(() => {
-    if (cameras.length === 0) return "no cameras configured";
-    return cameras.map((camera) => camera.name).join(" + ");
-  }, [cameras]);
+    const recordCameras = selectedRecord?.cameras ?? [];
+    if (recordCameras.length === 0) return "no cameras configured";
+    return recordCameras.map((camera) => camera.name).join(" + ");
+  }, [selectedRecord?.cameras]);
 
   const statusLine = useMemo(() => {
     if (teleop.status?.last_cleanup_error) {
@@ -240,11 +225,13 @@ const Collect: React.FC = () => {
 
     const datasetRepoId = selectedDataset;
 
-    if (cameras.length > 0 && releaseStreamsRef.current) {
+    const recordCameras = robot.cameras ?? [];
+
+    if (recordCameras.length > 0 && releaseStreamsRef.current) {
       console.log("🔓 Releasing camera streams before starting recording...");
       toast({
         title: "Preparing Camera Resources",
-        description: `Releasing ${cameras.length} camera stream(s) for recording...`,
+        description: `Releasing ${recordCameras.length} camera stream(s) for recording...`,
       });
       releaseStreamsRef.current();
       await new Promise((resolve) => setTimeout(resolve, 500));
@@ -256,7 +243,7 @@ const Collect: React.FC = () => {
       });
     }
 
-    const cameraDict = cameras.reduce(
+    const cameraDict = recordCameras.reduce(
       (acc, cam) => {
         acc[cam.name] = {
           type: cam.type,
@@ -308,11 +295,10 @@ const Collect: React.FC = () => {
       video: true,
       push_to_hub: false,
       resume: false,
-      streaming_encoding: streamingEncoding,
+      streaming_encoding: true,
       cameras: cameraDict,
     };
 
-    setShowCameraDialog(false);
     navigate("/recording", { state: { recordingConfig } });
   };
 
@@ -545,28 +531,12 @@ const Collect: React.FC = () => {
                 <Button
                   variant="outline"
                   size="sm"
-                  onClick={() => setShowCameraDialog(true)}
+                  disabled={!selectedRecord}
+                  onClick={() => openRobotSettings(selectedRecord?.name ?? null)}
                 >
                   Configure cameras
                 </Button>
               </div>
-
-              <label className="flex items-start gap-3 rounded-md border border-border bg-secondary p-3">
-                <Checkbox
-                  id="streamingEncoding"
-                  checked={streamingEncoding}
-                  onCheckedChange={(value) => setStreamingEncoding(value === true)}
-                  className="mt-0.5"
-                />
-                <span className="space-y-1">
-                  <span className="block text-sm font-medium">
-                    Streaming video encoding
-                  </span>
-                  <span className="block text-xs text-muted-foreground">
-                    Encode frames during capture so each episode saves quickly.
-                  </span>
-                </span>
-              </label>
 
               {!selectedDataset && (
                 <p className="text-sm text-muted-foreground">
@@ -620,28 +590,6 @@ const Collect: React.FC = () => {
           onOpenChange={setDatasetLibraryOpen}
         />
       </section>
-
-      <Dialog
-        open={showCameraDialog}
-        onOpenChange={(open) => {
-          setShowCameraDialog(open);
-          if (!open) configReleaseStreamsRef.current?.();
-        }}
-      >
-        <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
-          <DialogHeader>
-            <DialogTitle>Configure cameras</DialogTitle>
-            <DialogDescription>
-              These backend MJPEG previews match the cameras used by recording.
-            </DialogDescription>
-          </DialogHeader>
-          <CameraConfiguration
-            cameras={cameras}
-            onCamerasChange={setCameras}
-            releaseStreamsRef={configReleaseStreamsRef}
-          />
-        </DialogContent>
-      </Dialog>
 
       <MergeDatasetsDialog
         open={showMergeDialog}

@@ -57,7 +57,7 @@ import CameraConfiguration, {
   CameraConfig,
 } from "@/components/recording/CameraConfiguration";
 import CalibrationLibrary from "@/components/calibration/CalibrationLibrary";
-import { RobotRecord } from "@/hooks/useRobots";
+import { refreshRobots, RobotRecord } from "@/hooks/useRobots";
 
 const DISCONTINUITY_ERROR_PREFIX = "Motor discontinuity detected";
 
@@ -313,6 +313,9 @@ const RobotSettingsPanel = ({ robotName, variant }: RobotSettingsPanelProps) => 
             body: JSON.stringify({ cameras: next }),
           },
         );
+        // Push the change into the shared store so Collect's previews and
+        // recording payload update while the dialog is still open.
+        refreshRobots();
       } catch (e) {
         console.error("Failed to save cameras to robot record:", e);
       }
