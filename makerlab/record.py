@@ -36,7 +36,7 @@ from lerobot.teleoperators.so_leader import SO101LeaderConfig
 from .arm_identity import ArmIdentityError, verify_devices
 from .camera_preview import camera_preview_manager
 from .datasets import _lerobot_cache_root, invalidate_hub_status
-from .motor_power import apply_motor_power, clear_goal_velocity
+from .motor_power import apply_torque_limit, clear_goal_velocity
 from .rest_pose import capture_rest_pose
 from .teleoperate import _device_buses, _return_followers_to_rest, force_disable_torque
 from .utils.config import (
@@ -139,9 +139,10 @@ class RecordingRequest(BaseModel):
     # Escape hatch for the arm-identity guard (see makerlab/arm_identity.py):
     # when true, record even if the connected arms don't match their calibrations.
     skip_identity_check: bool = False
-    # Follower torque as a percentage of full power (see makerlab/motor_power.py).
-    # Applied to follower motors only; clamped server-side to 10-100.
-    motor_power: int = 100
+    # Follower session torque cap: raw Feetech Torque_Limit register value
+    # (see makerlab/motor_power.py). Applied to follower motors only; clamped
+    # server-side to [0, 1000]. Default 380 matches auto-cal's DEFAULT_TORQUE_LIMIT.
+    max_torque_limit: int = 380
 
 
 class UploadRequest(BaseModel):
@@ -451,7 +452,7 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                     record_config,
                     recording_events,
                     skip_identity_check=request.skip_identity_check,
-                    motor_power=request.motor_power,
+                    max_torque_limit=request.max_torque_limit,
                     identity_config_names=identity_config_names,
                 )
                 logger.info(f"Recording completed successfully. Dataset has {dataset.num_episodes} episodes")
@@ -903,7 +904,7 @@ def record_with_web_events(
     cfg: RecordConfig,
     web_events: dict,
     skip_identity_check: bool = False,
-    motor_power: int = 100,
+    max_torque_limit: int = 380,
     identity_config_names: list[str] | None = None,
 ) -> LeRobotDataset:
     """
@@ -1099,11 +1100,11 @@ def record_with_web_events(
     _write_calibration(robot, "robot")
     _write_calibration(teleop, "teleop")
 
-    # Session motor power (RAM Torque_Limit) — the follower only, never the
+    # Session torque cap (RAM Torque_Limit) — the follower only, never the
     # human-held leader. robot.connect() above already ran configure(), so
     # nothing overwrites this before the recording loop; a failed write
     # degrades to full power (logged inside) and must not abort the session.
-    apply_motor_power(robot, motor_power, "follower arm")
+    apply_torque_limit(robot, max_torque_limit, "follower arm")
     # Clear any leftover Goal_Velocity speed cap a previous arm-driving feature
     # stamped in RAM (auto-cal fold/unfold=1000, rest-pose return=400); the
     # follower only, never the human-held leader. See makerlab/motor_power.py.

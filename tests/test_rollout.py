@@ -367,7 +367,7 @@ def test_handle_start_inference_pins_return_to_initial_position(monkeypatch, tmp
 
     monkeypatch.setattr(rollout, "setup_follower_calibration_file", lambda cfg: cfg)
     monkeypatch.setattr(rollout, "_preflight_arm_identity", lambda *a, **k: [])
-    monkeypatch.setattr(rollout, "_preflight_motor_power", lambda *a, **k: [])
+    monkeypatch.setattr(rollout, "_preflight_torque_limit", lambda *a, **k: [])
     monkeypatch.setattr(rollout, "_resolve_policy_path", lambda ref: str(tmp_path / "pretrained_model"))
     monkeypatch.setattr(rollout, "_detect_device", lambda: "cpu")
 
@@ -559,7 +559,7 @@ def test_handle_start_inference_bimanual_builds_bi_so_follower_command(monkeypat
         lambda *a, **k: ("/staging/follower", "dual_arm"),
     )
     monkeypatch.setattr(rollout, "_preflight_arm_identity", lambda *a, **k: [])
-    monkeypatch.setattr(rollout, "_preflight_motor_power", lambda *a, **k: [])
+    monkeypatch.setattr(rollout, "_preflight_torque_limit", lambda *a, **k: [])
     monkeypatch.setattr(rollout, "_resolve_policy_path", lambda ref: str(tmp_path / "pretrained_model"))
     monkeypatch.setattr(rollout, "_detect_device", lambda: "cpu")
 

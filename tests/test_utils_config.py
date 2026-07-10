@@ -164,62 +164,97 @@ def test_robot_record_merge_clears_field_with_empty_string(tmp_lerobot_home: Pat
     assert loaded["follower_port"] == "/dev/b"
 
 
-def test_clamp_motor_power_bounds_and_fallback(tmp_lerobot_home: Path) -> None:
+def test_clamp_max_torque_limit_bounds_and_fallback(tmp_lerobot_home: Path) -> None:
     from makerlab.utils import config as cfg
 
-    assert cfg.clamp_motor_power(55) == 55
-    assert cfg.clamp_motor_power(5) == cfg.MOTOR_POWER_MIN
-    assert cfg.clamp_motor_power(150) == cfg.MOTOR_POWER_MAX
-    assert cfg.clamp_motor_power(42.9) == 42
-    # Non-numeric (including bool — a subclass of int) → full power, never raise.
-    assert cfg.clamp_motor_power(None) == cfg.DEFAULT_MOTOR_POWER
-    assert cfg.clamp_motor_power("50") == cfg.DEFAULT_MOTOR_POWER
-    assert cfg.clamp_motor_power(True) == cfg.DEFAULT_MOTOR_POWER
+    assert cfg.clamp_max_torque_limit(550) == 550
+    assert cfg.clamp_max_torque_limit(-5) == cfg.MAX_TORQUE_LIMIT_MIN
+    assert cfg.clamp_max_torque_limit(5000) == cfg.MAX_TORQUE_LIMIT_MAX
+    assert cfg.clamp_max_torque_limit(0) == cfg.MAX_TORQUE_LIMIT_MIN
+    assert cfg.clamp_max_torque_limit(1000) == cfg.MAX_TORQUE_LIMIT_MAX
+    assert cfg.clamp_max_torque_limit(379.9) == 379
+    # Non-numeric (including bool — a subclass of int) → default, never raise.
+    assert cfg.clamp_max_torque_limit(None) == cfg.DEFAULT_MAX_TORQUE_LIMIT
+    assert cfg.clamp_max_torque_limit("380") == cfg.DEFAULT_MAX_TORQUE_LIMIT
+    assert cfg.clamp_max_torque_limit(True) == cfg.DEFAULT_MAX_TORQUE_LIMIT
 
 
-def test_robot_record_motor_power_defaults_to_full(tmp_lerobot_home: Path) -> None:
-    """Records saved before the field existed (or fresh ones) read back as 100."""
+def test_robot_record_max_torque_limit_defaults(tmp_lerobot_home: Path) -> None:
+    """Fresh records — and older records saved before the field existed — read
+    back at the DEFAULT (380), matching auto-cal's DEFAULT_TORQUE_LIMIT."""
     from makerlab.utils import config as cfg
 
-    # A pre-motor_power record on disk: write raw JSON without the field.
+    assert cfg.DEFAULT_MAX_TORQUE_LIMIT == 380
+
+    cfg.save_robot_record("fresh_bot", {"name": "fresh_bot"}, allow_create=True)
+    assert cfg.get_robot_record("fresh_bot")["max_torque_limit"] == 380
+
+    # An older record with neither max_torque_limit nor legacy motor_power.
     path = Path(cfg.ROBOTS_PATH) / "old_bot.json"
     path.write_text(json.dumps({"name": "old_bot", "mode": "single", "leader_port": "/dev/a"}))
-
     loaded = cfg.get_robot_record("old_bot")
     assert loaded is not None
-    assert loaded["motor_power"] == cfg.DEFAULT_MOTOR_POWER
+    assert loaded["max_torque_limit"] == cfg.DEFAULT_MAX_TORQUE_LIMIT
 
 
-def test_robot_record_motor_power_merge_clamps_and_ignores_invalid(
+def test_robot_record_migrates_legacy_motor_power(tmp_lerobot_home: Path) -> None:
+    """A legacy record carrying motor_power (percent) but no max_torque_limit is
+    migrated on read: max_torque_limit = clamp(motor_power * 10). The old
+    motor_power key never appears in the returned record."""
+    from makerlab.utils import config as cfg
+
+    path = Path(cfg.ROBOTS_PATH) / "legacy_bot.json"
+    path.write_text(json.dumps({"name": "legacy_bot", "mode": "single", "motor_power": 50}))
+    loaded = cfg.get_robot_record("legacy_bot")
+    assert loaded is not None
+    assert loaded["max_torque_limit"] == 500
+    assert "motor_power" not in loaded
+
+    # An explicit max_torque_limit wins over a stale motor_power on the same file.
+    path.write_text(
+        json.dumps(
+            {"name": "legacy_bot", "mode": "single", "motor_power": 50, "max_torque_limit": 700}
+        )
+    )
+    loaded = cfg.get_robot_record("legacy_bot")
+    assert loaded["max_torque_limit"] == 700
+    assert "motor_power" not in loaded
+
+    # Full power legacy (100%) migrates to the register max (1000).
+    path.write_text(json.dumps({"name": "legacy_bot", "mode": "single", "motor_power": 100}))
+    assert cfg.get_robot_record("legacy_bot")["max_torque_limit"] == 1000
+
+
+def test_robot_record_max_torque_limit_merge_clamps_and_ignores_invalid(
     tmp_lerobot_home: Path,
 ) -> None:
     from makerlab.utils import config as cfg
 
-    cfg.save_robot_record("power_bot", {"motor_power": 60}, allow_create=True)
-    assert cfg.get_robot_record("power_bot")["motor_power"] == 60
+    cfg.save_robot_record("torque_bot", {"max_torque_limit": 600}, allow_create=True)
+    assert cfg.get_robot_record("torque_bot")["max_torque_limit"] == 600
 
     # Out-of-range values are clamped, not rejected.
-    cfg.save_robot_record("power_bot", {"motor_power": 5}, allow_create=False)
-    assert cfg.get_robot_record("power_bot")["motor_power"] == cfg.MOTOR_POWER_MIN
-    cfg.save_robot_record("power_bot", {"motor_power": 500}, allow_create=False)
-    assert cfg.get_robot_record("power_bot")["motor_power"] == cfg.MOTOR_POWER_MAX
+    cfg.save_robot_record("torque_bot", {"max_torque_limit": -50}, allow_create=False)
+    assert cfg.get_robot_record("torque_bot")["max_torque_limit"] == cfg.MAX_TORQUE_LIMIT_MIN
+    cfg.save_robot_record("torque_bot", {"max_torque_limit": 5000}, allow_create=False)
+    assert cfg.get_robot_record("torque_bot")["max_torque_limit"] == cfg.MAX_TORQUE_LIMIT_MAX
 
     # A wrongly-typed value is ignored (keeps the existing setting), matching
     # the known-typed-fields-only merge of the string/list fields.
-    cfg.save_robot_record("power_bot", {"motor_power": "25"}, allow_create=False)
-    assert cfg.get_robot_record("power_bot")["motor_power"] == cfg.MOTOR_POWER_MAX
+    cfg.save_robot_record("torque_bot", {"max_torque_limit": "250"}, allow_create=False)
+    assert cfg.get_robot_record("torque_bot")["max_torque_limit"] == cfg.MAX_TORQUE_LIMIT_MAX
 
 
-def test_robot_record_motor_power_clamped_on_read(tmp_lerobot_home: Path) -> None:
+def test_robot_record_max_torque_limit_clamped_on_read(tmp_lerobot_home: Path) -> None:
     """A corrupted on-disk value never reaches consumers un-clamped."""
     from makerlab.utils import config as cfg
 
     path = Path(cfg.ROBOTS_PATH) / "corrupt_bot.json"
-    path.write_text(json.dumps({"name": "corrupt_bot", "mode": "single", "motor_power": 9000}))
-    assert cfg.get_robot_record("corrupt_bot")["motor_power"] == cfg.MOTOR_POWER_MAX
+    path.write_text(json.dumps({"name": "corrupt_bot", "mode": "single", "max_torque_limit": 9000}))
+    assert cfg.get_robot_record("corrupt_bot")["max_torque_limit"] == cfg.MAX_TORQUE_LIMIT_MAX
 
-    path.write_text(json.dumps({"name": "corrupt_bot", "mode": "single", "motor_power": "junk"}))
-    assert cfg.get_robot_record("corrupt_bot")["motor_power"] == cfg.DEFAULT_MOTOR_POWER
+    path.write_text(json.dumps({"name": "corrupt_bot", "mode": "single", "max_torque_limit": "junk"}))
+    assert cfg.get_robot_record("corrupt_bot")["max_torque_limit"] == cfg.DEFAULT_MAX_TORQUE_LIMIT
 
 
 def test_rename_robot_record_moves_file_and_preserves_fields(

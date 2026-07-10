@@ -39,7 +39,7 @@ from pydantic import BaseModel
 from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
 
 from .arm_identity import ArmIdentityError, ArmSlot, verify_devices
-from .motor_power import apply_motor_power, clear_goal_velocity
+from .motor_power import apply_torque_limit, clear_goal_velocity
 from .utils.config import (
     bimanual_base_id,
     list_robot_records,
@@ -82,9 +82,10 @@ class InferenceRequest(BaseModel):
     # Escape hatch for the arm-identity guard (see makerlab/arm_identity.py):
     # when true, run even if the connected arm doesn't match its calibration.
     skip_identity_check: bool = False
-    # Follower torque as a percentage of full power (see makerlab/motor_power.py).
-    # Clamped server-side to 10-100; written before the subprocess starts.
-    motor_power: int = 100
+    # Follower session torque cap: raw Feetech Torque_Limit register value
+    # (see makerlab/motor_power.py). Clamped server-side to [0, 1000]; written
+    # before the subprocess starts. Default 380 matches auto-cal's DEFAULT_TORQUE_LIMIT.
+    max_torque_limit: int = 380
 
 
 inference_active: bool = False
@@ -270,7 +271,7 @@ def _preflight_arm_identity(port: str, follower_id: str, config_name: str | None
         robot.bus.disconnect(disable_torque=False)
 
 
-def _preflight_motor_power(port: str, follower_id: str, percent: int) -> list[str]:
+def _preflight_torque_limit(port: str, follower_id: str, value: int) -> list[str]:
     """Prime the follower's RAM motor registers before the rollout subprocess
     starts.
 
@@ -279,7 +280,7 @@ def _preflight_motor_power(port: str, follower_id: str, percent: int) -> list[st
     (only a power cycle resets them), and the subprocess's connect()/configure()
     never writes them — so setting them here and releasing the port is enough
     for the whole rollout. Two priming steps:
-      - apply_motor_power: the session torque cap (percent → Torque_Limit).
+      - apply_torque_limit: the session torque cap (raw Torque_Limit value).
       - clear_goal_velocity: reset any leftover speed cap a previous
         arm-driving feature stamped (auto-cal fold/unfold=1000, rest-pose
         return=400), which would otherwise throttle the whole rollout.
@@ -289,7 +290,7 @@ def _preflight_motor_power(port: str, follower_id: str, percent: int) -> list[st
     try:
         robot.bus.connect()
         try:
-            return apply_motor_power(robot, percent, "follower arm") + clear_goal_velocity(
+            return apply_torque_limit(robot, value, "follower arm") + clear_goal_velocity(
                 robot, "follower arm"
             )
         finally:
@@ -456,10 +457,12 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
                 identity_warnings += _preflight_arm_identity(
                     request.right_follower_port, right_id, config_name=request.right_follower_config
                 )
-            # Motor power on both buses, sequentially (each opens its own port).
-            identity_warnings += _preflight_motor_power(request.follower_port, left_id, request.motor_power)
-            identity_warnings += _preflight_motor_power(
-                request.right_follower_port, right_id, request.motor_power
+            # Torque cap on both buses, sequentially (each opens its own port).
+            identity_warnings += _preflight_torque_limit(
+                request.follower_port, left_id, request.max_torque_limit
+            )
+            identity_warnings += _preflight_torque_limit(
+                request.right_follower_port, right_id, request.max_torque_limit
             )
 
             robot_args = _bimanual_robot_args(request, base, follower_staging)
@@ -478,10 +481,10 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
             else:
                 identity_warnings = _preflight_arm_identity(request.follower_port, follower_id)
 
-            # Always written (even at 100%) so a gentler previous session can't
+            # Always written (even at 1000) so a gentler previous session can't
             # linger when the arm was never power-cycled.
-            identity_warnings += _preflight_motor_power(
-                request.follower_port, follower_id, request.motor_power
+            identity_warnings += _preflight_torque_limit(
+                request.follower_port, follower_id, request.max_torque_limit
             )
 
             robot_args = _single_robot_args(request, follower_id)

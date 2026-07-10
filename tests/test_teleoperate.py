@@ -933,7 +933,7 @@ class _CurrentBus:
 
 def test_power_telemetry_tracks_peak_and_mean() -> None:
     """Peaks/means in mA (6.5 mA per register LSB) give the objective A/B for
-    the motor-power cap; the summary names the Torque_Limit that was active."""
+    the torque cap; the summary names the Torque_Limit that was active."""
     import makerlab.teleoperate as teleop
 
     telemetry = teleop.PowerTelemetry()
@@ -943,11 +943,11 @@ def test_power_telemetry_tracks_peak_and_mean() -> None:
 
     assert telemetry.peak_ma["shoulder_pan"] == 100 * 6.5
     assert telemetry.latest_ma["shoulder_pan"] == 40 * 6.5
-    summary = telemetry.summary(30)
+    summary = telemetry.summary(300)
     assert summary is not None
     assert summary.startswith("power telemetry:")
     assert f"shoulder_pan peak {100 * 6.5:.0f}mA / mean {70 * 6.5:.0f}mA" in summary
-    assert "motor power 30%, Torque_Limit 300" in summary
+    assert "Torque_Limit 300" in summary
 
 
 def test_power_telemetry_prefixes_bimanual_and_survives_bus_errors() -> None:
