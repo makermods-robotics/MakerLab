@@ -23,6 +23,7 @@ export interface RobotRecord {
   // Follower torque as a percentage of full power (10-100, default 100).
   // Written to the servos' volatile torque-limit register at session start.
   motor_power: number;
+  max_torque_limit?: number;
   is_clean: boolean;
 }
 

@@ -1,7 +1,7 @@
 import React, { useState } from "react";
-import { useNavigate } from "react-router-dom";
 import { Settings, Plus } from "lucide-react";
 import { useRobots, RobotMode } from "@/hooks/useRobots";
+import { openRobotSettings } from "@/components/robot/robotSettingsStore";
 import CreateRobotDialog from "@/components/landing/CreateRobotDialog";
 import HfAuthChip from "@/components/landing/HfAuthChip";
 import { ThemeToggle } from "@/components/shell/ThemeToggle";
@@ -16,11 +16,10 @@ const statusLine = (mode: RobotMode, isClean: boolean | undefined) =>
 /**
  * The persistent robots rail on stage pages (Collect / Train & Deploy / Market).
  * Selection flows through the useRobots singleton store so every consumer
- * (pages, dialogs) stays in sync; the gear deep-links into the robot's full
- * settings surface (ports / calibration / cameras / motor power).
+ * (pages, dialogs) stays in sync; the gear opens the robot's full settings
+ * surface (ports / calibration / cameras / max torque) as a dialog.
  */
 const RobotsSidebar: React.FC = () => {
-  const navigate = useNavigate();
   const {
     records,
     selectedName,
@@ -90,9 +89,7 @@ const RobotsSidebar: React.FC = () => {
                   "grid h-7 w-7 place-items-center rounded-md opacity-60 hover:opacity-100",
                   active ? "hover:bg-primary-foreground/15" : "hover:bg-accent"
                 )}
-                onClick={() =>
-                  navigate("/calibration", { state: { robot_name: r.name } })
-                }
+                onClick={() => openRobotSettings(r.name)}
               >
                 <Settings className="h-3.5 w-3.5" />
               </button>

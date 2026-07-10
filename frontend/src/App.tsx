@@ -22,6 +22,7 @@ import NotFound from "@/pages/NotFound";
 import SingleTabGuard from "@/components/SingleTabGuard";
 import TeleopStopNotice from "@/components/TeleopStopNotice";
 import UpdateNotice from "@/components/UpdateNotice";
+import RobotSettingsDialog from "@/components/robot/RobotSettingsDialog";
 import { TooltipProvider } from "@radix-ui/react-tooltip";
 import { ApiProvider } from "./contexts/ApiContext";
 import { HfAuthProvider } from "./contexts/HfAuthContext";
@@ -41,6 +42,7 @@ function App() {
                     <SingleTabGuard>
                       <TeleopStopNotice />
                       <UpdateNotice />
+                      <RobotSettingsDialog />
                       <Routes>
                         <Route path="/" element={<Home />} />
                         <Route element={<StageLayout />}>
