@@ -4,19 +4,17 @@ import {
   AlertTriangle,
   Camera,
   CheckCircle2,
-  ChevronsUpDown,
-  GitMerge,
   Plus,
   Radio,
   Square,
 } from "lucide-react";
 import VisualizerPanel from "@/components/control/VisualizerPanel";
 import CameraFeed from "@/components/control/CameraFeed";
+import { DatasetLibrary } from "@/components/collect/DatasetLibrary";
 import { useTeleopSession } from "@/components/collect/useTeleopSession";
 import CameraConfiguration, {
   CameraConfig,
 } from "@/components/recording/CameraConfiguration";
-import DatasetPicker from "@/components/landing/DatasetPicker";
 import CreateDatasetDialog from "@/components/landing/CreateDatasetDialog";
 import DatasetInfoCard from "@/components/landing/DatasetInfoCard";
 import MergeDatasetsDialog from "@/components/landing/MergeDatasetsDialog";
@@ -57,6 +55,7 @@ import { useRobots } from "@/hooks/useRobots";
 import { useSelectedDataset } from "@/hooks/useSelectedDataset";
 import { validateDatasetRepoId } from "@/lib/datasetName";
 import { DatasetItem, deleteDataset } from "@/lib/replayApi";
+import { cn } from "@/lib/utils";
 
 interface CompletedDatasetState {
   dataset_repo_id?: string;
@@ -96,7 +95,6 @@ const Collect: React.FC = () => {
   const { selectedRecord } = useRobots();
   const {
     datasets,
-    loading: datasetsLoading,
     refresh: refreshDatasets,
   } = useDatasets();
   const { selectedDataset, setSelectedDataset } = useSelectedDataset();
@@ -105,6 +103,7 @@ const Collect: React.FC = () => {
   const [showCreateDatasetDialog, setShowCreateDatasetDialog] = useState(false);
   const [showMergeDialog, setShowMergeDialog] = useState(false);
   const [showCameraDialog, setShowCameraDialog] = useState(false);
+  const [datasetLibraryOpen, setDatasetLibraryOpen] = useState(false);
   const [pendingDeleteDataset, setPendingDeleteDataset] =
     useState<DatasetItem | null>(null);
 
@@ -159,12 +158,7 @@ const Collect: React.FC = () => {
     return "joints idle · leader detached";
   }, [teleop.active, teleop.status]);
 
-  const handlePickExisting = (item: DatasetItem) => {
-    setSelectedDataset(item.repo_id);
-    toast({ title: "Dataset selected", description: item.repo_id });
-  };
-
-  const handleOpenCustom = (repoId: string) => {
+  const handleSelectDataset = (repoId: string) => {
     setSelectedDataset(repoId);
     toast({ title: "Dataset selected", description: repoId });
   };
@@ -455,31 +449,18 @@ const Collect: React.FC = () => {
 
               <div className="space-y-2">
                 <Label>Dataset</Label>
-                <div className="flex gap-2">
-                  <DatasetPicker
-                    datasets={datasets}
-                    loading={datasetsLoading}
-                    onPickExisting={handlePickExisting}
-                    onOpenCustom={handleOpenCustom}
-                    onCreateNew={handleCreateDataset}
-                    onDelete={setPendingDeleteDataset}
-                    onUploaded={() => refreshDatasets()}
+                <div className="flex min-w-0 items-center gap-2">
+                  <span
+                    className={cn(
+                      "min-w-0 flex-1 truncate font-mono text-xs",
+                      selectedDataset
+                        ? "text-foreground"
+                        : "text-muted-foreground",
+                    )}
+                    title={selectedDataset ?? undefined}
                   >
-                    <Button
-                      variant="outline"
-                      role="combobox"
-                      className="min-w-0 flex-1 justify-between font-normal"
-                    >
-                      <span
-                        className={`truncate ${selectedDataset ? "text-foreground" : "text-muted-foreground"}`}
-                      >
-                        {datasetsLoading
-                          ? "Loading datasets..."
-                          : (selectedDataset ?? "Select or create a dataset...")}
-                      </span>
-                      <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
-                    </Button>
-                  </DatasetPicker>
+                    {selectedDataset ?? "No dataset selected"}
+                  </span>
                   <Button
                     variant="secondary"
                     size="icon"
@@ -488,6 +469,20 @@ const Collect: React.FC = () => {
                     title="Create dataset"
                   >
                     <Plus className="h-4 w-4" />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => {
+                      setDatasetLibraryOpen(true);
+                      requestAnimationFrame(() => {
+                        document
+                          .getElementById("dataset-library")
+                          ?.scrollIntoView({ behavior: "smooth" });
+                      });
+                    }}
+                  >
+                    Choose…
                   </Button>
                 </div>
               </div>
@@ -590,21 +585,8 @@ const Collect: React.FC = () => {
 
           <Card className="shadow-sm">
             <CardHeader>
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <CardTitle>Dataset</CardTitle>
-                  <CardDescription>Review, upload, rename, or merge.</CardDescription>
-                </div>
-                <Button
-                  variant="outline"
-                  size="icon"
-                  onClick={() => setShowMergeDialog(true)}
-                  aria-label="Merge datasets"
-                  title="Merge datasets"
-                >
-                  <GitMerge className="h-4 w-4" />
-                </Button>
-              </div>
+              <CardTitle>Dataset</CardTitle>
+              <CardDescription>Review, upload, or rename.</CardDescription>
             </CardHeader>
             <CardContent className="space-y-3">
               {selectedDataset ? (
@@ -620,18 +602,20 @@ const Collect: React.FC = () => {
                   Select a dataset to see local details and Hub status.
                 </p>
               )}
-              <Button
-                variant="secondary"
-                className="w-full"
-                onClick={() => setShowMergeDialog(true)}
-              >
-                <GitMerge className="mr-2 h-4 w-4" />
-                Merge datasets
-              </Button>
             </CardContent>
           </Card>
         </div>
       </div>
+
+      <section id="dataset-library" className="mt-4 scroll-mt-4">
+        <DatasetLibrary
+          selectedRepoId={selectedDataset}
+          onSelect={handleSelectDataset}
+          onMerge={() => setShowMergeDialog(true)}
+          open={datasetLibraryOpen}
+          onOpenChange={setDatasetLibraryOpen}
+        />
+      </section>
 
       <Dialog
         open={showCameraDialog}

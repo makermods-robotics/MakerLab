@@ -1,0 +1,215 @@
+import { useMemo, useState } from "react";
+import { ChevronRight, GitMerge } from "lucide-react";
+
+import { MarketListingCard } from "@/components/market/MarketListingCard";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
+import { useHfAuth } from "@/contexts/HfAuthContext";
+import { useDatasets } from "@/hooks/useDatasets";
+import { DatasetItem } from "@/lib/replayApi";
+import { cn } from "@/lib/utils";
+
+type DatasetFilter = "all" | "local" | "yours" | "public" | "private";
+
+interface DatasetLibraryProps {
+  selectedRepoId: string | null;
+  onSelect: (repoId: string) => void;
+  onMerge: () => void;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+}
+
+const filters: Array<{ id: DatasetFilter; label: string }> = [
+  { id: "all", label: "All" },
+  { id: "local", label: "Local" },
+  { id: "yours", label: "Yours on Hub" },
+  { id: "public", label: "Public" },
+  { id: "private", label: "Private" },
+];
+
+function relativeTime(iso: string | null): string {
+  if (!iso) return "updated unknown";
+  const time = Date.parse(iso);
+  if (Number.isNaN(time)) return "updated unknown";
+  const seconds = Math.max(0, Math.floor((Date.now() - time) / 1000));
+  if (seconds < 60) return "updated just now";
+  if (seconds < 3600) return `updated ${Math.floor(seconds / 60)}m ago`;
+  if (seconds < 86400) return `updated ${Math.floor(seconds / 3600)}h ago`;
+  return `updated ${Math.floor(seconds / 86400)}d ago`;
+}
+
+function repoNamespace(repoId: string): string | null {
+  const separator = repoId.indexOf("/");
+  return separator === -1 ? null : repoId.slice(0, separator);
+}
+
+function matchesFilter(
+  dataset: DatasetItem,
+  filter: DatasetFilter,
+  username: string | null,
+): boolean {
+  const hubVisible = dataset.source !== "local";
+
+  switch (filter) {
+    case "local":
+      return dataset.source !== "hub";
+    case "yours":
+      return (
+        hubVisible &&
+        username !== null &&
+        repoNamespace(dataset.repo_id)?.toLowerCase() === username.toLowerCase()
+      );
+    case "public":
+      return hubVisible && !dataset.private;
+    case "private":
+      return hubVisible && dataset.private;
+    default:
+      return true;
+  }
+}
+
+export function DatasetLibrary({
+  selectedRepoId,
+  onSelect,
+  onMerge,
+  open,
+  onOpenChange,
+}: DatasetLibraryProps) {
+  const { datasets, loading } = useDatasets();
+  const { auth } = useHfAuth();
+  const [filter, setFilter] = useState<DatasetFilter>("all");
+  const [internalOpen, setInternalOpen] = useState(false);
+
+  const expanded = open ?? internalOpen;
+  const username = auth.status === "authenticated" ? auth.username : null;
+  const visibleDatasets = useMemo(
+    () =>
+      datasets.filter((dataset) => matchesFilter(dataset, filter, username)),
+    [datasets, filter, username],
+  );
+
+  const handleOpenChange = (nextOpen: boolean) => {
+    if (open === undefined) setInternalOpen(nextOpen);
+    onOpenChange?.(nextOpen);
+  };
+
+  return (
+    <Card className="overflow-hidden shadow-sm">
+      <Collapsible open={expanded} onOpenChange={handleOpenChange}>
+        <div className="flex items-center justify-between gap-3 p-4 sm:px-6">
+          <CollapsibleTrigger asChild>
+            <button
+              type="button"
+              className="group flex min-w-0 items-center gap-2 rounded-md text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+            >
+              <ChevronRight className="h-4 w-4 shrink-0 transition-transform group-data-[state=open]:rotate-90" />
+              <span className="font-display text-lg font-bold tracking-tight">
+                Dataset library
+              </span>
+              <Badge variant="secondary">{datasets.length}</Badge>
+            </button>
+          </CollapsibleTrigger>
+          <Button variant="outline" size="sm" onClick={onMerge}>
+            <GitMerge className="h-4 w-4" />
+            Merge
+          </Button>
+        </div>
+
+        <CollapsibleContent>
+          <div className="border-t border-border p-4 sm:p-6">
+            <div
+              className="mb-4 flex flex-wrap gap-1 rounded-full bg-secondary p-1 sm:w-fit"
+              aria-label="Filter datasets"
+            >
+              {filters.map((item) => (
+                <Button
+                  key={item.id}
+                  type="button"
+                  size="sm"
+                  variant={filter === item.id ? "outline" : "ghost"}
+                  aria-pressed={filter === item.id}
+                  onClick={() => setFilter(item.id)}
+                  className={cn(
+                    "h-8 rounded-full px-3",
+                    filter === item.id && "bg-card shadow-sm",
+                  )}
+                >
+                  {item.label}
+                </Button>
+              ))}
+            </div>
+
+            {loading ? (
+              <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+                {Array.from({ length: 3 }).map((_, index) => (
+                  <div
+                    key={index}
+                    className="h-[280px] animate-pulse rounded-xl border border-border bg-secondary"
+                  />
+                ))}
+              </div>
+            ) : visibleDatasets.length > 0 ? (
+              <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+                {visibleDatasets.map((dataset) => {
+                  const selected = selectedRepoId === dataset.repo_id;
+                  const hasLocalCopy = dataset.source === "both";
+
+                  return (
+                    <div
+                      key={dataset.repo_id}
+                      className={cn(
+                        "relative rounded-xl transition-shadow",
+                        selected &&
+                          "ring-2 ring-primary ring-offset-2 ring-offset-background",
+                      )}
+                      onClick={(event) => {
+                        if (
+                          event.target instanceof Element &&
+                          event.target.closest("button")
+                        ) {
+                          return;
+                        }
+                        onSelect(dataset.repo_id);
+                      }}
+                    >
+                      {(hasLocalCopy || dataset.private) && (
+                        <div className="absolute right-3 top-3 z-10 flex flex-wrap justify-end gap-1.5">
+                          {hasLocalCopy && (
+                            <Badge variant="secondary">local copy</Badge>
+                          )}
+                          {dataset.private && (
+                            <Badge variant="outline">private</Badge>
+                          )}
+                        </div>
+                      )}
+                      <MarketListingCard
+                        kind="dataset"
+                        name={dataset.repo_id}
+                        source={dataset.source === "local" ? "local" : "hub"}
+                        meta={relativeTime(dataset.last_modified)}
+                        actionLabel="Select"
+                        completeLabel="Selected"
+                        complete={selected}
+                        onAction={() => onSelect(dataset.repo_id)}
+                      />
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="rounded-xl border border-dashed border-border p-8 text-center text-sm text-muted-foreground">
+                No datasets match this filter.
+              </div>
+            )}
+          </div>
+        </CollapsibleContent>
+      </Collapsible>
+    </Card>
+  );
+}
