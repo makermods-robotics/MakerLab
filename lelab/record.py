@@ -49,6 +49,16 @@ from .utils.robot_factory import build_bimanual_configs, build_single_configs
 
 logger = logging.getLogger(__name__)
 
+# Default pixel format for USB cameras when the request doesn't pin one.
+# OpenCV/V4L2 otherwise negotiates uncompressed YUYV, whose isochronous USB
+# bandwidth exhausts the controller at ~2-3 concurrent cameras — the UVC driver
+# then fails STREAMON with the misleading "VIDIOC_STREAMON: No space left on
+# device" (ENOSPC = USB bandwidth, not disk), silently dropping a 3rd/4th camera
+# from the UI. MJPG is ~10x smaller and lets the full rig stream. macOS already
+# negotiates MJPEG, so this only changes Linux behavior. An explicit per-camera
+# fourcc (e.g. a deliberate YUYV choice from the UI) still wins.
+_DEFAULT_FOURCC = "MJPG"
+
 # --- Recording log capture (bounded ring buffer) ------------------------------
 # The record flow logs progress through the Python `logger` rather than a
 # subprocess, so its output only ever reached the uvicorn console. To surface it
@@ -297,7 +307,9 @@ def _build_camera_configs(cameras: dict, default_backend) -> dict:
     """Convert the frontend camera dict into OpenCVCameraConfig objects.
 
     `backend` (a Cv2Backends name) and `fourcc` (a 4-char code) are optional per
-    camera; when omitted they fall back to `default_backend` and auto-detect.
+    camera; when omitted `backend` falls back to `default_backend` and `fourcc`
+    to MJPG (`_DEFAULT_FOURCC`) so multi-camera USB rigs don't exhaust isochronous
+    bandwidth on Linux (see `_DEFAULT_FOURCC`). An explicit per-camera fourcc wins.
     Cameras are addressed by their cv2 integer `camera_index`.
     """
     from lerobot.cameras.configs import Cv2Backends
@@ -313,7 +325,7 @@ def _build_camera_configs(cameras: dict, default_backend) -> dict:
 
         backend_name = camera_data.get("backend")
         backend = Cv2Backends[backend_name] if backend_name else default_backend
-        fourcc = camera_data.get("fourcc") or None
+        fourcc = camera_data.get("fourcc") or _DEFAULT_FOURCC
 
         camera_configs[camera_name] = OpenCVCameraConfig(
             index_or_path=camera_data.get("camera_index", 0),

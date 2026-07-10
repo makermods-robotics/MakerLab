@@ -258,8 +258,31 @@ def test_build_camera_configs_uses_default_backend_when_unset() -> None:
     configs = _build_camera_configs(cameras, Cv2Backends.AVFOUNDATION)
 
     assert configs["cam"].backend == Cv2Backends.AVFOUNDATION
-    assert configs["cam"].fourcc is None
+    # fourcc defaults to MJPG (compressed) to avoid USB isochronous-bandwidth
+    # exhaustion on multi-camera Linux rigs; an explicit choice still wins.
+    assert configs["cam"].fourcc == "MJPG"
     assert configs["cam"].index_or_path == 0
+
+
+def test_build_camera_configs_defaults_fourcc_to_mjpg() -> None:
+    from lelab.record import _DEFAULT_FOURCC, _build_camera_configs
+    from lerobot.cameras.configs import Cv2Backends
+
+    cameras = {"cam": {"type": "opencv", "camera_index": 0}}
+    configs = _build_camera_configs(cameras, Cv2Backends.ANY)
+
+    assert _DEFAULT_FOURCC == "MJPG"
+    assert configs["cam"].fourcc == "MJPG"
+
+
+def test_build_camera_configs_explicit_fourcc_overrides_mjpg_default() -> None:
+    from lelab.record import _build_camera_configs
+    from lerobot.cameras.configs import Cv2Backends
+
+    cameras = {"cam": {"type": "opencv", "camera_index": 0, "fourcc": "YUYV"}}
+    configs = _build_camera_configs(cameras, Cv2Backends.ANY)
+
+    assert configs["cam"].fourcc == "YUYV"
 
 
 def test_build_camera_configs_passes_fourcc_through() -> None:
