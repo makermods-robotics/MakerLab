@@ -26,6 +26,7 @@ from pydantic import BaseModel
 
 from lerobot.configs.dataset import DatasetRecordConfig
 from lerobot.datasets import LeRobotDataset
+from lerobot.motors.motors_bus import MotorsBus
 
 # Import the main record functionality to reuse it
 from lerobot.scripts.lerobot_record import RecordConfig
@@ -58,6 +59,30 @@ logger = logging.getLogger(__name__)
 # negotiates MJPEG, so this only changes Linux behavior. An explicit per-camera
 # fourcc (e.g. a deliberate YUYV choice from the UI) still wins.
 _DEFAULT_FOURCC = "MJPG"
+
+# --- Motor bus read retries ----------------------------------------------------
+# lerobot's SO-10x follower/leader call bus.sync_read("Present_Position") with
+# the default num_retry=0, so a single missed reply kills the whole recording
+# session ("[TxRxResult] There is no status packet!"). Replies do get missed:
+# on hosts where the arm serial adapters share a USB bus with streaming
+# cameras (e.g. the Jetson rig, cameras and CH34x adapters on the same hubs),
+# isochronous camera traffic occasionally delays a bulk serial reply past the
+# packet timeout. Position reads are idempotent, and a retry costs only the
+# packet timeout (single-digit ms at 1 Mbps) *when a read actually glitched* —
+# invisible at a 30 Hz loop. Patch the class-level default (process-wide);
+# an explicit num_retry from any caller still wins.
+_BUS_SYNC_READ_RETRIES = 2
+_original_sync_read = MotorsBus.sync_read
+
+
+def _sync_read_with_default_retries(
+    self, data_name, motors=None, *, normalize=True, num_retry=_BUS_SYNC_READ_RETRIES
+):
+    return _original_sync_read(self, data_name, motors, normalize=normalize, num_retry=num_retry)
+
+
+if MotorsBus.sync_read.__name__ != "_sync_read_with_default_retries":  # idempotent under --reload
+    MotorsBus.sync_read = _sync_read_with_default_retries
 
 # --- Recording log capture (bounded ring buffer) ------------------------------
 # The record flow logs progress through the Python `logger` rather than a
