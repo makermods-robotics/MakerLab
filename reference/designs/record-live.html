@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Recording — MakerLab</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@600;700&family=Space+Grotesk:wght@400;500&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/app.css">
+<style>
+  main.page.record-page { max-width: 1440px; padding-bottom: 118px; }
+  .session-back {
+    display: inline-flex; align-items: center;
+    color: var(--muted-fg); text-decoration: none;
+    font-size: 12.5px; margin-bottom: 17px;
+  }
+  .session-back:hover { color: var(--foreground); }
+  .head-title { display: grid; gap: 8px; }
+  .run-tags { display: flex; align-items: center; gap: 7px; }
+  .tag-sep { color: var(--muted-fg); font-family: "JetBrains Mono", monospace; font-size: 10px; }
+  .session-stats {
+    display: grid; grid-template-columns: minmax(190px, .85fr) minmax(240px, 1fr) auto;
+    align-items: end; gap: 18px;
+    border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+    padding: 17px 0 16px; margin-bottom: 18px;
+  }
+  .stat { display: grid; gap: 2px; }
+  .stat-label {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 10px; letter-spacing: .1em; text-transform: uppercase;
+    color: var(--muted-fg);
+  }
+  .timer {
+    font-family: "JetBrains Mono", monospace;
+    font-size: clamp(36px, 5vw, 68px); line-height: .95;
+    font-weight: 500; letter-spacing: 0;
+  }
+  .episode {
+    font-family: "Chakra Petch", sans-serif;
+    font-size: clamp(28px, 4vw, 52px); line-height: 1;
+    font-weight: 700; letter-spacing: .01em;
+  }
+  .phase { justify-self: end; align-self: center; }
+  .camera-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .camera-grid .media {
+    min-height: 420px; height: 46vh;
+    clip-path: var(--notch-md);
+    background-color: color-mix(in srgb, var(--card) 72%, var(--brand-tint));
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--brand) 10%, transparent);
+  }
+  .session-bar {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 25;
+    display: flex; align-items: center; justify-content: space-between; gap: 18px;
+    padding: 14px 24px 16px;
+    background: color-mix(in srgb, var(--background) 92%, transparent);
+    border-top: 1px solid var(--border);
+    backdrop-filter: blur(8px);
+  }
+  .session-hint {
+    color: var(--muted-fg);
+    font-family: "JetBrains Mono", monospace;
+    font-size: 10.5px; letter-spacing: .04em;
+  }
+  .session-actions { display: flex; align-items: center; gap: 9px; }
+  @media (max-width: 900px) {
+    main.page.record-page { padding-bottom: 154px; }
+    .page-head { align-items: flex-start; }
+    .session-stats { grid-template-columns: 1fr; align-items: start; }
+    .phase { justify-self: start; }
+    .camera-grid { grid-template-columns: 1fr; }
+    .camera-grid .media { height: 34vh; min-height: 260px; }
+    .session-bar { align-items: stretch; flex-direction: column; }
+    .session-actions { justify-content: flex-end; flex-wrap: wrap; }
+  }
+</style>
+</head>
+<body data-stage="collect" data-live>
+
+<main class="page record-page">
+  <a class="session-back" href="collect.html">← Collect (discard session)</a>
+
+  <div class="page-head">
+    <div class="head-title">
+      <h1>Recording — pick-cube</h1>
+      <div class="run-tags">
+        <span class="tag brand">SO-101</span>
+        <span class="tag-sep">/</span>
+        <span class="tag">bench-rig</span>
+      </div>
+    </div>
+    <button class="btn ghost">mute</button>
+  </div>
+
+  <div class="session-stats">
+    <div class="stat">
+      <span class="stat-label">Elapsed</span>
+      <span class="timer">00:42</span>
+    </div>
+    <div class="stat">
+      <span class="stat-label">Dataset progress</span>
+      <span class="episode">Episode 7 / 10</span>
+    </div>
+    <span class="tag brand phase">● recording</span>
+  </div>
+
+  <div class="camera-grid">
+    <div class="media" data-label="front camera"></div>
+    <div class="media" data-label="wrist camera"></div>
+  </div>
+</main>
+
+<div class="session-bar">
+  <div class="session-hint">episodes save to pick-cube on bench-rig</div>
+  <div class="session-actions">
+    <button class="btn ghost">Re-record episode</button>
+    <button class="btn">Skip ahead</button>
+    <a class="btn-brand" href="collect.html?post=1">Finish early</a>
+  </div>
+</div>
+
+<script src="assets/app.js"></script>
+</body>
+</html>

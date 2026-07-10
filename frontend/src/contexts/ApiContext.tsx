@@ -19,9 +19,19 @@ const defaultBaseUrl = (): string =>
 
 const httpToWs = (url: string): string => url.replace(/^http(s?):/, "ws$1:");
 
+// Loopback origins are a local `makerlab` / `makerlab --dev` run talking to its
+// own backend on this machine.
+const isLoopbackHost = (host: string): boolean =>
+  host === "localhost" ||
+  host === "127.0.0.1" ||
+  host === "0.0.0.0" ||
+  host === "::1" ||
+  host === "[::1]";
+
 const resolveInitialBaseUrl = (): string => {
   if (typeof window === "undefined") return DEFAULT_LOCALHOST;
 
+  // An explicit ?api=<url> always wins and is remembered for later bare loads.
   const fromQuery = new URLSearchParams(window.location.search).get("api");
   if (fromQuery) {
     try {
@@ -34,7 +44,18 @@ const resolveInitialBaseUrl = (): string => {
     }
   }
 
-  return window.localStorage.getItem(STORAGE_KEY) || defaultBaseUrl();
+  const fallback = defaultBaseUrl();
+
+  // A plain localhost run must always talk to its own backend. Reading a
+  // persisted override here let a stray `makerlab.apiBaseUrl` (e.g. left over
+  // from an earlier ?api= visit, or from a since-moved backend) silently point
+  // the UI at a different — often empty or unreachable — API, which then
+  // rendered as a confusing "no robots" state indistinguishable from success.
+  // So on loopback origins we ignore the stored value; the override only
+  // applies to remote deployments where the page origin isn't the API.
+  if (isLoopbackHost(window.location.hostname)) return fallback;
+
+  return window.localStorage.getItem(STORAGE_KEY) || fallback;
 };
 
 export const ApiProvider: React.FC<{ children: ReactNode }> = ({

@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Collect — MakerLab</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@600;700&family=Space+Grotesk:wght@400;500&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/app.css">
+<style>
+  .collect-grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(300px, 1fr); gap: 16px; }
+  .viz {
+    position: relative;
+    background: var(--card);
+    border: 1px solid var(--border);
+    clip-path: var(--notch-md);
+    height: 380px;
+  }
+  .viz canvas { width: 100%; height: 100%; display: block; }
+  .viz .viz-tag {
+    position: absolute; top: 12px; left: 14px;
+    display: flex; align-items: center; gap: 7px;
+  }
+  .viz .viz-state {
+    position: absolute; bottom: 12px; left: 14px;
+    font-family: "JetBrains Mono", monospace; font-size: 10.5px; letter-spacing: .1em;
+    text-transform: uppercase; color: var(--muted-fg);
+  }
+  .viz.teleop-live .viz-state { color: var(--brand); }
+  .cam-strip { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 16px; }
+  .cam-strip .media { height: 150px; }
+  .side { display: grid; gap: 16px; align-content: start; }
+  .teleop-actions { display: flex; gap: 9px; margin-top: 12px; align-items: center; }
+  .teleop-status { font-family: "JetBrains Mono", monospace; font-size: 10.5px; color: var(--muted-fg); margin-top: 10px; }
+  .record-form { display: grid; gap: 12px; margin-top: 12px; }
+  .form-2col { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .record-foot { display: flex; align-items: center; justify-content: space-between; margin-top: 2px; }
+  .record-foot small { color: var(--muted-fg); font-size: 11.5px; }
+  @media (max-width: 900px) { .collect-grid { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body data-stage="collect">
+
+<main class="page">
+  <div class="banner" data-post-banner hidden>
+    <div>
+      <b>pick-cube updated · +8 episodes (32 total)</b>
+      <small>Recorded just now on bench-rig · front + wrist cameras</small>
+    </div>
+    <a class="btn-brand" href="train.html">Train on this dataset →</a>
+  </div>
+
+  <div class="page-head">
+    <div>
+      <h1>Collect</h1>
+      <p class="gloss">Teach by demonstration — practice with teleop, then record episodes.</p>
+    </div>
+  </div>
+
+  <div class="collect-grid">
+    <div>
+      <div class="viz" id="viz">
+        <div class="viz-tag"><span class="tag brand">SO-101</span><span class="tag">bench-rig</span></div>
+        <canvas id="viz-canvas" aria-label="SO-101 live view"></canvas>
+        <div class="viz-state" id="viz-state">idle — start teleop to drive</div>
+      </div>
+      <div class="cam-strip">
+        <div class="media" data-label="front camera"></div>
+        <div class="media" data-label="wrist camera"></div>
+      </div>
+    </div>
+
+    <div class="side">
+      <section class="card">
+        <h2>Teleoperate</h2>
+        <p class="sub">Drive the follower with the leader arm. Nothing is saved.</p>
+        <div class="teleop-actions">
+          <button class="btn-brand" id="teleop-toggle" style="border:0">Start teleop</button>
+          <button class="btn ghost" id="teleop-stop" hidden>Stop</button>
+        </div>
+        <p class="teleop-status" id="teleop-status">joints idle · leader detached</p>
+      </section>
+
+      <section class="card">
+        <h2>Record dataset</h2>
+        <p class="sub">Episodes go to the selected dataset.</p>
+        <div class="record-form">
+          <div class="field">
+            <label>Dataset</label>
+            <select class="field-input"><option>pick-cube · 24 episodes</option><option>stack-blocks · 12 episodes</option><option>+ New dataset…</option></select>
+          </div>
+          <div class="field">
+            <label>Task prompt</label>
+            <textarea class="field-input" rows="2">Pick up the cube and place it in the tray.</textarea>
+          </div>
+          <div class="form-2col">
+            <div class="field"><label>Episodes</label><input class="field-input" value="10"></div>
+            <div class="field"><label>Episode / reset s</label><input class="field-input" value="30 / 5"></div>
+          </div>
+          <div class="record-foot">
+            <small>cameras: front + wrist</small>
+            <a class="btn-brand" href="record-live.html">Start recording</a>
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
+</main>
+
+<script src="assets/app.js"></script>
+<script>
+  if (new URLSearchParams(location.search).has('post')) {
+    document.querySelector('[data-post-banner]').hidden = false;
+  }
+</script>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.177.0/build/three.module.js",
+    "three/examples/jsm/": "https://unpkg.com/three@0.177.0/examples/jsm/",
+    "urdf-loader": "https://unpkg.com/urdf-loader@0.12.6/src/URDFLoader.js"
+  }
+}
+</script>
+<script type="module">
+  import { mountSO101 } from './assets/so101.js';
+  const canvas = document.getElementById('viz-canvas');
+  let viewer = null;
+  try {
+    viewer = await mountSO101(canvas, { mode: 'idle', camera: [0.55, 0.34, 0.7] });
+  } catch (e) { console.warn('[collect] 3D unavailable:', e); }
+
+  const toggle = document.getElementById('teleop-toggle');
+  const stop = document.getElementById('teleop-stop');
+  const status = document.getElementById('teleop-status');
+  const viz = document.getElementById('viz');
+  const state = document.getElementById('viz-state');
+  const set = (on) => {
+    if (viewer) viewer.setMode(on ? 'teleop' : 'idle');
+    viz.classList.toggle('teleop-live', on);
+    state.textContent = on ? '● teleop live — leader → follower' : 'idle — start teleop to drive';
+    status.textContent = on ? 'joints streaming · 60 hz · nothing saved' : 'joints idle · leader detached';
+    toggle.hidden = on;
+    stop.hidden = !on;
+  };
+  toggle.addEventListener('click', () => set(true));
+  stop.addEventListener('click', () => set(false));
+</script>
+</body>
+</html>

@@ -16,8 +16,8 @@ import {
 } from "@/components/ui/alert-dialog";
 import { AppShell } from "@/components/shell/AppShell";
 import { Card } from "@/components/ui/card";
-import { Eyebrow } from "@/components/ui/eyebrow";
 import { StatusPill, type SessionPhase } from "@/components/ui/status-pill";
+import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import {
   InferenceStatus,
@@ -73,7 +73,7 @@ const Inference: React.FC = () => {
               variant: next.exit_code === 0 ? "default" : "destructive",
             });
           }
-          navigate("/");
+          navigate("/training");
           return;
         }
         // Safety net: only fire after the rollout *main loop* has actually
@@ -163,36 +163,39 @@ const Inference: React.FC = () => {
     <AppShell
       fullBleed
       logoLink={false}
-      back={{ to: "/" }}
       status={<StatusPill phase={pillPhase} label={pillLabel} />}
-      actions={
-        <Button
-          onClick={() => setShowStopConfirm(true)}
-          disabled={!status.inference_active}
-          variant="destructive"
-          size="sm"
-        >
-          <Square className="w-4 h-4 mr-2" />
-          Stop
-        </Button>
-      }
     >
-      <div className="grid-bg flex min-h-[calc(100vh-52px)] items-center justify-center px-4 py-8">
-        <Card variant="notch" className="w-full max-w-md p-8">
-          <Eyebrow>[ inference run ]</Eyebrow>
+      <div className="grid-bg min-h-[calc(100vh-52px)] px-4 pb-28 pt-6">
+        <div className="mx-auto w-full max-w-[1280px]">
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setShowStopConfirm(true)}
+            disabled={!status.inference_active}
+            className="-ml-3 mb-4 text-muted-foreground hover:text-foreground"
+          >
+            ← Train &amp; Deploy (stop run)
+          </Button>
 
-          <div className="mt-8 text-center">
-            <div className="font-mono text-6xl font-bold leading-none text-foreground">
-              {formatTime(timerSeconds)}
+          <div className="mb-6 flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
+            <div className="space-y-2">
+              <h1 className="font-display text-3xl font-bold leading-tight tracking-normal text-foreground md:text-5xl">
+                Running — {status.policy_ref ?? "unknown policy"}
+              </h1>
+              <p className="font-mono text-sm text-muted-foreground">
+                {status.policy_ref ?? "checkpoint unknown"} · robot active · elapsed{" "}
+                {formatTime(timerSeconds)}
+              </p>
             </div>
-            <div className="mt-2 font-mono text-sm text-muted-foreground">
-              {isSettingUp
-                ? "Loading policy & connecting hardware…"
-                : `/ ${formatTime(duration)}`}
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge variant="secondary">
+                {isSettingUp ? "setup" : isRunning ? "rollout" : "finished"}
+              </Badge>
+              <Badge variant="outline">{formatTime(duration)}</Badge>
             </div>
           </div>
 
-          <div className="mt-6 h-1 w-full bg-secondary">
+          <div className="mb-6 h-1 w-full bg-secondary" aria-label={`progress ${Math.round(pct)}%`}>
             <div
               className={cn(
                 "h-1 transition-all duration-500",
@@ -202,10 +205,80 @@ const Inference: React.FC = () => {
             />
           </div>
 
-          <div className="mt-6 break-all font-mono text-xs text-muted-foreground">
-            policy: {status.policy_ref ?? "(unknown)"}
+          <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
+            <Card className="p-6">
+              <div className="mb-8 flex items-center justify-between gap-4">
+                <div>
+                  <h2 className="font-display text-xl font-semibold text-foreground">
+                    Run
+                  </h2>
+                  <p className="font-mono text-xs text-muted-foreground">
+                    {isSettingUp
+                      ? "loading policy and connecting hardware"
+                      : "policy rollout in progress"}
+                  </p>
+                </div>
+                <StatusPill phase={pillPhase} label={pillLabel} />
+              </div>
+              <div className="font-mono text-6xl font-medium leading-none tracking-normal text-foreground">
+                {formatTime(timerSeconds)}
+              </div>
+              <div className="mt-3 font-mono text-sm text-muted-foreground">
+                {isSettingUp ? "setup elapsed" : `/ ${formatTime(duration)}`}
+              </div>
+              <div className="mt-8 grid gap-3 font-mono text-xs text-muted-foreground sm:grid-cols-3">
+                <p>progress {Math.round(pct)}%</p>
+                <p>{isSettingUp ? "rollout pending" : "rollout active"}</p>
+                <p>{status.log_path ? "log attached" : "log pending"}</p>
+              </div>
+            </Card>
+
+            <Card className="p-6">
+              <div className="mb-6">
+                <h2 className="font-display text-xl font-semibold text-foreground">
+                  Session
+                </h2>
+              </div>
+              <div className="grid gap-4 text-sm">
+                <div>
+                  <p className="font-mono text-[10px] uppercase tracking-[0.1em] text-muted-foreground">
+                    Model
+                  </p>
+                  <p className="break-all font-medium text-foreground">
+                    {status.policy_ref ?? "(unknown)"}
+                  </p>
+                </div>
+                <div>
+                  <p className="font-mono text-[10px] uppercase tracking-[0.1em] text-muted-foreground">
+                    Checkpoint
+                  </p>
+                  <p className="break-all font-medium text-foreground">
+                    {status.policy_ref ?? "(unknown)"}
+                  </p>
+                </div>
+                <div>
+                  <p className="font-mono text-[10px] uppercase tracking-[0.1em] text-muted-foreground">
+                    Robot
+                  </p>
+                  <p className="font-medium text-foreground">active robot</p>
+                </div>
+              </div>
+            </Card>
           </div>
-        </Card>
+        </div>
+      </div>
+
+      <div className="fixed bottom-0 left-0 right-0 z-30 border-t border-border bg-background/90 px-4 py-4 backdrop-blur-[8px]">
+        <div className="mx-auto flex max-w-[1280px] justify-end">
+          <Button
+            onClick={() => setShowStopConfirm(true)}
+            disabled={!status.inference_active}
+            variant="destructive"
+          >
+            <Square />
+            Stop run
+          </Button>
+        </div>
       </div>
 
       <AlertDialog open={showStopConfirm} onOpenChange={setShowStopConfirm}>

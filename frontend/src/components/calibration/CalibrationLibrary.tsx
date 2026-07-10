@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { Download, Pencil, Trash2 } from "lucide-react";
+import { Pencil, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -19,7 +19,6 @@ import {
 } from "@/components/ui/dialog";
 import { useApi } from "@/contexts/ApiContext";
 import { useToast } from "@/hooks/use-toast";
-import ImportCalibrationButton from "./ImportCalibrationButton";
 
 interface ConfigEntry {
   name: string;
@@ -61,10 +60,10 @@ interface CalibrationLibraryProps {
 
 /**
  * Per-side calibration "library" as a dropdown: pick a saved config, then
- * Download, Rename, or Delete it, or Import a new one. Delete acts on the
- * selected config (not per dropdown entry, which would clash with
- * swap-on-select); deleting an in-use config unassigns it server-side and the
- * affected arm returns to "needs calibration".
+ * Rename or Delete it. Delete acts on the selected config (not per dropdown
+ * entry, which would clash with swap-on-select); deleting an in-use config
+ * unassigns it server-side and the affected arm returns to "needs
+ * calibration".
  */
 const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
   device,
@@ -131,36 +130,6 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
       return configs[0]?.name ?? null;
     });
   }, [configs, assignedConfig]);
-
-  const download = useCallback(
-    async (name: string) => {
-      try {
-        const res = await fetchWithHeaders(
-          `${baseUrl}/calibration-configs/${device}/${encodeURIComponent(name)}/download`,
-        );
-        if (!res.ok) {
-          toast({ title: "Download failed", variant: "destructive" });
-          return;
-        }
-        const blob = await res.blob();
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = `${name}.json`;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        URL.revokeObjectURL(url);
-      } catch (e) {
-        toast({
-          title: "Download failed",
-          description: String(e),
-          variant: "destructive",
-        });
-      }
-    },
-    [baseUrl, fetchWithHeaders, device, toast],
-  );
 
   const confirmDelete = useCallback(async () => {
     const name = pendingDelete;
@@ -389,17 +358,6 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
           variant="ghost"
           className="h-8 w-8 text-muted-foreground hover:text-foreground"
           disabled={!selected}
-          onClick={() => selected && download(selected)}
-          aria-label="Download selected config"
-          title="Download"
-        >
-          <Download className="w-4 h-4" />
-        </Button>
-        <Button
-          size="icon"
-          variant="ghost"
-          className="h-8 w-8 text-muted-foreground hover:text-foreground"
-          disabled={!selected}
           onClick={openRename}
           aria-label="Rename selected config"
           title="Rename"
@@ -417,13 +375,6 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
         >
           <Trash2 className="w-4 h-4" />
         </Button>
-        <ImportCalibrationButton
-          device={device}
-          onImported={async (name) => {
-            await refresh();
-            setSelected(name);
-          }}
-        />
       </div>
 
       {canAssign && (

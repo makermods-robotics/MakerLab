@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Market — MakerLab</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@600;700&family=Space+Grotesk:wght@400;500&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/app.css">
+<style>
+  .market-search { width: min(300px, 100%); }
+  .market-tabs {
+    display: inline-grid;
+    grid-template-columns: repeat(4, auto);
+    border: 1px solid var(--border);
+    background: var(--card);
+    margin-bottom: 16px;
+  }
+  .market-tab {
+    padding: 9px 18px;
+    text-align: center;
+    background: none;
+    border: 0;
+    font-family: "Chakra Petch", sans-serif;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .1em;
+    color: var(--muted-fg);
+  }
+  .market-tab:hover { color: var(--foreground); background: var(--accent); }
+  .market-tab.active { color: var(--foreground); box-shadow: inset 0 -2px 0 var(--brand); }
+  .market-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+  .market-card { padding: 0; overflow: hidden; }
+  .market-card[hidden] { display: none; }
+  .market-card .media { height: 130px; min-height: 130px; border-width: 0 0 1px; }
+  .market-card-body { padding: 14px 16px 16px; display: grid; gap: 10px; }
+  .market-card h2 { margin-bottom: 0; }
+  .market-tags { display: flex; flex-wrap: wrap; gap: 6px; }
+  .market-meta { color: var(--muted-fg); font-size: 12.5px; }
+  .market-foot { display: flex; justify-content: flex-end; margin-top: 2px; }
+  .market-note { color: var(--muted-fg); font-size: 12px; margin-top: 18px; }
+  @media (max-width: 800px) {
+    .page-head { align-items: stretch; flex-direction: column; }
+    .market-search { width: 100%; }
+    .market-tabs { display: grid; grid-template-columns: repeat(2, 1fr); width: 100%; }
+    .market-grid { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body data-stage="market">
+
+<main class="page">
+  <div class="page-head">
+    <div>
+      <h1>Market</h1>
+      <p class="gloss">skills and data for your rigs — a skill bundles a dataset with its trained policies</p>
+    </div>
+    <input class="field-input market-search" placeholder="Search skills, datasets, policies" aria-label="Search skills, datasets, policies">
+  </div>
+
+  <div class="market-tabs" aria-label="Market filters">
+    <button class="market-tab active" data-filter="all">All</button>
+    <button class="market-tab" data-filter="skill">Skills</button>
+    <button class="market-tab" data-filter="dataset">Datasets</button>
+    <button class="market-tab" data-filter="policy">Policies</button>
+  </div>
+
+  <section class="market-grid" aria-label="Market listings">
+    <article class="card market-card" data-kind="skill">
+      <div class="media" data-label="task preview"></div>
+      <div class="market-card-body">
+        <h2>fold-sock</h2>
+        <div class="market-tags"><span class="tag brand">120 ep</span><span class="tag">ACT</span></div>
+        <p class="market-meta">SO-101 · single · by Ada · 1.2k installs</p>
+        <div class="market-foot"><button class="btn-brand" data-install>Get</button></div>
+      </div>
+    </article>
+
+    <article class="card market-card" data-kind="skill">
+      <div class="media" data-label="task preview"></div>
+      <div class="market-card-body">
+        <h2>pick-cube</h2>
+        <div class="market-tags"><span class="tag brand">240 ep</span><span class="tag">SMOLVLA</span></div>
+        <p class="market-meta">SO-101 · single · by Noor · 3.8k installs</p>
+        <div class="market-foot"><button class="btn ghost" data-install>Installed ✓</button></div>
+      </div>
+    </article>
+
+    <article class="card market-card" data-kind="dataset">
+      <div class="media" data-label="task preview"></div>
+      <div class="market-card-body">
+        <h2>stack-blocks</h2>
+        <div class="market-tags"><span class="tag">dataset</span></div>
+        <p class="market-meta">SO-101 · single · by Min · 940 installs</p>
+        <div class="market-foot"><button class="btn-brand" data-install>Get</button></div>
+      </div>
+    </article>
+
+    <article class="card market-card" data-kind="policy">
+      <div class="media" data-label="task preview"></div>
+      <div class="market-card-body">
+        <h2>open-drawer</h2>
+        <div class="market-tags"><span class="tag">policy</span></div>
+        <p class="market-meta">SO-101 · single · by Kepler · 2.4k installs</p>
+        <div class="market-foot"><button class="btn-brand" data-install>Get</button></div>
+      </div>
+    </article>
+
+    <article class="card market-card" data-kind="dataset">
+      <div class="media" data-label="task preview"></div>
+      <div class="market-card-body">
+        <h2>pour-cup</h2>
+        <div class="market-tags"><span class="tag">dataset</span></div>
+        <p class="market-meta">SO-101 · single · by Rhea · 680 installs</p>
+        <div class="market-foot"><button class="btn-brand" data-install>Get</button></div>
+      </div>
+    </article>
+
+    <article class="card market-card" data-kind="policy">
+      <div class="media" data-label="task preview"></div>
+      <div class="market-card-body">
+        <h2>sort-bins</h2>
+        <div class="market-tags"><span class="tag">policy</span></div>
+        <p class="market-meta">SO-101 · single · by Tessa · 1.7k installs</p>
+        <div class="market-foot"><button class="btn-brand" data-install>Get</button></div>
+      </div>
+    </article>
+  </section>
+
+  <p class="market-note">Installed datasets appear in Collect. Installed policies appear in Train &amp; Deploy.</p>
+</main>
+
+<script src="assets/app.js"></script>
+<script>
+  const tabs = document.querySelectorAll('[data-filter]');
+  const cards = document.querySelectorAll('[data-kind]');
+
+  tabs.forEach((tab) => {
+    tab.addEventListener('click', () => {
+      const filter = tab.dataset.filter;
+      tabs.forEach((item) => item.classList.toggle('active', item === tab));
+      cards.forEach((card) => {
+        card.hidden = filter !== 'all' && card.dataset.kind !== filter;
+      });
+    });
+  });
+
+  document.querySelectorAll('[data-install]').forEach((button) => {
+    button.addEventListener('click', () => {
+      button.className = 'btn ghost';
+      button.textContent = 'Installed ✓';
+    });
+  });
+</script>
+</body>
+</html>

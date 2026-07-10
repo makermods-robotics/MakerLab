@@ -19,7 +19,6 @@ import {
 import { useToast } from "@/hooks/use-toast";
 import { useAvailableCameras } from "@/hooks/useAvailableCameras";
 import { useCameraStream } from "@/hooks/useCameraStream";
-import BackendCameraStream from "@/components/BackendCameraStream";
 
 // Sentinels distinguish "leave unset" (auto-detect / platform default) from an
 // explicit choice. Radix Select disallows an empty-string value, so we map these
@@ -64,11 +63,17 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
 }) => {
   const { toast } = useToast();
 
+  // Recording start pauses the previews via releaseStreamsRef; gate camera
+  // enumeration on the same flag so the getUserMedia/devicechange probing fully
+  // stops before cv2 opens the devices. Otherwise the enumeration probe can
+  // keep index 0 open and starve the recorder (OpenCVCamera(0) actual_fps=5.0).
+  const [streamsPaused, setStreamsPaused] = useState(false);
+
   const {
     cameras: availableCameras,
     isLoading: isLoadingCameras,
     refresh: refreshCameras,
-  } = useAvailableCameras();
+  } = useAvailableCameras({ enabled: !streamsPaused });
   const [selectedCameraIndex, setSelectedCameraIndex] = useState<string>("");
   const [cameraName, setCameraName] = useState("");
 
@@ -184,9 +189,10 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
   };
 
   // When the recording session is starting, the parent calls
-  // releaseStreamsRef.current() to make every CameraPreview drop its browser
-  // stream so cv2.VideoCapture can grab the camera exclusively.
-  const [streamsPaused, setStreamsPaused] = useState(false);
+  // releaseStreamsRef.current() to pause every preview so their browser tracks
+  // are released and cv2.VideoCapture can grab the cameras exclusively.
+  // Flipping streamsPaused also disables useAvailableCameras above (which still
+  // probes via getUserMedia/enumerateDevices) — see its comment.
   const releaseAllCameraStreams = useCallback(() => {
     setStreamsPaused(true);
   }, []);
@@ -272,9 +278,13 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
             <div className="rounded-lg border border-border bg-card overflow-hidden">
               <CameraStreamBox
                 deviceId={selectedCamera.deviceId}
-                cameraIndex={selectedCamera.index}
                 paused={streamsPaused}
               />
+              <div className="border-t border-border px-2 py-1.5">
+                <span className="text-[11px] text-muted-foreground truncate">
+                  Browser preview — recorder index {selectedCamera.index}
+                </span>
+              </div>
             </div>
 
             <div className="flex flex-col justify-center gap-4">
@@ -331,31 +341,21 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
 };
 
 interface CameraStreamBoxProps {
-  deviceId: string;
   paused: boolean;
-  /** cv2 index on the server — MJPEG fallback when there's no browser
-   * deviceId match (headless deployment: cameras plugged into the server). */
-  cameraIndex?: number;
+  deviceId?: string;
 }
 
-/** Live preview for a camera. Used both for the pre-add preview (as soon as
- * a camera is picked in the dropdown) and for each configured camera's card.
- * A camera with a browser deviceId match streams via getUserMedia (the hook
- * stops the stream on deviceId change and on unmount); one without a match
- * but with a known cv2 index falls back to the backend MJPEG stream. Pausing
- * (recording start / modal close) unmounts the MJPEG img, whose cleanup
- * clears the src so the HTTP connection drops and the server releases the
- * camera — mirroring the getUserMedia release semantics. */
+/** Browser preview used both before adding a camera and in configured cards.
+ * Pausing releases the getUserMedia track so cv2 can claim the camera. */
 const CameraStreamBox: React.FC<CameraStreamBoxProps> = ({
-  deviceId,
   paused,
-  cameraIndex,
+  deviceId,
 }) => {
-  const { videoRef, hasError: streamError } = useCameraStream(deviceId, paused);
-
-  const showVideo = !paused && deviceId && !streamError;
-  // BackendCameraStream owns its own failure/retry UI — no error latch here.
-  const showMjpeg = !paused && !deviceId && cameraIndex !== undefined;
+  const { videoRef, hasError: streamError } = useCameraStream(
+    deviceId ?? "",
+    paused
+  );
+  const showVideo = !paused && Boolean(deviceId) && !streamError;
   return (
     <div className="aspect-[4/3] bg-secondary relative">
       {showVideo ? (
@@ -366,11 +366,6 @@ const CameraStreamBox: React.FC<CameraStreamBoxProps> = ({
           playsInline
           className="w-full h-full object-cover"
         />
-      ) : showMjpeg ? (
-        <BackendCameraStream
-          cameraIndex={cameraIndex}
-          className="w-full h-full object-cover"
-        />
       ) : (
         <div className="w-full h-full flex flex-col items-center justify-center">
           <VideoOff className="w-8 h-8 text-muted-foreground mb-2" />
@@ -378,8 +373,8 @@ const CameraStreamBox: React.FC<CameraStreamBoxProps> = ({
             {paused
               ? "Preview paused"
               : deviceId
-              ? "Preview failed"
-              : "No browser match"}
+                ? "Preview failed"
+                : "No browser match — rescan or reconnect the camera"}
           </span>
         </div>
       )}
@@ -404,7 +399,6 @@ const CameraPreview: React.FC<CameraPreviewProps> = ({
     <div className="bg-card rounded-lg border border-border overflow-hidden">
       <CameraStreamBox
         deviceId={camera.device_id}
-        cameraIndex={camera.camera_index}
         paused={paused}
       />
 

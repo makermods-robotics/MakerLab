@@ -27,6 +27,24 @@ def test_recording_request_rejects_missing_required_fields() -> None:
         RecordingRequest()
 
 
+def test_recording_request_max_torque_limit_default_and_override() -> None:
+    from makerlab.record import RecordingRequest
+
+    base = dict(
+        leader_port="/dev/l",
+        follower_port="/dev/f",
+        leader_config="L",
+        follower_config="F",
+        dataset_repo_id="user/data",
+        single_task="task",
+    )
+    # Defaults to the auto-cal-matching torque cap, not the old full-power 100.
+    assert RecordingRequest(**base).max_torque_limit == 380
+    # An explicit raw value is carried through verbatim (clamping happens at the
+    # register write, not on the schema).
+    assert RecordingRequest(**base, max_torque_limit=650).max_torque_limit == 650
+
+
 def test_recording_status_handler_exposes_state_fields() -> None:
     from makerlab.record import handle_recording_status
 
@@ -484,7 +502,7 @@ def _run_record_session(
 
     monkeypatch.setattr(record, "_return_followers_to_rest", _spy_return)
     monkeypatch.setattr(record, "force_disable_torque", lambda device, label="": [])
-    monkeypatch.setattr(record, "apply_motor_power", lambda *a, **k: [])
+    monkeypatch.setattr(record, "apply_torque_limit", lambda *a, **k: [])
     monkeypatch.setattr(record, "clear_goal_velocity", lambda *a, **k: [])
     monkeypatch.setattr(record, "verify_devices", lambda *a, **k: [])
 

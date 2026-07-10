@@ -196,11 +196,21 @@ def test_camera_preview_409_while_recording(client: TestClient, monkeypatch: pyt
     assert "Recording" in response.json()["detail"]
 
 
-def test_camera_preview_409_while_teleoperating(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_camera_preview_allowed_while_teleoperating(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Teleop drives the serial bus and opens no cv2 cameras, so a preview during
+    teleop does not contend — it must NOT 409. (The manager is patched to a
+    finite stream so the TestClient request completes.)"""
+
+    def finite_stream(index: int):
+        yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\nfake-jpeg\r\n"
+
     monkeypatch.setattr(teleoperate, "teleoperation_active", True)
+    monkeypatch.setattr(server_mod.camera_preview_manager, "open_stream", finite_stream)
     response = client.get("/camera-preview/0")
-    assert response.status_code == 409
-    assert "Teleoperation" in response.json()["detail"]
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("multipart/x-mixed-replace")
 
 
 def test_camera_preview_503_when_camera_cannot_open(

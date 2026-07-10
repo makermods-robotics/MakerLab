@@ -387,24 +387,29 @@ _BIMANUAL_CONFIG_FIELDS = (
 _ROBOT_STRING_FIELDS = _SINGLE_CONFIG_FIELDS + _BIMANUAL_CONFIG_FIELDS
 _ROBOT_LIST_FIELDS = ("cameras",)
 
-# Follower motor power, as a percentage of full torque (see makerlab/motor_power.py
-# for how it's written to the servos). Bounded below because under ~10% the arm
-# can't reliably hold its own weight; 100 = stock behavior.
-MOTOR_POWER_MIN = 10
-MOTOR_POWER_MAX = 100
-DEFAULT_MOTOR_POWER = 100
+# Follower session torque cap, written RAW to the Feetech RAM Torque_Limit
+# register (see makerlab/motor_power.py) — 0 = no torque, 1000 = full torque.
+# Default 380 matches auto-calibration's DEFAULT_TORQUE_LIMIT: a gentler cap than
+# stock so collisions and pose snaps are softer out of the box.
+MAX_TORQUE_LIMIT_MIN = 0
+MAX_TORQUE_LIMIT_MAX = 1000
+DEFAULT_MAX_TORQUE_LIMIT = 380
+
+# Legacy records stored motor_power as a percentage (10-100); the RAM register is
+# scaled in 0.1% units, so the equivalent raw value is percent × 10.
+_LEGACY_MOTOR_POWER_TO_RAW = 10
 
 
-def clamp_motor_power(value: object) -> int:
-    """Coerce a motor_power value to a safe integer percent in [10, 100].
+def clamp_max_torque_limit(value: object) -> int:
+    """Coerce a max_torque_limit value to a safe integer in [0, 1000].
 
-    Anything non-numeric (including bool, a subclass of int) falls back to full
-    power — the register's own power-on default — rather than raising, so a
-    corrupted record can never block a session start.
+    Anything non-numeric (including bool, a subclass of int) falls back to the
+    DEFAULT rather than raising, so a corrupted record can never block a session
+    start.
     """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return DEFAULT_MOTOR_POWER
-    return max(MOTOR_POWER_MIN, min(MOTOR_POWER_MAX, int(value)))
+        return DEFAULT_MAX_TORQUE_LIMIT
+    return max(MAX_TORQUE_LIMIT_MIN, min(MAX_TORQUE_LIMIT_MAX, int(value)))
 
 
 # Config-name fields whose stored value may carry a ".json" extension to strip.
@@ -427,7 +432,7 @@ def is_valid_robot_name(name: str) -> bool:
 
 
 def _empty_record(name: str) -> dict:
-    record: dict = {"name": name, "mode": _DEFAULT_MODE, "motor_power": DEFAULT_MOTOR_POWER}
+    record: dict = {"name": name, "mode": _DEFAULT_MODE, "max_torque_limit": DEFAULT_MAX_TORQUE_LIMIT}
     for field in _ROBOT_STRING_FIELDS:
         record[field] = ""
     for field in _ROBOT_LIST_FIELDS:
@@ -460,10 +465,17 @@ def get_robot_record(name: str) -> dict | None:
     # Guard against an unknown mode on disk.
     if record.get("mode") not in _VALID_MODES:
         record["mode"] = _DEFAULT_MODE
-    # Older records have no motor_power (→ full power via _empty_record); an
-    # out-of-range or corrupted value on disk is clamped so every consumer
-    # sees a safe 10-100 integer.
-    record["motor_power"] = clamp_motor_power(record.get("motor_power"))
+    # Legacy records carry motor_power (a 10-100 percentage) but no
+    # max_torque_limit. Migrate on read — max_torque_limit = clamp(percent × 10)
+    # — so the new field is seeded from the old cap. motor_power is not a field of
+    # _empty_record, so it never survives into the returned/API record.
+    if "max_torque_limit" not in data:
+        legacy = data.get("motor_power")
+        if isinstance(legacy, (int, float)) and not isinstance(legacy, bool):
+            record["max_torque_limit"] = legacy * _LEGACY_MOTOR_POWER_TO_RAW
+    # An out-of-range or corrupted value on disk (or a migrated one) is clamped so
+    # every consumer sees a safe [0, 1000] integer.
+    record["max_torque_limit"] = clamp_max_torque_limit(record.get("max_torque_limit"))
     return record
 
 
@@ -509,11 +521,11 @@ def save_robot_record(name: str, data: dict, allow_create: bool = True) -> bool:
     for field in _ROBOT_LIST_FIELDS:
         if field in data and isinstance(data[field], list):
             record[field] = data[field]
-    # Same known-typed-fields-only merge as above: a numeric motor_power is
+    # Same known-typed-fields-only merge as above: a numeric max_torque_limit is
     # clamped to the safe range, anything else is ignored (keeps existing).
-    value = data.get("motor_power")
+    value = data.get("max_torque_limit")
     if isinstance(value, (int, float)) and not isinstance(value, bool):
-        record["motor_power"] = clamp_motor_power(value)
+        record["max_torque_limit"] = clamp_max_torque_limit(value)
     if data.get("mode") in _VALID_MODES:
         record["mode"] = data["mode"]
     record.setdefault("mode", _DEFAULT_MODE)

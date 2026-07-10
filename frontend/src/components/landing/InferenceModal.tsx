@@ -32,33 +32,18 @@ import {
 import { startInference } from "@/lib/inferenceApi";
 import CheckpointDropdown from "@/components/jobs/CheckpointDropdown";
 import { useAvailableCameras } from "@/hooks/useAvailableCameras";
-import { useCameraStream } from "@/hooks/useCameraStream";
 import BackendCameraStream from "@/components/BackendCameraStream";
 
 const CameraThumbnail: React.FC<{
-  deviceId: string;
-  /** cv2 index on the server — MJPEG fallback when there's no deviceId match
-   * (headless deployment: the cameras are plugged into the server). */
+  /** cv2 index on the server — the live backend MJPEG feed at this index, i.e.
+   * exactly what the rollout will open, independent of any browser deviceId
+   * match. Undefined (nothing bound) renders the "no preview" state. */
   cameraIndex?: number;
   paused: boolean;
-}> = ({ deviceId, cameraIndex, paused }) => {
-  const { videoRef, hasError } = useCameraStream(deviceId, paused);
-
-  const showVideo = !paused && deviceId && !hasError;
+}> = ({ cameraIndex, paused }) => {
   // BackendCameraStream owns its own failure/retry UI — no error latch here.
-  const showMjpeg = !paused && !deviceId && cameraIndex !== undefined;
+  const showMjpeg = !paused && cameraIndex !== undefined;
 
-  if (showVideo) {
-    return (
-      <video
-        ref={videoRef}
-        autoPlay
-        muted
-        playsInline
-        className="w-32 h-24 object-cover rounded border border-border bg-secondary"
-      />
-    );
-  }
   if (showMjpeg) {
     return (
       <BackendCameraStream
@@ -375,8 +360,8 @@ const InferenceModal: React.FC<Props> = ({
         task,
         cameras: cameraDict,
         duration_s: durationS,
-        // Follower torque limit for the session (10-100% of full power).
-        motor_power: robot.motor_power ?? 100,
+        // Raw follower torque limit for the session (0-1000, default 380).
+        max_torque_limit: robot.max_torque_limit ?? 380,
         // Bimanual: forward the mode + right-arm follower so the server builds a
         // `bi_so_follower` command staging both follower calibrations. In single
         // mode the right_* fields are inert (mode defaults to "single"
@@ -571,10 +556,6 @@ const InferenceModal: React.FC<Props> = ({
                 {cameraMap.map((m) => {
                   const dims = policyConfig.image_features[m.feature];
                   const value = cameraBindings[m.requestKey];
-                  const bound =
-                    value != null
-                      ? availableCameras.find((c) => c.index === value)
-                      : undefined;
                   return (
                     <div key={m.requestKey} className="flex items-center gap-3">
                       <div className="flex-1">
@@ -608,7 +589,6 @@ const InferenceModal: React.FC<Props> = ({
                         </SelectContent>
                       </Select>
                       <CameraThumbnail
-                        deviceId={bound?.deviceId ?? ""}
                         cameraIndex={value ?? undefined}
                         paused={submitting}
                       />

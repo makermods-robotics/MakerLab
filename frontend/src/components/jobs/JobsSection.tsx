@@ -6,7 +6,6 @@ import { useToast } from "@/hooks/use-toast";
 import { useJobsChangedSignal } from "@/hooks/useJobsChangedSignal";
 import {
   HubJob,
-  HubModel,
   JobProgressSnapshot,
   JobRecord,
   deleteJob,
@@ -24,16 +23,16 @@ import { listJobCheckpoints } from "@/lib/checkpointsApi";
 import { useNavigate } from "react-router-dom";
 import JobCard from "./JobCard";
 import HubJobCard from "./HubJobCard";
-import HubModelCard from "./HubModelCard";
 import InferenceModal from "@/components/landing/InferenceModal";
-import ImportModelModal from "./ImportModelModal";
+import { ModelLibrary } from "@/components/train/ModelLibrary";
+import { useModels } from "@/hooks/useModels";
 import { useRobots } from "@/hooks/useRobots";
 import {
   Collapsible,
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
-import { ChevronRight, Download, RefreshCw, Search } from "lucide-react";
+import { ChevronRight, RefreshCw } from "lucide-react";
 
 const LIMIT = 10;
 
@@ -52,16 +51,20 @@ const JobsSection: React.FC = () => {
     {},
   );
   const [hubJobs, setHubJobs] = useState<HubJob[]>([]);
-  const [hubModels, setHubModels] = useState<HubModel[]>([]);
   const [hubAuthenticated, setHubAuthenticated] = useState(false);
   const [hubJobsPermission, setHubJobsPermission] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [hubError, setHubError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
 
-  const { selectedRecord } = useRobots();
+  const { selectedRecord, selectedName } = useRobots();
+  const {
+    models,
+    authenticated: modelsAuthenticated,
+    loading: modelsLoading,
+    refresh: refreshModels,
+  } = useModels();
   const [inferenceModalOpen, setInferenceModalOpen] = useState(false);
-  const [importModalOpen, setImportModalOpen] = useState(false);
   const [inferenceJob, setInferenceJob] = useState<JobRecord | null>(null);
   const [inferenceStep, setInferenceStep] = useState<number | null>(null);
 
@@ -81,7 +84,6 @@ const JobsSection: React.FC = () => {
     }
     if (hubRes.status === "fulfilled") {
       setHubJobs(hubRes.value.jobs);
-      setHubModels(hubRes.value.models);
       setHubAuthenticated(hubRes.value.authenticated);
       setHubJobsPermission(hubRes.value.jobs_permission ?? true);
       setHubError(null);
@@ -318,10 +320,6 @@ const JobsSection: React.FC = () => {
       hubJobs.filter((h) => matchesQuery(h.docker_image ?? h.space_id ?? h.id)),
     [hubJobs, matchesQuery],
   );
-  const filteredHubModels = useMemo(
-    () => hubModels.filter((m) => matchesQuery(m.repo_id)),
-    [hubModels, matchesQuery],
-  );
 
   const localJobs = useMemo(
     () => filteredJobs.filter((j) => j.runner === "local"),
@@ -329,10 +327,6 @@ const JobsSection: React.FC = () => {
   );
   const trackedCloudJobs = useMemo(
     () => filteredJobs.filter((j) => j.runner === "hf_cloud"),
-    [filteredJobs],
-  );
-  const importedJobs = useMemo(
-    () => filteredJobs.filter((j) => j.runner === "imported"),
     [filteredJobs],
   );
   // Hub jobs already mirrored by a local JobRecord get their richer card via
@@ -349,27 +343,6 @@ const JobsSection: React.FC = () => {
   const untrackedHubJobs = useMemo(
     () => filteredHubJobs.filter((h) => !trackedHfJobIds.has(h.id)),
     [filteredHubJobs, trackedHfJobIds],
-  );
-  // Hide model repos already claimed by a tracked job — a cloud run (shown via
-  // JobCard) OR an imported model (also a JobCard, and the target a lazy
-  // auto-import lands on). Repo ids are compared case-insensitively to match
-  // the backend's find_imported dedup. The remainder are past trainings the
-  // registry no longer remembers, rendered as untracked Hub cards.
-  const trackedRepoIds = useMemo(
-    () =>
-      new Set(
-        [...trackedCloudJobs, ...importedJobs]
-          .map((j) => j.hf_repo_id?.toLowerCase())
-          .filter((id): id is string => !!id),
-      ),
-    [trackedCloudJobs, importedJobs],
-  );
-  const untrackedHubModels = useMemo(
-    () =>
-      filteredHubModels.filter(
-        (m) => !trackedRepoIds.has(m.repo_id.toLowerCase()),
-      ),
-    [filteredHubModels, trackedRepoIds],
   );
 
   // Resume lineage: job B stores config.resume_from_job_id = A. Hide A (the
@@ -444,21 +417,20 @@ const JobsSection: React.FC = () => {
     untrackedHubInactive.length;
 
   return (
-    <section className="grid grid-cols-1 lg:grid-cols-2 gap-x-8 gap-y-10 items-start">
-      {/* Jobs column: local runs, cloud runs, and inactive/untracked leftovers.
-          The search box lives here (it primarily filters job text) but keeps
-          filtering the models column too, so behavior is unchanged. */}
-      <div className="space-y-6">
+    <section className="grid grid-cols-1 gap-4 items-start">
+      {/* Jobs: local runs, cloud runs, and inactive/untracked leftovers. */}
+      <div className="grid content-start gap-2.5">
         <div className="flex items-center justify-between gap-3">
-          <h2 className="text-lg font-semibold text-foreground">Jobs</h2>
+          <h2 className="text-[11px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
+            Jobs
+          </h2>
           <div className="flex items-center gap-2">
-            <div className="relative">
-              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground pointer-events-none" />
+            <div>
               <Input
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 placeholder="Search jobs"
-                className="h-8 w-48 sm:w-60 pl-8 text-sm"
+                className="h-9 w-48 sm:w-60 text-sm"
                 aria-label="Search jobs"
               />
             </div>
@@ -481,11 +453,11 @@ const JobsSection: React.FC = () => {
         ) : null}
 
         <Collapsible defaultOpen>
-          <CollapsibleTrigger className="group flex items-center gap-1.5 text-sm font-semibold uppercase tracking-wide text-muted-foreground hover:text-foreground transition-colors">
-            <ChevronRight className="w-3.5 h-3.5 transition-transform group-data-[state=open]:rotate-90" />
+          <CollapsibleTrigger className="group flex items-center gap-2 py-0.5 text-[11px] font-semibold uppercase tracking-[0.12em] text-muted-foreground hover:text-foreground transition-colors">
+            <ChevronRight className="w-3 h-3 transition-transform group-data-[state=open]:rotate-90" />
             Local jobs ({localActive.length})
           </CollapsibleTrigger>
-          <CollapsibleContent className="pt-3">
+          <CollapsibleContent className="pt-2">
             {localActive.length === 0 ? (
               <p className="text-sm text-muted-foreground">
                 {query
@@ -493,7 +465,7 @@ const JobsSection: React.FC = () => {
                   : "No active local jobs. Start one from the Training page."}
               </p>
             ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-1 gap-4">
+              <div className="grid grid-cols-1 gap-2.5">
                 {localActive.map((job) => (
                   <JobCard
                     key={job.id}
@@ -503,6 +475,7 @@ const JobsSection: React.FC = () => {
                     onPlay={handlePlay}
                     onRenamed={refresh}
                     ancestors={ancestorsOf(job)}
+                    selectedRobotName={selectedName}
                   />
                 ))}
               </div>
@@ -510,14 +483,12 @@ const JobsSection: React.FC = () => {
           </CollapsibleContent>
         </Collapsible>
 
-        <div className="border-t border-border" />
-
         <Collapsible defaultOpen>
-          <CollapsibleTrigger className="group flex items-center gap-1.5 text-sm font-semibold uppercase tracking-wide text-muted-foreground hover:text-foreground transition-colors">
-            <ChevronRight className="w-3.5 h-3.5 transition-transform group-data-[state=open]:rotate-90" />
+          <CollapsibleTrigger className="group flex items-center gap-2 py-0.5 text-[11px] font-semibold uppercase tracking-[0.12em] text-muted-foreground hover:text-foreground transition-colors">
+            <ChevronRight className="w-3 h-3 transition-transform group-data-[state=open]:rotate-90" />
             Online jobs ({trackedCloudActive.length + untrackedHubActive.length})
           </CollapsibleTrigger>
-          <CollapsibleContent className="pt-3">
+          <CollapsibleContent className="pt-2">
             {hubError ? (
               <p className="text-sm text-destructive">
                 Couldn't load cloud jobs: {hubError}
@@ -546,7 +517,7 @@ const JobsSection: React.FC = () => {
                     </p>
                   )
                 ) : (
-                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-1 gap-4">
+                  <div className="grid grid-cols-1 gap-2.5">
                     {trackedCloudActive.map((job) => (
                       <JobCard
                         key={job.id}
@@ -555,6 +526,7 @@ const JobsSection: React.FC = () => {
                         onDelete={handleDelete}
                         onPlay={handlePlay}
                         onRenamed={refresh}
+                        selectedRobotName={selectedName}
                       />
                     ))}
                     {untrackedHubActive.map((job) => (
@@ -573,12 +545,12 @@ const JobsSection: React.FC = () => {
 
         {untrackedCount > 0 ? (
           <Collapsible>
-            <CollapsibleTrigger className="group flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground hover:text-foreground transition-colors">
-              <ChevronRight className="w-3.5 h-3.5 transition-transform group-data-[state=open]:rotate-90" />
+            <CollapsibleTrigger className="group flex items-center gap-2 py-0.5 text-[11px] font-semibold uppercase tracking-[0.12em] text-muted-foreground hover:text-foreground transition-colors">
+              <ChevronRight className="w-3 h-3 transition-transform group-data-[state=open]:rotate-90" />
               Untracked ({untrackedCount})
             </CollapsibleTrigger>
-            <CollapsibleContent className="pt-3">
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-1 gap-4">
+            <CollapsibleContent className="pt-2">
+              <div className="grid grid-cols-1 gap-2.5">
                 {localUntracked.map((job) => (
                   <JobCard
                     key={job.id}
@@ -588,6 +560,7 @@ const JobsSection: React.FC = () => {
                     onPlay={handlePlay}
                     onRenamed={refresh}
                     ancestors={ancestorsOf(job)}
+                    selectedRobotName={selectedName}
                   />
                 ))}
                 {trackedCloudUntracked.map((job) => (
@@ -598,6 +571,7 @@ const JobsSection: React.FC = () => {
                     onDelete={handleDelete}
                     onPlay={handlePlay}
                     onRenamed={refresh}
+                    selectedRobotName={selectedName}
                   />
                 ))}
                 {untrackedHubInactive.map((job) => (
@@ -613,57 +587,18 @@ const JobsSection: React.FC = () => {
         ) : null}
       </div>
 
-      {/* Models column: imported models plus uploaded hub repos no job tracks
-          (a model artifact, not a run — so it doesn't sit under Online jobs).
-          Owns the Import button; rendered even when empty so the entry point
-          is always visible. */}
-      <div className="space-y-6">
-        <div className="flex items-center justify-between gap-3">
-          <h2 className="text-lg font-semibold text-foreground">
-            Models
-            {importedJobs.length + untrackedHubModels.length > 0
-              ? ` (${importedJobs.length + untrackedHubModels.length})`
-              : ""}
-          </h2>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => setImportModalOpen(true)}
-            className="h-8"
-          >
-            <Download className="w-3.5 h-3.5 mr-1.5" />
-            Import model
-          </Button>
-        </div>
-        {importedJobs.length === 0 && untrackedHubModels.length === 0 ? (
-          <p className="text-sm text-muted-foreground">
-            {query
-              ? "No models match your search."
-              : "No models yet. Use Import model to add one from the Hub or a local folder."}
-          </p>
-        ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-1 gap-4">
-            {importedJobs.map((job) => (
-              <JobCard
-                key={job.id}
-                job={job}
-                onStop={handleStop}
-                onDelete={handleDelete}
-                onPlay={handlePlay}
-                onRenamed={refresh}
-              />
-            ))}
-            {untrackedHubModels.map((model) => (
-              <HubModelCard
-                key={model.repo_id}
-                model={model}
-                onDeleted={refresh}
-                onAction={handleLazyImportAction}
-              />
-            ))}
-          </div>
-        )}
-      </div>
+
+      {/* Every model repo the user owns on the Hub — the single browsing
+          surface for models; running/fine-tuning lazily imports the repo. */}
+      <ModelLibrary
+        models={models}
+        loading={modelsLoading}
+        authenticated={modelsAuthenticated}
+        robotLabel={selectedName ?? "your robot"}
+        onRun={(repoId) => handleLazyImportAction(repoId, "inference")}
+        onFinetune={(repoId) => handleLazyImportAction(repoId, "finetune")}
+        onRefresh={refreshModels}
+      />
 
       {inferenceJob ? (
         <InferenceModal
@@ -675,11 +610,6 @@ const JobsSection: React.FC = () => {
         />
       ) : null}
 
-      <ImportModelModal
-        open={importModalOpen}
-        onOpenChange={setImportModalOpen}
-        onImported={refresh}
-      />
     </section>
   );
 };

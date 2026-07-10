@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Inference Live — MakerLab</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@600;700&family=Space+Grotesk:wght@400;500&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/app.css">
+<style>
+  main.page { max-width: 1280px; padding-bottom: 96px; }
+  .back-link {
+    display: inline-block;
+    margin-bottom: 16px;
+    color: var(--muted-fg);
+    font-size: 12.5px;
+    text-decoration: none;
+  }
+  .back-link:hover { color: var(--foreground); }
+  .run-tags { display: flex; align-items: center; gap: 7px; }
+  .inference-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 260px;
+    gap: 16px;
+    align-items: start;
+  }
+  .camera-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .camera-grid .media {
+    min-height: 360px;
+    height: 44vh;
+    clip-path: var(--notch-md);
+  }
+  .stats-column { display: grid; gap: 16px; }
+  .elapsed {
+    font-size: 36px;
+    line-height: 1;
+    letter-spacing: .02em;
+    margin: 6px 0 14px;
+  }
+  .progress {
+    height: 4px;
+    background: var(--border);
+    margin-bottom: 14px;
+  }
+  .progress > div { width: 64%; height: 100%; background: var(--brand); }
+  .metric-lines, .session-lines { display: grid; gap: 7px; }
+  .metric-lines p {
+    font-size: 11px;
+    color: var(--muted-fg);
+  }
+  .session-lines p { color: var(--muted-fg); font-size: 12.5px; }
+  .session-lines b { color: var(--foreground); font-weight: 500; }
+  .control-bar {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 30;
+    display: flex;
+    justify-content: center;
+    gap: 10px;
+    padding: 14px 16px;
+    background: color-mix(in srgb, var(--background) 90%, transparent);
+    backdrop-filter: blur(8px);
+    border-top: 1px solid var(--border);
+  }
+  .control-bar .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    text-decoration: none;
+    min-width: 118px;
+  }
+  @media (max-width: 980px) {
+    .inference-grid { grid-template-columns: 1fr; }
+    .stats-column { grid-template-columns: 1fr 1fr; }
+  }
+  @media (max-width: 760px) {
+    .page-head { align-items: flex-start; flex-direction: column; }
+    .camera-grid, .stats-column { grid-template-columns: 1fr; }
+    .camera-grid .media { height: 34vh; min-height: 240px; }
+    .control-bar { justify-content: stretch; }
+    .control-bar .btn { flex: 1; min-width: 0; }
+  }
+</style>
+</head>
+<body data-stage="train" data-live>
+
+<main class="page">
+  <a class="back-link" href="train.html">← Train &amp; Deploy (stop run)</a>
+
+  <div class="page-head">
+    <div>
+      <h1>Running — pick-cube-act-v3</h1>
+      <p class="gloss mono">checkpoint step 8 000 · target bench-rig · started 01:42 ago</p>
+    </div>
+    <div class="run-tags">
+      <span class="tag brand">SO-101</span>
+      <span class="tag">bench-rig</span>
+    </div>
+  </div>
+
+  <div class="inference-grid">
+    <div class="camera-grid">
+      <div class="media" data-label="front camera"></div>
+      <div class="media" data-label="wrist camera"></div>
+    </div>
+
+    <aside class="stats-column">
+      <section class="card">
+        <h2>Run</h2>
+        <div class="elapsed mono">01:42</div>
+        <div class="progress" aria-label="progress 64%"><div></div></div>
+        <div class="metric-lines mono">
+          <p>progress 64%</p>
+          <p>action rate 28 hz</p>
+          <p>episodes 3 / 5</p>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Session</h2>
+        <div class="session-lines">
+          <p>model <b>pick-cube-act-v3</b></p>
+          <p>checkpoint <b>step 8 000</b></p>
+          <p>rig <b>bench-rig</b></p>
+        </div>
+      </section>
+    </aside>
+  </div>
+</main>
+
+<div class="control-bar" aria-label="Run controls">
+  <button class="btn ghost">Pause policy</button>
+  <a class="btn danger" href="train.html">Stop run</a>
+</div>
+
+<script src="assets/app.js"></script>
+</body>
+</html>

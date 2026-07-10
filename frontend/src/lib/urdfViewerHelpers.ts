@@ -51,7 +51,7 @@ export function createUrdfViewer(
 
   // Set initial viewer properties
   viewer.setAttribute("up", "Z");
-  setViewerColor(viewer, isDarkMode ? "#2c2b3a" : "#eff4ff");
+  setViewerColor(viewer, isDarkMode ? "#18181b" : "#f4f4f5");
   viewer.setAttribute("highlight-color", isDarkMode ? "#df6dd4" : "#b05ffe");
   viewer.setAttribute("auto-redraw", "true");
   // viewer.setAttribute("display-shadow", ""); // Enable shadows
@@ -207,7 +207,7 @@ export function updateViewerTheme(
   isDarkMode: boolean
 ): void {
   // Update the ambient color
-  setViewerColor(viewer, isDarkMode ? "#2c2b3a" : "#eff4ff");
+  setViewerColor(viewer, isDarkMode ? "#18181b" : "#f4f4f5");
   viewer.setAttribute("highlight-color", isDarkMode ? "#df6dd4" : "#b05ffe");
 
   // // Update the ambient light intensity based on theme

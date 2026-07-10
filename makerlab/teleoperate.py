@@ -28,7 +28,7 @@ from lerobot.teleoperators.so_leader import SO101Leader, SO101LeaderConfig
 
 from .arm_identity import verify_devices
 from .camera_preview import camera_preview_manager
-from .motor_power import apply_motor_power, clear_goal_velocity, torque_limit_from_percent
+from .motor_power import apply_torque_limit, clear_goal_velocity
 from .rest_pose import capture_rest_pose, return_to_rest_pose
 from .utils.config import (
     bimanual_base_id,
@@ -159,7 +159,7 @@ class PowerTelemetry:
             self._sum_ma[key] = self._sum_ma.get(key, 0.0) + ma
             self._n[key] = self._n.get(key, 0) + 1
 
-    def summary(self, motor_power_percent: int) -> str | None:
+    def summary(self, max_torque_limit: int) -> str | None:
         """One INFO-ready line of per-motor peaks/means, or None if no samples."""
         if not self._n:
             return None
@@ -169,7 +169,7 @@ class PowerTelemetry:
         ]
         return (
             f"power telemetry: {'; '.join(parts)} "
-            f"(motor power {motor_power_percent}%, Torque_Limit {torque_limit_from_percent(motor_power_percent)})"
+            f"(Torque_Limit {max_torque_limit})"
         )
 
 
@@ -301,9 +301,10 @@ class TeleoperateRequest(BaseModel):
     # Escape hatch for the arm-identity guard (see makerlab/arm_identity.py):
     # when true, start even if the connected arms don't match their calibrations.
     skip_identity_check: bool = False
-    # Follower torque as a percentage of full power (see makerlab/motor_power.py).
-    # Applied to follower motors only; clamped server-side to 10-100.
-    motor_power: int = 100
+    # Follower session torque cap: raw Feetech Torque_Limit register value
+    # (see makerlab/motor_power.py). Applied to follower motors only; clamped
+    # server-side to [0, 1000]. Default 380 matches auto-cal's DEFAULT_TORQUE_LIMIT.
+    max_torque_limit: int = 380
 
 
 def get_joint_positions_from_robot(robot, prefix: str = "", calibration=None) -> dict[str, float]:
@@ -534,10 +535,10 @@ def _connect_bimanual(request: TeleoperateRequest):
             cam.connect()
         robot.configure()
         teleop_device.configure()
-        # Session motor power (RAM Torque_Limit) — followers only, never the
+        # Session torque cap (RAM Torque_Limit) — followers only, never the
         # human-held leader. After configure() so nothing overwrites it; a
         # failed write degrades to full power and is surfaced as a warning.
-        identity_warnings += apply_motor_power(robot, request.motor_power, "follower arms")
+        identity_warnings += apply_torque_limit(robot, request.max_torque_limit, "follower arms")
         # Clear any leftover Goal_Velocity speed cap a previous arm-driving
         # feature stamped in RAM (auto-cal fold/unfold=1000, rest-pose return=400);
         # followers only, never the human-held leader. See makerlab/motor_power.py.
@@ -672,10 +673,10 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
                 cam.connect()
             robot.configure()
             teleop_device.configure()
-            # Session motor power (RAM Torque_Limit) — follower only, never the
+            # Session torque cap (RAM Torque_Limit) — follower only, never the
             # human-held leader. After configure() so nothing overwrites it; a
             # failed write degrades to full power and is surfaced as a warning.
-            identity_warnings += apply_motor_power(robot, request.motor_power, "follower arm")
+            identity_warnings += apply_torque_limit(robot, request.max_torque_limit, "follower arm")
             # Clear any leftover Goal_Velocity speed cap a previous arm-driving
             # feature stamped in RAM (auto-cal fold/unfold=1000, rest-pose
             # return=400); follower only, never the human-held leader. See
@@ -766,7 +767,7 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
             except Exception as e:
                 logger.error(f"Error during teleoperation loop: {e}")
             finally:
-                telemetry_summary = telemetry.summary(request.motor_power)
+                telemetry_summary = telemetry.summary(request.max_torque_limit)
                 if telemetry_summary:
                     logger.info(telemetry_summary)
                 if stopped_normally and not _release_now.is_set():

@@ -36,7 +36,7 @@ from lerobot.teleoperators.so_leader import SO101LeaderConfig
 from .arm_identity import ArmIdentityError, verify_devices
 from .camera_preview import camera_preview_manager
 from .datasets import _lerobot_cache_root, invalidate_hub_status
-from .motor_power import apply_motor_power, clear_goal_velocity
+from .motor_power import apply_torque_limit, clear_goal_velocity
 from .rest_pose import capture_rest_pose
 from .teleoperate import _device_buses, _return_followers_to_rest, force_disable_torque
 from .utils.config import (
@@ -139,9 +139,10 @@ class RecordingRequest(BaseModel):
     # Escape hatch for the arm-identity guard (see makerlab/arm_identity.py):
     # when true, record even if the connected arms don't match their calibrations.
     skip_identity_check: bool = False
-    # Follower torque as a percentage of full power (see makerlab/motor_power.py).
-    # Applied to follower motors only; clamped server-side to 10-100.
-    motor_power: int = 100
+    # Follower session torque cap: raw Feetech Torque_Limit register value
+    # (see makerlab/motor_power.py). Applied to follower motors only; clamped
+    # server-side to [0, 1000]. Default 380 matches auto-cal's DEFAULT_TORQUE_LIMIT.
+    max_torque_limit: int = 380
 
 
 class UploadRequest(BaseModel):
@@ -451,7 +452,7 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                     record_config,
                     recording_events,
                     skip_identity_check=request.skip_identity_check,
-                    motor_power=request.motor_power,
+                    max_torque_limit=request.max_torque_limit,
                     identity_config_names=identity_config_names,
                 )
                 logger.info(f"Recording completed successfully. Dataset has {dataset.num_episodes} episodes")
@@ -903,7 +904,7 @@ def record_with_web_events(
     cfg: RecordConfig,
     web_events: dict,
     skip_identity_check: bool = False,
-    motor_power: int = 100,
+    max_torque_limit: int = 380,
     identity_config_names: list[str] | None = None,
 ) -> LeRobotDataset:
     """
@@ -981,23 +982,57 @@ def record_with_web_events(
             encoder_threads=cfg.dataset.encoder_threads,
         )
 
-    # 🔧 ROBOT CONNECTION: Connect with enhanced error handling for camera conflicts
-    try:
-        logger.info("🔧 ROBOT CONNECTION: Attempting to connect robot...")
-        # Calibration is already on disk (loaded via the configs above), so never
-        # let connect() drop into interactive recalibration — that would hang the
-        # headless record thread (the "stuck on preparing session" symptom).
-        robot.connect(calibrate=False)
-        logger.info("✅ ROBOT CONNECTION: Robot connected successfully")
-    except Exception as e:
-        logger.error(f"❌ ROBOT CONNECTION: Failed to connect robot: {e}")
-        # If robot connection fails due to camera conflict, provide clear error
-        if "camera" in str(e).lower() or "device" in str(e).lower() or "busy" in str(e).lower():
-            logger.error("💡 ROBOT CONNECTION: Camera connection failure - likely camera resource conflict")
-            logger.error(
-                "💡 ROBOT CONNECTION: Make sure frontend camera streams are released before recording"
+    # 🔧 ROBOT CONNECTION: Connect with enhanced error handling for camera conflicts.
+    #
+    # A camera can read back a degraded fps on the FIRST open — macOS AVFoundation
+    # reports e.g. actual_fps=5.0 when the device was just released by a browser
+    # preview / enumeration probe and the OS-level release (which is asynchronous)
+    # hasn't settled. lerobot's _validate_fps then raises before any warmup frame.
+    # The device isn't broken: a cold re-open a moment later negotiates 30fps
+    # cleanly, so retry the transient fps failure a couple of times.
+    CONNECT_ATTEMPTS = 3
+    for attempt in range(1, CONNECT_ATTEMPTS + 1):
+        try:
+            logger.info(
+                "🔧 ROBOT CONNECTION: Attempting to connect robot (attempt %d/%d)...",
+                attempt,
+                CONNECT_ATTEMPTS,
             )
-        raise
+            # Calibration is already on disk (loaded via the configs above), so never
+            # let connect() drop into interactive recalibration — that would hang the
+            # headless record thread (the "stuck on preparing session" symptom).
+            robot.connect(calibrate=False)
+            logger.info("✅ ROBOT CONNECTION: Robot connected successfully")
+            break
+        except Exception as e:
+            msg = str(e)
+            # macOS returns the read-back value in the message ("failed to set
+            # fps=30 (actual_fps=5.0)"); treat that specific failure as transient.
+            transient_fps = "failed to set fps" in msg
+            logger.error(f"❌ ROBOT CONNECTION: Failed to connect robot: {e}")
+            # If robot connection fails due to camera conflict, provide clear error
+            if (
+                "camera" in msg.lower()
+                or "device" in msg.lower()
+                or "busy" in msg.lower()
+                or transient_fps
+            ):
+                logger.error(
+                    "💡 ROBOT CONNECTION: Camera connection failure - resource conflict or cold-open fps read"
+                )
+                logger.error(
+                    "💡 ROBOT CONNECTION: Make sure frontend camera streams are released before recording"
+                )
+            if attempt < CONNECT_ATTEMPTS and transient_fps:
+                # Drop any half-open handles from this failed attempt so the retry
+                # starts from a clean device, then let the OS release settle.
+                try:
+                    robot.disconnect()
+                except Exception:
+                    pass
+                time.sleep(1.5)
+                continue
+            raise
 
     if teleop is not None:
         try:
@@ -1065,11 +1100,11 @@ def record_with_web_events(
     _write_calibration(robot, "robot")
     _write_calibration(teleop, "teleop")
 
-    # Session motor power (RAM Torque_Limit) — the follower only, never the
+    # Session torque cap (RAM Torque_Limit) — the follower only, never the
     # human-held leader. robot.connect() above already ran configure(), so
     # nothing overwrites this before the recording loop; a failed write
     # degrades to full power (logged inside) and must not abort the session.
-    apply_motor_power(robot, motor_power, "follower arm")
+    apply_torque_limit(robot, max_torque_limit, "follower arm")
     # Clear any leftover Goal_Velocity speed cap a previous arm-driving feature
     # stamped in RAM (auto-cal fold/unfold=1000, rest-pose return=400); the
     # follower only, never the human-held leader. See makerlab/motor_power.py.
