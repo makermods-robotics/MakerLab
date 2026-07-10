@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { Check, Download, Plus } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -16,6 +17,8 @@ interface MarketListingCardProps {
   completeLabel: string;
   complete: boolean;
   loading?: boolean;
+  /** Overrides the kind-derived action icon (Plus/Download). */
+  actionIcon?: ReactNode;
   onAction: () => void;
 }
 
@@ -28,6 +31,7 @@ export function MarketListingCard({
   completeLabel,
   complete,
   loading = false,
+  actionIcon,
   onAction,
 }: MarketListingCardProps) {
   const ActionIcon = kind === "dataset" ? Plus : Download;
@@ -65,7 +69,7 @@ export function MarketListingCard({
             {complete ? (
               <Check className="h-4 w-4" />
             ) : (
-              <ActionIcon className="h-4 w-4" />
+              (actionIcon ?? <ActionIcon className="h-4 w-4" />)
             )}
             {complete ? completeLabel : loading ? "Working..." : actionLabel}
           </Button>

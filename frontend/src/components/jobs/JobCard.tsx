@@ -586,10 +586,12 @@ const JobCard: React.FC<Props> = ({
             {!isImported ? (
               <Button
                 onClick={handlePlay}
-                className="h-9 px-3"
-                aria-label="Run inference with this checkpoint"
+                size="icon"
+                className="h-9 w-9"
+                aria-label={`Run this checkpoint on ${robotLabel}`}
+                title={`Run on ${robotLabel}`}
               >
-                <Play className="w-4 h-4" /> Test on {robotLabel}
+                <Play className="w-4 h-4" />
               </Button>
             ) : null}
           </div>
@@ -599,10 +601,12 @@ const JobCard: React.FC<Props> = ({
             {showInferenceRow && isImported ? (
               <Button
                 onClick={handlePlay}
-                className="h-9 px-3"
-                aria-label="Run inference with this model"
+                size="icon"
+                className="h-9 w-9"
+                aria-label={`Run this model on ${robotLabel}`}
+                title={`Run on ${robotLabel}`}
               >
-                <Play className="w-4 h-4" /> Run on {robotLabel}
+                <Play className="w-4 h-4" />
               </Button>
             ) : null}
             {canContinue ? (

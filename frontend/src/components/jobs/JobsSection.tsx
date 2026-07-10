@@ -6,7 +6,6 @@ import { useToast } from "@/hooks/use-toast";
 import { useJobsChangedSignal } from "@/hooks/useJobsChangedSignal";
 import {
   HubJob,
-  HubModel,
   JobProgressSnapshot,
   JobRecord,
   deleteJob,
@@ -24,16 +23,16 @@ import { listJobCheckpoints } from "@/lib/checkpointsApi";
 import { useNavigate } from "react-router-dom";
 import JobCard from "./JobCard";
 import HubJobCard from "./HubJobCard";
-import HubModelCard from "./HubModelCard";
 import InferenceModal from "@/components/landing/InferenceModal";
-import ImportModelModal from "./ImportModelModal";
+import { ModelLibrary } from "@/components/train/ModelLibrary";
+import { useModels } from "@/hooks/useModels";
 import { useRobots } from "@/hooks/useRobots";
 import {
   Collapsible,
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
-import { ChevronRight, Download, RefreshCw } from "lucide-react";
+import { ChevronRight, RefreshCw } from "lucide-react";
 
 const LIMIT = 10;
 
@@ -52,7 +51,6 @@ const JobsSection: React.FC = () => {
     {},
   );
   const [hubJobs, setHubJobs] = useState<HubJob[]>([]);
-  const [hubModels, setHubModels] = useState<HubModel[]>([]);
   const [hubAuthenticated, setHubAuthenticated] = useState(false);
   const [hubJobsPermission, setHubJobsPermission] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -60,8 +58,13 @@ const JobsSection: React.FC = () => {
   const [search, setSearch] = useState("");
 
   const { selectedRecord, selectedName } = useRobots();
+  const {
+    models,
+    authenticated: modelsAuthenticated,
+    loading: modelsLoading,
+    refresh: refreshModels,
+  } = useModels();
   const [inferenceModalOpen, setInferenceModalOpen] = useState(false);
-  const [importModalOpen, setImportModalOpen] = useState(false);
   const [inferenceJob, setInferenceJob] = useState<JobRecord | null>(null);
   const [inferenceStep, setInferenceStep] = useState<number | null>(null);
 
@@ -81,7 +84,6 @@ const JobsSection: React.FC = () => {
     }
     if (hubRes.status === "fulfilled") {
       setHubJobs(hubRes.value.jobs);
-      setHubModels(hubRes.value.models);
       setHubAuthenticated(hubRes.value.authenticated);
       setHubJobsPermission(hubRes.value.jobs_permission ?? true);
       setHubError(null);
@@ -318,10 +320,6 @@ const JobsSection: React.FC = () => {
       hubJobs.filter((h) => matchesQuery(h.docker_image ?? h.space_id ?? h.id)),
     [hubJobs, matchesQuery],
   );
-  const filteredHubModels = useMemo(
-    () => hubModels.filter((m) => matchesQuery(m.repo_id)),
-    [hubModels, matchesQuery],
-  );
 
   const localJobs = useMemo(
     () => filteredJobs.filter((j) => j.runner === "local"),
@@ -329,10 +327,6 @@ const JobsSection: React.FC = () => {
   );
   const trackedCloudJobs = useMemo(
     () => filteredJobs.filter((j) => j.runner === "hf_cloud"),
-    [filteredJobs],
-  );
-  const importedJobs = useMemo(
-    () => filteredJobs.filter((j) => j.runner === "imported"),
     [filteredJobs],
   );
   // Hub jobs already mirrored by a local JobRecord get their richer card via
@@ -349,27 +343,6 @@ const JobsSection: React.FC = () => {
   const untrackedHubJobs = useMemo(
     () => filteredHubJobs.filter((h) => !trackedHfJobIds.has(h.id)),
     [filteredHubJobs, trackedHfJobIds],
-  );
-  // Hide model repos already claimed by a tracked job — a cloud run (shown via
-  // JobCard) OR an imported model (also a JobCard, and the target a lazy
-  // auto-import lands on). Repo ids are compared case-insensitively to match
-  // the backend's find_imported dedup. The remainder are past trainings the
-  // registry no longer remembers, rendered as untracked Hub cards.
-  const trackedRepoIds = useMemo(
-    () =>
-      new Set(
-        [...trackedCloudJobs, ...importedJobs]
-          .map((j) => j.hf_repo_id?.toLowerCase())
-          .filter((id): id is string => !!id),
-      ),
-    [trackedCloudJobs, importedJobs],
-  );
-  const untrackedHubModels = useMemo(
-    () =>
-      filteredHubModels.filter(
-        (m) => !trackedRepoIds.has(m.repo_id.toLowerCase()),
-      ),
-    [filteredHubModels, trackedRepoIds],
   );
 
   // Resume lineage: job B stores config.resume_from_job_id = A. Hide A (the
@@ -444,10 +417,8 @@ const JobsSection: React.FC = () => {
     untrackedHubInactive.length;
 
   return (
-    <section className="grid grid-cols-1 min-[900px]:grid-cols-[minmax(0,1.1fr)_minmax(300px,0.9fr)] gap-4 items-start">
-      {/* Jobs column: local runs, cloud runs, and inactive/untracked leftovers.
-          The search box lives here (it primarily filters job text) but keeps
-          filtering the models column too, so behavior is unchanged. */}
+    <section className="grid grid-cols-1 gap-4 items-start">
+      {/* Jobs: local runs, cloud runs, and inactive/untracked leftovers. */}
       <div className="grid content-start gap-2.5">
         <div className="flex items-center justify-between gap-3">
           <h2 className="text-[11px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
@@ -616,59 +587,18 @@ const JobsSection: React.FC = () => {
         ) : null}
       </div>
 
-      {/* Models column: imported models plus uploaded hub repos no job tracks
-          (a model artifact, not a run — so it doesn't sit under Online jobs).
-          Owns the Import button; rendered even when empty so the entry point
-          is always visible. */}
-      <div className="grid content-start gap-2.5">
-        <div className="flex items-center justify-between gap-3">
-          <h2 className="text-[11px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
-            Models
-            {importedJobs.length + untrackedHubModels.length > 0
-              ? ` (${importedJobs.length + untrackedHubModels.length})`
-              : ""}
-          </h2>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => setImportModalOpen(true)}
-            className="h-8"
-          >
-            <Download className="w-3.5 h-3.5 mr-1.5" />
-            Import model
-          </Button>
-        </div>
-        {importedJobs.length === 0 && untrackedHubModels.length === 0 ? (
-          <p className="text-sm text-muted-foreground">
-            {query
-              ? "No models match your search."
-              : "No models yet. Use Import model to add one from the Hub or a local folder."}
-          </p>
-        ) : (
-          <div className="grid grid-cols-1 gap-2.5">
-            {importedJobs.map((job) => (
-              <JobCard
-                key={job.id}
-                job={job}
-                onStop={handleStop}
-                onDelete={handleDelete}
-                onPlay={handlePlay}
-                onRenamed={refresh}
-                selectedRobotName={selectedName}
-              />
-            ))}
-            {untrackedHubModels.map((model) => (
-              <HubModelCard
-                key={model.repo_id}
-                model={model}
-                onDeleted={refresh}
-                onAction={handleLazyImportAction}
-                selectedRobotName={selectedName}
-              />
-            ))}
-          </div>
-        )}
-      </div>
+
+      {/* Every model repo the user owns on the Hub — the single browsing
+          surface for models; running/fine-tuning lazily imports the repo. */}
+      <ModelLibrary
+        models={models}
+        loading={modelsLoading}
+        authenticated={modelsAuthenticated}
+        robotLabel={selectedName ?? "your robot"}
+        onRun={(repoId) => handleLazyImportAction(repoId, "inference")}
+        onFinetune={(repoId) => handleLazyImportAction(repoId, "finetune")}
+        onRefresh={refreshModels}
+      />
 
       {inferenceJob ? (
         <InferenceModal
@@ -680,11 +610,6 @@ const JobsSection: React.FC = () => {
         />
       ) : null}
 
-      <ImportModelModal
-        open={importModalOpen}
-        onOpenChange={setImportModalOpen}
-        onImported={refresh}
-      />
     </section>
   );
 };
