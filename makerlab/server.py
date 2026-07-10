@@ -46,6 +46,7 @@ from lerobot.policies.factory import make_policy_config
 # REBINDS its recording_active global, so only live attribute access sees the
 # current value — a from-import would freeze the startup value.
 from . import datasets as dataset_browser, record as record_state
+from .models import list_user_models
 
 # Import our custom calibration functionality
 from .auto_calibrate import AutoCalibrationRequest, auto_calibration_manager
@@ -594,6 +595,15 @@ def datasets_info(repo_id: str):
     if info is None:
         raise HTTPException(status_code=404, detail=f"Dataset '{repo_id}' not found in the local cache")
     return info
+
+
+@app.get("/models")
+async def get_models():
+    """All model repos the user owns on the Hub, annotated for library filters."""
+    info = cached_whoami()
+    if info is None:
+        return {"status": "success", "authenticated": False, "models": []}
+    return {"status": "success", "authenticated": True, "models": list_user_models()}
 
 
 @app.get("/datasets/hub-status")
