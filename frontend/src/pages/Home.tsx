@@ -3,6 +3,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { Grid2X2, Plus, Sparkles } from "lucide-react";
 import BoothHero from "@/components/home/BoothHero";
 import CreateRobotDialog from "@/components/landing/CreateRobotDialog";
+import { openRobotSettings } from "@/components/robot/robotSettingsStore";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { useRobots, type RobotRecord } from "@/hooks/useRobots";
@@ -109,10 +110,6 @@ const Home: React.FC = () => {
     [availableNames, records]
   );
 
-  const settingsState = useMemo(
-    () => (selectedName ? { robot_name: selectedName } : undefined),
-    [selectedName]
-  );
   const isExiting = exitingName !== null;
 
   const openRobot = useCallback(
@@ -151,13 +148,13 @@ const Home: React.FC = () => {
       }
       if ((event.metaKey || event.ctrlKey) && event.key === ",") {
         event.preventDefault();
-        navigate("/calibration", { state: settingsState });
+        openRobotSettings(selectedName);
       }
     };
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [isExiting, navigate, openRobot, robots, selectedName, settingsState]);
+  }, [isExiting, navigate, openRobot, robots, selectedName]);
 
   return (
     <main className="relative min-h-screen overflow-hidden bg-background text-foreground">
@@ -195,13 +192,13 @@ const Home: React.FC = () => {
             <p className="text-[13px] text-muted-foreground">
               SO-101 workbench{" "}
               <span className="mx-1.5 text-muted-foreground/60">·</span>
-              <Link
-                to="/calibration"
-                state={settingsState}
+              <button
+                type="button"
+                onClick={() => openRobotSettings(selectedName)}
                 className="underline-offset-4 hover:text-foreground hover:underline"
               >
                 Settings
-              </Link>
+              </button>
             </p>
           </header>
 
@@ -366,7 +363,11 @@ const Home: React.FC = () => {
         defaultMode="single"
         onCreateNew={async (name, mode) => {
           const ok = await createRobot(name, mode);
-          if (ok) selectRobot(name);
+          if (ok) {
+            selectRobot(name);
+            // Straight into calibration/setup, as a dialog over the page.
+            openRobotSettings(name);
+          }
           return ok;
         }}
       />
