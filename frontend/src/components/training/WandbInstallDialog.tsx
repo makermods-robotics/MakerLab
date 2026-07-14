@@ -10,7 +10,7 @@ import { useInstallExtra } from "@/hooks/useInstallExtra";
 import {
   InstallProgress,
   InstallTitleIcon,
-  RestartInstructions,
+  ReadyInstructions,
   installTitle,
 } from "./InstallProgress";
 
@@ -57,7 +57,7 @@ const WandbInstallDialog: React.FC<Props> = ({ open, onOpenChange, installHint }
                 to log this run to W&amp;B.
               </>
             }
-            doneDescription={<RestartInstructions purpose="W&amp;B logging" />}
+            doneDescription={<ReadyInstructions purpose="W&amp;B logging" />}
           />
         </div>
       </DialogContent>

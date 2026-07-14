@@ -14,33 +14,182 @@
 
 """HF Jobs runner — runs a training as an HF Jobs job on HuggingFace's GPUs.
 
-Uses huggingface/lerobot-gpu:latest as the runtime image (lerobot pre-installed).
-Tails logs via HfApi.fetch_job_logs and reuses the existing parse_metrics_into
-parser since stdout format is identical to a local lerobot run.
+Uses huggingface/lerobot-gpu:latest as the runtime image; the in-container
+wrapper replaces its bundled lerobot with makerlab's exact pyproject pin before
+launching the trainer (the image's "latest" drifts from the CLI surface our
+argv builder targets). Tails logs via HfApi.fetch_job_logs and reuses the
+existing parse_metrics_into parser since stdout format is identical to a
+local lerobot run.
 """
 
 from __future__ import annotations
 
 import contextlib
+import inspect
 import logging
 import netrc
 import os
+import re
+import shlex
 import threading
 import time
+import tomllib
+from importlib.metadata import requires
 from pathlib import Path
 from queue import Empty, Queue
 
 from huggingface_hub import get_token
 from huggingface_hub.errors import RepositoryNotFoundError
+from packaging.requirements import Requirement
 
 from ..jobs import LogLine, TrainingMetrics, extract_wandb_run_url, parse_metrics_into
-from ..train import TrainingRequest, build_training_command
+from ..train import TrainingRequest, build_training_command, parse_hf_duration
 from ..utils.config import with_makerlab_tag
 from ..utils.hf_auth import cached_whoami, shared_hf_api
 
 logger = logging.getLogger(__name__)
 
 LEROBOT_IMAGE = "huggingface/lerobot-gpu:latest"
+
+# The :latest image ships whatever lerobot was current when it was built —
+# which drifts from the pin in our pyproject.toml that build_training_command's
+# argv is shaped for (a real job died on `--eval_freq`, renamed upstream).
+# The wrapper therefore pip-installs the exact pin (below) before launching
+# the trainer, so container and host agree on the CLI surface.
+
+# Extras from the pyproject pin that only matter on the host machine (serial
+# motor buses). Dropped from the container install.
+_HOST_ONLY_EXTRAS = frozenset({"feetech"})
+
+# policy_type -> lerobot extra that carries the policy's model dependencies
+# at the pinned ref (e.g. transformers for smolvla). Policies without an
+# entry (act, tdmpc, vqbet, sac) need nothing beyond the core install.
+_POLICY_CLOUD_EXTRAS = {
+    "smolvla": "smolvla",
+    "diffusion": "diffusion",
+    "pi0": "pi",
+    "pi0_fast": "pi",
+    "pi05": "pi",
+}
+
+# "git+https://github.com/<org>/<repo>(.git)@<ref>" — the shape of our pin.
+_GIT_PIN_RE = re.compile(r"^git\+(?P<repo>https://github\.com/[^@#]+?)(?:\.git)?@(?P<ref>[^#]+)$")
+
+
+def _pinned_lerobot_requirement() -> Requirement:
+    """The exact lerobot requirement makerlab was installed with (the pyproject pin).
+
+    Primary source is the installed distribution's metadata — generated from
+    pyproject.toml at install time, so there is no second hardcoded copy of the
+    sha and, crucially, it matches the lerobot actually importable on this host
+    (the one build_training_command's argv is shaped for). Falls back to parsing
+    pyproject.toml directly when running from a source tree without installed
+    metadata.
+    """
+    candidates: list[str] = []
+    with contextlib.suppress(Exception):
+        candidates = requires("MakerLab") or []
+    if not any("lerobot" in c for c in candidates):
+        pyproject = Path(__file__).resolve().parents[2] / "pyproject.toml"
+        candidates = tomllib.loads(pyproject.read_text())["project"]["dependencies"]
+    for line in candidates:
+        with contextlib.suppress(Exception):
+            parsed = Requirement(line)
+            if parsed.name.lower() == "lerobot":
+                return parsed
+    raise RuntimeError("Could not resolve the lerobot pin from MakerLab metadata or pyproject.toml")
+
+
+def cloud_lerobot_spec(policy_type: str) -> str:
+    """Pip requirement the cloud container must install so its lerobot matches
+    the pin that build_training_command targets.
+
+    Derived from the pyproject pin at submission time (never hardcoded), with
+    two container-side adjustments to the extras: host-only extras are dropped,
+    and the trained policy's model-deps extra is added. A GitHub `git+…@ref`
+    pin is rewritten to the equivalent source archive tarball
+    (github.com/<org>/<repo>/archive/<ref>.tar.gz — same tree, but pip can
+    install it without git in the image; lerobot's version is static, no scm).
+    """
+    req = _pinned_lerobot_requirement()
+    extras = {e for e in req.extras if e not in _HOST_ONLY_EXTRAS}
+    policy_extra = _POLICY_CLOUD_EXTRAS.get(policy_type)
+    if policy_extra:
+        extras.add(policy_extra)
+    name = f"lerobot[{','.join(sorted(extras))}]" if extras else "lerobot"
+    if req.url:
+        m = _GIT_PIN_RE.match(req.url)
+        url = f"{m.group('repo')}/archive/{m.group('ref')}.tar.gz" if m else req.url
+        return f"{name} @ {url}"
+    # Future-proofing: a PyPI-version pin flows through as a plain specifier.
+    return f"{name}{req.specifier}"
+
+
+def _install_plan(spec, python, uv_path, has_pip, has_ensurepip):
+    """Pick how to install `spec` into `python`'s environment.
+
+    Returns (label, commands): an installer name for logging plus the argv
+    lists to run in order, or (None, []) when the environment has none.
+
+    uv first: the lerobot-gpu image's venv is created with `uv venv`, which
+    ships NO pip module — a real job died on `python -m pip` with "No module
+    named pip". `--python` pins the install into this interpreter's env,
+    mirroring _build_install_cmd in makerlab/utils/system.py. pip stays as the
+    fallback for future image changes; ensurepip is the last resort.
+
+    Pure stdlib and self-contained by design: its source is inlined verbatim
+    into WRAPPER_SOURCE (via inspect.getsource) so the in-container wrapper
+    and the unit tests exercise the same implementation.
+    """
+    if uv_path:
+        return "uv", [[uv_path, "pip", "install", "--python", python, "--no-cache", spec]]
+    if has_pip:
+        return "pip", [[python, "-m", "pip", "install", "--no-cache-dir", spec]]
+    if has_ensurepip:
+        return "ensurepip+pip", [
+            [python, "-m", "ensurepip", "--upgrade"],
+            [python, "-m", "pip", "install", "--no-cache-dir", spec],
+        ]
+    return None, []
+
+
+def _cloud_device(flavor: str) -> str:
+    """HF Jobs flavors are NVIDIA GPU boxes except the cpu-* tiers."""
+    return "cpu" if flavor.startswith("cpu") else "cuda"
+
+
+def localize_config_for_cloud(config: TrainingRequest, flavor: str) -> None:
+    """Strip host-machine specifics from the request at the cloud-submission
+    boundary, before build_training_command runs. Mutates in place — the
+    mutated config is what gets persisted on the JobRecord, so the historical
+    record reflects what actually ran. Local runs are untouched.
+
+    Raises ValueError (→ HTTP 400) for host-path inputs that cannot work in
+    the container, so the user gets a clear message instead of a remote crash.
+    """
+    # A host-local config_path (the local-resume signal) can't exist in the
+    # container. Cloud resume uses resume_from_hub_repo instead — the wrapper
+    # downloads the checkpoint from the Hub and reconstructs the layout there,
+    # so that path is allowed and config_path is set to the container path later
+    # (in HfCloudJobRunner.start), never here.
+    if config.config_path and not config.resume_from_hub_repo:
+        raise ValueError(
+            "Resuming on a cloud job from a local checkpoint isn't supported: the "
+            "source checkpoint's train_config.json lives on this machine, not in "
+            "the container. Resume a cloud run from its Hub output instead."
+        )
+    if config.policy_pretrained_path and Path(config.policy_pretrained_path).is_absolute():
+        raise ValueError(
+            "Fine-tuning a cloud job from a local checkpoint isn't supported — "
+            "push the source model to the Hub and fine-tune from the Hub copy."
+        )
+    # The container resolves the dataset from the Hub by repo_id; a host-local
+    # dataset root doesn't exist there.
+    config.dataset_root = None
+    # The host's auto-detected device (mps on a Mac) is meaningless on the
+    # remote pod; pin the flavor's real backend instead.
+    config.policy_device = _cloud_device(flavor)
+
 
 # Where the trainer writes checkpoints inside the HF Jobs container. The host
 # path the registry hands us (under ~/.cache/...) doesn't exist on the remote
@@ -49,24 +198,47 @@ LEROBOT_IMAGE = "huggingface/lerobot-gpu:latest"
 # here to the Hub, so the makerlab UI never reads this path directly.
 _CONTAINER_OUTPUT_DIR = "/tmp/makerlab/train"  # nosec B108 — fixed path inside the remote HF Jobs container, not host-local
 
+# lerobot's per-checkpoint layout under <output_dir>/checkpoints/<step_dir>/.
+# Cloud resume reconstructs exactly this so the trainer's own resume path (which
+# reads config_path.parent.parent as the checkpoint dir) finds pretrained_model/
+# and training_state/ where it expects them.
+_CONTAINER_TRAIN_CONFIG_NAME = "train_config.json"
+
 # Inlined sidecar uploader for HF Jobs. Spawns the lerobot trainer as a
 # subprocess and concurrently uploads new <output_dir>/checkpoints/<step>/
 # directories to the Hub model repo, so the makerlab UI can list them while
 # training is in progress.
 #
-# Sent verbatim as the value of `python -c '...'`. Anything after `--` in
-# the command argv is forwarded to the trainer.
-WRAPPER_SOURCE = r'''
-import os, re, sys, threading, subprocess
+# Sent verbatim as the value of `python -c '...'`. Wrapper-side arguments
+# (the pinned lerobot spec) come before `--`; anything after `--` is
+# forwarded to the trainer. The __INSTALL_PLAN_SOURCE__ placeholder is
+# replaced with _install_plan's own source below, so the wrapper's installer
+# choice is the exact function the unit tests exercise.
+_WRAPPER_TEMPLATE = r'''
+import importlib.util
+import os, re, shlex, shutil, sys, threading, subprocess
 from pathlib import Path
 from huggingface_hub import HfApi
+
+__INSTALL_PLAN_SOURCE__
 
 argv = sys.argv[1:]
 if "--" not in argv:
     print("[wrapper] missing -- separator", flush=True)
     sys.exit(2)
 sep = argv.index("--")
+wrapper_args = argv[:sep]
 trainer_argv = argv[sep + 1:]
+
+# Wrapper-side args: the pinned lerobot spec (first non---option token) plus
+# optional directives. --resume-from=<repo>@checkpoints/<step_dir> tells us to
+# download that checkpoint tree and reconstruct lerobot's output-dir layout so
+# the trainer's own resume path finds it (config_path.parent.parent).
+lerobot_spec = next((a for a in wrapper_args if not a.startswith("--")), None)
+resume_from = None
+for a in wrapper_args:
+    if a.startswith("--resume-from="):
+        resume_from = a.split("=", 1)[1]
 
 
 def _arg(name):
@@ -85,6 +257,28 @@ if not output_dir or not repo_id:
     print(f"[wrapper] need --output_dir and --policy.repo_id; got {output_dir} / {repo_id}", flush=True)
     sys.exit(2)
 
+# The image ships whatever lerobot was latest when it was built; the trainer
+# argv is shaped for makerlab's pinned lerobot. Install the exact pin (passed as a
+# wrapper arg) before launching, or the argument surfaces drift apart (a real
+# run died on argparse rc=2 over --eval_freq).
+if lerobot_spec:
+    install_label, install_cmds = _install_plan(
+        lerobot_spec,
+        sys.executable,
+        shutil.which("uv"),
+        importlib.util.find_spec("pip") is not None,
+        importlib.util.find_spec("ensurepip") is not None,
+    )
+    if install_label is None:
+        print("[wrapper] cannot install pinned lerobot: no uv, pip, or ensurepip in image", flush=True)
+        sys.exit(1)
+    print(f"[wrapper] installing pinned lerobot via {install_label}: {lerobot_spec}", flush=True)
+    for install_cmd in install_cmds:
+        install_rc = subprocess.run(install_cmd).returncode
+        if install_rc != 0:
+            print(f"[wrapper] pinned lerobot install failed rc={install_rc}: {shlex.join(install_cmd)}", flush=True)
+            sys.exit(install_rc)
+
 api = HfApi()
 # lerobot only calls push_to_hub at the end of training, so the repo doesn't
 # exist when our checkpoint watcher fires. Create it up front (idempotent).
@@ -95,6 +289,42 @@ except Exception as exc:
     print(f"[wrapper] create_repo failed: {exc}", flush=True)
 
 seen = set()
+
+# Resume: download the parent checkpoint tree (pretrained_model/ +
+# training_state/) into <output_dir>/checkpoints/<step_dir>/ so lerobot's own
+# resume path (config_path.parent.parent) finds the optimizer + step state. The
+# step dir is pre-seeded into `seen` so the watcher never re-uploads the
+# checkpoint we just pulled down.
+if resume_from:
+    m = re.match(r"^(?P<repo>[^@]+)@checkpoints/(?P<step_dir>\d+)$", resume_from)
+    if not m:
+        print(f"[wrapper] bad --resume-from ref: {resume_from}", flush=True)
+        sys.exit(2)
+    src_repo, step_dir = m.group("repo"), m.group("step_dir")
+    dest = Path(output_dir) / "checkpoints" / step_dir
+    print(f"[wrapper] resuming: downloading {src_repo}@checkpoints/{step_dir}", flush=True)
+    try:
+        from huggingface_hub import snapshot_download
+
+        local_root = snapshot_download(
+            repo_id=src_repo,
+            repo_type="model",
+            allow_patterns=[f"checkpoints/{step_dir}/*"],
+        )
+        src = Path(local_root) / "checkpoints" / step_dir
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        # copytree from the snapshot cache (symlinked files) into a real tree the
+        # trainer can read/rewrite; resolve symlinks so lerobot sees plain files.
+        shutil.copytree(src, dest, symlinks=False)
+        if not (dest / "training_state").is_dir():
+            print("[wrapper] resume checkpoint has no training_state/; cannot resume", flush=True)
+            sys.exit(1)
+        seen.add(step_dir)
+        print(f"[wrapper] resume checkpoint ready at {dest}", flush=True)
+    except Exception as exc:
+        print(f"[wrapper] resume download failed: {exc}", flush=True)
+        sys.exit(1)
+
 stop_event = threading.Event()
 
 
@@ -137,7 +367,13 @@ def _watch():
 watch_thread = threading.Thread(target=_watch, name="ckpt-watcher", daemon=True)
 watch_thread.start()
 
-print(f"[wrapper] launching trainer: {' '.join(trainer_argv)}", flush=True)
+# Run the trainer on this same interpreter so it sees the just-installed pin.
+if trainer_argv and trainer_argv[0] == "python":
+    trainer_argv[0] = sys.executable
+
+# trainer_argv is passed to Popen as a LIST (never joined and re-split), so
+# values with spaces stay one argument; shlex.join is only for a faithful log.
+print(f"[wrapper] launching trainer: {shlex.join(trainer_argv)}", flush=True)
 proc = subprocess.Popen(list(trainer_argv), env=os.environ.copy())
 try:
     rc = proc.wait()
@@ -153,10 +389,30 @@ print(f"[wrapper] trainer exited with rc={rc}", flush=True)
 sys.exit(rc)
 '''
 
+WRAPPER_SOURCE = _WRAPPER_TEMPLATE.replace("__INSTALL_PLAN_SOURCE__", inspect.getsource(_install_plan))
+
 # HF Jobs' platform default timeout has killed legitimate runs that pushed
 # the model successfully but were still uploading auxiliary files. 2h covers
-# our typical ACT/SmolVLA runs on t4-small with comfortable headroom.
+# our typical ACT/SmolVLA runs on t4-small with comfortable headroom. This is
+# the FALLBACK: used only when the request carries no explicit hf_job_timeout.
 HF_JOB_TIMEOUT = "2h"
+
+
+def resolve_job_timeout(config: TrainingRequest) -> int | str:
+    """The value to hand HfApi.run_job's `timeout` for this job.
+
+    Precedence: an explicit, already-validated request value
+    (config.hf_job_timeout) wins and is normalised to an int of SECONDS —
+    run_job's own string parser only understands a single unit suffix
+    (float(timeout[:-1]) * factor[timeout[-1]]), so compound forms like
+    "3h30m" must be pre-resolved here rather than passed through as a string.
+    When the request leaves the field unset we fall back to the HF_JOB_TIMEOUT
+    constant (a plain single-unit string run_job parses natively), preserving
+    the platform-default-killed-legit-runs safety net.
+    """
+    if config.hf_job_timeout:
+        return parse_hf_duration(config.hf_job_timeout)
+    return HF_JOB_TIMEOUT
 
 # Cadence at which the status poller hits inspect_job. inspect_job is the
 # authoritative source for job liveness; the log stream is best-effort and
@@ -254,6 +510,11 @@ class HfCloudJobRunner:
         if not username:
             raise RuntimeError("Could not resolve HF username from whoami()")
 
+        # Strip host-machine specifics (auto-detected device, local dataset
+        # root, host checkpoint paths) BEFORE the potentially-slow dataset
+        # upload, so invalid requests fail fast with a 400.
+        localize_config_for_cloud(config, self._flavor)
+
         # Open the log file early so dataset-upload progress is recorded
         # before the cloud job is submitted.
         self._log_file_path.parent.mkdir(parents=True, exist_ok=True)
@@ -267,19 +528,46 @@ class HfCloudJobRunner:
         # The mutated config is what gets persisted in JobRecord.config, so
         # the historical record reflects what actually ran.
         config.policy_push_to_hub = True
-        # job_id is already a unique slug like "act_dataset_2026-05-04_10-22-03".
-        config.policy_repo_id = f"{username}/{job_id}"
+        # Resume continues the SAME output repo as the parent run so the whole
+        # lineage lives in one place; a fresh run gets its own repo named after
+        # its unique job id slug (e.g. "act_dataset_2026-05-04_10-22-03").
+        resume_directive: str | None = None
+        if config.resume and config.resume_from_hub_repo:
+            config.policy_repo_id = config.resume_from_hub_repo
+            step_dir = config.resume_from_hub_step or "last"
+            # The wrapper downloads checkpoints/<step_dir>/ into this exact path;
+            # lerobot's resume reads config_path.parent.parent as the checkpoint
+            # dir, so both pretrained_model/ and training_state/ must live here.
+            config.config_path = (
+                f"{_CONTAINER_OUTPUT_DIR}/checkpoints/{step_dir}/pretrained_model/"
+                f"{_CONTAINER_TRAIN_CONFIG_NAME}"
+            )
+            resume_directive = f"--resume-from={config.resume_from_hub_repo}@checkpoints/{step_dir}"
+        else:
+            config.policy_repo_id = f"{username}/{job_id}"
 
         trainer_argv = build_training_command(config, _CONTAINER_OUTPUT_DIR)
-        # The wrapper expects `python -c WRAPPER_SOURCE -- <trainer argv>`.
+        # The wrapper expects `python -c WRAPPER_SOURCE <spec> [directives] -- <trainer argv>`.
         # `python -c` consumes the first non-option argument as the script,
-        # so we prepend a "--" sentinel of our own.
-        wrapped_command = ["python", "-c", WRAPPER_SOURCE, "--", *trainer_argv]
+        # so we prepend a "--" sentinel of our own; the pinned-lerobot spec and
+        # any wrapper directives (e.g. --resume-from) ride before it as
+        # wrapper-side arguments.
+        wrapper_side_args = [cloud_lerobot_spec(config.policy_type)]
+        if resume_directive is not None:
+            wrapper_side_args.append(resume_directive)
+        wrapped_command = [
+            "python",
+            "-c",
+            WRAPPER_SOURCE,
+            *wrapper_side_args,
+            "--",
+            *trainer_argv,
+        ]
         logger.info(
             "Submitting HF Cloud job %s on %s (wrapped trainer): %s",
             job_id,
             self._flavor,
-            " ".join(trainer_argv),
+            shlex.join(trainer_argv),
         )
 
         # HF_TOKEN goes via `secrets` (not `env`) so it doesn't show up in
@@ -301,7 +589,7 @@ class HfCloudJobRunner:
             command=wrapped_command,
             flavor=self._flavor,
             secrets=secrets,
-            timeout=HF_JOB_TIMEOUT,
+            timeout=resolve_job_timeout(config),
         )
         self._hf_job_id = job.id
         self._hf_job_url = getattr(job, "url", None)
@@ -370,10 +658,16 @@ class HfCloudJobRunner:
             # — same behaviour as before.
             return
 
-        self._log_line(f"[upload] dataset {repo_id} not on Hub; pushing local copy...")
+        self._log_line(f"[upload] dataset {repo_id} not on Hub; pushing local copy (public)...")
         from lerobot.datasets import LeRobotDataset
 
         try:
+            # Public by default: MakerLab's global policy is that datasets it pushes
+            # to the Hub are public and carry the required org/product tags (see
+            # with_makerlab_tag / REQUIRED_HUB_TAGS). This implicit cloud-run upload
+            # follows that same default so all MakerLab-produced datasets are
+            # discoverable. (This intentionally reverses the earlier private
+            # default — an implicit upload of a local-only dataset is now public.)
             LeRobotDataset(repo_id).push_to_hub(tags=with_makerlab_tag(None), private=False)
         except Exception as exc:
             msg = f"Failed to upload local dataset {repo_id} to Hub: {exc}"

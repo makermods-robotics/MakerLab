@@ -141,36 +141,15 @@ export const InstallProgress: React.FC<InstallProgressProps> = ({
   );
 };
 
-export const RestartInstructions: React.FC<{ purpose: string }> = ({
+// The installed package is only consumed by training subprocesses (fresh
+// processes that see the new install immediately), and the backend probes
+// availability live per request — so no server restart is needed. Reload the
+// page to pick it up.
+export const ReadyInstructions: React.FC<{ purpose: string }> = ({
   purpose,
 }) => (
-  <>
-    <p>
-      Install complete. Restart{" "}
-      <code className="px-1 py-0.5 rounded bg-slate-900 text-sky-300">
-        lelab
-      </code>{" "}
-      to enable {purpose}:
-    </p>
-    <ol className="list-decimal list-inside space-y-2 pl-1">
-      <li>
-        Press{" "}
-        <kbd className="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-600 text-xs font-mono text-slate-200">
-          Ctrl+C
-        </kbd>{" "}
-        in the terminal running{" "}
-        <code className="px-1 py-0.5 rounded bg-slate-900 text-sky-300">
-          lelab
-        </code>
-        .
-      </li>
-      <li>
-        Run{" "}
-        <code className="px-1 py-0.5 rounded bg-slate-900 text-sky-300">
-          lelab
-        </code>{" "}
-        again.
-      </li>
-    </ol>
-  </>
+  <p>
+    Install complete — {purpose} is available immediately, no restart needed.
+    Reload the page if it doesn't unlock on its own.
+  </p>
 );
