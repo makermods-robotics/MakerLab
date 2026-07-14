@@ -35,7 +35,12 @@ test = [
 ]
 
 [project.scripts]
+# The installed command is `makerlab`. The Python package/module stays
+# `makerlab` (imports, the wheel, `makerlab.server:app`) — only the CLI is rebranded.
 makerlab = "makerlab.scripts.makerlab:main"
+# Headless robot-station posture as an installed command: --lan --offline
+# defaults, extra args pass through. What the systemd unit runs.
+makerlab-station = "makerlab.scripts.makerlab:station"
 
 [tool.setuptools.packages.find]
 where = ["."]

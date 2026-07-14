@@ -60,14 +60,28 @@ yarn-error.log*
 *.sqlite3
 
 # Local dev / tool state
+.agents/
 .claude/
 .playwright-mcp/
 .superpowers/
 .worktrees/
 outputs/
-docs/
 PHONE_CAMERA_SETUP.md
 HTTPS_SETUP.md
 
 # Self-signed dev certs (regenerate per HTTPS_SETUP.md)
 certs/
+
+internal_docs/
+debug/
+
+# Linter and type-checker caches
+.ruff_cache/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Optional test reports
+.coverage.*
+coverage.xml
+junit.xml
