@@ -46,8 +46,12 @@ concurrency:
 
 jobs:
   pytest:
-    name: Pytest
-    runs-on: ubuntu-latest
+    name: Pytest (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
@@ -55,8 +59,16 @@ jobs:
           lfs: true
 
       # lerobot is a transitive dep that needs these native libs at install /
-      # import time. List taken from LeRobot's fast_tests.yml.
+      # import time on Linux. List taken from LeRobot's fast_tests.yml.
+      # Windows doesn't need an equivalent step: verified directly on a real
+      # Windows 11 + Python 3.12 install of this project's exact dependency
+      # set (lerobot[core_scripts,feetech,training]) that none of the
+      # packages needing these libs (pyusb, shapely, sounddevice) are even
+      # part of that dependency closure, and the ones that are (av,
+      # opencv-python-headless, pyserial, feetech-servo-sdk) import cleanly
+      # from their Windows wheels with no extra system packages installed.
       - name: Install apt dependencies
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update && sudo apt-get install -y build-essential git \
           curl libglib2.0-0 libegl1-mesa-dev ffmpeg \
