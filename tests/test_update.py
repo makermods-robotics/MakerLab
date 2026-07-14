@@ -149,6 +149,39 @@ def test_run_update_no_source(monkeypatch):
     assert result.success is False
 
 
+def test_run_update_decodes_with_errors_replace(monkeypatch):
+    """subprocess.run must pass errors="replace" alongside encoding="utf-8".
+
+    Without it, a single invalid-UTF-8 byte in the update tool's output raises
+    UnicodeDecodeError, which gets swallowed by handle_run_update's broad
+    except and surfaced as a cryptic "Update failed: ..." instead of the
+    update tool's real output.
+    """
+    monkeypatch.setattr(
+        update,
+        "get_installed_source",
+        lambda: {"commit": "abc123", "owner": "huggingface", "repo": "leLab"},
+    )
+
+    captured_kwargs = {}
+
+    class _FakeCompletedProcess:
+        returncode = 0
+        stdout = "ok"
+        stderr = ""
+
+    def fake_run(cmd, **kwargs):
+        captured_kwargs.update(kwargs)
+        return _FakeCompletedProcess()
+
+    monkeypatch.setattr(update.subprocess, "run", fake_run)
+    result = update.handle_run_update()
+
+    assert captured_kwargs["encoding"] == "utf-8"
+    assert captured_kwargs["errors"] == "replace"
+    assert result.success is True
+
+
 def test_update_command_for_uv_tool_install(monkeypatch):
     """Standard `uv tool install` setup updates the tool in place with --force."""
     monkeypatch.setattr(update.shutil, "which", lambda name: "/usr/bin/uv")

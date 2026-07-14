@@ -120,6 +120,50 @@ def test_merge_rejects_blank_output() -> None:
     assert mgr.state == "idle"
 
 
+def test_monitor_survives_non_utf8_replacement_char() -> None:
+    """A non-UTF-8 byte from the merge subprocess decodes (via
+    errors="replace" on the Popen call in MergeManager.start()) to U+FFFD;
+    _monitor's `for line in iter(self.process.stdout.readline, ""):` loop
+    must process that line without raising. Without errors="replace" a
+    strict decode raises UnicodeDecodeError before any line is read, and
+    since nothing then drains the pipe, a child still writing to it deadlocks
+    in the subsequent process.wait() (see the Popen kwargs comment).
+
+    Calls _monitor() directly on a manually-wired process double rather than
+    going through start()/Popen — this module only tests the pre-subprocess
+    guards otherwise."""
+    from makerlab.merge import MergeManager
+
+    class _FakeStdout:
+        """.readline() double matching text-mode Popen.stdout, yielding a
+        line with the replacement char then the "" sentinel that ends
+        iter(readline, "")."""
+
+        def __init__(self, lines: list[str]) -> None:
+            self._lines = iter(lines)
+
+        def readline(self) -> str:
+            return next(self._lines, "")
+
+    class _FakeProcess:
+        returncode = 0
+
+        def __init__(self, lines: list[str]) -> None:
+            self.stdout = _FakeStdout(lines)
+
+        def wait(self) -> None:
+            return None
+
+    mgr = MergeManager()
+    mgr.process = _FakeProcess(["bad � byte\n"])
+
+    mgr._monitor()  # must not raise
+
+    status = mgr.get_status()
+    assert status["state"] == "done"
+    assert any("�" in log["message"] for log in status["logs"])
+
+
 def test_merge_status_shape_when_idle() -> None:
     from makerlab.merge import MergeManager
 

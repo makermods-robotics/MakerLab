@@ -237,6 +237,7 @@ def handle_run_update() -> UpdateResult:
             capture_output=True,
             text=True,
             encoding="utf-8",
+            errors="replace",
             timeout=600,
             env=child_env,
         )

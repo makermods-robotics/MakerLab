@@ -192,6 +192,43 @@ def test_resolve_cloud_resume_rejects_missing_repo() -> None:
         _resolve_cloud_resume(_cloud_record(repo_id=None), None)
 
 
+def test_pump_stdout_survives_non_utf8_replacement_char() -> None:
+    """A non-UTF-8 byte from the training subprocess decodes (via
+    errors="replace" on the Popen call in LocalJobRunner.start()) to U+FFFD;
+    _pump_stdout's `for line in iter(self._process.stdout.readline, ""):`
+    loop must process that line without raising. Without errors="replace" a
+    strict decode raises UnicodeDecodeError before any line is read, and
+    since nothing then drains the pipe, a child still writing to it deadlocks
+    in the subsequent proc.wait() (see the Popen kwargs comment).
+
+    Calls _pump_stdout() directly on a manually-wired runner rather than
+    going through start()/Popen — this module deliberately doesn't exercise
+    LocalJobRunner.start() (see module docstring)."""
+    from types import SimpleNamespace
+
+    from makerlab.jobs import LocalJobRunner, TrainingMetrics
+
+    class _FakeStdout:
+        """.readline() double matching text-mode Popen.stdout, yielding a
+        line with the replacement char then the "" sentinel that ends
+        iter(readline, "")."""
+
+        def __init__(self, lines: list[str]) -> None:
+            self._lines = iter(lines)
+
+        def readline(self) -> str:
+            return next(self._lines, "")
+
+    runner = LocalJobRunner(TrainingMetrics())
+    runner._process = SimpleNamespace(stdout=_FakeStdout(["bad � byte\n"]))
+
+    runner._pump_stdout()  # must not raise
+
+    lines = runner.stream_log_lines()
+    assert len(lines) == 1
+    assert "�" in lines[0].message
+
+
 def test_extract_wandb_run_url_finds_canonical_url() -> None:
     from makerlab.jobs import extract_wandb_run_url
 

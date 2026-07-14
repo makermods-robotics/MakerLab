@@ -157,6 +157,41 @@ def test_auto_calibration_launches_captures_logs_and_completes(
     assert any("Stage 0" in line for line in status["logs"])
 
 
+def test_auto_calibration_survives_non_utf8_replacement_char(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-UTF-8 byte from the child decodes (via errors="replace" on the
+    Popen call) to U+FFFD; the log-reader loop (`for line in proc.stdout:` in
+    _run()) must process that line without raising. Without errors="replace"
+    a strict decode raises UnicodeDecodeError before any line is read, and
+    since nothing then drains the pipe, a child still writing to it deadlocks
+    in the subsequent proc.wait() — see the Popen kwargs comment."""
+    import makerlab.auto_calibrate as ac
+
+    class FakeProc:
+        def __init__(self) -> None:
+            self.stdout = iter(["bad � byte\n", "calibration done\n"])
+
+        def wait(self) -> int:
+            return 0
+
+        def terminate(self) -> None:
+            pass
+
+    monkeypatch.setattr(ac.subprocess, "Popen", lambda *a, **k: FakeProc())
+
+    mgr = ac.AutoCalibrationManager()
+    result = mgr.start(ac.AutoCalibrationRequest(device_type="robot", port="/dev/x", config_file="my_arm"))
+    assert result["success"] is True
+
+    if mgr._thread is not None:
+        mgr._thread.join(timeout=2)
+
+    status = mgr.get_status()
+    assert status["status"] == "completed"
+    assert any("�" in line for line in status["logs"])
+
+
 def test_stop_graceful_reaches_stopped_and_releases_torque(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

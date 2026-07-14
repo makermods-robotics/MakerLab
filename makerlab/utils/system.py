@@ -119,6 +119,7 @@ class InstallManager:
                 stderr=subprocess.STDOUT,
                 universal_newlines=True,
                 encoding="utf-8",
+                errors="replace",
                 bufsize=1,
                 env=child_env,
             )

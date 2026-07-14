@@ -259,6 +259,46 @@ def test_install_failure_does_not_invalidate_caches(monkeypatch) -> None:
     assert mgr.get_status()["state"] == "error"
 
 
+def test_monitor_survives_non_utf8_replacement_char() -> None:
+    """A non-UTF-8 byte from the pip/uv subprocess decodes (via
+    errors="replace" on the Popen call in InstallManager.start()) to U+FFFD;
+    _monitor's `for line in iter(self.process.stdout.readline, ""):` loop
+    must process that line without raising. Without errors="replace" a
+    strict decode raises UnicodeDecodeError before any line is read, and
+    since nothing then drains the pipe, a child still writing to it deadlocks
+    in the subsequent process.wait() (see the Popen kwargs comment)."""
+    from makerlab.utils import system
+
+    class _FakeStdout:
+        """.readline() double matching text-mode Popen.stdout, yielding a
+        line with the replacement char then the "" sentinel that ends
+        iter(readline, "")."""
+
+        def __init__(self, lines: list[str]) -> None:
+            self._lines = iter(lines)
+
+        def readline(self) -> str:
+            return next(self._lines, "")
+
+    class _FakeProcess:
+        returncode = 0
+
+        def __init__(self, lines: list[str]) -> None:
+            self.stdout = _FakeStdout(lines)
+
+        def wait(self) -> None:
+            return None
+
+    mgr = system.InstallManager("some-package")
+    mgr.process = _FakeProcess(["bad � byte\n"])
+
+    mgr._monitor()  # must not raise
+
+    status = mgr.get_status()
+    assert status["state"] == "done"
+    assert any("�" in log["message"] for log in status["logs"])
+
+
 def test_policy_extra_install_is_noop_for_core_policy() -> None:
     from makerlab.utils.system import handle_install_policy_extra, handle_install_policy_extra_status
 
