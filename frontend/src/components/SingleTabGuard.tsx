@@ -3,9 +3,17 @@ import { Button } from "@/components/ui/button";
 
 type Peer = { id: string; openedAt: number; lastSeen: number };
 
-const CHANNEL = "lelab-tabs-v1";
+const CHANNEL = "makerlab-tabs-v1";
 const HEARTBEAT_MS = 1000;
 const PEER_TIMEOUT_MS = 3000;
+
+// crypto.randomUUID only exists in secure contexts (https/localhost); when the
+// UI is served over plain HTTP on a LAN host, fall back to a non-crypto id —
+// the tab election only needs uniqueness.
+const newTabId = (): string =>
+  typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 
 const SingleTabGuard = ({ children }: { children: ReactNode }) => {
   const [isPrimary, setIsPrimary] = useState(true);
@@ -39,7 +47,7 @@ const SingleTabGuard = ({ children }: { children: ReactNode }) => {
       return;
     }
 
-    myIdRef.current = crypto.randomUUID();
+    myIdRef.current = newTabId();
     myOpenedAtRef.current = Date.now();
 
     const channel = new BroadcastChannel(CHANNEL);
@@ -119,7 +127,7 @@ const SingleTabGuard = ({ children }: { children: ReactNode }) => {
         >
           <div className="mx-4 max-w-md space-y-4 rounded-lg border bg-background p-6 text-center shadow-lg">
             <h2 className="text-lg font-semibold">
-              LeLab is already open in another tab
+              MakerLab is already open in another tab
             </h2>
             <p className="text-sm text-muted-foreground">
               Only one tab can control the robot at a time. Switch back to the

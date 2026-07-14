@@ -23,6 +23,12 @@ import CameraConfiguration, {
 } from "@/components/recording/CameraConfiguration";
 import { useHfAuth } from "@/contexts/HfAuthContext";
 import { RobotRecord } from "@/hooks/useRobots";
+import { validateDatasetName } from "@/lib/datasetName";
+import { DatasetInfo } from "@/lib/replayApi";
+
+/** The fps every MakerLab recording session uses (hardcoded in the recording
+ * config Landing builds) — compared against a resumed dataset's fps. */
+const RECORDING_FPS = 30;
 
 interface RecordingModalProps {
   open: boolean;
@@ -44,7 +50,64 @@ interface RecordingModalProps {
   setCameras: (cameras: CameraConfig[]) => void;
   onStart: () => void;
   releaseStreamsRef?: React.MutableRefObject<(() => void) | null>;
+  /** When set, the modal configures a RESUME session appending episodes to
+   * this existing dataset (its /datasets/info summary): the name field is
+   * replaced by a fixed "adding to <repo_id>" line, the episodes field is
+   * relabeled, and a non-blocking compatibility advisory compares the
+   * dataset's cameras/fps/robot type against the session about to start. The
+   * backend's sanity check remains the hard gate. */
+  resumeInfo?: DatasetInfo | null;
 }
+
+/** Compatibility advisory lines for a resume session: dataset cameras vs the
+ * configured camera names, dataset fps vs the fixed session fps, dataset
+ * robot_type vs the selected robot's implied type. Warn-and-allow — the
+ * backend's sanity_check_dataset_robot_compatibility is the hard gate; this
+ * just surfaces likely mismatches before hardware spins up. */
+const resumeMismatches = (
+  info: DatasetInfo,
+  cameras: CameraConfig[],
+  robot: RobotRecord | null,
+): string[] => {
+  const out: string[] = [];
+
+  // Compare dataset keys against the camera names AS THE DATASET WILL SEE
+  // THEM: a bimanual session's cameras ride the LEFT arm and lerobot's BiSO
+  // wrapper prefixes each dataset feature with `left_` (record names stay
+  // unprefixed everywhere in the UI — naming a camera `left_front` in the
+  // record would produce the double-prefixed `left_left_front`; see the
+  // matching note in InferenceModal). Comparing raw record names against
+  // dataset keys made every bimanual resume a false "cameras differ" warning.
+  const datasetKey = (name: string) =>
+    robot?.mode === "bimanual" ? `left_${name}` : name;
+  const configured = cameras.map((c) => datasetKey(c.name)).sort();
+  const recorded = [...info.cameras].sort();
+  if (
+    recorded.length > 0 &&
+    (configured.length !== recorded.length ||
+      configured.some((name, i) => name !== recorded[i]))
+  ) {
+    out.push(
+      `Cameras differ — dataset has [${recorded.join(", ") || "none"}], ` +
+        `this session records [${configured.join(", ") || "none"}].`,
+    );
+  }
+
+  if (info.fps != null && info.fps !== RECORDING_FPS) {
+    out.push(`Dataset was recorded at ${info.fps} fps; sessions record at ${RECORDING_FPS} fps.`);
+  }
+
+  if (robot && info.robot_type) {
+    const implied = robot.mode === "bimanual" ? "bi_so_follower" : "so101_follower";
+    if (info.robot_type !== implied) {
+      out.push(
+        `Dataset robot type is "${info.robot_type}"; the selected robot records as "${implied}".`,
+      );
+    }
+  }
+
+  return out;
+};
 
 const RecordingModal: React.FC<RecordingModalProps> = ({
   open,
@@ -66,10 +129,20 @@ const RecordingModal: React.FC<RecordingModalProps> = ({
   setCameras,
   onStart,
   releaseStreamsRef,
+  resumeInfo = null,
 }) => {
   const { auth } = useHfAuth();
 
-  const canStart = !!robot && robot.is_clean;
+  const isResume = resumeInfo !== null;
+
+  // null when the name is valid; a message otherwise (incl. empty). Mirrors the
+  // backend, so Start can't fire a recording the recorder will reject. A resume
+  // session reuses the existing dataset's on-disk id verbatim — no name entry,
+  // so no name gate (the backend validates the full repo id).
+  const nameError = validateDatasetName(datasetName);
+  const canStart = !!robot && robot.is_clean && (isResume || nameError === null);
+
+  const mismatches = isResume ? resumeMismatches(resumeInfo, cameras, robot) : [];
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -81,13 +154,43 @@ const RecordingModal: React.FC<RecordingModalProps> = ({
             </div>
           </div>
           <DialogTitle className="text-white text-center text-2xl font-bold">
-            Configure Recording
+            {isResume ? "Record More Episodes" : "Configure Recording"}
           </DialogTitle>
         </DialogHeader>
         <div className="space-y-6 py-4">
           <DialogDescription className="text-gray-400 text-base leading-relaxed text-center">
-            Pick a configured robot and dataset parameters for recording.
+            {isResume ? (
+              <>
+                Adding episodes to{" "}
+                <span className="break-all font-mono text-gray-300">
+                  {resumeInfo?.repo_id}
+                </span>
+                .
+              </>
+            ) : (
+              "Pick a configured robot and dataset parameters for recording."
+            )}
           </DialogDescription>
+
+          {/* Resume compatibility advisory — warn-and-allow. The backend's
+              dataset/robot sanity check is the hard gate; this surfaces likely
+              mismatches (cameras / fps / robot type) before hardware moves. */}
+          {isResume && mismatches.length > 0 && (
+            <Alert className="bg-amber-900/40 border-amber-700 text-amber-100">
+              <AlertTriangle className="h-4 w-4" />
+              <AlertDescription>
+                <p className="font-medium">
+                  This session may not match the dataset — recording can fail at
+                  start:
+                </p>
+                <ul className="mt-1 list-disc space-y-0.5 pl-4 text-xs">
+                  {mismatches.map((m) => (
+                    <li key={m}>{m}</li>
+                  ))}
+                </ul>
+              </AlertDescription>
+            </Alert>
+          )}
 
           <div className="grid grid-cols-1 gap-6">
             <div className="space-y-4">
@@ -125,43 +228,48 @@ const RecordingModal: React.FC<RecordingModalProps> = ({
                 Dataset Configuration
               </h3>
               <div className="grid grid-cols-1 gap-4">
-                <div className="space-y-2">
-                  <Label
-                    htmlFor="datasetName"
-                    className="text-sm font-medium text-gray-300"
-                  >
-                    Dataset Name *
-                  </Label>
-                  <Input
-                    id="datasetName"
-                    value={datasetName}
-                    onChange={(e) =>
-                      setDatasetName(
-                        e.target.value.replace(/[^A-Za-z0-9._-]/g, "_")
-                      )
-                    }
-                    placeholder="my_dataset"
-                    className="bg-gray-800 border-gray-700 text-white"
-                  />
-                  <p className="text-xs text-gray-500">
-                    Letters, numbers, <code>.</code> <code>_</code>{" "}
-                    <code>-</code> only — other characters become{" "}
-                    <code>_</code>.
-                  </p>
-                  {datasetName &&
-                    (auth.status === "authenticated" ? (
+                {/* Resume appends to an existing on-disk dataset — its repo id
+                    is fixed (shown in the header), so no name entry. */}
+                {!isResume && (
+                  <div className="space-y-2">
+                    <Label
+                      htmlFor="datasetName"
+                      className="text-sm font-medium text-gray-300"
+                    >
+                      Dataset Name *
+                    </Label>
+                    <Input
+                      id="datasetName"
+                      value={datasetName}
+                      onChange={(e) => setDatasetName(e.target.value)}
+                      placeholder="my_dataset"
+                      aria-invalid={!!datasetName.trim() && nameError !== null}
+                      className="bg-gray-800 border-gray-700 text-white aria-[invalid=true]:border-red-500/70"
+                    />
+                    {datasetName.trim() && nameError ? (
+                      <p className="text-xs text-red-400">{nameError}</p>
+                    ) : (
                       <p className="text-xs text-gray-500">
-                        Will be saved as{" "}
-                        <span className="text-gray-300 font-mono">
-                          {auth.username}/{datasetName}
-                        </span>
+                        Letters, numbers, <code>.</code> <code>_</code>{" "}
+                        <code>-</code> only; start and end with a letter or
+                        number.
                       </p>
-                    ) : auth.status === "unauthenticated" ? (
-                      <p className="text-xs text-amber-400/80">
-                        Log in to Hugging Face to set the repository owner.
-                      </p>
-                    ) : null)}
-                </div>
+                    )}
+                    {datasetName &&
+                      (auth.status === "authenticated" ? (
+                        <p className="text-xs text-gray-500">
+                          Will be saved as{" "}
+                          <span className="text-gray-300 font-mono">
+                            {auth.username}/{datasetName}
+                          </span>
+                        </p>
+                      ) : auth.status === "unauthenticated" ? (
+                        <p className="text-xs text-amber-400/80">
+                          Log in to Hugging Face to set the repository owner.
+                        </p>
+                      ) : null)}
+                  </div>
+                )}
                 <div className="space-y-2">
                   <Label
                     htmlFor="singleTask"
@@ -182,7 +290,7 @@ const RecordingModal: React.FC<RecordingModalProps> = ({
                     htmlFor="numEpisodes"
                     className="text-sm font-medium text-gray-300"
                   >
-                    Number of Episodes
+                    {isResume ? "Episodes to add" : "Number of Episodes"}
                   </Label>
                   <NumberInput
                     id="numEpisodes"
