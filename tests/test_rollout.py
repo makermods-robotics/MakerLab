@@ -255,7 +255,7 @@ def test_resolve_policy_path_resolves_hub_ref(monkeypatch: pytest.MonkeyPatch, t
         seen_kwargs.update(kwargs)
         return str(fake_root)
 
-    monkeypatch.setattr("huggingface_hub.snapshot_download", fake_snapshot_download)
+    monkeypatch.setattr("makerlab.rollout.snapshot_download", fake_snapshot_download)
 
     result = _resolve_policy_path("user/my-repo@checkpoints/000050")
 
@@ -280,7 +280,7 @@ def test_resolve_policy_path_resolves_hub_root_ref(monkeypatch, tmp_path) -> Non
         seen.update(kwargs)
         return str(fake_root)
 
-    monkeypatch.setattr("huggingface_hub.snapshot_download", fake_snapshot_download)
+    monkeypatch.setattr("makerlab.rollout.snapshot_download", fake_snapshot_download)
     result = _resolve_policy_path("user/repo@root")
     assert seen["repo_id"] == "user/repo"
     # Byte-scoping: no allow_patterns (the whole root IS the model), but the
@@ -682,7 +682,7 @@ def test_resolve_policy_path_sets_downloading_model_phase(monkeypatch, tmp_path)
         seen_phase["phase"] = rollout._inference_meta.get("phase")
         return str(tmp_path)
 
-    monkeypatch.setattr("huggingface_hub.snapshot_download", fake_snapshot_download)
+    monkeypatch.setattr("makerlab.rollout.snapshot_download", fake_snapshot_download)
     rollout._resolve_policy_path("user/repo@root")
 
     assert seen_phase["phase"] == rollout.PHASE_DOWNLOADING_MODEL
@@ -1000,7 +1000,7 @@ def test_download_progress_reported_into_status(monkeypatch) -> None:
         bar.update(250)
         return "/tmp/snap"
 
-    monkeypatch.setattr("huggingface_hub.snapshot_download", fake_snapshot_download)
+    monkeypatch.setattr("makerlab.rollout.snapshot_download", fake_snapshot_download)
     rollout._resolve_policy_path("user/repo@checkpoints/000050", report=rollout._report_download_progress)
 
     assert rollout._inference_meta["phase"] == rollout.PHASE_DOWNLOADING_MODEL
@@ -1026,7 +1026,7 @@ def test_download_percent_is_none_until_total_known(monkeypatch) -> None:
         bar.update(128)  # bytes trickling in before any total is known
         return "/tmp/snap"
 
-    monkeypatch.setattr("huggingface_hub.snapshot_download", fake_snapshot_download)
+    monkeypatch.setattr("makerlab.rollout.snapshot_download", fake_snapshot_download)
     rollout._resolve_policy_path("user/repo@root", report=rollout._report_download_progress)
 
     status = rollout.handle_inference_status()

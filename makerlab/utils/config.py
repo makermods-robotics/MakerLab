@@ -31,11 +31,6 @@ CALIBRATION_BASE_PATH_ROBOTS = os.path.expanduser("~/.cache/huggingface/lerobot/
 LEADER_CONFIG_PATH = os.path.join(CALIBRATION_BASE_PATH_TELEOP, "so_leader")
 FOLLOWER_CONFIG_PATH = os.path.join(CALIBRATION_BASE_PATH_ROBOTS, "so_follower")
 
-# Define port storage path
-PORT_CONFIG_PATH = os.path.expanduser("~/.cache/huggingface/lerobot/ports")
-LEADER_PORT_FILE = os.path.join(PORT_CONFIG_PATH, "leader_port.txt")
-FOLLOWER_PORT_FILE = os.path.join(PORT_CONFIG_PATH, "follower_port.txt")
-
 # Robot config records (per-robot JSON metadata)
 ROBOTS_PATH = os.path.expanduser("~/.cache/huggingface/lerobot/robots")
 
@@ -115,14 +110,6 @@ def _atomic_write_text(path: str, content: str) -> None:
     with open(tmp, "w") as f:
         f.write(content)
     os.replace(tmp, path)
-
-
-def _port_file_for(robot_type: RobotSide) -> str:
-    if robot_type == "leader":
-        return LEADER_PORT_FILE
-    if robot_type == "follower":
-        return FOLLOWER_PORT_FILE
-    raise ValueError(f"robot_type must be 'leader' or 'follower', got {robot_type!r}")
 
 
 def _require_assigned_config(config: str, side: str) -> None:
@@ -241,28 +228,6 @@ def find_available_ports():
         patterns = ("tty.usbmodem*", "tty.usbserial*", "ttyUSB*", "ttyACM*")
         ports = [str(path) for pattern in patterns for path in Path("/dev").glob(pattern)]
     return sorted(ports)
-
-
-def get_saved_robot_port(robot_type: RobotSide) -> str | None:
-    """Return the saved port for `robot_type`, or None if no file exists."""
-    port_file = _port_file_for(robot_type)
-    if not os.path.exists(port_file):
-        logger.info(f"No saved port found for {robot_type}")
-        return None
-    with open(port_file) as f:
-        port = f.read().strip()
-    logger.info(f"Retrieved saved {robot_type} port: {port}")
-    return port
-
-
-def get_default_robot_port(robot_type: RobotSide) -> str:
-    """Saved port if present, else a platform-typical default."""
-    saved_port = get_saved_robot_port(robot_type)
-    if saved_port:
-        return saved_port
-    if platform.system() == "Windows":
-        return "COM3"
-    return "/dev/ttyUSB0"
 
 
 # ---------------------------------------------------------------------------

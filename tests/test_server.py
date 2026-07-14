@@ -133,6 +133,25 @@ def test_delete_unused_calibration_config_reports_no_unassignments(
     assert not config_file.exists()
 
 
+def test_get_calibration_configs_returns_sorted(
+    client: TestClient, tmp_lerobot_home, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The config listing is sorted case-insensitively by filename, regardless of
+    on-disk (os.listdir) order, so the dropdown is deterministic."""
+    monkeypatch.setattr(server_mod, "LEADER_CONFIG_PATH", cfg.LEADER_CONFIG_PATH)
+    # Seed out-of-order names, including mixed case.
+    for name in ("zeta", "Alpha", "beta", "Charlie"):
+        (Path(cfg.LEADER_CONFIG_PATH) / f"{name}.json").write_text("{}")
+
+    resp = client.get("/calibration-configs/teleop")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["success"] is True
+    names = [c["name"] for c in body["configs"]]
+    assert names == sorted(names, key=str.lower)
+    assert names == ["Alpha", "beta", "Charlie", "zeta"]
+
+
 def test_upsert_robot_rejects_same_side_config_conflict(client: TestClient, tmp_lerobot_home) -> None:
     """Assigning one config to both same-side arms of a bimanual robot is a 409."""
     client.post(
@@ -258,6 +277,9 @@ def test_policy_optimizer_defaults_reports_availability(client: TestClient) -> N
     assert data["available"]["act"] is True
     assert data["defaults"]["act"] is not None
     assert data["available"]["pi0_fast"] is True
+    assert data["available"]["gaussian_actor"] is True
+    assert data["defaults"]["gaussian_actor"] is not None
+    assert "sac" not in data["available"]
     assert data["available"]["reward_classifier"] is False
     assert data["defaults"]["reward_classifier"] is None
 

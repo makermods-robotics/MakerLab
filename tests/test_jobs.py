@@ -448,7 +448,7 @@ def test_read_checkpoint_config_hub_root(monkeypatch, tmp_path) -> None:
         seen.update(kwargs)
         return str(cfg_file)
 
-    monkeypatch.setattr("huggingface_hub.hf_hub_download", fake_download)
+    monkeypatch.setattr("makerlab.jobs.hf_hub_download", fake_download)
     ckpt = JobCheckpoint(step=0, source="hub", ref="user/repo@root")
     assert _read_checkpoint_config(ckpt) == {"type": "smolvla"}
     assert seen["repo_id"] == "user/repo"
@@ -466,7 +466,7 @@ def test_read_checkpoint_config_hub_tree(monkeypatch, tmp_path) -> None:
         seen.update(kwargs)
         return str(cfg_file)
 
-    monkeypatch.setattr("huggingface_hub.hf_hub_download", fake_download)
+    monkeypatch.setattr("makerlab.jobs.hf_hub_download", fake_download)
     ckpt = JobCheckpoint(step=50, source="hub", ref="user/repo@checkpoints/000050")
     assert _read_checkpoint_config(ckpt) == {"type": "act"}
     assert seen["repo_id"] == "user/repo"

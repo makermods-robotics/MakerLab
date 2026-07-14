@@ -36,9 +36,10 @@ from pathlib import Path
 from queue import Empty, Queue
 from typing import Literal, Protocol, runtime_checkable
 
+from huggingface_hub import hf_hub_download
 from pydantic import BaseModel
 
-from .train import TrainingRequest
+from .train import _SLUG_RE, TrainingRequest, build_training_command
 from .utils.config import is_valid_robot_name
 from .utils.hf_auth import shared_hf_api
 
@@ -315,8 +316,6 @@ class LocalJobRunner:
         self._resume_total = _resume_total_steps(config)
 
         # Build the command via the helper that lives in train.py.
-        from .train import build_training_command  # avoid import cycle at module load
-
         cmd = build_training_command(config, output_dir, sys.executable)
         logger.info("Starting job %s: %s", job_id, " ".join(cmd))
 
@@ -819,8 +818,6 @@ def _read_checkpoint_config(ckpt: JobCheckpoint) -> dict[str, object]:
     if ckpt.source == "local":
         with open(Path(ckpt.ref) / "config.json") as f:
             return json.load(f)
-    from huggingface_hub import hf_hub_download
-
     m = _HUB_CKPT_REF_RE.match(ckpt.ref)
     if m:
         repo_id = m.group("repo")
@@ -857,8 +854,6 @@ def _flat_feature_dim(feat: object) -> int | None:
 
 def _generate_job_id(policy_type: str, dataset_repo_id: str) -> str:
     """Build a sortable, collision-free job id from policy type and dataset slug."""
-    from .train import _SLUG_RE
-
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     dataset_slug = _SLUG_RE.sub("_", dataset_repo_id).strip("_") or "dataset"
     return f"{policy_type}_{dataset_slug}_{timestamp}"

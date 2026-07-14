@@ -1058,32 +1058,17 @@ const Calibration = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isPolling]);
 
-  // Load default port when device type changes (skip when arriving from a tile —
-  // the robot-record prefill above wins)
+  // With no named robot profile, pre-fill the port field with the first detected
+  // serial port once the port list arrives (skip when arriving from a tile — the
+  // robot-record prefill above wins). Only fills an empty field so a user choice
+  // isn't clobbered.
   useEffect(() => {
-    const loadDefaultPort = async () => {
-      if (!deviceType) return;
-      if (robotName) return;
-
-      try {
-        const robotType = deviceType === "robot" ? "follower" : "leader";
-        const response = await fetchWithHeaders(
-          `${baseUrl}/robot-port/${robotType}`,
-        );
-        const data = await response.json();
-        if (data.status === "success") {
-          const portToUse = data.saved_port || data.default_port;
-          if (portToUse) {
-            setPort(portToUse);
-          }
-        }
-      } catch (error) {
-        console.error("Error loading default port:", error);
-      }
-    };
-
-    loadDefaultPort();
-  }, [deviceType, robotName, baseUrl, fetchWithHeaders]);
+    if (robotName) return;
+    if (port) return;
+    if (availablePorts.length > 0) {
+      setPort(availablePorts[0]);
+    }
+  }, [robotName, port, availablePorts]);
 
   const handleDeviceTypeChange = (next: string) => {
     setDeviceType(next);

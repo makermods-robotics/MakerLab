@@ -55,7 +55,7 @@ All under `~/.cache/huggingface/lerobot/` (managed in [utils/config.py](makerlab
 
 - `calibration/teleoperators/so101_leader/*.json` — leader calibration files (also called "teleop")
 - `calibration/robots/so101_follower/*.json` — follower calibration files (also called "robot")
-- `ports/{leader,follower}_port.txt` — legacy last-used serial ports (read-only: still honored as the default port by `GET /robot-port/{robot_type}`, but nothing writes them anymore — robot records own port persistence)
+- `ports/{leader,follower}_port.txt` — legacy last-used serial ports, now fully vestigial: nothing writes them and nothing reads them anymore (the old `GET /robot-port/{robot_type}` endpoint and its helpers were removed). Robot records own port persistence; the Calibration page pre-fills the port field from the first entry of `GET /available-ports` when no named robot profile is selected.
 
 `device_type` in API requests is `"teleop"` or `"robot"` (mapped to leader/follower paths). `robot_type` in port endpoints is `"leader"` or `"follower"`. Don't conflate the two vocabularies.
 

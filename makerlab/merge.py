@@ -278,7 +278,7 @@ def _merge_incompatibility(repo_ids: list[str]) -> str | None:
                 continue  # camera differences handled above
             base_spec = base_features.get(key)
             other_spec = other_features.get(key)
-            if base_spec is None or other_spec is None:
+            if base_spec is None or other_spec is None:  # noqa: SIM114 — missing feature spec vs shape mismatch are distinct cases; merging the branches would obscure that
                 differing.append(key)
             elif (
                 isinstance(base_spec, dict)

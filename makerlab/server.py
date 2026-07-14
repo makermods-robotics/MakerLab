@@ -20,6 +20,7 @@ import io
 import json
 import logging
 import os
+import platform
 import queue
 import re
 import subprocess
@@ -27,8 +28,9 @@ import sys
 import threading
 import time
 import zipfile
+from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -120,10 +122,8 @@ from .utils.config import (
     config_slot_conflict,
     delete_robot_record,
     find_available_ports,
-    get_default_robot_port,
     get_dismissed_hub_jobs,
     get_robot_record,
-    get_saved_robot_port,
     is_robot_record_clean,
     is_valid_robot_name,
     list_robot_records,
@@ -425,7 +425,7 @@ _POLICY_TYPE_TO_LEROBOT = {
     "tdmpc": "tdmpc",
     "vqbet": "vqbet",
     "pi0_fast": "pi0_fast",
-    "sac": "sac",
+    "gaussian_actor": "gaussian_actor",
     "reward_classifier": "reward_classifier",
 }
 
@@ -1816,8 +1816,6 @@ def stop_calibration():
 @app.get("/calibration-status")
 def calibration_status():
     """Get current calibration status"""
-    from dataclasses import asdict
-
     status = calibration_manager.get_status()
     return asdict(status)
 
@@ -1882,10 +1880,11 @@ def get_calibration_configs(device_type: str):
         else:
             return {"success": False, "message": "Invalid device type"}
 
-        # Get all JSON files in the config directory
+        # Get all JSON files in the config directory. Sort case-insensitively by
+        # filename so the dropdown order is deterministic (os.listdir is arbitrary).
         configs = []
         if os.path.exists(config_path):
-            for file in os.listdir(config_path):
+            for file in sorted(os.listdir(config_path), key=str.lower):
                 if file.endswith(".json"):
                     config_name = os.path.splitext(file)[0]
                     file_path = os.path.join(config_path, file)
@@ -2325,8 +2324,6 @@ def get_available_cameras():
     match" with an empty device_id (issues #12, #16).
     """
     try:
-        import platform
-
         system = platform.system()
 
         if system == "Darwin":
@@ -2348,17 +2345,6 @@ def get_available_cameras():
     except Exception as e:
         logger.error(f"Error detecting cameras: {e}")
         return {"status": "error", "message": str(e), "cameras": []}
-
-
-RobotSideLiteral = Literal["leader", "follower"]
-
-
-@app.get("/robot-port/{robot_type}")
-def get_robot_port(robot_type: RobotSideLiteral):
-    """Get the saved port for a robot type"""
-    saved_port = get_saved_robot_port(robot_type)
-    default_port = get_default_robot_port(robot_type)
-    return {"status": "success", "saved_port": saved_port, "default_port": default_port}
 
 
 # ============================================================================

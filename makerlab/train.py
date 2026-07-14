@@ -123,7 +123,7 @@ class TrainingRequest(BaseModel):
     # per-window averages and more log volume.
     log_freq: int = 50
     save_freq: int = 1000
-    eval_freq: int = 0
+    env_eval_freq: int = 0
     save_checkpoint: bool = True
 
     # Output configuration
@@ -311,7 +311,7 @@ def build_training_command(
     # Logging / checkpointing
     cmd.extend(["--log_freq", str(request.log_freq)])
     cmd.extend(["--save_freq", str(request.save_freq)])
-    cmd.extend(["--eval_freq", str(request.eval_freq)])
+    cmd.extend(["--env_eval_freq", str(request.env_eval_freq)])
     cmd.extend(["--save_checkpoint", "true" if request.save_checkpoint else "false"])
 
     # Output

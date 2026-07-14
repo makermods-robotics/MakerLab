@@ -33,10 +33,12 @@ from lerobot.robots import (
     Robot,
     make_robot_from_config,
 )
+from lerobot.robots.so_follower import SO101FollowerConfig
 from lerobot.teleoperators import (
     Teleoperator,
     make_teleoperator_from_config,
 )
+from lerobot.teleoperators.so_leader import SO101LeaderConfig
 from lerobot.utils.utils import init_logging
 
 from .utils.config import calibration_dir_for_device, save_robot_record
@@ -343,12 +345,8 @@ class CalibrationManager:
 
             # Create device configuration
             if request.device_type == "robot":
-                from lerobot.robots.so_follower import SO101FollowerConfig
-
                 config = SO101FollowerConfig(port=request.port, id=request.config_file)
             elif request.device_type == "teleop":
-                from lerobot.teleoperators.so_leader import SO101LeaderConfig
-
                 config = SO101LeaderConfig(port=request.port, id=request.config_file)
             else:
                 raise ValueError(f"Unknown device type: {request.device_type}")

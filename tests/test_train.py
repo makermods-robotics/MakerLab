@@ -34,6 +34,8 @@ def test_minimal_request_yields_well_formed_argv() -> None:
     assert _arg_value(cmd, "--dataset.repo_id") == "lerobot/pusht"
     assert _arg_value(cmd, "--policy.type") == "act"
     assert _arg_value(cmd, "--steps") == "10000"
+    assert _arg_value(cmd, "--env_eval_freq") == "0"
+    assert "--eval_freq" not in cmd
     assert _arg_value(cmd, "--output_dir") == "/tmp/out"
 
 

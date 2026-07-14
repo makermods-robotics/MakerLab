@@ -36,11 +36,13 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from huggingface_hub import snapshot_download
 from pydantic import BaseModel
 from tqdm.auto import tqdm as _base_tqdm
 
 from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
 
+from . import record as _record, teleoperate as _teleoperate
 from .arm_identity import ArmIdentityError, ArmSlot, verify_devices
 from .motor_power import apply_motor_power, clear_goal_velocity
 from .record import _DEFAULT_FOURCC
@@ -168,10 +170,7 @@ def _pump_stdout(proc: subprocess.Popen, log_handle) -> None:
     global _inference_rollout_started_at
     try:
         for raw in iter(proc.stdout.readline, b""):
-            try:
-                line = raw.decode("utf-8", errors="replace")
-            except Exception:
-                continue
+            line = raw.decode("utf-8", errors="replace")
             try:
                 log_handle.write(line)
                 log_handle.flush()
@@ -315,7 +314,6 @@ def _resolve_policy_path(policy_ref: str, report: Callable[[int, int | None], No
     if Path(policy_ref).is_dir():
         # A local checkpoint — nothing to fetch, so no downloading_model phase.
         return policy_ref
-    from huggingface_hub import snapshot_download
 
     # A Hub ref: snapshot_download may pull hundreds of MB and take minutes.
     # Announce it (downloading_model phase) so the UI names the wait, and feed
@@ -897,8 +895,6 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
     global inference_active, _inference_started_at, _inference_meta, _inference_cancel
 
     # Mutex with teleop and recording: all three drive the same serial bus.
-    from . import record as _record, teleoperate as _teleoperate
-
     with _state_lock:
         if _teleoperate.teleoperation_active:
             return {

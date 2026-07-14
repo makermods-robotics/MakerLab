@@ -36,10 +36,12 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import shutil
 import threading
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -52,7 +54,10 @@ from .datasets import (
     _lerobot_cache_root,
 )
 from .jobs import (
+    JobNotFoundError,
+    JobNotRunningError,
     JobRecord,
+    _list_imported_hub,
     _list_local_checkpoints,
     _read_checkpoint_config,
     job_registry,
@@ -88,7 +93,7 @@ KNOWN_POLICY_TYPES = {
     "vqbet",
     "pi0",
     "pi05",
-    "sac",
+    "gaussian_actor",
     "smolvla",
     "wall_x",
     "pi0_fast",
@@ -227,8 +232,6 @@ def _local_model_summary(record: JobRecord, pretrained_dir: Path) -> dict[str, A
 
 
 def _epoch_iso(ts: float | None) -> str | None:
-    from datetime import UTC, datetime
-
     if ts is None:
         return None
     try:
@@ -267,8 +270,6 @@ def _find_local_record(model_id: str) -> JobRecord | None:
     None when the id is unknown, isn't a local run, isn't done, or left no
     checkpoint — the same qualification `list_local_models` applies, so callers
     (info / upload / delete) agree on what a "local model" is."""
-    from .jobs import JobNotFoundError
-
     try:
         record = job_registry.get(model_id)
     except JobNotFoundError:
@@ -674,8 +675,6 @@ def list_all_models() -> list[dict[str, Any]]:
 
 def _dir_size_bytes(path: Path) -> int:
     """Total size of all files under `path`. Unreadable files are skipped."""
-    import os
-
     total = 0
     for dirpath, _dirnames, filenames in os.walk(path):
         for name in filenames:
@@ -743,8 +742,6 @@ def _hub_model_probe(repo_id: str) -> dict[str, Any] | None:
     Hub calls (list_repo_files + hf_hub_download), so it's the FALLBACK when the
     single model_info call fails or leaves the policy type unknown. Returns None
     if the repo has no usable model config (or can't be read)."""
-    from .jobs import _list_imported_hub
-
     api = shared_hf_api()
     checkpoints = _list_imported_hub(api, repo_id)
     if not checkpoints:
@@ -1005,8 +1002,6 @@ def delete_local_model(model_id: str) -> dict[str, Any]:
 
     Returns {deleted: True, id}. Raises ModelError (404 unknown, 409 running,
     400 unsafe path, 502 delete failure)."""
-    from .jobs import JobNotFoundError, JobNotRunningError
-
     try:
         record = job_registry.get(model_id)
     except JobNotFoundError as exc:

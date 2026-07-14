@@ -34,6 +34,7 @@ from huggingface_hub import (
 )
 from huggingface_hub.errors import HfHubHTTPError
 
+from . import merge as _merge
 from .utils.config import (
     get_hidden_datasets,
     get_saved_custom_datasets,
@@ -726,8 +727,6 @@ def _dataset_in_use(repo_id: str) -> str | None:
         return "This dataset is being uploaded to the Hub right now. Wait for it to finish."
 
     # Merge: merge.py exposes a MergeManager singleton with state + output id.
-    from . import merge as _merge
-
     mgr = _merge.merge_manager
     if mgr.state == "running" and mgr.output_repo_id == repo_id:
         return "A merge is producing this dataset right now. Wait for it to finish first."

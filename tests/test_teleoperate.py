@@ -249,7 +249,7 @@ class _FakePortHandler:
         self.is_using = True
         self.clear_calls = 0
 
-    def clearPort(self) -> None:
+    def clearPort(self) -> None:  # noqa: N802 — camelCase mimics the real Feetech SDK method this fakes
         self.clear_calls += 1
 
 

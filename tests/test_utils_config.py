@@ -34,24 +34,6 @@ def _patch_robots_path(tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(cfg, "ROBOTS_PATH", str(robots_dir))
 
 
-def test_get_saved_robot_port_reads_legacy_port_files(tmp_lerobot_home: Path) -> None:
-    from makerlab.utils import config as cfg
-
-    # Nothing writes these files anymore, but existing installs still have
-    # them; the read path keeps honoring them as the default port.
-    Path(cfg.LEADER_PORT_FILE).write_text("/dev/ttyUSB0")
-    Path(cfg.FOLLOWER_PORT_FILE).write_text("/dev/ttyUSB1")
-
-    assert cfg.get_saved_robot_port("leader") == "/dev/ttyUSB0"
-    assert cfg.get_saved_robot_port("follower") == "/dev/ttyUSB1"
-
-
-def test_get_saved_robot_port_returns_none_when_unset(tmp_lerobot_home: Path) -> None:
-    from makerlab.utils import config as cfg
-
-    assert cfg.get_saved_robot_port("leader") is None
-
-
 def test_is_valid_robot_name_accepts_simple_names(tmp_lerobot_home: Path) -> None:
     from makerlab.utils import config as cfg
 
