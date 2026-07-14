@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for lelab.torque — the shared per-bus torque release helper."""
+"""Tests for makerlab.torque — the shared per-bus torque release helper."""
 
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ class _FakeBus:
 
 
 def test_force_disable_bus_torque_disables_every_motor() -> None:
-    from lelab.torque import force_disable_bus_torque
+    from makerlab.torque import force_disable_bus_torque
 
     bus = _FakeBus()
     problems = force_disable_bus_torque(bus, "auto-calibration arm")
@@ -48,7 +48,7 @@ def test_force_disable_bus_torque_reports_failed_motor_and_port() -> None:
     problem message must be unmistakable: it names the port and warns that
     torque may still be enabled (the arm stays rigid until power is pulled).
     """
-    from lelab.torque import force_disable_bus_torque
+    from makerlab.torque import force_disable_bus_torque
 
     bus = _FakeBus(port="COM_ARM", failing=("elbow_flex",))
     problems = force_disable_bus_torque(bus, "auto-calibration arm")

@@ -515,7 +515,7 @@ const Calibration = () => {
         (e) => console.error("Failed to stop calibration on leave:", e),
       );
     },
-    beaconFlagKey: "lelab:calibration-stopped",
+    beaconFlagKey: "makerlab:calibration-stopped",
   });
 
   const pollStatus = async () => {
@@ -1149,25 +1149,25 @@ const Calibration = () => {
 
   // --- Motor power (per-robot, persisted) -------------------------------
   // The backend stores/applies motor_power as a PERCENT of full torque
-  // (10-100; see lelab/utils/config.py clamp_motor_power). The servo actually
+  // (10-100; see makerlab/utils/config.py clamp_motor_power). The servo actually
   // scales torque via its RAM Torque_Limit register on a 0-1000 scale, and
   // apply_motor_power writes `percent * _TORQUE_LIMIT_PER_PERCENT` to it (see
-  // lelab/motor_power.py, _TORQUE_LIMIT_PER_PERCENT = 10). The UI below is
+  // makerlab/motor_power.py, _TORQUE_LIMIT_PER_PERCENT = 10). The UI below is
   // expressed in those RAW register units — same scale as autocal's
-  // DEFAULT_TORQUE_LIMIT = 380 (lelab/vendor/feetech_autocal/
+  // DEFAULT_TORQUE_LIMIT = 380 (makerlab/vendor/feetech_autocal/
   // calibration_defaults.py) — so operators can reason in one vocabulary.
   // This is a DISPLAY/units change only: we convert raw<->percent at the edges
   // and still persist a percent, so clamp_motor_power / torque_limit_from_percent
   // / the apply path are untouched.
-  const TORQUE_LIMIT_PER_PERCENT = 10; // must match lelab/motor_power.py
-  const MOTOR_POWER_MIN_PERCENT = 10; // must match lelab/utils/config.py
-  const MOTOR_POWER_MAX_PERCENT = 100; // must match lelab/utils/config.py
+  const TORQUE_LIMIT_PER_PERCENT = 10; // must match makerlab/motor_power.py
+  const MOTOR_POWER_MIN_PERCENT = 10; // must match makerlab/utils/config.py
+  const MOTOR_POWER_MAX_PERCENT = 100; // must match makerlab/utils/config.py
   const TORQUE_LIMIT_MIN = MOTOR_POWER_MIN_PERCENT * TORQUE_LIMIT_PER_PERCENT; // 100
   const TORQUE_LIMIT_MAX = MOTOR_POWER_MAX_PERCENT * TORQUE_LIMIT_PER_PERCENT; // 1000
   // Autocal's operating torque, shown as a reference marker only. NOT applied
   // as the default here — changing the persisted default would be a torque
   // (safety) behavior change; see config.py DEFAULT_MOTOR_POWER.
-  const DEFAULT_TORQUE_LIMIT_REF = 380; // lelab/vendor/.../calibration_defaults.py
+  const DEFAULT_TORQUE_LIMIT_REF = 380; // makerlab/vendor/.../calibration_defaults.py
 
   // Local slider position (in PERCENT). Held as a draft and committed to the
   // robot record only on Save (previously it POSTed on slider release). Applied

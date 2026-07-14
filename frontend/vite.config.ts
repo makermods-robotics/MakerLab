@@ -21,7 +21,7 @@ export default defineConfig(({ mode }) => ({
         : [],
   },
   preview: {
-    allowedHosts: ["lerobot-lelab.hf.space"],
+    allowedHosts: ["lerobot-makerlab.hf.space"],
   },
   resolve: {
     alias: {

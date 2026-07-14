@@ -29,7 +29,7 @@ const EssentialsCard: React.FC<ConfigComponentProps> = ({
       return;
     }
     // Check availability before flipping the switch on. If wandb isn't
-    // importable in this lelab process, surface the same install flow used
+    // importable in this makerlab process, surface the same install flow used
     // for the training extra (accelerate) instead of letting the user start
     // a run that will fail.
     try {

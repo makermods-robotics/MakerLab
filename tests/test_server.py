@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for lelab.server — FastAPI app and ConnectionManager."""
+"""Tests for makerlab.server — FastAPI app and ConnectionManager."""
 
 from __future__ import annotations
 
@@ -27,8 +27,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi.testclient import TestClient
 
-import lelab.server as server_mod
-from lelab.utils import config as cfg
+import makerlab.server as server_mod
+from makerlab.utils import config as cfg
 
 # A browser sends an Accept header that prefers HTML on navigations/hard-reloads.
 BROWSER_ACCEPT = {"accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"}
@@ -54,7 +54,7 @@ REQUIRED_PATHS = {
 
 
 def test_app_exposes_required_endpoints() -> None:
-    from lelab.server import app
+    from makerlab.server import app
 
     paths = {route.path for route in app.routes}
     missing = REQUIRED_PATHS - paths
@@ -282,7 +282,7 @@ def test_download_calibration_config_returns_file(
     leader_dir.mkdir()
     (leader_dir / "armA.json").write_text('{"shoulder_pan": {"id": 1}}')
     # server.py binds its own LEADER_CONFIG_PATH at import — patch that one.
-    monkeypatch.setattr("lelab.server.LEADER_CONFIG_PATH", str(leader_dir))
+    monkeypatch.setattr("makerlab.server.LEADER_CONFIG_PATH", str(leader_dir))
 
     response = client.get("/calibration-configs/teleop/armA/download")
     assert response.status_code == 200
@@ -298,7 +298,7 @@ def test_download_calibration_config_accepts_dot_json_suffix(
     leader_dir = tmp_path / "leader"
     leader_dir.mkdir()
     (leader_dir / "so101.json").write_text('{"shoulder_pan": {"id": 1}}')
-    monkeypatch.setattr("lelab.server.LEADER_CONFIG_PATH", str(leader_dir))
+    monkeypatch.setattr("makerlab.server.LEADER_CONFIG_PATH", str(leader_dir))
 
     response = client.get("/calibration-configs/teleop/so101.json/download")
     assert response.status_code == 200
@@ -310,7 +310,7 @@ def test_download_calibration_config_missing_returns_404(
 ) -> None:
     leader_dir = tmp_path / "leader"
     leader_dir.mkdir()
-    monkeypatch.setattr("lelab.server.LEADER_CONFIG_PATH", str(leader_dir))
+    monkeypatch.setattr("makerlab.server.LEADER_CONFIG_PATH", str(leader_dir))
 
     response = client.get("/calibration-configs/teleop/nope/download")
     assert response.status_code == 404
@@ -386,13 +386,13 @@ def test_spa_fallback_respects_explicit_html_refusal(client: TestClient) -> None
     ],
 )
 def test_accepts_html(accept: str, expected: bool) -> None:
-    from lelab.server import _accepts_html
+    from makerlab.server import _accepts_html
 
     assert _accepts_html(accept) is expected
 
 
 def test_connection_manager_tracks_connect_and_disconnect() -> None:
-    from lelab.server import ConnectionManager
+    from makerlab.server import ConnectionManager
 
     mgr = ConnectionManager()
     fake_ws = MagicMock()
@@ -406,7 +406,7 @@ def test_connection_manager_tracks_connect_and_disconnect() -> None:
 
 
 def test_connection_manager_broadcast_sync_does_not_block_without_loop() -> None:
-    from lelab.server import ConnectionManager
+    from makerlab.server import ConnectionManager
 
     mgr = ConnectionManager()
     # Should enqueue without raising even if there are no consumers.
@@ -459,7 +459,7 @@ def test_broadcast_sends_on_owning_loop_and_survives_dead_connection(ws_loop) ->
     """A send failure must drop only that connection — not kill the worker —
     and healthy sends must run on the loop that accepted the websocket
     (regression: 'Task got Future attached to a different loop')."""
-    from lelab.server import ConnectionManager
+    from makerlab.server import ConnectionManager
 
     mgr = ConnectionManager()
     seen: dict[str, object] = {}
@@ -495,7 +495,7 @@ def test_connection_manager_rapid_reconnect_restarts_worker(ws_loop) -> None:
     """Disconnect-then-reconnect while broadcasts flow (browser reload during
     teleop) must hand off cleanly to a fresh worker with no self-join
     (regression: 'cannot join current thread' killing joint streaming)."""
-    from lelab.server import ConnectionManager
+    from makerlab.server import ConnectionManager
 
     mgr = ConnectionManager()
     ws1 = _fake_ws()
@@ -553,7 +553,7 @@ def test_windows_cameras_uses_real_directshow_names(monkeypatch: pytest.MonkeyPa
     """The Windows path returns pygrabber's real device names in index order so
     the frontend can match each camera to its browser deviceId (issues #12/#16).
     """
-    from lelab import server
+    from makerlab import server
 
     class _FakeGraph:
         def get_input_devices(self) -> list[str]:
@@ -572,7 +572,7 @@ def test_windows_cameras_falls_back_when_pygrabber_unavailable(
 ) -> None:
     """If pygrabber is missing or its COM init fails, enumeration degrades to the
     generic cv2 probe instead of erroring."""
-    from lelab import server
+    from makerlab import server
 
     class _BoomGraph:
         def __init__(self) -> None:
@@ -588,21 +588,21 @@ def test_windows_cameras_falls_back_when_pygrabber_unavailable(
 def test_v4l2_camera_name_reads_sysfs(monkeypatch: pytest.MonkeyPatch) -> None:
     import io
 
-    from lelab import server
+    from makerlab import server
 
     monkeypatch.setattr("builtins.open", lambda *a, **k: io.StringIO("HD Pro Webcam C920\n"))
     assert server._v4l2_camera_name(0) == "HD Pro Webcam C920"
 
 
 def test_v4l2_camera_name_returns_none_when_missing() -> None:
-    from lelab import server
+    from makerlab import server
 
     # No such sysfs node (also the case on non-Linux): graceful None, not error.
     assert server._v4l2_camera_name(999999) is None
 
 
 def test_import_model_route_returns_record(client, monkeypatch) -> None:
-    from lelab import server
+    from makerlab import server
 
     fake = {
         "id": "act_imported_x",
@@ -615,7 +615,7 @@ def test_import_model_route_returns_record(client, monkeypatch) -> None:
         "runner": "imported",
         "hf_repo_id": None,
     }
-    from lelab.jobs import JobRecord
+    from makerlab.jobs import JobRecord
 
     # No pre-existing entry for this source → fresh 201 path.
     monkeypatch.setattr(server.job_registry, "find_imported", lambda source: None)
@@ -633,8 +633,8 @@ def test_import_model_route_returns_record(client, monkeypatch) -> None:
 def test_import_model_route_flags_duplicate_with_200(client, monkeypatch) -> None:
     """Re-importing an already-registered source returns the EXISTING record
     with already_imported=true and a 200 (not 201)."""
-    from lelab import server
-    from lelab.jobs import JobRecord
+    from makerlab import server
+    from makerlab.jobs import JobRecord
 
     existing = JobRecord(
         id="act_imported_x",
@@ -662,7 +662,7 @@ def test_import_model_route_flags_duplicate_with_200(client, monkeypatch) -> Non
 
 
 def test_import_model_route_maps_value_error_to_400(client, monkeypatch) -> None:
-    from lelab import server
+    from makerlab import server
 
     def boom(source, name=None):
         raise ValueError("No usable model at '/tmp/x'")
@@ -675,8 +675,8 @@ def test_import_model_route_maps_value_error_to_400(client, monkeypatch) -> None
 
 
 def test_rename_job_route_returns_updated_record(client, monkeypatch) -> None:
-    from lelab import server
-    from lelab.jobs import JobRecord
+    from makerlab import server
+    from makerlab.jobs import JobRecord
 
     fake = {
         "id": "act_ds_x",
@@ -701,8 +701,8 @@ def test_rename_job_route_returns_updated_record(client, monkeypatch) -> None:
 
 
 def test_rename_job_route_maps_not_found_to_404(client, monkeypatch) -> None:
-    from lelab import server
-    from lelab.jobs import JobNotFoundError
+    from makerlab import server
+    from makerlab.jobs import JobNotFoundError
 
     def boom(job_id, new_name):
         raise JobNotFoundError(job_id)
@@ -713,7 +713,7 @@ def test_rename_job_route_maps_not_found_to_404(client, monkeypatch) -> None:
 
 
 def test_rename_job_route_maps_value_error_to_400(client, monkeypatch) -> None:
-    from lelab import server
+    from makerlab import server
 
     def boom(job_id, new_name):
         raise ValueError("Display name cannot be empty.")
@@ -810,7 +810,7 @@ def test_delete_hub_model_unauthenticated_is_401(client: TestClient, monkeypatch
 # crashed cloud run pre-creates) alongside the tagged ones, so the untracked
 # cleanup path can reach them. It does this with ONE unfiltered list_models()
 # call per author, filtered client-side: a repo qualifies if it carries the
-# "lerobot" library tag OR its name matches lelab's "_<timestamp>" run-repo
+# "lerobot" library tag OR its name matches makerlab's "_<timestamp>" run-repo
 # naming (see _list_author_models). The single unfiltered call replaced an older
 # two-pass (filter="lerobot" + unfiltered) approach — half the Hub calls, same
 # result set.
@@ -890,7 +890,7 @@ def test_list_hub_jobs_unions_and_dedups_tagged_and_untagged(client: TestClient,
 def test_list_hub_jobs_excludes_foreign_personal_models(client: TestClient, monkeypatch) -> None:
     # A user's unrelated personal model (no lerobot tag, name doesn't match the
     # run-repo timestamp convention) must NOT be surfaced — it's theirs, not a
-    # lelab orphan. But a tagged repo is always kept even without the suffix.
+    # makerlab orphan. But a tagged repo is always kept even without the suffix.
     personal = _FakeModel("makermods/my-cool-llm", last_modified=None)
     run_repo = _FakeModel(
         "makermods/smolvla_makermods_so101_merged_20260701_2026-07-03_09-15-57",

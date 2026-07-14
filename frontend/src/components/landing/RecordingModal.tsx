@@ -26,7 +26,7 @@ import { RobotRecord } from "@/hooks/useRobots";
 import { validateDatasetName } from "@/lib/datasetName";
 import { DatasetInfo } from "@/lib/replayApi";
 
-/** The fps every LeLab recording session uses (hardcoded in the recording
+/** The fps every MakerLab recording session uses (hardcoded in the recording
  * config Landing builds) — compared against a resumed dataset's fps. */
 const RECORDING_FPS = 30;
 

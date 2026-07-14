@@ -28,7 +28,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from lelab.utils import config as cfg, system
+from makerlab.utils import config as cfg, system
 
 # --- open_folder_in_file_browser helper --------------------------------------
 
@@ -100,7 +100,7 @@ def test_open_folder_unsupported_platform_raises(tmp_path, monkeypatch: pytest.M
 
 def _patch_open(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     """Mock the server's open helper to record the path and open nothing."""
-    import lelab.server as server_mod
+    import makerlab.server as server_mod
 
     opened: list[str] = []
     monkeypatch.setattr(server_mod, "open_folder_in_file_browser", lambda path: opened.append(path))
@@ -163,7 +163,7 @@ def test_endpoint_creates_dir_if_missing(
 def test_endpoint_reports_error_on_spawn_failure(
     client: TestClient, tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import lelab.server as server_mod
+    import makerlab.server as server_mod
 
     def _boom(path: str) -> None:
         raise RuntimeError("spawn failed")

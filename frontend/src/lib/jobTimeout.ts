@@ -1,6 +1,6 @@
 // Pure, dependency-free helpers for the HF Jobs "Job timeout" field: a rough
 // suggested-duration estimator plus the parse/validate logic that mirrors the
-// backend rule (lelab/train.py::parse_hf_duration).
+// backend rule (makerlab/train.py::parse_hf_duration).
 //
 // IMPORTANT: every constant in the estimator below is a deliberately coarse
 // RULE OF THUMB, not a benchmark. They exist to put a sensible default in

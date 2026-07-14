@@ -175,7 +175,7 @@ const Recording = () => {
     confirmMessage: leaveDiscardMessage(resume),
     beaconUrl: `${baseUrl}/stop-recording?discard=true`,
     onLeave: stopRecordingForLeave,
-    beaconFlagKey: "lelab:recording-stopped",
+    beaconFlagKey: "makerlab:recording-stopped",
   });
 
   // Redirect if no config provided

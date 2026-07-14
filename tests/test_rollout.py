@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for lelab.rollout — request schema, pure helpers, and the
+"""Tests for makerlab.rollout — request schema, pure helpers, and the
 non-subprocess branches of the start/stop/status handlers.
 
 handle_start_inference's happy path spawns a real subprocess and a stdout-
@@ -31,7 +31,7 @@ import pytest
 def _reset_rollout_globals(monkeypatch: pytest.MonkeyPatch):
     """Reset rollout's module-level state around each test so a leaking
     `inference_active=True` from one case can't poison the next."""
-    from lelab import rollout
+    from makerlab import rollout
 
     monkeypatch.setattr(rollout, "inference_active", False)
     monkeypatch.setattr(rollout, "_inference_proc", None)
@@ -73,14 +73,14 @@ class _EmptyStdout:
 def test_inference_request_rejects_missing_required_fields() -> None:
     from pydantic import ValidationError
 
-    from lelab.rollout import InferenceRequest
+    from makerlab.rollout import InferenceRequest
 
     with pytest.raises(ValidationError):
         InferenceRequest()
 
 
 def test_inference_request_has_expected_defaults() -> None:
-    from lelab.rollout import InferenceRequest
+    from makerlab.rollout import InferenceRequest
 
     req = InferenceRequest(
         follower_port="/dev/ttyUSB0",
@@ -95,7 +95,7 @@ def test_inference_request_has_expected_defaults() -> None:
 def test_inference_request_bimanual_fields_default_to_single() -> None:
     """A request that omits the bimanual block is single-arm — the right-arm
     fields are inert and `mode` defaults to 'single'."""
-    from lelab.rollout import InferenceRequest
+    from makerlab.rollout import InferenceRequest
 
     req = InferenceRequest(
         follower_port="/dev/ttyUSB0",
@@ -110,7 +110,7 @@ def test_inference_request_bimanual_fields_default_to_single() -> None:
 
 
 def test_inference_request_accepts_bimanual_block() -> None:
-    from lelab.rollout import InferenceRequest
+    from makerlab.rollout import InferenceRequest
 
     req = InferenceRequest(
         follower_port="/dev/left",
@@ -137,26 +137,26 @@ def test_inference_request_accepts_bimanual_block() -> None:
 def test_arm_count_mismatch_none_when_state_dim_unknown() -> None:
     """A checkpoint with no observation.state (state_dim None) can't be judged
     cheaply — defer to the subprocess's own shape check."""
-    from lelab.rollout import _arm_count_mismatch
+    from makerlab.rollout import _arm_count_mismatch
 
     assert _arm_count_mismatch("single", None) is None
     assert _arm_count_mismatch("bimanual", None) is None
 
 
 def test_arm_count_mismatch_none_when_single_matches_single() -> None:
-    from lelab.rollout import _arm_count_mismatch
+    from makerlab.rollout import _arm_count_mismatch
 
     assert _arm_count_mismatch("single", 6) is None
 
 
 def test_arm_count_mismatch_none_when_bimanual_matches_bimanual() -> None:
-    from lelab.rollout import _arm_count_mismatch
+    from makerlab.rollout import _arm_count_mismatch
 
     assert _arm_count_mismatch("bimanual", 12) is None
 
 
 def test_arm_count_mismatch_flags_bimanual_checkpoint_on_single_robot() -> None:
-    from lelab.rollout import _arm_count_mismatch
+    from makerlab.rollout import _arm_count_mismatch
 
     msg = _arm_count_mismatch("single", 12)
     assert msg is not None
@@ -165,7 +165,7 @@ def test_arm_count_mismatch_flags_bimanual_checkpoint_on_single_robot() -> None:
 
 
 def test_arm_count_mismatch_flags_single_checkpoint_on_bimanual_robot() -> None:
-    from lelab.rollout import _arm_count_mismatch
+    from makerlab.rollout import _arm_count_mismatch
 
     msg = _arm_count_mismatch("bimanual", 6)
     assert msg is not None
@@ -176,7 +176,7 @@ def test_arm_count_mismatch_flags_single_checkpoint_on_bimanual_robot() -> None:
 def test_arm_count_mismatch_none_for_unrecognised_width() -> None:
     """A width that's neither a single arm nor a clean multiple is left to the
     subprocess rather than guessed at (e.g. 7 = 6 + an extra sensor dim)."""
-    from lelab.rollout import _arm_count_mismatch
+    from makerlab.rollout import _arm_count_mismatch
 
     assert _arm_count_mismatch("single", 7) is None
     assert _arm_count_mismatch("bimanual", 7) is None
@@ -185,7 +185,7 @@ def test_arm_count_mismatch_none_for_unrecognised_width() -> None:
 def test_detect_device_returns_cpu_when_neither_cuda_nor_mps(monkeypatch: pytest.MonkeyPatch) -> None:
     import torch
 
-    from lelab.rollout import _detect_device
+    from makerlab.rollout import _detect_device
 
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     monkeypatch.setattr(torch.backends.mps, "is_available", lambda: False)
@@ -195,7 +195,7 @@ def test_detect_device_returns_cpu_when_neither_cuda_nor_mps(monkeypatch: pytest
 def test_detect_device_prefers_cuda_over_mps(monkeypatch: pytest.MonkeyPatch) -> None:
     import torch
 
-    from lelab.rollout import _detect_device
+    from makerlab.rollout import _detect_device
 
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
@@ -205,7 +205,7 @@ def test_detect_device_prefers_cuda_over_mps(monkeypatch: pytest.MonkeyPatch) ->
 def test_detect_device_falls_back_to_mps_when_no_cuda(monkeypatch: pytest.MonkeyPatch) -> None:
     import torch
 
-    from lelab.rollout import _detect_device
+    from makerlab.rollout import _detect_device
 
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
@@ -217,7 +217,7 @@ def test_detect_device_returns_cpu_when_torch_probe_raises(monkeypatch: pytest.M
     broken at runtime we still need a sensible fallback."""
     import torch
 
-    from lelab.rollout import _detect_device
+    from makerlab.rollout import _detect_device
 
     def _boom() -> bool:
         raise RuntimeError("simulated torch.cuda failure")
@@ -227,7 +227,7 @@ def test_detect_device_returns_cpu_when_torch_probe_raises(monkeypatch: pytest.M
 
 
 def test_resolve_policy_path_returns_local_dir_unchanged(tmp_path) -> None:
-    from lelab.rollout import _resolve_policy_path
+    from makerlab.rollout import _resolve_policy_path
 
     pretrained = tmp_path / "pretrained_model"
     pretrained.mkdir()
@@ -235,7 +235,7 @@ def test_resolve_policy_path_returns_local_dir_unchanged(tmp_path) -> None:
 
 
 def test_resolve_policy_path_raises_on_unparsable_ref() -> None:
-    from lelab.rollout import _resolve_policy_path
+    from makerlab.rollout import _resolve_policy_path
 
     with pytest.raises(ValueError, match="Unrecognised policy ref"):
         _resolve_policy_path("not-a-real-ref-no-at-sign")
@@ -245,7 +245,7 @@ def test_resolve_policy_path_resolves_hub_ref(monkeypatch: pytest.MonkeyPatch, t
     """Hub refs ('user/repo@checkpoints/000050') must be passed through
     snapshot_download and joined to the standard checkpoints/<step>/pretrained_model
     layout."""
-    from lelab.rollout import _resolve_policy_path
+    from makerlab.rollout import _resolve_policy_path
 
     fake_root = tmp_path / "snapshot"
     fake_root.mkdir()
@@ -270,7 +270,7 @@ def test_resolve_policy_path_resolves_hub_root_ref(monkeypatch, tmp_path) -> Non
     it — but excludes the checkpoints/ and training_state/ sub-trees (neither is
     needed to run inference, both can be multi-GB) so only the root pretrained
     files are pulled."""
-    from lelab.rollout import _resolve_policy_path
+    from makerlab.rollout import _resolve_policy_path
 
     fake_root = tmp_path / "snapshot"
     fake_root.mkdir()
@@ -291,7 +291,7 @@ def test_resolve_policy_path_resolves_hub_root_ref(monkeypatch, tmp_path) -> Non
 
 
 def test_format_cameras_arg_empty_yields_empty_braces() -> None:
-    from lelab.rollout import _format_cameras_arg
+    from makerlab.rollout import _format_cameras_arg
 
     assert _format_cameras_arg({}) == "{}"
 
@@ -299,7 +299,7 @@ def test_format_cameras_arg_empty_yields_empty_braces() -> None:
 def test_format_cameras_arg_renames_camera_index_to_index_or_path() -> None:
     """lerobot's CLI expects `index_or_path`, but the frontend posts
     `camera_index`. The rename is the whole point of this helper."""
-    from lelab.rollout import _format_cameras_arg
+    from makerlab.rollout import _format_cameras_arg
 
     result = _format_cameras_arg(
         {"front": {"type": "opencv", "camera_index": 0, "width": 640, "height": 480, "fps": 30}}
@@ -311,7 +311,7 @@ def test_format_cameras_arg_renames_camera_index_to_index_or_path() -> None:
 
 
 def test_format_cameras_arg_omits_none_values() -> None:
-    from lelab.rollout import _format_cameras_arg
+    from makerlab.rollout import _format_cameras_arg
 
     result = _format_cameras_arg({"front": {"camera_index": 0, "fps": None}})
     assert "fps" not in result
@@ -319,7 +319,7 @@ def test_format_cameras_arg_omits_none_values() -> None:
 
 
 def test_format_cameras_arg_handles_multiple_cameras() -> None:
-    from lelab.rollout import _format_cameras_arg
+    from makerlab.rollout import _format_cameras_arg
 
     result = _format_cameras_arg(
         {
@@ -332,7 +332,7 @@ def test_format_cameras_arg_handles_multiple_cameras() -> None:
 
 
 def test_handle_stop_inference_when_idle_returns_409() -> None:
-    from lelab.rollout import handle_stop_inference
+    from makerlab.rollout import handle_stop_inference
 
     result = handle_stop_inference()
     assert result["success"] is False
@@ -340,7 +340,7 @@ def test_handle_stop_inference_when_idle_returns_409() -> None:
 
 
 def test_handle_inference_status_when_idle_returns_dict_with_expected_keys() -> None:
-    from lelab.rollout import handle_inference_status
+    from makerlab.rollout import handle_inference_status
 
     result = handle_inference_status()
     assert isinstance(result, dict)
@@ -350,7 +350,7 @@ def test_handle_inference_status_when_idle_returns_dict_with_expected_keys() -> 
 
 
 def _stub_request():
-    from lelab.rollout import InferenceRequest
+    from makerlab.rollout import InferenceRequest
 
     return InferenceRequest(
         follower_port="/dev/ttyUSB0",
@@ -362,9 +362,9 @@ def _stub_request():
 def test_handle_start_inference_blocked_when_teleoperation_active(monkeypatch) -> None:
     """If teleop owns the bus, inference must refuse rather than race for
     the serial port."""
-    from lelab.rollout import handle_start_inference
+    from makerlab.rollout import handle_start_inference
 
-    monkeypatch.setattr("lelab.teleoperate.teleoperation_active", True)
+    monkeypatch.setattr("makerlab.teleoperate.teleoperation_active", True)
     result = handle_start_inference(_stub_request())
     assert result["success"] is False
     assert result["status_code"] == 409
@@ -372,9 +372,9 @@ def test_handle_start_inference_blocked_when_teleoperation_active(monkeypatch) -
 
 
 def test_handle_start_inference_blocked_when_recording_active(monkeypatch) -> None:
-    from lelab.rollout import handle_start_inference
+    from makerlab.rollout import handle_start_inference
 
-    monkeypatch.setattr("lelab.record.recording_active", True)
+    monkeypatch.setattr("makerlab.record.recording_active", True)
     result = handle_start_inference(_stub_request())
     assert result["success"] is False
     assert result["status_code"] == 409
@@ -382,7 +382,7 @@ def test_handle_start_inference_blocked_when_recording_active(monkeypatch) -> No
 
 
 def test_handle_start_inference_blocked_when_already_active(monkeypatch) -> None:
-    from lelab import rollout
+    from makerlab import rollout
 
     monkeypatch.setattr(rollout, "inference_active", True)
     result = rollout.handle_start_inference(_stub_request())
@@ -404,7 +404,7 @@ def test_handle_start_inference_pins_return_to_initial_position(monkeypatch, tmp
     redirects HOME so the worker's log file lands in tmp rather than the real
     cache — we only inspect the argv handed to Popen. The resolve stub takes the
     `report` kwarg the worker now passes for download progress."""
-    from lelab import rollout
+    from makerlab import rollout
 
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(rollout, "setup_follower_calibration_file", lambda cfg: cfg)
@@ -449,7 +449,7 @@ def test_handle_start_inference_pins_return_to_initial_position(monkeypatch, tmp
 
 
 def _bimanual_request():
-    from lelab.rollout import InferenceRequest
+    from makerlab.rollout import InferenceRequest
 
     return InferenceRequest(
         follower_port="/dev/left",
@@ -463,7 +463,7 @@ def _bimanual_request():
 
 
 def test_single_robot_args_uses_so101_follower_type() -> None:
-    from lelab.rollout import _single_robot_args
+    from makerlab.rollout import _single_robot_args
 
     args = _single_robot_args(_stub_request(), "robot_a")
     assert "--robot.type=so101_follower" in args
@@ -474,7 +474,7 @@ def test_single_robot_args_uses_so101_follower_type() -> None:
 
 
 def test_single_robot_args_appends_cameras_when_present() -> None:
-    from lelab.rollout import InferenceRequest, _single_robot_args
+    from makerlab.rollout import InferenceRequest, _single_robot_args
 
     req = InferenceRequest(
         follower_port="/dev/ttyUSB0",
@@ -489,7 +489,7 @@ def test_single_robot_args_appends_cameras_when_present() -> None:
 
 
 def test_bimanual_robot_args_uses_bi_so_follower_with_both_ports() -> None:
-    from lelab.rollout import _bimanual_robot_args
+    from makerlab.rollout import _bimanual_robot_args
 
     args = _bimanual_robot_args(_bimanual_request(), "dual_arm", "/staging/follower")
     assert "--robot.type=bi_so_follower" in args
@@ -500,7 +500,7 @@ def test_bimanual_robot_args_uses_bi_so_follower_with_both_ports() -> None:
 
 
 def test_bimanual_robot_args_puts_cameras_on_left_arm_only() -> None:
-    from lelab.rollout import InferenceRequest, _bimanual_robot_args
+    from makerlab.rollout import InferenceRequest, _bimanual_robot_args
 
     req = InferenceRequest(
         follower_port="/dev/left",
@@ -517,7 +517,7 @@ def test_bimanual_robot_args_puts_cameras_on_left_arm_only() -> None:
 
 
 def test_build_rollout_cmd_wraps_robot_args_with_shared_flags() -> None:
-    from lelab.rollout import _build_rollout_cmd
+    from makerlab.rollout import _build_rollout_cmd
 
     robot_args = ["--robot.type=so101_follower", "--robot.port=/dev/ttyUSB0"]
     cmd = _build_rollout_cmd(_stub_request(), "/local/pretrained_model", robot_args)
@@ -537,7 +537,7 @@ def test_build_rollout_cmd_wraps_robot_args_with_shared_flags() -> None:
 def test_handle_start_inference_rejects_bimanual_checkpoint_on_single_robot() -> None:
     """A bimanual checkpoint on a single-arm robot returns 409 without opening
     any port or spawning a subprocess."""
-    from lelab.rollout import InferenceRequest, handle_start_inference
+    from makerlab.rollout import InferenceRequest, handle_start_inference
 
     req = InferenceRequest(
         follower_port="/dev/ttyUSB0",
@@ -553,7 +553,7 @@ def test_handle_start_inference_rejects_bimanual_checkpoint_on_single_robot() ->
 
 
 def test_handle_start_inference_rejects_single_checkpoint_on_bimanual_robot() -> None:
-    from lelab.rollout import InferenceRequest, handle_start_inference
+    from makerlab.rollout import InferenceRequest, handle_start_inference
 
     req = InferenceRequest(
         follower_port="/dev/left",
@@ -573,7 +573,7 @@ def test_handle_start_inference_rejects_single_checkpoint_on_bimanual_robot() ->
 def test_handle_start_inference_arm_count_guard_releases_slot() -> None:
     """A rejected start must leave inference_active False so the next request
     isn't wedged behind a phantom session."""
-    from lelab import rollout
+    from makerlab import rollout
 
     req = rollout.InferenceRequest(
         follower_port="/dev/ttyUSB0",
@@ -595,7 +595,7 @@ def test_handle_start_inference_bimanual_builds_bi_so_follower_command(monkeypat
     staging helper are all replaced so nothing real runs; the startup worker (and
     its stdout pump) run inline via _SyncThread and HOME is redirected so the log
     file lands in tmp."""
-    from lelab import rollout
+    from makerlab import rollout
 
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(rollout, "bimanual_base_id", lambda name: "dual_arm")
@@ -661,7 +661,7 @@ def test_handle_start_inference_bimanual_builds_bi_so_follower_command(monkeypat
 
 def test_status_phase_is_none_when_idle() -> None:
     """No session has seeded a meta → phase is None (frontend shows nothing)."""
-    from lelab.rollout import handle_inference_status
+    from makerlab.rollout import handle_inference_status
 
     result = handle_inference_status()
     assert result["phase"] is None
@@ -670,7 +670,7 @@ def test_status_phase_is_none_when_idle() -> None:
 def test_resolve_policy_path_sets_downloading_model_phase(monkeypatch, tmp_path) -> None:
     """During the Hub snapshot_download, an active session's phase must read
     `downloading_model` so the UI can name that (multi-second) wait."""
-    from lelab import rollout
+    from makerlab import rollout
 
     # Seed a live meta the way handle_start_inference does before the download.
     monkeypatch.setattr(rollout, "_inference_meta", {"phase": rollout.PHASE_STARTING})
@@ -691,7 +691,7 @@ def test_resolve_policy_path_sets_downloading_model_phase(monkeypatch, tmp_path)
 def test_resolve_policy_path_local_dir_leaves_phase_untouched(monkeypatch, tmp_path) -> None:
     """A local checkpoint dir needs no download, so it must NOT flip the phase
     to downloading_model."""
-    from lelab import rollout
+    from makerlab import rollout
 
     pretrained = tmp_path / "pretrained_model"
     pretrained.mkdir()
@@ -705,7 +705,7 @@ def test_resolve_policy_path_local_dir_leaves_phase_untouched(monkeypatch, tmp_p
 def test_set_phase_noops_without_active_session(monkeypatch) -> None:
     """A late stdout line arriving after teardown (empty meta) can't resurrect
     a phase on an empty dict."""
-    from lelab import rollout
+    from makerlab import rollout
 
     monkeypatch.setattr(rollout, "_inference_meta", {})
     rollout._set_phase(rollout.PHASE_CONNECTING)
@@ -734,7 +734,7 @@ class _NullLog:
 def test_pump_stdout_advances_phases_through_setup(monkeypatch) -> None:
     """The stdout pump walks loading_policy → connecting → running off the
     stable lerobot setup lines, then pins running at the rollout marker."""
-    from lelab import rollout
+    from makerlab import rollout
 
     monkeypatch.setattr(rollout, "_inference_meta", {"phase": rollout.PHASE_STARTING})
     monkeypatch.setattr(rollout, "_inference_started_at", 0.0)
@@ -777,7 +777,7 @@ def test_pump_stdout_advances_phases_through_setup(monkeypatch) -> None:
 def test_pump_stdout_does_not_regress_phase_after_marker(monkeypatch) -> None:
     """A setup-looking line AFTER the rollout marker must not drag a running
     session back to `connecting`."""
-    from lelab import rollout
+    from makerlab import rollout
 
     monkeypatch.setattr(rollout, "_inference_meta", {"phase": rollout.PHASE_STARTING})
     monkeypatch.setattr(rollout, "_inference_started_at", 0.0)
@@ -800,7 +800,7 @@ def test_start_inference_seeds_starting_phase(monkeypatch) -> None:
     off to the background worker, so the very first status poll can already name
     the wait. Here the worker Thread is a no-op — modelling the instant after the
     POST returns, before the worker has run — so the phase stays `starting`."""
-    from lelab import rollout
+    from makerlab import rollout
 
     # A no-op Thread: the background startup worker is never actually run, so the
     # meta shows the state the POST left behind.
@@ -819,7 +819,7 @@ def test_start_inference_seeds_starting_phase(monkeypatch) -> None:
 def test_stop_inference_sets_stopping_phase(monkeypatch) -> None:
     """A stop request stamps `stopping` on the meta before terminate/wait, so a
     racing status poll doesn't report a stale `running`."""
-    from lelab import rollout
+    from makerlab import rollout
 
     phase_at_terminate: dict = {}
 
@@ -841,7 +841,7 @@ def test_stop_inference_sets_stopping_phase(monkeypatch) -> None:
 
 def test_status_finalisation_reports_stopped_on_clean_exit(monkeypatch) -> None:
     """A subprocess that exited rc=0 finalises to the terminal `stopped` phase."""
-    from lelab import rollout
+    from makerlab import rollout
 
     class _ExitedProc:
         returncode = 0
@@ -861,7 +861,7 @@ def test_status_finalisation_reports_stopped_on_clean_exit(monkeypatch) -> None:
 
 def test_status_finalisation_reports_error_on_nonzero_exit(monkeypatch) -> None:
     """A non-zero exit code finalises to the terminal `error` phase."""
-    from lelab import rollout
+    from makerlab import rollout
 
     class _CrashedProc:
         returncode = 1
@@ -880,7 +880,7 @@ def test_status_finalisation_reports_error_on_nonzero_exit(monkeypatch) -> None:
 
 
 def test_classify_outcome_ok_warns_and_fails() -> None:
-    from lelab.rollout import _classify_outcome
+    from makerlab.rollout import _classify_outcome
 
     # rc 0/None => the run was fine.
     assert _classify_outcome(0, True, "overload") == "ok"
@@ -898,7 +898,7 @@ def test_classify_outcome_ok_warns_and_fails() -> None:
 
 
 def test_friendly_hint_maps_common_failures() -> None:
-    from lelab.utils.errors import friendly_hint
+    from makerlab.utils.errors import friendly_hint
 
     assert "gripper" in (friendly_hint("Motor overload detected") or "").lower()
     assert "connect" in (friendly_hint("Failed to connect to the follower") or "").lower()
@@ -907,7 +907,7 @@ def test_friendly_hint_maps_common_failures() -> None:
 
 
 def test_extract_error_from_log_pulls_exception_tail(tmp_path) -> None:
-    from lelab.rollout import _extract_error_from_log
+    from makerlab.rollout import _extract_error_from_log
 
     log = tmp_path / "rollout.log"
     log.write_text(
@@ -925,7 +925,7 @@ def test_extract_error_from_log_pulls_exception_tail(tmp_path) -> None:
 
 def test_inference_in_use_path_none_when_idle() -> None:
     """No active inference -> no in-use path (delete guards stay open)."""
-    from lelab import rollout
+    from makerlab import rollout
 
     assert rollout.inference_in_use_path() is None
 
@@ -933,7 +933,7 @@ def test_inference_in_use_path_none_when_idle() -> None:
 def test_inference_in_use_path_returns_resolved_path(monkeypatch: pytest.MonkeyPatch) -> None:
     """While a session is active, the accessor exposes the RESOLVED local
     checkpoint dir captured at start (not the possibly-hub policy_ref)."""
-    from lelab import rollout
+    from makerlab import rollout
 
     monkeypatch.setattr(rollout, "inference_active", True)
     monkeypatch.setattr(
@@ -956,7 +956,7 @@ def test_start_inference_returns_immediately_without_downloading(monkeypatch) ->
     download. With the worker Thread stubbed to a no-op, the handler still
     returns success and claims the session — and snapshot_download is never
     touched on the request thread (it would raise here if it were)."""
-    from lelab import rollout
+    from makerlab import rollout
 
     def _boom(**kwargs):
         raise AssertionError("snapshot_download must not run on the request thread")
@@ -979,7 +979,7 @@ def test_download_progress_reported_into_status(monkeypatch) -> None:
     as download_bytes_done / _total / _percent. The total can arrive after some
     bytes (metadata discovery), which is exactly the refresh()-then-update()
     order huggingface_hub uses on the shared bytes bar."""
-    from lelab import rollout
+    from makerlab import rollout
 
     monkeypatch.setattr(rollout, "inference_active", True)
     monkeypatch.setattr(rollout, "_inference_started_at", 0.0)
@@ -1013,7 +1013,7 @@ def test_download_progress_reported_into_status(monkeypatch) -> None:
 def test_download_percent_is_none_until_total_known(monkeypatch) -> None:
     """Before any file size is known the total is None, so download_percent is
     None too → the UI shows an indeterminate bar rather than a bogus 0/0%."""
-    from lelab import rollout
+    from makerlab import rollout
 
     monkeypatch.setattr(rollout, "inference_active", True)
     monkeypatch.setattr(
@@ -1039,7 +1039,7 @@ def test_startup_download_failure_reports_failed_and_hint_without_spawn(monkeypa
     """A Hub download that raises (offline / 404 / disk full) is finalised as a
     `failed` outcome carrying the error text + a friendly hint — and no arm
     preflight runs and no subprocess spawns."""
-    from lelab import rollout
+    from makerlab import rollout
 
     monkeypatch.setattr(rollout, "inference_active", True)
     monkeypatch.setattr(
@@ -1080,7 +1080,7 @@ def test_stop_during_download_leaves_clean_idle_without_spawn(monkeypatch) -> No
     opening the bus (_prepare_robot) or spawning a subprocess. Models the real
     ordering — stop() with no subprocess yet flips the session idle and sets the
     cancel event; the in-flight download still finishes into the cache."""
-    from lelab import rollout
+    from makerlab import rollout
 
     cancel = threading.Event()
     monkeypatch.setattr(rollout, "inference_active", True)
@@ -1118,7 +1118,7 @@ def test_run_inference_startup_local_ref_skips_download_phase(monkeypatch, tmp_p
     """A local checkpoint dir needs no download: the worker resolves it instantly,
     never enters the downloading_model phase, and proceeds straight to preflight
     + spawn."""
-    from lelab import rollout
+    from makerlab import rollout
 
     monkeypatch.setenv("HOME", str(tmp_path))
     pretrained = tmp_path / "pretrained_model"

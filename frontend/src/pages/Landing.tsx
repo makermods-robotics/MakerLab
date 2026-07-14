@@ -245,7 +245,7 @@ const Landing = () => {
   return (
     <div
       className="min-h-screen bg-black text-white pb-16"
-      style={{ ["--lelab-topbar-h" as string]: "48px" }}
+      style={{ ["--makerlab-topbar-h" as string]: "48px" }}
     >
       <LandingTopBar />
 

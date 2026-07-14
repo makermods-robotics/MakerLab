@@ -3,7 +3,7 @@ requires = ["setuptools>=45", "wheel", "setuptools_scm[toml]>=6.2"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "LeLab"
+name = "MakerLab"
 version = "0.1.0"
 description = "LeRobot Lab - A web interface for robotics with lerobot integration"
 readme = "README.md"
@@ -36,15 +36,15 @@ test = [
 
 [project.scripts]
 # The installed command is `makerlab`. The Python package/module stays
-# `lelab` (imports, the wheel, `lelab.server:app`) — only the CLI is rebranded.
-makerlab = "lelab.scripts.lelab:main"
+# `makerlab` (imports, the wheel, `makerlab.server:app`) — only the CLI is rebranded.
+makerlab = "makerlab.scripts.makerlab:main"
 # Headless robot-station posture as an installed command: --lan --offline
 # defaults, extra args pass through. What the systemd unit runs.
-makerlab-station = "lelab.scripts.lelab:station"
+makerlab-station = "makerlab.scripts.makerlab:station"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["lelab*", "frontend"]
+include = ["makerlab*", "frontend"]
 
 [tool.setuptools.package-data]
 frontend = ["dist/**/*"]
@@ -120,5 +120,5 @@ ignore_missing_imports = true
 follow_imports = "skip"
 
 [[tool.mypy.overrides]]
-module = "lelab.*"
+module = "makerlab.*"
 ignore_errors = true

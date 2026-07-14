@@ -165,10 +165,10 @@ const useCanEditHub = (repoId: string): boolean => {
   );
 };
 
-/** Org/required tags the backend's `with_lelab_tag` always re-adds on save, so
+/** Org/required tags the backend's `with_makerlab_tag` always re-adds on save, so
  * they can't actually be dropped. Shown as locked, non-removable chips so the
  * UI never implies the user can remove them. Matched case-insensitively. */
-const REQUIRED_TAGS = ["makermods", "openbooth", "LeLab"];
+const REQUIRED_TAGS = ["makermods", "openbooth", "MakerLab"];
 const isRequiredTag = (t: string): boolean =>
   REQUIRED_TAGS.some((r) => r.toLowerCase() === t.toLowerCase());
 
@@ -181,7 +181,7 @@ const isRequiredTag = (t: string): boolean =>
  * the parent's status/tags refresh via `onChanged`.
  *
  * Tags render as removable pills; the org/required tags (makermods, openbooth,
- * LeLab) render as locked, non-removable pills since the backend always re-adds
+ * MakerLab) render as locked, non-removable pills since the backend always re-adds
  * them. A text input adds a new tag on Enter or comma.
  *
  * Only rendered for datasets whose namespace the user can write to (see
@@ -451,7 +451,7 @@ const HubSettingsEditor: React.FC<{
                 className="h-7 border-gray-600 bg-gray-800 text-xs text-white"
               />
               <p className="leading-snug text-gray-500">
-                The makermods, openbooth, and LeLab tags are always kept.
+                The makermods, openbooth, and MakerLab tags are always kept.
               </p>
               {tagsError && <p className="text-red-400">{tagsError}</p>}
               <Button

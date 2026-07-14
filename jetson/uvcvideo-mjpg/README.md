@@ -11,7 +11,7 @@ MJPEG streams reserve realistically (~65 Mbps each → 5+ cameras per bus).
 The quirk must be enabled (`quirks=128`) for the patch to do anything; the
 installer sets that via `/etc/modprobe.d/uvcvideo.conf`.
 
-Install: `sudo ./install.sh` (details + verification in ../../JETSON_SETUP.md).
+Install: `sudo ./install.sh` (details + verification in ../README.md).
 DKMS rebuilds the module automatically on kernel updates.
 
 `src/` is `drivers/media/usb/uvc/` from mainline Linux **v6.8.12** (matching

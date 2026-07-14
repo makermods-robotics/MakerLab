@@ -38,8 +38,8 @@ from unittest.mock import MagicMock, patch
 import httpx
 import pytest
 
-import lelab.datasets as ds
-import lelab.server as server_mod
+import makerlab.datasets as ds
+import makerlab.server as server_mod
 
 
 # --------------------------------------------------------------------------- #
@@ -76,8 +76,8 @@ def test_list_user_datasets_swallows_connect_error_returns_other_authors() -> No
     api.list_datasets.side_effect = _list_datasets
 
     with (
-        patch("lelab.datasets.cached_whoami", return_value=_whoami("makermods", orgs=["blockedorg"])),
-        patch("lelab.datasets.shared_hf_api", return_value=api),
+        patch("makerlab.datasets.cached_whoami", return_value=_whoami("makermods", orgs=["blockedorg"])),
+        patch("makerlab.datasets.shared_hf_api", return_value=api),
     ):
         result = ds.list_user_datasets()  # must NOT raise
 
@@ -91,8 +91,8 @@ def test_list_user_datasets_all_authors_fail_returns_empty() -> None:
     api.list_datasets.side_effect = httpx.ConnectError("blocked")
 
     with (
-        patch("lelab.datasets.cached_whoami", return_value=_whoami("makermods", orgs=["org"])),
-        patch("lelab.datasets.shared_hf_api", return_value=api),
+        patch("makerlab.datasets.cached_whoami", return_value=_whoami("makermods", orgs=["org"])),
+        patch("makerlab.datasets.shared_hf_api", return_value=api),
     ):
         assert ds.list_user_datasets() == []
 
@@ -113,8 +113,8 @@ def test_list_user_datasets_hfhub_http_error_still_swallowed() -> None:
     api.list_datasets.side_effect = _list_datasets
 
     with (
-        patch("lelab.datasets.cached_whoami", return_value=_whoami("alice", orgs=["org"])),
-        patch("lelab.datasets.shared_hf_api", return_value=api),
+        patch("makerlab.datasets.cached_whoami", return_value=_whoami("alice", orgs=["org"])),
+        patch("makerlab.datasets.shared_hf_api", return_value=api),
     ):
         result = ds.list_user_datasets()
 
@@ -129,8 +129,8 @@ def test_list_user_datasets_dedups_across_authors() -> None:
     api.list_datasets.return_value = [shared]
 
     with (
-        patch("lelab.datasets.cached_whoami", return_value=_whoami("a", orgs=["b", "c"])),
-        patch("lelab.datasets.shared_hf_api", return_value=api),
+        patch("makerlab.datasets.cached_whoami", return_value=_whoami("a", orgs=["b", "c"])),
+        patch("makerlab.datasets.shared_hf_api", return_value=api),
     ):
         result = ds.list_user_datasets()
 
@@ -220,7 +220,7 @@ def test_dataset_listing_cache_reuses_within_ttl(tmp_lerobot_home) -> None:
         calls["n"] += 1
         return [{"repo_id": "makermods/pick", "last_modified": "2026-07-03T00:00:00+00:00", "private": False}]
 
-    with patch("lelab.datasets.list_user_datasets", side_effect=_hub):
+    with patch("makerlab.datasets.list_user_datasets", side_effect=_hub):
         first = ds.list_all_datasets()
         second = ds.list_all_datasets()
 
@@ -246,9 +246,9 @@ def test_dataset_listing_cache_invalidated_by_mutation(tmp_lerobot_home) -> None
     # Pins/hidden ids live outside tmp_lerobot_home, so the developer's real
     # saved-custom/hidden entries would leak into the exact-equality asserts.
     with (
-        patch("lelab.datasets.list_user_datasets", side_effect=_hub),
-        patch("lelab.datasets.get_saved_custom_datasets", return_value=[]),
-        patch("lelab.datasets.get_hidden_datasets", return_value=set()),
+        patch("makerlab.datasets.list_user_datasets", side_effect=_hub),
+        patch("makerlab.datasets.get_saved_custom_datasets", return_value=[]),
+        patch("makerlab.datasets.get_hidden_datasets", return_value=set()),
     ):
         first = ds.list_all_datasets()
         assert [d["repo_id"] for d in first] == ["makermods/old"]
@@ -266,9 +266,9 @@ def test_set_dataset_visibility_invalidates_listing_cache() -> None:
     listing cache so a visibility flip shows up on the next /datasets load."""
     api = MagicMock()
     with (
-        patch("lelab.datasets.hf_hub_offline", return_value=False),
-        patch("lelab.datasets.shared_hf_api", return_value=api),
-        patch("lelab.datasets.invalidate_dataset_listing_cache") as inv,
+        patch("makerlab.datasets.hf_hub_offline", return_value=False),
+        patch("makerlab.datasets.shared_hf_api", return_value=api),
+        patch("makerlab.datasets.invalidate_dataset_listing_cache") as inv,
     ):
         ds.set_dataset_visibility("makermods/pick", private=True)
     inv.assert_called_once()
@@ -277,9 +277,9 @@ def test_set_dataset_visibility_invalidates_listing_cache() -> None:
 def test_set_dataset_tags_invalidates_listing_cache() -> None:
     """set_dataset_tags must invalidate the listing cache."""
     with (
-        patch("lelab.datasets.hf_hub_offline", return_value=False),
-        patch("lelab.datasets.metadata_update"),
-        patch("lelab.datasets.invalidate_dataset_listing_cache") as inv,
+        patch("makerlab.datasets.hf_hub_offline", return_value=False),
+        patch("makerlab.datasets.metadata_update"),
+        patch("makerlab.datasets.invalidate_dataset_listing_cache") as inv,
     ):
         ds.set_dataset_tags("makermods/pick", ["robotics"])
     inv.assert_called_once()

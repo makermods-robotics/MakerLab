@@ -3,7 +3,7 @@ import { Button } from "@/components/ui/button";
 
 type Peer = { id: string; openedAt: number; lastSeen: number };
 
-const CHANNEL = "lelab-tabs-v1";
+const CHANNEL = "makerlab-tabs-v1";
 const HEARTBEAT_MS = 1000;
 const PEER_TIMEOUT_MS = 3000;
 
@@ -127,7 +127,7 @@ const SingleTabGuard = ({ children }: { children: ReactNode }) => {
         >
           <div className="mx-4 max-w-md space-y-4 rounded-lg border bg-background p-6 text-center shadow-lg">
             <h2 className="text-lg font-semibold">
-              LeLab is already open in another tab
+              MakerLab is already open in another tab
             </h2>
             <p className="text-sm text-muted-foreground">
               Only one tab can control the robot at a time. Switch back to the

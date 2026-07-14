@@ -108,7 +108,7 @@ const Inference: React.FC = () => {
     onLeave: () => {
       stopInference(baseUrl, fetchWithHeaders).catch(() => {});
     },
-    beaconFlagKey: "lelab:inference-stopped",
+    beaconFlagKey: "makerlab:inference-stopped",
   });
 
   useEffect(() => {

@@ -103,7 +103,7 @@ const CreateModel: React.FC = () => {
             })}
           </div>
           <p className="text-xs text-gray-500 -mt-2">
-            Untested in LeLab — use at your own risk
+            Untested in MakerLab — use at your own risk
           </p>
           <div className="grid grid-cols-3 gap-2">
             {POLICY_TYPE_OPTIONS.filter((p) => !p.stable).map((policy) => {
@@ -114,7 +114,7 @@ const CreateModel: React.FC = () => {
                   title={
                     unavailable
                       ? "Not available in this lerobot version"
-                      : `Train a ${policy.label} model — untested in LeLab, use at your own risk`
+                      : `Train a ${policy.label} model — untested in MakerLab, use at your own risk`
                   }
                 >
                   <Button

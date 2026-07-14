@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for lelab.record — request schemas and handler entry points."""
+"""Tests for makerlab.record — request schemas and handler entry points."""
 
 from __future__ import annotations
 
@@ -21,14 +21,14 @@ import pytest
 def test_recording_request_rejects_missing_required_fields() -> None:
     from pydantic import ValidationError
 
-    from lelab.record import RecordingRequest
+    from makerlab.record import RecordingRequest
 
     with pytest.raises(ValidationError):
         RecordingRequest()
 
 
 def test_recording_status_handler_exposes_state_fields() -> None:
-    from lelab.record import handle_recording_status
+    from makerlab.record import handle_recording_status
 
     result = handle_recording_status()
     assert isinstance(result, dict)
@@ -45,7 +45,7 @@ def test_recording_status_surfaces_preparing_substeps(monkeypatch) -> None:
     The status handler must pass those through verbatim so the UI can name the
     substep — verified here without touching hardware by driving the module
     global the worker sets."""
-    from lelab import record
+    from makerlab import record
 
     for substep in ("connecting_robot", "connecting_teleop"):
         monkeypatch.setattr(record, "current_phase", substep)
@@ -57,7 +57,7 @@ def test_recording_status_surfaces_preparing_substeps(monkeypatch) -> None:
 
 
 def test_handle_stop_recording_when_idle_returns_dict(tmp_lerobot_home) -> None:
-    from lelab.record import handle_stop_recording
+    from makerlab.record import handle_stop_recording
 
     result = handle_stop_recording()
     assert isinstance(result, dict)
@@ -86,7 +86,7 @@ def test_stop_recording_during_release_grace_releases_now(
     """
     import threading
 
-    import lelab.record as record
+    import makerlab.record as record
 
     release_now = threading.Event()
     monkeypatch.setattr(record, "releasing", True)
@@ -102,7 +102,7 @@ def test_stop_recording_during_release_grace_releases_now(
 def test_stop_recording_mentions_rest_pose_return(monkeypatch: pytest.MonkeyPatch) -> None:
     """The first stop must tell the user the arm returns to its starting
     position, then goes limp — no timed hold anymore (same as teleop)."""
-    import lelab.record as record
+    import makerlab.record as record
 
     monkeypatch.setattr(record, "releasing", False)
     monkeypatch.setattr(record, "recording_active", True)
@@ -121,7 +121,7 @@ def test_record_finish_pending_release_cuts_grace_short(
 ) -> None:
     import threading
 
-    import lelab.record as record
+    import makerlab.record as record
 
     worker = _FakeWorker()
     release_now = threading.Event()
@@ -139,7 +139,7 @@ def test_record_finish_pending_release_leaves_live_session_alone(
 ) -> None:
     import threading
 
-    import lelab.record as record
+    import makerlab.record as record
 
     worker = _FakeWorker()
     release_now = threading.Event()
@@ -155,7 +155,7 @@ def test_record_finish_pending_release_leaves_live_session_alone(
 def test_record_finish_pending_release_noop_when_idle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import lelab.record as record
+    import makerlab.record as record
 
     monkeypatch.setattr(record, "recording_thread", None)
     assert record.finish_pending_release() is True
@@ -165,7 +165,7 @@ def test_recording_status_reports_releasing(monkeypatch: pytest.MonkeyPatch) -> 
     """During the post-stop return the status must say the arm is still
     energized and going home (releasing) rather than pretending the session
     is fully over."""
-    import lelab.record as record
+    import makerlab.record as record
 
     monkeypatch.setattr(record, "releasing", True)
     status = record.handle_recording_status()
@@ -177,12 +177,12 @@ def test_create_record_config_pins_dshow_on_windows(monkeypatch: pytest.MonkeyPa
     """On Windows, recording must use the DSHOW backend so a camera_index opens
     the same device /available-cameras enumerated (via pygrabber, DSHOW order).
     """
-    import lelab.record as record
+    import makerlab.record as record
     from lerobot.cameras.configs import Cv2Backends
 
     monkeypatch.setattr("platform.system", lambda: "Windows")
     monkeypatch.setattr(
-        "lelab.utils.robot_factory.setup_calibration_files",
+        "makerlab.utils.robot_factory.setup_calibration_files",
         lambda leader, follower: ("leader", "follower"),
     )
 
@@ -203,7 +203,7 @@ def test_create_record_config_pins_dshow_on_windows(monkeypatch: pytest.MonkeyPa
 def test_create_record_config_builds_biso_for_bimanual(monkeypatch: pytest.MonkeyPatch) -> None:
     """A bimanual request stages the four arbitrarily-named library configs and
     builds a BiSO pair pointed at the per-device staging dirs."""
-    import lelab.record as record
+    import makerlab.record as record
     from lerobot.robots.bi_so_follower import BiSOFollowerConfig
     from lerobot.teleoperators.bi_so_leader import BiSOLeaderConfig
 
@@ -217,7 +217,7 @@ def test_create_record_config_builds_biso_for_bimanual(monkeypatch: pytest.Monke
         )
         return (f"/staging/{base}/leader", f"/staging/{base}/follower", base)
 
-    monkeypatch.setattr("lelab.utils.robot_factory.stage_bimanual_calibrations", _fake_stage)
+    monkeypatch.setattr("makerlab.utils.robot_factory.stage_bimanual_calibrations", _fake_stage)
 
     # Config names are ARBITRARY — no "<base>_left/right" convention required.
     request = record.RecordingRequest(
@@ -251,8 +251,8 @@ def test_create_record_config_builds_biso_for_bimanual(monkeypatch: pytest.Monke
 
 
 def test_build_camera_configs_uses_default_backend_when_unset() -> None:
-    from lelab.record import _build_camera_configs
     from lerobot.cameras.configs import Cv2Backends
+    from makerlab.record import _build_camera_configs
 
     cameras = {"cam": {"type": "opencv", "camera_index": 0, "width": 640, "height": 480, "fps": 30}}
     configs = _build_camera_configs(cameras, Cv2Backends.AVFOUNDATION)
@@ -265,8 +265,8 @@ def test_build_camera_configs_uses_default_backend_when_unset() -> None:
 
 
 def test_build_camera_configs_defaults_fourcc_to_mjpg() -> None:
-    from lelab.record import _DEFAULT_FOURCC, _build_camera_configs
     from lerobot.cameras.configs import Cv2Backends
+    from makerlab.record import _DEFAULT_FOURCC, _build_camera_configs
 
     cameras = {"cam": {"type": "opencv", "camera_index": 0}}
     configs = _build_camera_configs(cameras, Cv2Backends.ANY)
@@ -276,8 +276,8 @@ def test_build_camera_configs_defaults_fourcc_to_mjpg() -> None:
 
 
 def test_build_camera_configs_explicit_fourcc_overrides_mjpg_default() -> None:
-    from lelab.record import _build_camera_configs
     from lerobot.cameras.configs import Cv2Backends
+    from makerlab.record import _build_camera_configs
 
     cameras = {"cam": {"type": "opencv", "camera_index": 0, "fourcc": "YUYV"}}
     configs = _build_camera_configs(cameras, Cv2Backends.ANY)
@@ -286,8 +286,8 @@ def test_build_camera_configs_explicit_fourcc_overrides_mjpg_default() -> None:
 
 
 def test_build_camera_configs_passes_fourcc_through() -> None:
-    from lelab.record import _build_camera_configs
     from lerobot.cameras.configs import Cv2Backends
+    from makerlab.record import _build_camera_configs
 
     cameras = {"cam": {"type": "opencv", "camera_index": 0, "fourcc": "MJPG"}}
     configs = _build_camera_configs(cameras, Cv2Backends.ANY)
@@ -296,8 +296,8 @@ def test_build_camera_configs_passes_fourcc_through() -> None:
 
 
 def test_build_camera_configs_explicit_backend_overrides_default() -> None:
-    from lelab.record import _build_camera_configs
     from lerobot.cameras.configs import Cv2Backends
+    from makerlab.record import _build_camera_configs
 
     cameras = {"cam": {"type": "opencv", "camera_index": 0, "backend": "V4L2"}}
     configs = _build_camera_configs(cameras, Cv2Backends.AVFOUNDATION)
@@ -306,8 +306,8 @@ def test_build_camera_configs_explicit_backend_overrides_default() -> None:
 
 
 def test_build_camera_configs_invalid_backend_raises() -> None:
-    from lelab.record import _build_camera_configs
     from lerobot.cameras.configs import Cv2Backends
+    from makerlab.record import _build_camera_configs
 
     cameras = {"cam": {"type": "opencv", "camera_index": 0, "backend": "NOPE"}}
     with pytest.raises(KeyError):
@@ -315,8 +315,8 @@ def test_build_camera_configs_invalid_backend_raises() -> None:
 
 
 def test_build_camera_configs_skips_non_opencv_type() -> None:
-    from lelab.record import _build_camera_configs
     from lerobot.cameras.configs import Cv2Backends
+    from makerlab.record import _build_camera_configs
 
     cameras = {"cam": {"type": "realsense", "camera_index": 0}}
     configs = _build_camera_configs(cameras, Cv2Backends.ANY)
@@ -340,7 +340,7 @@ def _make_dataset_dir(cache, repo_id: str, total_episodes: int):
 
 def test_discard_empty_dataset_removes_zero_episode_dir(tmp_lerobot_home) -> None:
     """A non-resume session that saved zero episodes has its directory removed."""
-    import lelab.record as record
+    import makerlab.record as record
 
     target = _make_dataset_dir(tmp_lerobot_home, "tester/big_20260703_120000", total_episodes=0)
     assert target.exists()
@@ -353,7 +353,7 @@ def test_discard_empty_dataset_removes_zero_episode_dir(tmp_lerobot_home) -> Non
 
 def test_discard_empty_dataset_keeps_nonempty_dir(tmp_lerobot_home) -> None:
     """A directory that recorded >=1 episode is never removed."""
-    import lelab.record as record
+    import makerlab.record as record
 
     target = _make_dataset_dir(tmp_lerobot_home, "tester/good_20260703_120000", total_episodes=3)
 
@@ -366,7 +366,7 @@ def test_discard_empty_dataset_keeps_nonempty_dir(tmp_lerobot_home) -> None:
 def test_discard_empty_dataset_never_touches_resume_session(tmp_lerobot_home) -> None:
     """A resume/append session writes into a pre-existing dataset — even at zero
     NEW episodes on disk, the directory must never be removed."""
-    import lelab.record as record
+    import makerlab.record as record
 
     target = _make_dataset_dir(tmp_lerobot_home, "tester/preexisting", total_episodes=0)
 
@@ -378,7 +378,7 @@ def test_discard_empty_dataset_never_touches_resume_session(tmp_lerobot_home) ->
 
 def test_discard_empty_dataset_rejects_path_traversal(tmp_lerobot_home) -> None:
     """A repo_id escaping the cache root is refused (no deletion outside cache)."""
-    import lelab.record as record
+    import makerlab.record as record
 
     removed = record._discard_empty_dataset("../../etc", resume=False)
     assert removed is False
@@ -386,8 +386,8 @@ def test_discard_empty_dataset_rejects_path_traversal(tmp_lerobot_home) -> None:
 
 def test_discard_empty_dataset_invalidates_hub_status(tmp_lerobot_home) -> None:
     """Removing an empty dataset drops any cached Hub-existence probe for it."""
-    import lelab.datasets as datasets
-    import lelab.record as record
+    import makerlab.datasets as datasets
+    import makerlab.record as record
 
     _make_dataset_dir(tmp_lerobot_home, "tester/probed_20260703", total_episodes=0)
     # Seed a cached probe answer for the repo id.
@@ -411,7 +411,7 @@ def test_discard_session_dataset_never_touches_resume_session(tmp_lerobot_home) 
     """A QUIT on a RESUME session must NEVER delete the pre-existing dataset —
     lerobot already committed its earlier episodes, so they must survive. The
     resume guard is checked first; this is the load-bearing safety property."""
-    import lelab.record as record
+    import makerlab.record as record
 
     target = _make_dataset_dir(tmp_lerobot_home, "tester/preexisting", total_episodes=5)
 
@@ -425,7 +425,7 @@ def test_discard_session_dataset_removes_fresh_dir_with_episodes(tmp_lerobot_hom
     """A QUIT on a FRESH session removes the whole stamped directory even when
     episodes were saved earlier THIS session — quit discards everything the
     session created (unlike _discard_empty_dataset, which keeps a non-empty dir)."""
-    import lelab.record as record
+    import makerlab.record as record
 
     target = _make_dataset_dir(tmp_lerobot_home, "tester/quit_20260708_120000", total_episodes=3)
     assert target.exists()
@@ -438,7 +438,7 @@ def test_discard_session_dataset_removes_fresh_dir_with_episodes(tmp_lerobot_hom
 
 def test_discard_session_dataset_rejects_path_traversal(tmp_lerobot_home) -> None:
     """A repo_id escaping the cache root is refused — no deletion outside cache."""
-    import lelab.record as record
+    import makerlab.record as record
 
     removed = record._discard_session_dataset("../../etc", resume=False)
     assert removed is False
@@ -446,8 +446,8 @@ def test_discard_session_dataset_rejects_path_traversal(tmp_lerobot_home) -> Non
 
 def test_discard_session_dataset_invalidates_hub_status(tmp_lerobot_home) -> None:
     """Discarding a quit session drops any cached Hub-existence probe for it."""
-    import lelab.datasets as datasets
-    import lelab.record as record
+    import makerlab.datasets as datasets
+    import makerlab.record as record
 
     _make_dataset_dir(tmp_lerobot_home, "tester/quit_probed", total_episodes=2)
     with datasets._HUB_STATUS_LOCK:
@@ -462,7 +462,7 @@ def test_discard_session_dataset_invalidates_hub_status(tmp_lerobot_home) -> Non
 def test_handle_stop_recording_discard_arms_flag_and_stop(monkeypatch: pytest.MonkeyPatch) -> None:
     """A Quit stop (discard=True) on a live session arms discard_requested, sets
     the same stop events a Done stop does, and echoes discard in the response."""
-    import lelab.record as record
+    import makerlab.record as record
 
     events = {"stop_recording": False, "exit_early": False}
     monkeypatch.setattr(record, "releasing", False)
@@ -483,7 +483,7 @@ def test_handle_stop_recording_discard_arms_flag_and_stop(monkeypatch: pytest.Mo
 def test_handle_stop_recording_discard_ignored_when_idle(monkeypatch: pytest.MonkeyPatch) -> None:
     """A discard stop against no active session is refused and never arms the
     discard flag — an idle/mutex miss can't schedule a dataset deletion."""
-    import lelab.record as record
+    import makerlab.record as record
 
     monkeypatch.setattr(record, "releasing", False)
     monkeypatch.setattr(record, "recording_active", False)
@@ -502,7 +502,7 @@ def test_worker_quit_discards_fresh_dataset_with_saved_episodes(
     """End-to-end through the real worker: a fresh session whose user quit
     (discard_requested set) has its whole stamped directory removed in the
     finally block, even with episodes saved, and reports discarded_empty."""
-    import lelab.record as record
+    import makerlab.record as record
 
     def _work_then_quit(cfg, events, **kwargs):
         # Create the dataset dir at the stamped repo id the session recorded into,
@@ -528,7 +528,7 @@ def test_recording_status_reports_discarded_empty_at_session_end(
 ) -> None:
     """When the ended session discarded its empty dataset, the status payload
     tells the frontend honestly that nothing was kept."""
-    import lelab.record as record
+    import makerlab.record as record
 
     monkeypatch.setattr(record, "recording_active", False)
     monkeypatch.setattr(record, "current_phase", "completed")
@@ -549,8 +549,8 @@ def test_record_start_clears_stale_release_state_from_previous_double_stop(
     every later release grace is cut short instantly until a server restart."""
     import threading
 
-    import lelab.record as record
-    import lelab.teleoperate as teleop
+    import makerlab.record as record
+    import makerlab.teleoperate as teleop
 
     stale = threading.Event()
     stale.set()
@@ -590,7 +590,7 @@ def test_record_start_clears_stale_release_state_from_previous_double_stop(
 # Rest-pose return on session end (mirrors the teleop stop-path integration).
 # record_with_web_events captures each follower's pose at session start and, on
 # a NORMAL end, drives it back before releasing torque — same helpers as teleop
-# (lelab.rest_pose, lelab.teleoperate._return_followers_to_rest), so the shared
+# (makerlab.rest_pose, makerlab.teleoperate._return_followers_to_rest), so the shared
 # return logic itself is covered in tests/test_teleoperate.py. These tests pin
 # record's own finally-block wiring: normal end returns then releases, a
 # double-stop skips the return, an error skips it, the pose is captured per
@@ -641,7 +641,7 @@ def _run_record_session(
     The loop runs a single episode: record_loop sets `stop_recording` (via the
     supplied events) so the session ends normally after one save, unless
     `raise_in_loop` makes record_loop raise (the error path)."""
-    import lelab.record as record
+    import makerlab.record as record
 
     return_calls: list[tuple] = []
 
@@ -739,7 +739,7 @@ def test_record_accepts_bare_repo_id(monkeypatch: pytest.MonkeyPatch, tmp_lerobo
     lerobot's sanity_check_dataset_name would crash on it, so we don't call it."""
 
     monkeypatch.setattr(
-        "lelab.utils.robot_factory.setup_calibration_files",
+        "makerlab.utils.robot_factory.setup_calibration_files",
         lambda leader, follower: ("leader", "follower"),
     )
     bus = _RecReturnBus(positions=dict.fromkeys(_RecReturnBus._MOTORS, 1500))
@@ -755,7 +755,7 @@ def test_record_refuses_eval_prefixed_repo_id(monkeypatch: pytest.MonkeyPatch, t
     with or without a namespace."""
 
     monkeypatch.setattr(
-        "lelab.utils.robot_factory.setup_calibration_files",
+        "makerlab.utils.robot_factory.setup_calibration_files",
         lambda leader, follower: ("leader", "follower"),
     )
     for repo_id in ("eval_ds", "tester/eval_ds"):
@@ -769,10 +769,10 @@ def test_record_refuses_eval_prefixed_repo_id(monkeypatch: pytest.MonkeyPatch, t
 def test_record_normal_end_returns_then_releases(monkeypatch: pytest.MonkeyPatch, tmp_lerobot_home) -> None:
     """A normal session end drives the follower back to its captured start pose
     (once), then disconnects — same as teleop's stop, no timed hold."""
-    import lelab.record as record
+    import makerlab.record as record
 
     monkeypatch.setattr(
-        "lelab.utils.robot_factory.setup_calibration_files",
+        "makerlab.utils.robot_factory.setup_calibration_files",
         lambda leader, follower: ("leader", "follower"),
     )
     bus = _RecReturnBus(positions=dict.fromkeys(_RecReturnBus._MOTORS, 1500))
@@ -793,7 +793,7 @@ def test_record_captures_pose_per_follower_excluding_gripper(
     (it may be holding an object at stop time)."""
 
     monkeypatch.setattr(
-        "lelab.utils.robot_factory.setup_calibration_files",
+        "makerlab.utils.robot_factory.setup_calibration_files",
         lambda leader, follower: ("leader", "follower"),
     )
     positions = {
@@ -822,7 +822,7 @@ def test_record_double_stop_skips_the_return(monkeypatch: pytest.MonkeyPatch, tm
     skip the return and release immediately, mirroring teleop."""
 
     monkeypatch.setattr(
-        "lelab.utils.robot_factory.setup_calibration_files",
+        "makerlab.utils.robot_factory.setup_calibration_files",
         lambda leader, follower: ("leader", "follower"),
     )
     robot = _RecRobot(_RecReturnBus())
@@ -843,7 +843,7 @@ def test_record_error_path_skips_return_and_releases(
     may be gone, so release ASAP — but still disconnects."""
 
     monkeypatch.setattr(
-        "lelab.utils.robot_factory.setup_calibration_files",
+        "makerlab.utils.robot_factory.setup_calibration_files",
         lambda leader, follower: ("leader", "follower"),
     )
     robot = _RecRobot(_RecReturnBus())
@@ -862,10 +862,10 @@ def test_stop_during_recording_phase_discards_episode_no_reset(
     — exactly what handle_stop_recording produces) must discard the in-progress
     episode (clear_episode_buffer, never save_episode) and end the session
     immediately, with no reset detour, then return to rest and disconnect once."""
-    import lelab.record as record
+    import makerlab.record as record
 
     monkeypatch.setattr(
-        "lelab.utils.robot_factory.setup_calibration_files",
+        "makerlab.utils.robot_factory.setup_calibration_files",
         lambda leader, follower: ("leader", "follower"),
     )
     robot = _RecRobot(_RecReturnBus())
@@ -889,10 +889,10 @@ def test_stop_wins_over_skip_when_both_set_in_same_episode(
     """When stop_recording AND _exit_early_triggered land in the same episode,
     stop wins: the short-circuit is checked FIRST, so the episode is discarded,
     not saved. (Stop is a deliberate 'end now, drop this take' action.)"""
-    import lelab.record as record
+    import makerlab.record as record
 
     monkeypatch.setattr(
-        "lelab.utils.robot_factory.setup_calibration_files",
+        "makerlab.utils.robot_factory.setup_calibration_files",
         lambda leader, follower: ("leader", "follower"),
     )
     robot = _RecRobot(_RecReturnBus())
@@ -932,16 +932,16 @@ def _join_upload(mgr, timeout: float = 5.0) -> None:
 def test_upload_manager_start_runs_and_completes(monkeypatch: pytest.MonkeyPatch) -> None:
     """A start pushes in a worker thread and lands in state "done" with the
     dataset_url, invalidating the cached hub status."""
-    from lelab.record import UploadManager, UploadRequest
+    from makerlab.record import UploadManager, UploadRequest
 
     ds = _fake_dataset()
     monkeypatch.setattr("lerobot.datasets.LeRobotDataset", lambda repo_id: ds)
     invalidated: list[str] = []
-    monkeypatch.setattr("lelab.record.invalidate_hub_status", invalidated.append)
+    monkeypatch.setattr("makerlab.record.invalidate_hub_status", invalidated.append)
 
     mgr = UploadManager()
     # Nothing else is writing this dataset — _dataset_in_use must return None.
-    monkeypatch.setattr("lelab.datasets._dataset_in_use", lambda repo_id: None)
+    monkeypatch.setattr("makerlab.datasets._dataset_in_use", lambda repo_id: None)
 
     result = mgr.start(UploadRequest(dataset_repo_id="tester/ds", tags=["x"], private=True))
     assert result == {"started": True, "repo_id": "tester/ds", "message": "Upload started"}
@@ -952,7 +952,7 @@ def test_upload_manager_start_runs_and_completes(monkeypatch: pytest.MonkeyPatch
     assert status["repo_id"] == "tester/ds"
     assert status["dataset_url"] == "https://huggingface.co/datasets/tester/ds"
     assert invalidated == ["tester/ds"]
-    # push_to_hub got the lelab-tagged tags + private flag.
+    # push_to_hub got the makerlab-tagged tags + private flag.
     ds.push_to_hub.assert_called_once()
     kwargs = ds.push_to_hub.call_args.kwargs
     assert kwargs["private"] is True
@@ -962,14 +962,14 @@ def test_upload_manager_start_runs_and_completes(monkeypatch: pytest.MonkeyPatch
 def test_upload_manager_error_maps_auth_friendly(monkeypatch: pytest.MonkeyPatch) -> None:
     """A 401 during push lands in state "error" with the friendly login message
     and the docs_url, not a raw traceback string."""
-    from lelab.record import UploadManager, UploadRequest
+    from makerlab.record import UploadManager, UploadRequest
 
     def _raise_401(**kwargs):
         raise RuntimeError("401 Client Error: you must be authenticated")
 
     ds = _fake_dataset(push=_raise_401)
     monkeypatch.setattr("lerobot.datasets.LeRobotDataset", lambda repo_id: ds)
-    monkeypatch.setattr("lelab.datasets._dataset_in_use", lambda repo_id: None)
+    monkeypatch.setattr("makerlab.datasets._dataset_in_use", lambda repo_id: None)
 
     mgr = UploadManager()
     mgr.start(UploadRequest(dataset_repo_id="tester/ds"))
@@ -983,14 +983,14 @@ def test_upload_manager_error_maps_auth_friendly(monkeypatch: pytest.MonkeyPatch
 
 def test_upload_manager_error_generic_message(monkeypatch: pytest.MonkeyPatch) -> None:
     """A non-auth failure surfaces its message without a docs_url."""
-    from lelab.record import UploadManager, UploadRequest
+    from makerlab.record import UploadManager, UploadRequest
 
     def _boom(**kwargs):
         raise RuntimeError("disk exploded")
 
     ds = _fake_dataset(push=_boom)
     monkeypatch.setattr("lerobot.datasets.LeRobotDataset", lambda repo_id: ds)
-    monkeypatch.setattr("lelab.datasets._dataset_in_use", lambda repo_id: None)
+    monkeypatch.setattr("makerlab.datasets._dataset_in_use", lambda repo_id: None)
 
     mgr = UploadManager()
     mgr.start(UploadRequest(dataset_repo_id="tester/ds"))
@@ -1005,10 +1005,10 @@ def test_upload_manager_error_generic_message(monkeypatch: pytest.MonkeyPatch) -
 def test_upload_manager_rejects_concurrent_start(monkeypatch: pytest.MonkeyPatch) -> None:
     """A second start while one is running is refused (409-mapped by the route),
     naming the repo already uploading; the running upload is untouched."""
-    from lelab.record import UploadManager, UploadRequest
+    from makerlab.record import UploadManager, UploadRequest
 
     mgr = UploadManager()
-    monkeypatch.setattr("lelab.datasets._dataset_in_use", lambda repo_id: None)
+    monkeypatch.setattr("makerlab.datasets._dataset_in_use", lambda repo_id: None)
     # Pretend an upload is already running for another repo (don't spawn one).
     mgr.state = "running"
     mgr.repo_id = "tester/first"
@@ -1024,10 +1024,10 @@ def test_upload_manager_rejects_concurrent_start(monkeypatch: pytest.MonkeyPatch
 def test_upload_manager_refuses_busy_dataset(monkeypatch: pytest.MonkeyPatch) -> None:
     """A start is refused when the dataset is being written by another op —
     _dataset_in_use returns a reason, and no worker thread is spawned."""
-    from lelab.record import UploadManager, UploadRequest
+    from makerlab.record import UploadManager, UploadRequest
 
     monkeypatch.setattr(
-        "lelab.datasets._dataset_in_use",
+        "makerlab.datasets._dataset_in_use",
         lambda repo_id: "A recording session is writing to this dataset. Stop it before renaming.",
     )
     mgr = UploadManager()
@@ -1039,7 +1039,7 @@ def test_upload_manager_refuses_busy_dataset(monkeypatch: pytest.MonkeyPatch) ->
 
 
 def test_upload_status_idle_shape() -> None:
-    from lelab.record import UploadManager
+    from makerlab.record import UploadManager
 
     status = UploadManager().get_status()
     assert status["state"] == "idle"
@@ -1053,8 +1053,8 @@ def test_delete_dataset_refused_mid_upload(tmp_lerobot_home, monkeypatch: pytest
     directory is left on disk."""
     import json
 
-    import lelab.record as record
-    from lelab.record import DatasetInfoRequest, handle_delete_dataset
+    import makerlab.record as record
+    from makerlab.record import DatasetInfoRequest, handle_delete_dataset
 
     repo_id = "tester/uploading"
     meta = tmp_lerobot_home / repo_id / "meta"
@@ -1077,8 +1077,8 @@ def test_delete_dataset_refused_mid_recording(tmp_lerobot_home, monkeypatch: pyt
     import json
     from unittest.mock import MagicMock
 
-    import lelab.record as record
-    from lelab.record import DatasetInfoRequest, handle_delete_dataset
+    import makerlab.record as record
+    from makerlab.record import DatasetInfoRequest, handle_delete_dataset
 
     repo_id = "tester/recording_ds"
     meta = tmp_lerobot_home / repo_id / "meta"
@@ -1100,8 +1100,8 @@ def test_delete_dataset_refused_mid_merge(tmp_lerobot_home, monkeypatch: pytest.
     """Deleting the output dataset of a running merge is refused."""
     import json
 
-    from lelab import merge
-    from lelab.record import DatasetInfoRequest, handle_delete_dataset
+    from makerlab import merge
+    from makerlab.record import DatasetInfoRequest, handle_delete_dataset
 
     repo_id = "tester/merging_ds"
     meta = tmp_lerobot_home / repo_id / "meta"
@@ -1122,8 +1122,8 @@ def test_delete_dataset_refused_mid_local_training(tmp_lerobot_home, monkeypatch
     import json
     from unittest.mock import MagicMock
 
-    from lelab import jobs
-    from lelab.record import DatasetInfoRequest, handle_delete_dataset
+    from makerlab import jobs
+    from makerlab.record import DatasetInfoRequest, handle_delete_dataset
 
     repo_id = "tester/training_ds"
     meta = tmp_lerobot_home / repo_id / "meta"
@@ -1148,8 +1148,8 @@ def test_delete_refusal_wording_is_action_neutral(tmp_lerobot_home, monkeypatch:
     import json
     from unittest.mock import MagicMock
 
-    import lelab.record as record
-    from lelab.record import DatasetInfoRequest, handle_delete_dataset
+    import makerlab.record as record
+    from makerlab.record import DatasetInfoRequest, handle_delete_dataset
 
     repo_id = "tester/neutral_ds"
     meta = tmp_lerobot_home / repo_id / "meta"
@@ -1173,9 +1173,9 @@ def test_start_recording_resume_skips_timestamp_stamp(monkeypatch: pytest.Monkey
     one. Regression-guards the `if not request.resume` skip."""
     import re
 
-    import lelab.record as record
-    import lelab.rollout as rollout
-    import lelab.teleoperate as teleop
+    import makerlab.record as record
+    import makerlab.rollout as rollout
+    import makerlab.teleoperate as teleop
 
     monkeypatch.setattr(record, "recording_active", False)
     monkeypatch.setattr(record, "recording_thread", None)
@@ -1223,7 +1223,7 @@ def test_start_recording_resume_skips_timestamp_stamp(monkeypatch: pytest.Monkey
 
 def test_classify_outcome_three_ways() -> None:
     """The pure classifier behind both record and teleop catch sites."""
-    from lelab.utils.errors import classify_outcome
+    from makerlab.utils.errors import classify_outcome
 
     # No error: the session was fine, wherever it stood.
     assert classify_outcome(work_completed=True, error_text=None) == "ok"
@@ -1242,7 +1242,7 @@ def test_classify_outcome_three_ways() -> None:
 
 
 def test_format_exception_type_message_and_truncation() -> None:
-    from lelab.utils.errors import format_exception
+    from makerlab.utils.errors import format_exception
 
     assert format_exception(RuntimeError("boom")) == "RuntimeError: boom"
     out = format_exception(RuntimeError("x" * 2000))
@@ -1256,7 +1256,7 @@ def test_recording_status_carries_outcome_error_hint_at_session_end(
 ) -> None:
     """The session-end status payload exposes the taxonomy fields, with the
     hint derived from the error text via friendly_hint."""
-    import lelab.record as record
+    import makerlab.record as record
 
     monkeypatch.setattr(record, "recording_active", False)
     monkeypatch.setattr(record, "current_phase", "completed")
@@ -1280,7 +1280,7 @@ def test_recording_status_omits_outcome_fields_while_active(
 ) -> None:
     """The taxonomy describes an ENDED session only — a live session's status
     carries none of the three fields (mirrors discarded_empty)."""
-    import lelab.record as record
+    import makerlab.record as record
 
     monkeypatch.setattr(record, "recording_active", True)
     monkeypatch.setattr(record, "current_phase", "recording")
@@ -1296,9 +1296,9 @@ def _start_session_with_fake_work(monkeypatch: pytest.MonkeyPatch, fake_work):
     """Drive handle_start_recording with record_with_web_events replaced by
     `fake_work`, so the REAL worker thread runs the real catch site. Returns
     after joining the worker. All feature mutexes idle; no hardware touched."""
-    import lelab.record as record
-    import lelab.rollout as rollout
-    import lelab.teleoperate as teleop
+    import makerlab.record as record
+    import makerlab.rollout as rollout
+    import makerlab.teleoperate as teleop
 
     monkeypatch.setattr(record, "recording_active", False)
     monkeypatch.setattr(record, "recording_thread", None)
@@ -1334,7 +1334,7 @@ def test_worker_classifies_teardown_failure_as_warning(
     """THE headline case: a session whose recording loop finished (episodes
     saved, phase "completed") but whose teardown overloaded the gripper must
     end ran_with_warning with phase "completed" — NOT a failed session."""
-    import lelab.record as record
+    import makerlab.record as record
 
     def _work_then_teardown_boom(cfg, events, **kwargs):
         # The loop finished its real work before cleanup raised.
@@ -1357,7 +1357,7 @@ def test_worker_classifies_midsession_failure_as_failed(
     """An exception mid-episode (loop still in "recording") is a real failure:
     phase "error", outcome "failed", with the camera hint mapped."""
 
-    import lelab.record as record
+    import makerlab.record as record
 
     def _boom_mid_episode(cfg, events, **kwargs):
         record.current_phase = "recording"
@@ -1375,7 +1375,7 @@ def test_worker_classifies_midsession_failure_as_failed(
 def test_worker_reports_ok_outcome_on_clean_end(monkeypatch: pytest.MonkeyPatch, tmp_lerobot_home) -> None:
     """A session that ends without raising reports outcome "ok" (no error, no
     hint) so the frontend's normal navigate-to-upload path is untouched."""
-    import lelab.record as record
+    import makerlab.record as record
 
     class _FakeDataset:
         num_episodes = 2

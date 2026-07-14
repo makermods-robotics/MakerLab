@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for lelab.train — request schema and CLI builder."""
+"""Tests for makerlab.train — request schema and CLI builder."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ def _arg_value(cmd: list[str], flag: str) -> str:
 
 
 def test_minimal_request_yields_well_formed_argv() -> None:
-    from lelab.train import TrainingRequest, build_training_command
+    from makerlab.train import TrainingRequest, build_training_command
 
     req = TrainingRequest(dataset_repo_id="lerobot/pusht")
     cmd = build_training_command(req, output_dir="/tmp/out")
@@ -41,7 +41,7 @@ def test_resume_request_emits_minimal_argv() -> None:
     """On resume, lerobot reconstructs the run from config_path, so the builder
     must NOT re-pass --dataset.* / --policy.type (they'd fight the loaded
     config) and must pass the resume essentials plus the overridable knobs."""
-    from lelab.train import TrainingRequest, build_training_command
+    from makerlab.train import TrainingRequest, build_training_command
 
     req = TrainingRequest(
         dataset_repo_id="lerobot/pusht",
@@ -67,7 +67,7 @@ def test_resume_request_emits_minimal_argv() -> None:
 
 
 def test_optional_dataset_fields_only_present_when_set() -> None:
-    from lelab.train import TrainingRequest, build_training_command
+    from makerlab.train import TrainingRequest, build_training_command
 
     req = TrainingRequest(dataset_repo_id="lerobot/pusht")
     cmd = build_training_command(req, "/tmp/out")
@@ -90,7 +90,7 @@ def test_optional_dataset_fields_only_present_when_set() -> None:
 
 
 def test_wandb_block_only_serialized_when_enabled() -> None:
-    from lelab.train import TrainingRequest, build_training_command
+    from makerlab.train import TrainingRequest, build_training_command
 
     off = build_training_command(TrainingRequest(dataset_repo_id="x", wandb_enable=False), "/tmp/out")
     assert _arg_value(off, "--wandb.enable") == "false"
@@ -113,7 +113,7 @@ def test_wandb_block_only_serialized_when_enabled() -> None:
 
 
 def test_push_to_hub_emits_repo_id_only_when_enabled() -> None:
-    from lelab.train import TrainingRequest, build_training_command
+    from makerlab.train import TrainingRequest, build_training_command
 
     off = build_training_command(
         TrainingRequest(dataset_repo_id="x", policy_push_to_hub=False, policy_repo_id="me/x"),
@@ -130,7 +130,7 @@ def test_push_to_hub_emits_repo_id_only_when_enabled() -> None:
     assert _arg_value(on, "--policy.repo_id") == "me/x"
     # A pushed policy is public and carries the required Hub tags.
     assert _arg_value(on, "--policy.private") == "false"
-    assert _arg_value(on, "--policy.tags") == "[makermods,openbooth,LeLab]"
+    assert _arg_value(on, "--policy.tags") == "[makermods,openbooth,MakerLab]"
     # When not pushing, no privacy/tags flags are emitted.
     assert "--policy.private" not in off
     assert "--policy.tags" not in off
@@ -138,7 +138,7 @@ def test_push_to_hub_emits_repo_id_only_when_enabled() -> None:
 
 def test_resume_push_to_hub_emits_public_and_tags() -> None:
     """The resume branch must also make a pushed policy public + tagged."""
-    from lelab.train import TrainingRequest, build_training_command
+    from makerlab.train import TrainingRequest, build_training_command
 
     req = TrainingRequest(
         dataset_repo_id="x",
@@ -151,11 +151,11 @@ def test_resume_push_to_hub_emits_public_and_tags() -> None:
 
     assert _arg_value(cmd, "--policy.push_to_hub") == "true"
     assert _arg_value(cmd, "--policy.private") == "false"
-    assert _arg_value(cmd, "--policy.tags") == "[makermods,openbooth,LeLab]"
+    assert _arg_value(cmd, "--policy.tags") == "[makermods,openbooth,MakerLab]"
 
 
 def test_seed_omitted_when_none() -> None:
-    from lelab.train import TrainingRequest, build_training_command
+    from makerlab.train import TrainingRequest, build_training_command
 
     req = TrainingRequest(dataset_repo_id="x", seed=None)
     cmd = build_training_command(req, "/tmp/out")
@@ -169,7 +169,7 @@ def test_seed_omitted_when_none() -> None:
 def test_explicit_device_passes_through() -> None:
     """A concrete device (persisted by an older config) passes through
     unchanged for backward compatibility."""
-    from lelab.train import TrainingRequest, build_training_command
+    from makerlab.train import TrainingRequest, build_training_command
 
     cmd = build_training_command(
         TrainingRequest(dataset_repo_id="x", policy_device="cuda"), "/tmp/out"
@@ -187,7 +187,7 @@ def test_auto_device_resolves_to_concrete_backend(monkeypatch) -> None:
     truthful. Resolution is made deterministic here via monkeypatch."""
     import torch
 
-    from lelab.train import TrainingRequest, build_training_command
+    from makerlab.train import TrainingRequest, build_training_command
 
     # No GPU available -> cpu.
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
@@ -210,7 +210,7 @@ def test_default_device_is_auto_and_resolved(monkeypatch) -> None:
     concrete backend rather than emitting "auto"."""
     import torch
 
-    from lelab.train import TrainingRequest, build_training_command
+    from makerlab.train import TrainingRequest, build_training_command
 
     assert TrainingRequest(dataset_repo_id="x").policy_device == "auto"
 
@@ -223,7 +223,7 @@ def test_default_device_is_auto_and_resolved(monkeypatch) -> None:
 def test_training_request_validates_required_field() -> None:
     from pydantic import ValidationError
 
-    from lelab.train import TrainingRequest
+    from makerlab.train import TrainingRequest
 
     with pytest.raises(ValidationError):
         TrainingRequest()  # dataset_repo_id is required
@@ -247,14 +247,14 @@ def test_training_request_validates_required_field() -> None:
     ],
 )
 def test_parse_hf_duration_accepts_valid_forms(value: str, expected_seconds: int) -> None:
-    from lelab.train import parse_hf_duration
+    from makerlab.train import parse_hf_duration
 
     assert parse_hf_duration(value) == expected_seconds
 
 
 @pytest.mark.parametrize("value", ["", "   ", "2h30", "2x", "abc", "-1h", "0h", "0s", "h"])
 def test_parse_hf_duration_rejects_bad_forms(value: str) -> None:
-    from lelab.train import parse_hf_duration
+    from makerlab.train import parse_hf_duration
 
     with pytest.raises(ValueError):
         parse_hf_duration(value)
@@ -263,7 +263,7 @@ def test_parse_hf_duration_rejects_bad_forms(value: str) -> None:
 def test_hf_job_timeout_defaults_to_none_and_round_trips() -> None:
     """Optional field: absent in old persisted config JSON loads as None, and
     a valid value survives a JSON round-trip."""
-    from lelab.train import TrainingRequest
+    from makerlab.train import TrainingRequest
 
     assert TrainingRequest(dataset_repo_id="x").hf_job_timeout is None
 
@@ -282,7 +282,7 @@ def test_hf_job_timeout_defaults_to_none_and_round_trips() -> None:
 def test_hf_job_timeout_validator_accepts_and_normalises(value, stored) -> None:
     """Valid (or blank/None) inputs pass; the friendly form is kept (whitespace
     trimmed), NOT converted to seconds — the runner does that conversion."""
-    from lelab.train import TrainingRequest
+    from makerlab.train import TrainingRequest
 
     req = TrainingRequest(dataset_repo_id="x", hf_job_timeout=value)
     assert req.hf_job_timeout == stored
@@ -292,7 +292,7 @@ def test_hf_job_timeout_validator_accepts_and_normalises(value, stored) -> None:
 def test_hf_job_timeout_validator_rejects_bad_forms(value: str) -> None:
     from pydantic import ValidationError
 
-    from lelab.train import TrainingRequest
+    from makerlab.train import TrainingRequest
 
     with pytest.raises(ValidationError):
         TrainingRequest(dataset_repo_id="x", hf_job_timeout=value)
@@ -301,7 +301,7 @@ def test_hf_job_timeout_validator_rejects_bad_forms(value: str) -> None:
 def test_hf_job_timeout_never_leaks_into_training_argv() -> None:
     """The timeout is a runner/platform concern; build_training_command must
     not emit it as a lerobot CLI flag (local runs ignore the field entirely)."""
-    from lelab.train import TrainingRequest, build_training_command
+    from makerlab.train import TrainingRequest, build_training_command
 
     req = TrainingRequest(dataset_repo_id="x", hf_job_timeout="3h30m")
     cmd = build_training_command(req, output_dir="/tmp/out")

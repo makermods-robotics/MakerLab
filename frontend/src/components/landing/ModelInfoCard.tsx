@@ -146,7 +146,7 @@ interface ModelInfoCardProps {
  * path (local) or Hub repo link (hub). Data comes from /models/info.
  *
  * Upload (local-only): pushes the checkpoint to the Hub as a public,
- * makermods/openbooth/LeLab-tagged repo — the backend does the tagging. Delete
+ * makermods/openbooth/MakerLab-tagged repo — the backend does the tagging. Delete
  * (local-only): removes the run's output dir. Both mirror the dataset card's
  * upload/delete gating (offered only for a local model whose namespace the user
  * can write to / whose local copy they own).

@@ -2,7 +2,7 @@
 # Install the uvcvideo-mjpg DKMS module: the stock uvcvideo driver with the
 # FIX_BANDWIDTH quirk extended to compressed (MJPEG) formats, so more than
 # two USB cameras can stream concurrently on one USB-2 bus. Background and
-# verification: JETSON_SETUP.md, "Multi-camera USB".
+# verification: jetson/README.md, "Multi-camera USB".
 #
 # Usage: sudo ./install.sh
 # Rollback: sudo dkms remove uvcvideo-mjpg/6.8.12 --all
@@ -67,4 +67,4 @@ fi
 echo
 echo "module : $(modinfo -n uvcvideo)"   # expect .../updates/dkms/uvcvideo.ko
 echo "quirks : $(cat /sys/module/uvcvideo/parameters/quirks 2>/dev/null || echo '(module not loaded)')"
-echo "Done. Verify with three concurrent MJPG streams once cameras are idle (JETSON_SETUP.md)."
+echo "Done. Verify with three concurrent MJPG streams once cameras are idle (jetson/README.md)."

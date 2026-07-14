@@ -32,14 +32,14 @@ import pytest
 @pytest.fixture(autouse=True)
 def _reset_rollout_meta(monkeypatch: pytest.MonkeyPatch) -> None:
     """Clear rollout's active-session meta so each case controls the log source."""
-    from lelab import rollout
+    from makerlab import rollout
 
     monkeypatch.setattr(rollout, "_inference_meta", {})
 
 
 def test_inference_log_empty_when_no_run(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     """No active meta and an empty logs dir → empty text, log_path None, no raise."""
-    from lelab import rollout
+    from makerlab import rollout
 
     empty_dir = tmp_path / "inference_logs"
     empty_dir.mkdir()
@@ -53,7 +53,7 @@ def test_inference_log_empty_when_no_run(monkeypatch: pytest.MonkeyPatch, tmp_pa
 
 def test_inference_log_tails_active_meta_file(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     """With an active meta log_path, the handler returns that file's tail."""
-    from lelab import rollout
+    from makerlab import rollout
 
     log_file = tmp_path / "run.log"
     log_file.write_text("line1\nline2\nline3\n")
@@ -66,7 +66,7 @@ def test_inference_log_tails_active_meta_file(monkeypatch: pytest.MonkeyPatch, t
 
 def test_inference_log_bounded_to_max_lines(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     """A log longer than max_lines is trimmed to the trailing lines only."""
-    from lelab import rollout
+    from makerlab import rollout
 
     log_file = tmp_path / "run.log"
     log_file.write_text("\n".join(f"line{i}" for i in range(1000)) + "\n")
@@ -82,7 +82,7 @@ def test_inference_log_bounded_to_max_lines(monkeypatch: pytest.MonkeyPatch, tmp
 
 def test_inference_log_falls_back_to_newest_file(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     """With no active meta, the newest *.log under the logs dir is tailed."""
-    from lelab import rollout
+    from makerlab import rollout
 
     logs_dir = tmp_path / ".cache" / "huggingface" / "lerobot" / "inference_logs"
     logs_dir.mkdir(parents=True)
@@ -107,7 +107,7 @@ def test_inference_log_falls_back_to_newest_file(monkeypatch: pytest.MonkeyPatch
 def _reset_record_handler(monkeypatch: pytest.MonkeyPatch):
     """Ensure no leaked ring-buffer handler from another test, and detach any
     handler this test attaches so loggers aren't left instrumented."""
-    from lelab import record
+    from makerlab import record
 
     monkeypatch.setattr(record, "_record_log_handler", None)
     yield
@@ -118,7 +118,7 @@ def _reset_record_handler(monkeypatch: pytest.MonkeyPatch):
 
 def test_recording_log_empty_when_no_session() -> None:
     """No handler attached → empty text, no raise."""
-    from lelab import record
+    from makerlab import record
 
     result = record.handle_recording_log()
     assert result["logs"] == ""
@@ -127,7 +127,7 @@ def test_recording_log_empty_when_no_session() -> None:
 def test_recording_log_captures_logger_output(monkeypatch: pytest.MonkeyPatch) -> None:
     """After attaching the handler, records logged to the record logger appear
     in the ring buffer's snapshot."""
-    from lelab import record
+    from makerlab import record
 
     record._attach_record_log_handler()
     record.logger.info("recording episode 1")
@@ -141,7 +141,7 @@ def test_recording_log_captures_logger_output(monkeypatch: pytest.MonkeyPatch) -
 def test_recording_log_ring_buffer_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
     """The ring buffer keeps only the last N records — memory cannot grow
     unbounded no matter how many lines are logged."""
-    from lelab import record
+    from makerlab import record
 
     monkeypatch.setattr(record, "_RECORD_LOG_MAX_LINES", 5)
     record._attach_record_log_handler()
@@ -159,7 +159,7 @@ def test_recording_log_ring_buffer_is_bounded(monkeypatch: pytest.MonkeyPatch) -
 def test_recording_log_tail_max_lines(monkeypatch: pytest.MonkeyPatch) -> None:
     """The handler's own max_lines arg trims the returned tail independently of
     the buffer capacity."""
-    from lelab import record
+    from makerlab import record
 
     record._attach_record_log_handler()
     for i in range(20):
@@ -174,7 +174,7 @@ def test_recording_log_tail_max_lines(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_attach_replaces_previous_handler(monkeypatch: pytest.MonkeyPatch) -> None:
     """A fresh attach detaches the previous handler so a new session starts with
     a clean buffer and the record logger isn't left with a stale handler."""
-    from lelab import record
+    from makerlab import record
 
     record._attach_record_log_handler()
     first = record._record_log_handler
@@ -195,7 +195,7 @@ def test_attach_replaces_previous_handler(monkeypatch: pytest.MonkeyPatch) -> No
 def test_ring_buffer_handler_capacity_direct() -> None:
     """Unit-test the handler in isolation: it never holds more than `capacity`
     formatted lines."""
-    from lelab.record import _RingBufferLogHandler
+    from makerlab.record import _RingBufferLogHandler
 
     handler = _RingBufferLogHandler(capacity=3)
     for i in range(10):

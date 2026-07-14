@@ -1,7 +1,7 @@
 <h1 align="center">🦾 MakerLab</h1>
 
 <p align="center">
-  <b>A web interface for <a href="https://github.com/huggingface/lerobot">LeRobot</a>, built for the SO-101 leader/follower arm.</b>
+  <b>A browser interface for <a href="https://github.com/huggingface/lerobot">LeRobot</a>, built for SO-101 leader/follower arms.</b>
 </p>
 
 <div align="center">
@@ -10,104 +10,181 @@
 
 </div>
 
-**MakerLab** is a web app that puts the full LeRobot workflow — calibrate, teleoperate, record, train, replay — into a single browser UI. Plug in your arm, open the app, and go. No CLI gymnastics, no keyboard prompts.
+MakerLab puts the full LeRobot workflow—robot setup, calibration, teleoperation,
+recording, training, inference, and replay—into one web application. Plug in the
+arms, start MakerLab, and operate everything from the browser instead of moving
+between LeRobot CLI commands and keyboard-driven flows.
 
-MakerLab is a fork of Hugging Face's **[LeLab](https://github.com/huggingface/leLab)** — the graphical interface for LeRobot, originally built by Team LeLab at the 2025 LeRobot Worldwide Hackathon 🏆 and maintained by the [LeRobot](https://huggingface.co/lerobot) team. MakerLab, by [makermods-robotics](https://github.com/makermods-robotics), extends it with hardware-safety guards, bimanual support, and a more guided setup and training flow.
+MakerLab is a fork of Hugging Face's [LeLab](https://github.com/huggingface/leLab),
+the graphical interface created by Team LeLab at the 2025 LeRobot Worldwide
+Hackathon and maintained by the [LeRobot](https://huggingface.co/lerobot) team.
+MakerLab extends it with hardware-safety guards, bimanual support, reusable robot
+profiles, data and model libraries, and a guided training and deployment flow.
 
-## Quick Start
+## What you can do
 
-Install from source (requires Python ≥ 3.12):
+| Workflow | Capability |
+| --- | --- |
+| **Set up robots** | Create reusable single-arm or bimanual robot profiles with saved ports, calibrations, cameras, and power limits. |
+| **Calibrate** | Run guided manual or automatic calibration without keyboard prompts. |
+| **Teleoperate** | Drive one or two follower arms from their leaders with live joint visualization. |
+| **Record** | Capture multi-camera episodes into LeRobot datasets and resume existing sessions. |
+| **Manage data** | Inspect, import, download, upload, rename, delete, and merge local or Hub datasets. |
+| **Train** | Run local or Hugging Face Jobs training and continue from checkpoints. |
+| **Manage models** | Import, download, upload, inspect, and select trained policies. |
+| **Run inference** | Bind the required cameras and deploy a selected checkpoint on single or bimanual robots. |
+| **Replay** | Re-run a recorded episode on the robot. |
+
+## What MakerLab adds
+
+### Hardware safety
+
+- **Arm-identity guard:** fingerprints each arm before energizing it, catching
+  swapped leader and follower ports.
+- **Hand-motion port detection:** identifies a serial port by watching an arm
+  move while its motors remain unpowered. Gripper wiggle remains available as
+  an alternative.
+- **Graceful stops:** freezes the arm, returns toward the session's starting
+  pose, and releases torque. Press Stop again for immediate release.
+- **Motor-power limits:** stores a per-robot power limit and reports live supply
+  voltage and session power telemetry.
+
+### Robots and calibration
+
+- **Reusable robot profiles:** one selected robot supplies the ports,
+  calibrations, cameras, layout, and power settings used across the app.
+- **Bimanual workflows:** four-arm calibration, bimanual teleoperation, dual-arm
+  visualization, bimanual recording, and bimanual inference.
+- **Named calibration library:** create, rename, import, export, and safely
+  delete calibration files without repeatedly overwriting one slot.
+- **Automatic calibration:** calibrate one arm or a selected group concurrently,
+  with per-arm status and controlled cancellation.
+
+### Datasets, models, and training
+
+- **Dataset library:** local and Hub status, metadata, tasks, per-task episode
+  counts, camera information, background transfers, visibility, and tags.
+- **Dataset merging:** validates compatible datasets and runs LeRobot's
+  aggregation flow from the UI.
+- **Model library:** manages local runs, imported checkpoints, downloaded Hub
+  policies, model metadata, aliases, and deployment selection.
+- **Checkpoint continuation:** resumes local or cloud training while preserving
+  lineage and stitching metrics into one history.
+- **Guided configuration:** selects the policy and dataset before training,
+  checks availability, and offers required policy extras when missing.
+
+## Installation
+
+MakerLab requires Python 3.12 or newer and supports macOS and Linux. NVIDIA
+Jetson installations have additional CUDA and camera-driver requirements; read
+the [Jetson station guide](jetson/README.md) before creating the environment on
+a Jetson intended for GPU training or inference.
+
+### Prerequisites
+
+Install [uv](https://docs.astral.sh/uv/) and Git LFS:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+git lfs install
+```
+
+Git LFS is required before rebuilding the frontend. The SO-101 meshes under
+`frontend/public/` are LFS objects; building from an unsmudged clone embeds
+pointer files and breaks the 3D viewer.
+
+### Install as a tool
+
+Use a tool install when you only want to run MakerLab. It installs a global
+`makerlab` command and uses the production frontend bundled in the package.
+
+```bash
+uv tool install "git+https://github.com/makermods-robotics/MakerLab"
+makerlab
+```
+
+To install from an existing local checkout or update a tool installation:
+
+```bash
+uv tool install /path/to/MakerLab
+uv tool install --reinstall /path/to/MakerLab
+```
+
+A tool installation is a frozen snapshot and does not include the frontend
+source needed by `makerlab --dev`. It also creates a separate environment with
+its own copy of PyTorch and LeRobot. Jetson systems that require CUDA PyTorch
+should use the source installation described in the
+[Jetson guide](jetson/README.md).
+
+### Install from source
+
+Use an editable source installation when developing MakerLab or when the host
+needs control over the Python and PyTorch environment.
 
 ```bash
 git clone https://github.com/makermods-robotics/MakerLab
 cd MakerLab
-pip install -e .
-makerlab         # serves the UI + API on :8000, opens your browser
+git lfs install --local
+git lfs pull
+uv venv --python 3.12
+uv pip install -e .
+.venv/bin/makerlab
 ```
 
-The CLI command is `makerlab`; the Python package/module keeps the upstream `lelab` name.
+When working on the source, invoke `.venv/bin/makerlab` explicitly. A bare
+`makerlab` may resolve to an older `uv tool install` snapshot. Check with:
 
-## What you can do
+```bash
+which makerlab
+readlink "$(which makerlab)"
+```
 
-The core LeRobot workflow, inherited from LeLab and extended throughout:
+Running either entry point from the source environment also attempts to place
+non-destructive symlinks in `~/.local/bin`, making `makerlab` and
+`makerlab-station` available outside the checkout. Set
+`MAKERLAB_NO_PATH_LINK=1` to disable that convenience.
 
-<div align="center">
-  <table>
-    <tr>
-      <td>🎯 <b>Calibrate</b></td>
-      <td>Guided web flow for both arms — manual or fully automatic, no keyboard prompts.</td>
-    </tr>
-    <tr>
-      <td>🕹️ <b>Teleoperate</b></td>
-      <td>Move the leader, the follower mirrors it. Live joint streaming into a 3D viewer.</td>
-    </tr>
-    <tr>
-      <td>📹 <b>Record</b></td>
-      <td>Capture episodes into a LeRobotDataset, with multiple cameras.</td>
-    </tr>
-    <tr>
-      <td>🧠 <b>Train</b></td>
-      <td>Kick off a LeRobot training job and watch the loss/lr chart live.</td>
-    </tr>
-    <tr>
-      <td>🤖 <b>Run inference</b></td>
-      <td>Execute a trained policy on the follower.</td>
-    </tr>
-    <tr>
-      <td>⏪ <b>Replay</b></td>
-      <td>Re-run any recorded episode.</td>
-    </tr>
-    <tr>
-      <td>☁️ <b>Upload</b></td>
-      <td>Push your dataset to the <a href="https://huggingface.co/">Hugging Face Hub</a> in one click.</td>
-    </tr>
-  </table>
-</div>
+### Run modes
 
-## What MakerLab adds
+| Command | Behavior |
+| --- | --- |
+| `makerlab` | Serves the production UI on `127.0.0.1:8000` and opens a browser. |
+| `makerlab --dev` | Runs Vite with hot reload on `:8080` and reloadable FastAPI on `:8000`. Requires a source checkout and Node.js. |
+| `makerlab --lan` | Binds to `0.0.0.0:8000` without opening a browser. |
+| `makerlab --offline` | Sets `HF_HUB_OFFLINE=1`; hardware and local-model workflows remain available while Hub operations fail fast. |
+| `makerlab-station` | Equivalent to `makerlab --lan --offline`. |
+| `makerlab --stop` | Stops a running MakerLab process tree and releases ports `8000` and `8080`. |
 
-**Hardware safety** — opinionated about not letting a wiring mistake break a servo:
+## Development
 
-- 🛡️ **Arm-identity guard** — fingerprints each arm's EEPROM before energizing, so a swapped leader/follower port is caught rather than driven.
-- ✋ **Hand-motion port detection** — hit *Detect* and swing an arm's base to identify its serial port with no motor power. The legacy gripper-wiggle method is still available.
-- 🛑 **Graceful stops** — teleop and auto-calibration freeze, return to the start pose, then release torque. Hit *Stop* twice for an instant release.
-- 🔋 **Motor power limiting** — cap per-robot motor power, with a live supply-voltage readout and session power telemetry.
+Install the development and test dependencies into the editable environment:
 
-**Robots & calibration:**
+```bash
+uv pip install -e ".[dev,test]"
+.venv/bin/makerlab --dev
+```
 
-- 🤝 **Robots as first-class objects** — create a robot through a dialog with an immutable arm layout (single or bimanual), and reuse it across every feature.
-- 🦾 **Bimanual mode** — two leader/follower pairs: 4-arm calibration, bimanual teleoperation with a dual-arm 3D viewer, and bimanual dataset recording.
-- 🏷️ **Named calibrations** — save calibrations under names instead of overwriting; deleting one in use unassigns it rather than blocking. A start-pose guard rejects calibrations that didn't begin from the middle pose, and <code>wrist_roll</code> is handled as a full turn to match upstream <code>lerobot-calibrate</code>.
+Useful checks:
 
-**Datasets:**
+```bash
+.venv/bin/python -m pytest
+.venv/bin/ruff check .
+.venv/bin/ruff format --check .
+```
 
-- 🪪 **Dataset info cards** — episodes, cameras, and tasks with per-task episode counts, plus warnings on unusable datasets.
-- 🔀 **Merge from the UI** — combine datasets (wraps LeRobot's <code>aggregate_datasets</code>), with legible errors and name validation.
-- 🎥 **Preview before naming** — see all camera feeds before committing to a recording setup.
-
-**Training:**
-
-- 🧭 **Model-type-first entry** — pick the policy and dataset on the home page (availability-gated), frozen for the run thereafter; config guards, run names, and honest compute targets.
-- ⏯️ **Continue from a checkpoint** — resume a saved run, with the lineage's loss chart stitched into one view and source checkpoints folded into the successor.
-- 🗂️ **Job tooling** — checkpoint management, model display-name aliases, and idempotent imports with dedup.
+The Vite frontend lives in `frontend/`. The production bundle in
+`frontend/dist/` is committed and packaged into the Python wheel. Normal
+frontend development uses Vite and does not require rebuilding `dist` by hand.
 
 ## Resources
 
-- **[LeRobot](https://github.com/huggingface/lerobot):** the underlying library — go here for everything beyond the UI.
-- **[LeLab](https://github.com/huggingface/leLab):** the upstream project this is forked from; try its hosted UI on the [LeLab Space](https://huggingface.co/spaces/lerobot/LeLab).
-- **[Discord](https://discord.gg/q8Dzzpym3f):** chat with the LeRobot community.
-- **[CLAUDE.md](CLAUDE.md):** architecture rundown for contributors.
-
-## Contribute
-
-PRs welcome. Hot-reload mode for working on the code:
-
-```bash
-makerlab --dev
-```
-
-Vite on `:8080`, uvicorn `--reload` on `:8000`.
+- [Jetson station guide](jetson/README.md)
+- [LeRobot](https://github.com/huggingface/lerobot), the underlying robotics framework
+- [LeLab](https://github.com/huggingface/leLab), the upstream project
+- [LeLab Space](https://huggingface.co/spaces/lerobot/LeLab), the upstream hosted UI
+- [LeRobot Discord](https://discord.gg/q8Dzzpym3f)
+- [Contributor architecture notes](CLAUDE.md)
 
 <div align="center">
-<sub>MakerLab is maintained by <a href="https://github.com/makermods-robotics">makermods-robotics</a>. Forked with ❤️ from <a href="https://github.com/huggingface/leLab">LeLab</a>, originally hacked together by <a href="https://www.linkedin.com/posts/nicolas-rabault-_lerobot-hackathon-lerobot-ugcPost-7341065019368828930-jTnl/">Team LeLab at the 2025 LeRobot Worldwide Hackathon 🏆</a>.</sub>
+<sub>MakerLab is maintained by <a href="https://github.com/makermods-robotics">makermods-robotics</a>. Forked with ❤️ from <a href="https://github.com/huggingface/leLab">LeLab</a>.</sub>
 </div>

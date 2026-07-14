@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository purpose
 
-LeLab is a FastAPI + React web interface wrapping the [LeRobot](https://github.com/huggingface/lerobot) framework for the SO-101 leader/follower arm. It exposes teleoperation, dataset recording, calibration, replay, and training as HTTP/WebSocket endpoints, replacing LeRobot's CLI + keyboard-driven flows.
+MakerLab is a FastAPI + React web interface wrapping the [LeRobot](https://github.com/huggingface/lerobot) framework for the SO-101 leader/follower arm. It exposes teleoperation, dataset recording, calibration, replay, and training as HTTP/WebSocket endpoints, replacing LeRobot's CLI + keyboard-driven flows.
 
-The frontend (React + Vite) lives in [`frontend/`](frontend/). The built bundle in [`frontend/dist/`](frontend/dist/) is committed and shipped inside the Python wheel as package data (`frontend.__init__.py` makes setuptools treat it as a package); [`lelab/server.py`](lelab/server.py) mounts it as `StaticFiles` at `/` so a single `makerlab` process serves both API and UI on `:8000`. The `frontend/` directory is also force-pushed to the [LeLab HF Space](https://huggingface.co/spaces/lerobot/LeLab) by [`.github/workflows/sync_space.yml`](.github/workflows/sync_space.yml) — that's a separate runtime; the Space builds the [Dockerfile](frontend/Dockerfile) (which runs `npm run build` again, so committed `dist/` doesn't matter to it).
+The frontend (React + Vite) lives in [`frontend/`](frontend/). The built bundle in [`frontend/dist/`](frontend/dist/) is committed and shipped inside the Python wheel as package data (`frontend.__init__.py` makes setuptools treat it as a package); [`makerlab/server.py`](makerlab/server.py) mounts it as `StaticFiles` at `/` so a single `makerlab` process serves both API and UI on `:8000`. The `frontend/` directory is also force-pushed to the upstream [LeLab HF Space](https://huggingface.co/spaces/lerobot/LeLab) by [`.github/workflows/sync_space.yml`](.github/workflows/sync_space.yml) — that's a separate runtime; the Space builds the [Dockerfile](frontend/Dockerfile) (which runs `npm run build` again, so committed `dist/` doesn't matter to it).
 
 ## Common commands
 
@@ -16,7 +16,7 @@ Install (editable, requires Python ≥3.10):
 pip install -e .
 ```
 
-`lerobot` is pinned to a specific commit on `huggingface/lerobot` `main` (see [pyproject.toml](pyproject.toml)) — no PyPI release yet exposes the `lerobot-rollout` script that [lelab/rollout.py](lelab/rollout.py) shells out to. Bump the SHA when you want newer upstream changes; expect import-path drift (e.g. `lerobot.configs.dataset`, `lerobot.utils.feature_utils`, `lerobot.common.control_utils`) and adjust call sites accordingly.
+`lerobot` is pinned to a specific commit on `huggingface/lerobot` `main` (see [pyproject.toml](pyproject.toml)) — no PyPI release yet exposes the `lerobot-rollout` script that [makerlab/rollout.py](makerlab/rollout.py) shells out to. Bump the SHA when you want newer upstream changes; expect import-path drift (e.g. `lerobot.configs.dataset`, `lerobot.utils.feature_utils`, `lerobot.common.control_utils`) and adjust call sites accordingly.
 
 Run servers (entry point defined in [pyproject.toml](pyproject.toml)):
 
@@ -31,15 +31,15 @@ Run the Python tests with `pytest` (config in [pyproject.toml](pyproject.toml); 
 
 ## Architecture
 
-### Backend module layout (`lelab/`)
+### Backend module layout (`makerlab/`)
 
-[server.py](lelab/server.py) is a thin FastAPI router. Each feature lives in its own module that owns its global state and exposes `handle_*` functions plus a Pydantic request model:
+[server.py](makerlab/server.py) is a thin FastAPI router. Each feature lives in its own module that owns its global state and exposes `handle_*` functions plus a Pydantic request model:
 
-- [record.py](lelab/record.py) — dataset recording (wraps `lerobot.record.record`); patches `lerobot.common.utils.control_utils` keyboard listener so frontend buttons replace arrow-key controls.
-- [teleoperate.py](lelab/teleoperate.py) — leader→follower teleoperation (wraps `lerobot.teleoperate`).
-- [calibrate.py](lelab/calibrate.py) — step-by-step web calibration with a `CalibrationManager` singleton and `_step_complete` threading.Event.
-- [train.py](lelab/train.py) — wraps the LeRobot training CLI as a subprocess (psutil for lifecycle, queue for log streaming).
-- [utils/config.py](lelab/utils/config.py) — shared paths and persistence: calibration JSON, saved ports, saved config selections. **Import shared constants from here, do not hardcode paths in feature modules.**
+- [record.py](makerlab/record.py) — dataset recording (wraps `lerobot.record.record`); patches `lerobot.common.utils.control_utils` keyboard listener so frontend buttons replace arrow-key controls.
+- [teleoperate.py](makerlab/teleoperate.py) — leader→follower teleoperation (wraps `lerobot.teleoperate`).
+- [calibrate.py](makerlab/calibrate.py) — step-by-step web calibration with a `CalibrationManager` singleton and `_step_complete` threading.Event.
+- [train.py](makerlab/train.py) — wraps the LeRobot training CLI as a subprocess (psutil for lifecycle, queue for log streaming).
+- [utils/config.py](makerlab/utils/config.py) — shared paths and persistence: calibration JSON, saved ports, saved config selections. **Import shared constants from here, do not hardcode paths in feature modules.**
 
 ### State model
 
@@ -47,11 +47,11 @@ Each feature module owns module-level globals (e.g. `recording_active`, `teleope
 
 ### WebSocket broadcast
 
-[server.py](lelab/server.py#L104-L206) defines a single `ConnectionManager` with a background `_broadcast_worker` thread that drains a `queue.Queue` and forwards joint data to all `/ws/joint-data` clients via a thread-local asyncio loop. Feature modules get the manager passed in (e.g. `handle_start_teleoperation(request, manager)`) and call `manager.broadcast_joint_data_sync(data)` from their worker threads. Don't `await` from these threads — use the sync queue method.
+[server.py](makerlab/server.py#L104-L206) defines a single `ConnectionManager` with a background `_broadcast_worker` thread that drains a `queue.Queue` and forwards joint data to all `/ws/joint-data` clients via a thread-local asyncio loop. Feature modules get the manager passed in (e.g. `handle_start_teleoperation(request, manager)`) and call `manager.broadcast_joint_data_sync(data)` from their worker threads. Don't `await` from these threads — use the sync queue method.
 
 ### Persistent state on disk
 
-All under `~/.cache/huggingface/lerobot/` (managed in [utils/config.py](lelab/utils/config.py)):
+All under `~/.cache/huggingface/lerobot/` (managed in [utils/config.py](makerlab/utils/config.py)):
 
 - `calibration/teleoperators/so101_leader/*.json` — leader calibration files (also called "teleop")
 - `calibration/robots/so101_follower/*.json` — follower calibration files (also called "robot")
@@ -61,7 +61,7 @@ All under `~/.cache/huggingface/lerobot/` (managed in [utils/config.py](lelab/ut
 
 ### Calibration files: dual-location pattern
 
-[setup_calibration_files](lelab/utils/config.py#L30-L74) copies user-selected configs from `LEADER_CONFIG_PATH` / `FOLLOWER_CONFIG_PATH` into LeRobot's expected locations under `~/.cache/huggingface/lerobot/calibration/`. Recording, teleoperation, and replay all call this before starting. New features that drive a robot must do the same.
+[setup_calibration_files](makerlab/utils/config.py#L30-L74) copies user-selected configs from `LEADER_CONFIG_PATH` / `FOLLOWER_CONFIG_PATH` into LeRobot's expected locations under `~/.cache/huggingface/lerobot/calibration/`. Recording, teleoperation, and replay all call this before starting. New features that drive a robot must do the same.
 
 ## Hardware target
 
@@ -69,4 +69,4 @@ Hardcoded for **SO-101 leader/follower arms** (`so101_leader`, `so101_follower`)
 
 ## Phone camera / HTTPS
 
-Phone-as-camera streaming requires HTTPS. See [PHONE_CAMERA_SETUP.md](PHONE_CAMERA_SETUP.md) and [HTTPS_SETUP.md](HTTPS_SETUP.md). Self-signed certs go in `certs/`. The default `lelab-fullstack` does **not** start with HTTPS — for phone cameras run uvicorn manually with `--ssl-keyfile certs/key.pem --ssl-certfile certs/cert.pem`.
+Phone-as-camera streaming requires HTTPS. See [PHONE_CAMERA_SETUP.md](PHONE_CAMERA_SETUP.md) and [HTTPS_SETUP.md](HTTPS_SETUP.md). Self-signed certs go in `certs/`. The default `makerlab-fullstack` does **not** start with HTTPS — for phone cameras run uvicorn manually with `--ssl-keyfile certs/key.pem --ssl-certfile certs/cert.pem`.
