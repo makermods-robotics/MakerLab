@@ -15,7 +15,7 @@ export interface UpdateStatus {
 // Stores the latest SHA the user chose to ignore via "don't ask again". A newer
 // release has a different SHA, so the popup naturally returns — which clears the
 // previous opt-out, exactly as intended.
-const DISMISS_KEY = "lelab:update-dismissed-sha";
+const DISMISS_KEY = "makerlab:update-dismissed-sha";
 
 interface UseUpdateCheckResult {
   status: UpdateStatus | null;
@@ -25,7 +25,7 @@ interface UseUpdateCheckResult {
 }
 
 /**
- * Checks GitHub (via the backend) once on load for a newer LeLab and decides
+ * Checks GitHub (via the backend) once on load for a newer MakerLab and decides
  * whether to surface the update popup. Skipped on the hosted HF Space (a
  * different runtime that can't be updated this way) and silent on any failure.
  */
