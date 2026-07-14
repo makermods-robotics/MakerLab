@@ -11,7 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for makerlab.auto_calibrate — subprocess manager (process mocked)."""
+"""Tests for makerlab.auto_calibrate — subprocess manager (process mocked).
+
+Note: Popen is faked throughout, so the real subprocess encoding/env kwargs
+(the Windows UTF-8 fix in auto_calibrate.py) aren't exercised here — verified
+separately with a real subprocess, not by this suite.
+"""
 
 from __future__ import annotations
 

@@ -492,10 +492,19 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
         log_dir = Path.home() / ".cache" / "huggingface" / "lerobot" / "inference_logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         log_path = log_dir / f"{int(time.time())}.log"
-        log_handle = log_path.open("w", buffering=1)
+        # encoding="utf-8": the pumped lines are already-decoded str (see
+        # _pump_stdout's utf-8 decode below); writing them with the platform
+        # default encoding can fail the same way on Windows (ANSI codepage).
+        log_handle = log_path.open("w", buffering=1, encoding="utf-8")
 
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
+        # Forces the rollout subprocess's own stdout to UTF-8: on Windows a
+        # piped (non-console) stdout otherwise falls back to the ANSI
+        # codepage, which can't encode non-ASCII output the policy/robot code
+        # may print — see makerlab/auto_calibrate.py for the crash this
+        # pattern caused.
+        env["PYTHONIOENCODING"] = "utf-8"
         # Feed a newline into stdin PER follower arm so SOFollower.calibrate()'s
         # `input("Press ENTER to use the calibration file ...")` returns "" and
         # writes the existing calibration to the motors instead of hanging

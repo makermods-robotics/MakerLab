@@ -188,6 +188,17 @@ class AutoCalibrationManager:
             self._logs.clear()
             self._request = request
             self._stop_thread = None
+            # Force UTF-8 for the child's own stdout: on Windows, a redirected
+            # (piped) stdout falls back to the process's ANSI codepage instead
+            # of UTF-8, and the vendored script prints non-ASCII characters
+            # (e.g. "≈") that codepage can't encode, crashing the child with
+            # UnicodeEncodeError. encoding="utf-8" below then makes the parent
+            # decode the pipe the same way the child was told to encode it.
+            # tests/test_auto_calibrate.py fakes Popen, so it can't exercise
+            # this — if you touch these kwargs, re-verify with a real
+            # subprocess on Windows.
+            child_env = os.environ.copy()
+            child_env["PYTHONIOENCODING"] = "utf-8"
             try:
                 self._proc = subprocess.Popen(
                     command,
@@ -199,7 +210,9 @@ class AutoCalibrationManager:
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,
+                    encoding="utf-8",
                     bufsize=1,
+                    env=child_env,
                 )
             except Exception as e:
                 logger.error(f"Failed to launch auto-calibration: {e}")

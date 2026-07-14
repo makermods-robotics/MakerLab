@@ -282,13 +282,21 @@ class MergeManager:
 
         cmd = [sys.executable, "-m", "makerlab.merge", output, *sources]
         logger.info("Starting dataset merge: %s", " ".join(cmd))
+        # PYTHONIOENCODING forces the child's own stdout to UTF-8: on Windows a
+        # piped (non-console) stdout otherwise falls back to the ANSI codepage,
+        # which can't encode non-ASCII output (progress bars, dataset names,
+        # etc.) — see makerlab/auto_calibrate.py for the crash this caused.
+        child_env = os.environ.copy()
+        child_env["PYTHONIOENCODING"] = "utf-8"
         try:
             self.process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 universal_newlines=True,
+                encoding="utf-8",
                 bufsize=1,
+                env=child_env,
             )
         except Exception as exc:
             logger.exception("Failed to spawn merge subprocess")

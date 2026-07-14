@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shlex
 import shutil
 import subprocess
@@ -224,12 +225,20 @@ def handle_run_update() -> UpdateResult:
             message="This install can't auto-update (editable or non-git). "
             "Update it the way you installed it.",
         )
+    # PYTHONIOENCODING forces a python-based updater's (pip fallback) own
+    # stdout to UTF-8: on Windows a piped (non-console) stdout otherwise falls
+    # back to the ANSI codepage, which can't encode non-ASCII pip/git output —
+    # see makerlab/auto_calibrate.py for the crash this pattern caused.
+    child_env = os.environ.copy()
+    child_env["PYTHONIOENCODING"] = "utf-8"
     try:
         proc = subprocess.run(
             _build_update_cmd(source["owner"], source["repo"]),
             capture_output=True,
             text=True,
+            encoding="utf-8",
             timeout=600,
+            env=child_env,
         )
     except Exception as exc:  # noqa: BLE001 — surface failure to the UI
         logger.exception("Auto-update subprocess failed")

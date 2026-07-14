@@ -129,10 +129,15 @@ class MetricsHistoryPoint(BaseModel):
 
 
 def _pid_alive(pid: int) -> bool:
-    """Return True if a process with this PID exists. Cheap; uses signal 0."""
+    """Return True if a process with this PID exists. Cheap; uses signal 0.
+
+    Catches OSError broadly, not just ProcessLookupError/PermissionError: on
+    Windows, os.kill(pid, 0) on a stale/reused PID raises a plain OSError
+    (WinError 87), not ProcessLookupError — narrower handling here crashed
+    JobRegistry's startup load for any leftover job record on Windows."""
     try:
         os.kill(pid, 0)
-    except (ProcessLookupError, PermissionError):
+    except OSError:
         return False
     return True
 
@@ -318,14 +323,23 @@ class LocalJobRunner:
 
         # Open the persistent log sink (one JSON line per stdout line). Held
         # open for the subprocess's lifetime so we don't reopen per write.
+        # encoding="utf-8": see the PYTHONIOENCODING note below — without it, a
+        # non-ASCII line decoded from the child's stdout can fail to write here
+        # on Windows too (default file encoding is the ANSI codepage).
         if self._log_file_path is not None:
             self._log_file_path.parent.mkdir(parents=True, exist_ok=True)
-            self._log_file = self._log_file_path.open("a", buffering=1)
+            self._log_file = self._log_file_path.open("a", buffering=1, encoding="utf-8")
 
         # PYTHONUNBUFFERED makes the child's stdout flush per line. Without it
         # block-buffering hides log lines from our parser for many seconds.
+        # PYTHONIOENCODING forces the child's own stdout to UTF-8: on Windows a
+        # piped (non-console) stdout otherwise falls back to the ANSI codepage,
+        # and training output (tqdm bars, wandb, etc.) commonly prints non-ASCII
+        # characters that codepage can't encode — see makerlab/auto_calibrate.py
+        # for the auto-calibration crash this exact pattern caused.
         child_env = os.environ.copy()
         child_env["PYTHONUNBUFFERED"] = "1"
+        child_env["PYTHONIOENCODING"] = "utf-8"
 
         # start_new_session=True puts the child in its own session/process
         # group. Without it, signals sent to the uvicorn worker (e.g. when
@@ -337,6 +351,7 @@ class LocalJobRunner:
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             universal_newlines=True,
+            encoding="utf-8",
             bufsize=1,
             env=child_env,
             start_new_session=True,
