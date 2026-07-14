@@ -1,5 +1,7 @@
 import React from "react";
 import { AlertTriangle, Loader2, UploadCloud, WifiOff } from "lucide-react";
+import { Switch } from "@/components/ui/switch";
+import { Label } from "@/components/ui/label";
 
 interface LocalDatasetCloudNoticeProps {
   /** The local-only dataset the cloud run would train on. */
@@ -14,6 +16,12 @@ interface LocalDatasetCloudNoticeProps {
   uploading: boolean;
   /** Last upload error, shown in-place so the user doesn't lose it to a toast. */
   errorMessage?: string | null;
+  /** Whether the user opted to publish the uploaded dataset publicly. This
+   * upload exists only so cloud compute can read the dataset, so it defaults to
+   * private (false) — the toggle is the explicit opt-in to make it public. */
+  makePublic: boolean;
+  /** Set the public/private choice. Ignored while an upload is in flight. */
+  onMakePublicChange: (value: boolean) => void;
 }
 
 const formatSize = (bytes: number): string => {
@@ -42,6 +50,8 @@ const LocalDatasetCloudNotice: React.FC<LocalDatasetCloudNoticeProps> = ({
   offline,
   uploading,
   errorMessage,
+  makePublic,
+  onMakePublicChange,
 }) => {
   const sizeLabel = sizeBytes != null ? formatSize(sizeBytes) : null;
 
@@ -78,9 +88,26 @@ const LocalDatasetCloudNotice: React.FC<LocalDatasetCloudNoticeProps> = ({
             Hugging Face Cloud trains from the Hub, so{" "}
             <span className="font-medium">{repoId}</span>
             {sizeLabel ? ` (~${sizeLabel})` : ""} will be uploaded as a{" "}
-            <span className="font-medium">private</span> dataset before training
-            starts.
+            <span className="font-medium">
+              {makePublic ? "public" : "private"}
+            </span>{" "}
+            dataset before training starts.
           </p>
+          <div className="mt-3 flex items-center space-x-3">
+            <Switch
+              id="cloud_upload_make_public"
+              checked={makePublic}
+              onCheckedChange={onMakePublicChange}
+              disabled={uploading}
+              className="data-[state=checked]:bg-amber-500"
+            />
+            <Label
+              htmlFor="cloud_upload_make_public"
+              className="text-amber-200/80"
+            >
+              Make this dataset public
+            </Label>
+          </div>
           {uploading ? (
             <p className="mt-2 flex items-center gap-2 text-amber-100">
               <Loader2 className="w-4 h-4 animate-spin" />

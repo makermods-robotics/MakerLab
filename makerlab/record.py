@@ -16,14 +16,19 @@ import collections
 import contextlib
 import json
 import logging
+import platform
 import shutil
 import threading
 import time
+import traceback
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel
 
+from lerobot.cameras.configs import Cv2Backends
+from lerobot.cameras.opencv import OpenCVCameraConfig
 from lerobot.configs.dataset import DatasetRecordConfig
 from lerobot.datasets import LeRobotDataset
 from lerobot.motors.motors_bus import MotorsBus
@@ -190,6 +195,14 @@ current_episode = 1  # Track current episode number
 saved_episodes = 0  # Track how many episodes have been saved
 current_phase = "preparing"  # Track current phase: "preparing", "recording", "resetting", "completed"
 phase_start_time = None  # Track when current phase started
+# Saved-episode count of the most recent ENDED session. The live `saved_episodes`
+# counter is reset to 0 in the worker's finally, and `handle_recording_status()`
+# only echoes the live counter while the session is active — so a terminal payload
+# would report 0 regardless of on-disk reality. This snapshot is captured just
+# before the reset and surfaced in EVERY ended payload, so the frontend can offer
+# the upload / discard recovery actions for a warning-or-failed session that in
+# fact kept episodes (see Recording Bug List entry 5).
+last_session_saved_episodes = 0
 # True when the most recent session saved zero episodes and its (freshly
 # created) dataset directory was discarded. Surfaced in the session-end status
 # so the frontend can tell the user nothing was kept (see Upload.tsx).
@@ -312,10 +325,6 @@ def _platform_backend():
     what the /available-cameras thumbnails were captured with. cv2.CAP_ANY can
     pick different backends across calls on macOS, silently reordering cameras
     between the modal preview and the recording."""
-    import platform
-
-    from lerobot.cameras.configs import Cv2Backends
-
     system = platform.system()
     if system == "Darwin":
         return Cv2Backends.AVFOUNDATION
@@ -337,9 +346,6 @@ def _build_camera_configs(cameras: dict, default_backend) -> dict:
     bandwidth on Linux (see `_DEFAULT_FOURCC`). An explicit per-camera fourcc wins.
     Cameras are addressed by their cv2 integer `camera_index`.
     """
-    from lerobot.cameras.configs import Cv2Backends
-    from lerobot.cameras.opencv import OpenCVCameraConfig
-
     camera_configs: dict = {}
     for camera_name, camera_data in cameras.items():
         if camera_data.get("type") != "opencv":
@@ -543,6 +549,7 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                 phase_start_time, \
                 current_episode, \
                 saved_episodes, \
+                last_session_saved_episodes, \
                 last_session_discarded_empty, \
                 last_session_outcome, \
                 last_session_error
@@ -639,6 +646,10 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                         request.dataset_repo_id, request.resume
                     )
 
+                # Snapshot the terminal saved count BEFORE zeroing the live
+                # counter, so the ended status payload reports what was actually
+                # kept on disk (see last_session_saved_episodes).
+                last_session_saved_episodes = saved_episodes
                 recording_active = False
                 recording_start_time = None
                 phase_start_time = None
@@ -805,6 +816,11 @@ def handle_recording_status() -> dict[str, Any]:
     # saved" variant and does NOT link the (now-gone) repo id.
     if session_ended:
         status["discarded_empty"] = last_session_discarded_empty
+        # Terminal saved-episode count, captured before the worker zeroed the
+        # live counter. Every ended payload carries it so a warning/failed
+        # session that kept episodes can still surface the upload/discard
+        # recovery actions (see last_session_saved_episodes / Bug List entry 5).
+        status["saved_episodes"] = last_session_saved_episodes
         # Terminal error taxonomy (the in-process twin of rollout's exited
         # payload): `outcome` classifies the ended session (ok |
         # ran_with_warning | failed), `error` is the caught exception's
@@ -850,8 +866,6 @@ def handle_recording_status() -> dict[str, Any]:
 
 def handle_delete_dataset(request: DatasetInfoRequest) -> dict[str, Any]:
     """Remove a recorded dataset's directory from local disk."""
-    from pathlib import Path
-
     from lerobot.utils.constants import HF_LEROBOT_HOME
 
     repo_id = request.dataset_repo_id
@@ -1124,8 +1138,6 @@ class UploadManager:
                 self.docs_url = None
         except Exception as e:
             logger.error(f"Error uploading dataset {repo_id}: {e}")
-            import traceback
-
             logger.error(f"Full traceback: {traceback.format_exc()}")
             auth = _upload_auth_error(e)
             with self._lock:
@@ -1173,12 +1185,9 @@ def record_with_web_events(
     identity guard compares against the library instead of the BiSO staging alias
     ids ("<base>_left"/"<base>_right"). None for single-arm (id is the real stem).
     """
-    import time
-
     from lerobot.common.control_utils import (
         sanity_check_dataset_robot_compatibility,
     )
-    from lerobot.datasets import LeRobotDataset
     from lerobot.processor import make_default_processors
     from lerobot.robots import make_robot_from_config
     from lerobot.scripts.lerobot_record import record_loop
@@ -1204,7 +1213,8 @@ def record_with_web_events(
             cfg.dataset.repo_id,
             root=cfg.dataset.root,
             batch_encoding_size=cfg.dataset.video_encoding_batch_size,
-            vcodec=cfg.dataset.vcodec,
+            rgb_encoder=cfg.dataset.rgb_encoder,
+            depth_encoder=cfg.dataset.depth_encoder,
             streaming_encoding=cfg.dataset.streaming_encoding,
             encoder_queue_maxsize=cfg.dataset.encoder_queue_maxsize,
             encoder_threads=cfg.dataset.encoder_threads,
@@ -1234,7 +1244,8 @@ def record_with_web_events(
             image_writer_processes=cfg.dataset.num_image_writer_processes,
             image_writer_threads=cfg.dataset.num_image_writer_threads_per_camera * len(robot.cameras),
             batch_encoding_size=cfg.dataset.video_encoding_batch_size,
-            vcodec=cfg.dataset.vcodec,
+            rgb_encoder=cfg.dataset.rgb_encoder,
+            depth_encoder=cfg.dataset.depth_encoder,
             streaming_encoding=cfg.dataset.streaming_encoding,
             encoder_queue_maxsize=cfg.dataset.encoder_queue_maxsize,
             encoder_threads=cfg.dataset.encoder_threads,

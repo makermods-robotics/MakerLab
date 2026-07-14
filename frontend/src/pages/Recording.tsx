@@ -515,11 +515,31 @@ const Recording = () => {
   }, [backendStatus, recordingConfig, navigate]);
 
   // "Discard & exit" from an ENDED failed/warning session that kept episodes on
-  // disk: the session is already over (no active-session stop to issue), so
-  // delete the dataset directory outright, then go home.
+  // disk: the session is already over (no active-session stop to issue).
+  //
+  // RESUME sessions append into a PRE-EXISTING dataset. Whole-directory deletion
+  // here would erase every episode recorded BEFORE this session — unrecoverable
+  // loss of expensive demo data (see Recording Bug List entry 6). We can't
+  // cheaply separate this session's already-committed episodes from the
+  // pre-existing ones, so for a resume we delete NOTHING: all episodes stay on
+  // disk and the user can prune individual ones from the dataset browser.
+  //
+  // FRESH sessions created the whole timestamped dataset this run, so deleting
+  // its directory is a correct full rollback.
   const discardAndExit = useCallback(async () => {
     const repoId =
       backendStatus?.dataset_repo_id || recordingConfig?.dataset_repo_id;
+    if (resume) {
+      const kept = backendStatus?.saved_episodes ?? 0;
+      toast({
+        title: "Dataset kept",
+        description: `Dataset was resumed — kept ${kept} episode${
+          kept === 1 ? "" : "s"
+        } from this session plus every earlier episode. Remove individual episodes from the dataset browser if you need to.`,
+      });
+      navigate("/");
+      return;
+    }
     if (repoId) {
       try {
         await fetchWithHeaders(`${baseUrl}/delete-dataset`, {
@@ -532,7 +552,15 @@ const Recording = () => {
       }
     }
     navigate("/");
-  }, [backendStatus, recordingConfig, baseUrl, fetchWithHeaders, navigate]);
+  }, [
+    backendStatus,
+    recordingConfig,
+    baseUrl,
+    fetchWithHeaders,
+    navigate,
+    resume,
+    toast,
+  ]);
 
   // Re-record is keyboard-driven again, on BACKSPACE (explicit user request;
   // the old ArrowLeft binding was removed because a back-gesture keystroke
@@ -817,7 +845,9 @@ const Recording = () => {
                     }`}
                   />
                   {endedWarn
-                    ? "Session finished with a cleanup warning — your episodes are safe"
+                    ? `Session finished with a cleanup warning — your ${savedEpisodes} saved episode${
+                        savedEpisodes === 1 ? "" : "s"
+                      } ${savedEpisodes === 1 ? "is" : "are"} safe`
                     : "Recording session failed"}
                 </div>
                 {backendStatus.hint && (
@@ -845,16 +875,23 @@ const Recording = () => {
                       Continue to upload
                     </Button>
                   )}
-                  {/* Discard the kept episodes and leave (quit path from an
-                      already-ended session). Only when there's something to
-                      discard. */}
+                  {/* Leave without uploading. FRESH session → this discards the
+                      whole (this-session) dataset. RESUME session → keeps every
+                      episode (deleting the dataset would erase pre-existing
+                      episodes; see Bug List entry 6), so the copy/styling drop
+                      the destructive framing. Only shown when something is on
+                      disk. */}
                   {keptSomething && (
                     <Button
                       onClick={discardAndExit}
                       variant="outline"
-                      className="w-full border-red-500/50 text-red-300 hover:bg-red-900/30 hover:text-red-200"
+                      className={
+                        resume
+                          ? "w-full border-gray-600 bg-transparent text-gray-200 hover:bg-gray-800 hover:text-white"
+                          : "w-full border-red-500/50 text-red-300 hover:bg-red-900/30 hover:text-red-200"
+                      }
                     >
-                      Discard &amp; exit
+                      {resume ? "Exit without uploading" : "Discard & exit"}
                     </Button>
                   )}
                   <Button

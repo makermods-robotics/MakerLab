@@ -21,10 +21,13 @@ from __future__ import annotations
 
 import netrc
 import re
+import sys
 import tomllib
+import types
 from pathlib import Path
 
 import pytest
+from huggingface_hub.errors import RepositoryNotFoundError
 
 
 def test_resolve_wandb_api_key_prefers_environment_variable(
@@ -136,7 +139,7 @@ def test_cloud_lerobot_spec_carries_the_pyproject_pinned_ref() -> None:
     from makerlab.runners.hf_cloud import cloud_lerobot_spec
 
     pin = _pyproject_lerobot_pin()
-    ref = pin.rsplit("@", 1)[1]  # the sha at the end of git+https://…@<sha>
+    ref = pin.rsplit("@", 1)[1]  # the ref at the end of git+https://…@<ref>
     spec = cloud_lerobot_spec("act")
     assert ref in spec
     assert "latest" not in spec
@@ -149,7 +152,7 @@ def test_cloud_lerobot_spec_uses_archive_tarball_not_git() -> None:
 
     spec = cloud_lerobot_spec("act")
     assert "git+" not in spec
-    assert re.search(r"@ https://github\.com/.+/archive/[0-9a-f]+\.tar\.gz$", spec)
+    assert re.search(r"@ https://github\.com/.+/archive/[^/]+\.tar\.gz$", spec)
 
 
 def test_cloud_lerobot_spec_drops_host_only_extras_and_adds_policy_extra() -> None:
@@ -389,3 +392,86 @@ def test_resolve_job_timeout_uses_request_value_normalised_to_seconds() -> None:
     assert resolve_job_timeout(TrainingRequest(dataset_repo_id="x", hf_job_timeout="45m")) == 2700
     assert resolve_job_timeout(TrainingRequest(dataset_repo_id="x", hf_job_timeout="3h30m")) == 12600
     assert resolve_job_timeout(TrainingRequest(dataset_repo_id="x", hf_job_timeout="2h")) == 7200
+
+
+def _make_runner():
+    """Build an HfCloudJobRunner without running __init__ (which calls
+    shared_hf_api() and would hit the network). We only exercise the pure
+    _ensure_dataset_on_hub branch, so the object just needs _api and _log_file."""
+    from makerlab.runners.hf_cloud import HfCloudJobRunner
+
+    runner = HfCloudJobRunner.__new__(HfCloudJobRunner)
+    runner._log_file = None  # _log_line no-ops without a file
+    return runner
+
+
+def _install_fake_lerobot_dataset(monkeypatch, captured: dict) -> None:
+    """Stub `from lerobot.datasets import LeRobotDataset` so the fallback's push
+    is captured instead of contacting the Hub. push_to_hub records its kwargs."""
+
+    class _FakeDataset:
+        def __init__(self, repo_id):
+            captured["repo_id"] = repo_id
+
+        def push_to_hub(self, **kwargs):
+            captured.update(kwargs)
+
+    module = types.ModuleType("lerobot.datasets")
+    module.LeRobotDataset = _FakeDataset  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "lerobot.datasets", module)
+
+
+def test_ensure_dataset_on_hub_fallback_pushes_private(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A local-only dataset uploaded solely so the cloud pod can read it must be
+    pushed PRIVATE by default — the user never explicitly asked to publish it
+    here (they opt into public via the UI notice). Regression for the "notice
+    says private but upload is public" P0."""
+    runner = _make_runner()
+    repo_id = "user/local-only-ds"
+
+    # RepositoryNotFoundError's __init__ reads response.headers/.request, so a
+    # bare None won't do — hand it a minimal stand-in.
+    fake_response = types.SimpleNamespace(headers={}, request=None)
+
+    class _FakeApi:
+        def dataset_info(self, rid):
+            # Not on the Hub -> fall through to the local push path.
+            raise RepositoryNotFoundError(rid, response=fake_response)
+
+    runner._api = _FakeApi()
+
+    # Local copy exists (meta/info.json present) under HF_LEROBOT_HOME.
+    monkeypatch.setenv("HF_LEROBOT_HOME", str(tmp_path))
+    info = tmp_path / repo_id / "meta" / "info.json"
+    info.parent.mkdir(parents=True)
+    info.write_text("{}")
+
+    captured: dict = {}
+    _install_fake_lerobot_dataset(monkeypatch, captured)
+
+    runner._ensure_dataset_on_hub(repo_id)
+
+    assert captured["repo_id"] == repo_id
+    assert captured["private"] is True
+
+
+def test_ensure_dataset_on_hub_skips_when_already_on_hub(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """If the dataset already resolves on the Hub, no push happens at all."""
+    runner = _make_runner()
+
+    class _FakeApi:
+        def dataset_info(self, rid):
+            return {"id": rid}  # exists -> early return, no upload
+
+    runner._api = _FakeApi()
+
+    captured: dict = {}
+    _install_fake_lerobot_dataset(monkeypatch, captured)
+
+    runner._ensure_dataset_on_hub("user/already-there")
+
+    assert captured == {}

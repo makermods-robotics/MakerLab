@@ -354,6 +354,10 @@ const ConfigurationMode: React.FC = () => {
   }, [needsUpload, datasetRepoId, baseUrl, fetchWithHeaders]);
 
   const [uploadError, setUploadError] = useState<string | null>(null);
+  // Visibility for the cloud-training-triggered upload. This upload only exists
+  // so HF Jobs can read the local-only dataset, so it defaults to private; the
+  // notice's toggle is the explicit opt-in to publish it publicly instead.
+  const [uploadMakePublic, setUploadMakePublic] = useState<boolean>(false);
 
   // The actual job launch, factored out so it can run either directly (dataset
   // already on the Hub) or as the upload's success continuation.
@@ -453,7 +457,8 @@ const ConfigurationMode: React.FC = () => {
     if (needsUpload) {
       setUploadError(null);
       setIsStarting(true);
-      const err = await startUpload([], false /* public: MakerLab uploads are public by default */);
+      // isPrivate is the inverse of the user's public opt-in; default private.
+      const err = await startUpload([], !uploadMakePublic);
       if (err) {
         setUploadError(err);
         setIsStarting(false);
@@ -585,6 +590,8 @@ const ConfigurationMode: React.FC = () => {
               offline={offline}
               uploading={uploading}
               errorMessage={uploadError}
+              makePublic={uploadMakePublic}
+              onMakePublicChange={setUploadMakePublic}
             />
           </div>
         ) : null}

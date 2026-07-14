@@ -701,6 +701,7 @@ def _run_record_session(
             dataset_calls.append("clear_episode_buffer")
 
     monkeypatch.setattr("lerobot.datasets.LeRobotDataset", _FakeDataset, raising=False)
+    monkeypatch.setattr("makerlab.record.LeRobotDataset", _FakeDataset, raising=False)
 
     # robot.connect(calibrate=False) is called on the double.
     robot.connect = lambda **kwargs: None  # type: ignore[attr-defined]
@@ -1391,3 +1392,105 @@ def test_worker_reports_ok_outcome_on_clean_end(monkeypatch: pytest.MonkeyPatch,
     assert status["outcome"] == "ok"
     assert status["error"] is None
     assert status["hint"] is None
+
+
+# ---------------------------------------------------------------------------
+# Terminal saved-episode count (Bug List entry 5) and resume-safe session
+# rollback (entry 6). These two land together: entry 5 makes the frontend's
+# recovery actions reachable, which is what could arm entry 6's dataset-deleting
+# button — so the resume-keeps invariant is tested alongside it.
+# ---------------------------------------------------------------------------
+
+
+def test_terminal_status_retains_saved_episodes(
+    monkeypatch: pytest.MonkeyPatch, tmp_lerobot_home
+) -> None:
+    """Entry 5 regression: the worker zeroes the live `saved_episodes` counter in
+    its finally, but the ENDED status payload must still report what was kept on
+    disk (snapshotted into last_session_saved_episodes before the reset). A
+    ran_with_warning session that saved 3 episodes reports saved_episodes == 3,
+    not 0 — that count is what arms the frontend's upload/discard recovery
+    actions for a warning/failed session."""
+    import makerlab.record as record
+
+    def _work_then_teardown_boom(cfg, events, **kwargs):
+        # Loop finished its real work (episodes saved) before teardown raised.
+        record.current_phase = "completed"
+        record.saved_episodes = 3
+        raise RuntimeError("Overload detected on gripper while disabling torque (torque_enable)")
+
+    status = _start_session_with_fake_work(monkeypatch, _work_then_teardown_boom)
+
+    assert status["session_ended"] is True
+    assert status["outcome"] == "ran_with_warning"
+    # The count survives the worker's finally reset of the live counter.
+    assert status["saved_episodes"] == 3
+    # The live counter itself was zeroed — no stale active-session leak.
+    assert record.saved_episodes == 0
+
+
+def test_worker_quit_keeps_resumed_dataset(
+    monkeypatch: pytest.MonkeyPatch, tmp_lerobot_home
+) -> None:
+    """Entry 6 backend invariant: a QUIT (discard_requested) on a RESUME session
+    must NEVER delete the pre-existing dataset. Driven end-to-end through the
+    REAL worker with a resume request — the pre-existing directory and its
+    episodes survive, and the session does not report discarded_empty. The FRESH
+    counterpart (quit removes the whole stamped dir) is
+    test_worker_quit_discards_fresh_dataset_with_saved_episodes above."""
+    import makerlab.record as record
+    import makerlab.rollout as rollout
+    import makerlab.teleoperate as teleop
+
+    # A resume session is NOT repo_id-stamped, so the on-disk dir is exactly the
+    # requested id (handle_start_recording only timestamps fresh sessions).
+    repo_id = "tester/resumed_ds"
+    target = _make_dataset_dir(tmp_lerobot_home, repo_id, total_episodes=5)
+
+    def _resume_work_then_quit(cfg, events, **kwargs):
+        # Appended a couple episodes this session, then the user quit.
+        record.current_phase = "completed"
+        record.saved_episodes = 2
+        record.discard_requested = True  # handle_stop_recording(discard=True) sets this
+
+    monkeypatch.setattr(record, "recording_active", False)
+    monkeypatch.setattr(record, "recording_thread", None)
+    monkeypatch.setattr(record, "releasing", False)
+    monkeypatch.setattr(record, "current_phase", "preparing")
+    monkeypatch.setattr(record, "last_session_outcome", None)
+    monkeypatch.setattr(record, "last_session_error", None)
+    monkeypatch.setattr(teleop, "teleoperation_active", False)
+    monkeypatch.setattr(teleop, "teleoperation_thread", None)
+    monkeypatch.setattr(rollout, "inference_active", False)
+    monkeypatch.setattr(record, "create_record_config", lambda request: None)
+    monkeypatch.setattr(record, "record_with_web_events", _resume_work_then_quit)
+
+    try:
+        result = record.handle_start_recording(
+            record.RecordingRequest(
+                leader_port="COM_LEADER",
+                follower_port="COM_FOLLOWER",
+                leader_config="leader",
+                follower_config="follower",
+                dataset_repo_id=repo_id,
+                single_task="pick",
+                resume=True,
+            )
+        )
+        assert result["success"] is True
+        record.recording_thread.join(timeout=5.0)
+        assert not record.recording_thread.is_alive()
+
+        # The pre-existing dataset and every episode survive the quit — the
+        # load-bearing data-safety guarantee.
+        assert target.exists()
+        assert (target / "meta" / "info.json").exists()
+        assert (target / "videos" / "ep.mp4").exists()
+
+        status = record.handle_recording_status()
+        assert status["session_ended"] is True
+        assert status["discarded_empty"] is False
+        # This session's appended count is still reported for the recovery UI.
+        assert status["saved_episodes"] == 2
+    finally:
+        record.discard_requested = False  # don't leak the armed flag into later tests

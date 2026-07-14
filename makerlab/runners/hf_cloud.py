@@ -63,7 +63,7 @@ _HOST_ONLY_EXTRAS = frozenset({"feetech"})
 
 # policy_type -> lerobot extra that carries the policy's model dependencies
 # at the pinned ref (e.g. transformers for smolvla). Policies without an
-# entry (act, tdmpc, vqbet, sac) need nothing beyond the core install.
+# entry (act, tdmpc, vqbet, gaussian_actor) need nothing beyond the core install.
 _POLICY_CLOUD_EXTRAS = {
     "smolvla": "smolvla",
     "diffusion": "diffusion",
@@ -81,7 +81,7 @@ def _pinned_lerobot_requirement() -> Requirement:
 
     Primary source is the installed distribution's metadata — generated from
     pyproject.toml at install time, so there is no second hardcoded copy of the
-    sha and, crucially, it matches the lerobot actually importable on this host
+    ref and, crucially, it matches the lerobot actually importable on this host
     (the one build_training_command's argv is shaped for). Falls back to parsing
     pyproject.toml directly when running from a source tree without installed
     metadata.
@@ -658,17 +658,18 @@ class HfCloudJobRunner:
             # — same behaviour as before.
             return
 
-        self._log_line(f"[upload] dataset {repo_id} not on Hub; pushing local copy (public)...")
+        self._log_line(f"[upload] dataset {repo_id} not on Hub; pushing local copy (private)...")
         from lerobot.datasets import LeRobotDataset
 
         try:
-            # Public by default: MakerLab's global policy is that datasets it pushes
-            # to the Hub are public and carry the required org/product tags (see
-            # with_makerlab_tag / REQUIRED_HUB_TAGS). This implicit cloud-run upload
-            # follows that same default so all MakerLab-produced datasets are
-            # discoverable. (This intentionally reverses the earlier private
-            # default — an implicit upload of a local-only dataset is now public.)
-            LeRobotDataset(repo_id).push_to_hub(tags=with_makerlab_tag(None), private=False)
+            # Private by default: this upload is an implicit safety fallback that
+            # exists ONLY so the cloud pod can read a dataset which lives on the
+            # host machine. The user never explicitly asked to publish it here, so
+            # we must not silently make their camera footage public — the UI's
+            # cloud-training notice carries an explicit "make public" opt-in that
+            # flows through the frontend upload path (record.py's UploadRequest).
+            # Tags still apply so MakerLab-produced datasets stay identifiable.
+            LeRobotDataset(repo_id).push_to_hub(tags=with_makerlab_tag(None), private=True)
         except Exception as exc:
             msg = f"Failed to upload local dataset {repo_id} to Hub: {exc}"
             self._log_line(f"[upload] {msg}")
