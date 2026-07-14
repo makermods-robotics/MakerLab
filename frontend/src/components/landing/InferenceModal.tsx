@@ -31,9 +31,27 @@ import {
 } from "@/lib/checkpointsApi";
 import { startInference } from "@/lib/inferenceApi";
 import CheckpointDropdown from "@/components/jobs/CheckpointDropdown";
-import { useAvailableCameras } from "@/hooks/useAvailableCameras";
+import {
+  AvailableCamera,
+  useAvailableCameras,
+} from "@/hooks/useAvailableCameras";
 import { useCameraStream } from "@/hooks/useCameraStream";
 
+interface Props {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  robot: RobotRecord | null;
+  jobId: string;
+  initialStep: number | null;
+}
+
+const DEFAULT_FPS = 30;
+
+const cameraKey = (cam: AvailableCamera) => String(cam.index);
+
+/** Small getUserMedia preview for verifying which physical camera a role binds
+ * to. `paused` drops the browser stream so the rollout subprocess can open the
+ * same device via OpenCV without contending. */
 const CameraThumbnail: React.FC<{ deviceId: string; paused: boolean }> = ({
   deviceId,
   paused,
@@ -60,15 +78,76 @@ const CameraThumbnail: React.FC<{ deviceId: string; paused: boolean }> = ({
   );
 };
 
-interface Props {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  robot: RobotRecord | null;
-  jobId: string;
-  initialStep: number | null;
+/**
+ * One camera as the modal sees it. The BiSO prefix round-trip lives here so the
+ * future per-arm routing work has a single obvious place to extend.
+ *
+ * `feature` is the checkpoint's camera key exactly as it comes back from
+ * `get_policy_config_summary` (the suffix after `observation.images.`). For a
+ * bimanual checkpoint recorded through makerlab, lerobot's BiSOFollower parks every
+ * camera on the LEFT arm and auto-prefixes each feature with `left_` when it
+ * writes the dataset — so a camera the user named `front` at record time becomes
+ * the feature `left_front`.
+ *
+ * Inference mirrors that: the rollout hands the request's camera dict to
+ * `--robot.left_arm_config.cameras`, and BiSO re-prefixes with `left_` at
+ * runtime. So the modal must bind + send under the BARE name (`front`), which
+ * the rollout re-prefixes back to `left_front` — matching the checkpoint. If we
+ * bound/sent under the literal `left_front` we'd emit `left_left_front` (double
+ * prefix → policy mismatch).
+ *
+ * `display` / `requestKey` are therefore the stripped bare name in bimanual
+ * mode, and identical to `feature` in single-arm mode (single-arm checkpoints
+ * already carry bare names — a camera legitimately named e.g. `left_side` must
+ * never be mangled). We only strip when it's unambiguous: see `cameraMappings`.
+ */
+interface CameraMapping {
+  /** Checkpoint feature key — the key into `policyConfig.image_features`. */
+  feature: string;
+  /** Name shown in the UI. Stripped bare name (bimanual) or `feature`. */
+  display: string;
+  /** Key used in the start-inference camera dict. Equals `display`. */
+  requestKey: string;
 }
 
-const DEFAULT_FPS = 30;
+const ARM_PREFIX_RE = /^(left|right)_/;
+
+/**
+ * Build the display/request mapping for the checkpoint's camera features.
+ *
+ * Single-arm: identity — bare names pass through untouched.
+ *
+ * Bimanual: strip the `left_`/`right_` prefix that BiSO added at record time,
+ * so the user sees the name they chose and the rollout re-prefixes it correctly.
+ * Guard against collisions: if two features would strip to the same bare name
+ * (a checkpoint carrying BOTH `left_x` and `right_x`, or a bare `x` alongside
+ * `left_x`), fall back to the FULL feature name for every colliding entry —
+ * correctness over cosmetics. makerlab can't produce `right_*` checkpoints today,
+ * so this is a defensive branch for externally-recorded bimanual checkpoints;
+ * it must not silently mis-bind them.
+ */
+function cameraMappings(
+  features: string[],
+  isBimanual: boolean,
+): CameraMapping[] {
+  if (!isBimanual) {
+    return features.map((f) => ({ feature: f, display: f, requestKey: f }));
+  }
+  // Count how many features want each stripped bare name so we can detect
+  // collisions before committing to the shortened form.
+  const strippedCounts = new Map<string, number>();
+  for (const f of features) {
+    const bare = f.replace(ARM_PREFIX_RE, "");
+    strippedCounts.set(bare, (strippedCounts.get(bare) ?? 0) + 1);
+  }
+  return features.map((f) => {
+    const bare = f.replace(ARM_PREFIX_RE, "");
+    // Strip only when the bare name is unique across all features; otherwise
+    // keep the full feature name so the two colliding cameras stay distinct.
+    const name = strippedCounts.get(bare) === 1 ? bare : f;
+    return { feature: f, display: name, requestKey: name };
+  });
+}
 
 const InferenceModal: React.FC<Props> = ({
   open,
@@ -91,9 +170,34 @@ const InferenceModal: React.FC<Props> = ({
   const [policyConfigLoading, setPolicyConfigLoading] = useState(false);
   const [policyConfigError, setPolicyConfigError] = useState<string | null>(null);
 
-  // Per expected camera name → user-selected physical camera index (or null).
-  const [cameraBindings, setCameraBindings] = useState<Record<string, number | null>>({});
+  // Per camera DISPLAY name → user-selected physical camera key (the raw cv2
+  // index string). Keyed by the stripped display name (== requestKey), not the
+  // checkpoint feature key — see `cameraMappings` / the CameraMapping doc for
+  // the round-trip.
+  const [cameraBindings, setCameraBindings] = useState<Record<string, string | null>>({});
   const { cameras: availableCameras } = useAvailableCameras({ enabled: open });
+
+  // `lerobot-rollout` drives any Robot generically, including `bi_so_follower`,
+  // so a bimanual record now runs inference on BOTH followers — the server
+  // stages the two follower calibrations and builds a `bi_so_follower` command.
+  // We no longer block bimanual robots here.
+  const isBimanual = robot?.mode === "bimanual";
+
+  // Checkpoint feature ↔ display/request-key mapping. Bimanual checkpoints carry
+  // BiSO's `left_`-prefixed camera features; the modal shows + binds + sends the
+  // bare name so the rollout re-prefixes it back to match the checkpoint.
+  const cameraMap = React.useMemo(
+    () => cameraMappings(Object.keys(policyConfig?.image_features ?? {}), isBimanual),
+    [policyConfig, isBimanual],
+  );
+
+  const liveCameraByKey = React.useCallback(
+    (key: string | null | undefined) =>
+      key == null
+        ? undefined
+        : availableCameras.find((cam) => cameraKey(cam) === key),
+    [availableCameras],
+  );
 
   // Load checkpoints when modal opens.
   useEffect(() => {
@@ -132,12 +236,13 @@ const InferenceModal: React.FC<Props> = ({
       .then((cfg) => {
         if (cancelled) return;
         setPolicyConfig(cfg);
-        // Reset camera bindings to one entry per expected camera name.
-        // Preserve any prior selection that's still relevant.
+        // Reset camera bindings to one entry per DISPLAY name (bare name in
+        // bimanual mode). Preserve any prior selection that's still relevant.
+        const mappings = cameraMappings(Object.keys(cfg.image_features), isBimanual);
         setCameraBindings((prev) => {
-          const next: Record<string, number | null> = {};
-          for (const name of Object.keys(cfg.image_features)) {
-            next[name] = prev[name] ?? null;
+          const next: Record<string, string | null> = {};
+          for (const m of mappings) {
+            next[m.requestKey] = prev[m.requestKey] ?? null;
           }
           return next;
         });
@@ -153,11 +258,13 @@ const InferenceModal: React.FC<Props> = ({
     return () => {
       cancelled = true;
     };
-  }, [open, baseUrl, fetchWithHeaders, jobId, selectedStep]);
+  }, [open, baseUrl, fetchWithHeaders, jobId, selectedStep, isBimanual]);
 
   // If the selected robot has cameras whose names match a policy-expected
-  // camera, auto-bind them. Prefer matching by browser device_id (stable
-  // across cv2 index drift); fall back to the saved camera_index.
+  // camera, auto-bind them. Match against the DISPLAY name (the bare name the
+  // user chose at record time — that's what the robot record stores), not the
+  // `left_`-prefixed checkpoint feature. Prefer the stored browser device_id,
+  // then the saved camera_index fallback.
   useEffect(() => {
     if (!policyConfig) return;
     const robotCams = robot?.cameras ?? [];
@@ -165,67 +272,128 @@ const InferenceModal: React.FC<Props> = ({
     setCameraBindings((prev) => {
       let changed = false;
       const next = { ...prev };
-      for (const policyName of Object.keys(policyConfig.image_features)) {
-        if (next[policyName] != null) continue;
+      for (const m of cameraMap) {
+        if (next[m.requestKey] != null) continue;
         const robotCam = robotCams.find(
-          (c) => c.name.toLowerCase() === policyName.toLowerCase(),
+          (c) => c.name.toLowerCase() === m.display.toLowerCase(),
         );
         if (!robotCam) continue;
-        const live =
-          (robotCam.device_id &&
-            availableCameras.find((c) => c.deviceId === robotCam.device_id)) ||
-          availableCameras.find((c) => c.index === robotCam.camera_index);
+        const live = robotCam.device_id
+          ? availableCameras.find((c) => c.deviceId === robotCam.device_id)
+          : availableCameras.find((c) => c.index === robotCam.camera_index);
         if (live) {
-          next[policyName] = live.index;
+          next[m.requestKey] = cameraKey(live);
           changed = true;
         }
       }
       return changed ? next : prev;
     });
-  }, [policyConfig, robot, availableCameras]);
+  }, [policyConfig, robot, availableCameras, cameraMap]);
+
+  useEffect(() => {
+    if (!policyConfig || availableCameras.length === 0) return;
+    setCameraBindings((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      for (const [name, key] of Object.entries(prev)) {
+        if (key != null && !liveCameraByKey(key)) {
+          next[name] = null;
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [policyConfig, availableCameras, liveCameraByKey]);
 
   const selectedRef =
     selectedStep != null
       ? checkpoints.find((c) => c.step === selectedStep)?.ref ?? null
       : null;
 
-  const expectedCameraNames = policyConfig
-    ? Object.keys(policyConfig.image_features)
-    : [];
-  const allCamerasBound = expectedCameraNames.every(
-    (name) => cameraBindings[name] != null,
+  // Arm-count mismatch between the CHECKPOINT and the selected ROBOT. A
+  // bimanual-trained SO-101 checkpoint carries a 12-dim state/action (two 6-DOF
+  // arms) and left_/right_-prefixed camera names; a single-arm checkpoint is
+  // 6-dim. Running a policy on the wrong arm count crashes on a shape mismatch
+  // deep in the rollout subprocess. Detect it here from the checkpoint's state
+  // dim (fall back to action dim) and explain it before Start. This is the
+  // client mirror of the server's `_arm_count_mismatch` 409 guard — we forward
+  // `checkpoint_state_dim` so the server enforces the same rule authoritatively.
+  const SO101_DOF = 6;
+  const checkpointDim = policyConfig?.state_dim ?? policyConfig?.action_dim ?? null;
+  const checkpointArms =
+    checkpointDim != null && checkpointDim % SO101_DOF === 0
+      ? checkpointDim / SO101_DOF
+      : null;
+  const checkpointIsBimanual = checkpointArms != null && checkpointArms >= 2;
+  // Flag both directions: a bimanual checkpoint on a single-arm robot, AND a
+  // single-arm checkpoint on a bimanual robot. Only assert a mismatch when the
+  // checkpoint exposes a recognisable arm count (checkpointArms != null) — a
+  // vision-only checkpoint with no state dim can't be judged here, so we let
+  // the server's post-mortem shape check speak instead of guessing.
+  const robotCheckpointArmMismatch =
+    !!robot &&
+    !!policyConfig &&
+    checkpointArms != null &&
+    checkpointIsBimanual !== isBimanual;
+
+  const allCamerasBound = cameraMap.every(
+    (m) => liveCameraByKey(cameraBindings[m.requestKey]) != null,
   );
 
   const canStart =
     !!robot &&
     robot.is_clean &&
+    !robotCheckpointArmMismatch &&
     selectedRef != null &&
     !!policyConfig &&
     allCamerasBound &&
     !submitting;
 
   const handleStart = async () => {
-    if (!robot || selectedRef == null || !policyConfig) return;
+    if (
+      !robot ||
+      robotCheckpointArmMismatch ||
+      selectedRef == null ||
+      !policyConfig
+    )
+      return;
     // Setting submitting=true makes every CameraPreview drop its
     // browser stream — required so the rollout subprocess can open the
     // same camera index via OpenCV without colliding on the device.
     setSubmitting(true);
     await new Promise((r) => setTimeout(r, 300));
+    // Emit camera dict keys under the DISPLAY/request name (bare in bimanual
+    // mode). The rollout hands these to the BiSO left_arm_config, which
+    // re-prefixes with `left_` — reconstructing the checkpoint's `left_<name>`
+    // feature. Resolution still comes from the checkpoint feature's dims.
     const cameraDict: Record<string, {
-      type: string; camera_index?: number; width: number; height: number; fps?: number;
+      type: string;
+      camera_index?: number;
+      width: number;
+      height: number;
+      fps?: number;
+      fourcc?: string;
     }> = {};
-    for (const [name, dims] of Object.entries(policyConfig.image_features)) {
-      const idx = cameraBindings[name];
-      if (idx == null) continue;
-      cameraDict[name] = {
+    for (const m of cameraMap) {
+      const key = cameraBindings[m.requestKey];
+      if (key == null) continue;
+      const live = liveCameraByKey(key);
+      if (!live) continue;
+      const dims = policyConfig.image_features[m.feature];
+      cameraDict[m.requestKey] = {
         type: "opencv",
-        camera_index: idx,
+        camera_index: live.index,
         width: dims.width,
         height: dims.height,
         fps: DEFAULT_FPS,
       };
     }
     try {
+      // The POST now returns immediately (it only validates cheaply, then the
+      // server downloads the model + preflights the arm in the background), so
+      // this navigates to the inference page right away — the download and its
+      // progress, any warn-but-allow arm finding, and any failure all surface
+      // there via /inference-status polling.
       await startInference(baseUrl, fetchWithHeaders, {
         follower_port: robot.follower_port,
         follower_config: robot.follower_config,
@@ -233,6 +401,20 @@ const InferenceModal: React.FC<Props> = ({
         task,
         cameras: cameraDict,
         duration_s: durationS,
+        // Follower torque limit for the session (10-100% of full power).
+        motor_power: robot.motor_power ?? 100,
+        // Bimanual: forward the mode + right-arm follower so the server builds a
+        // `bi_so_follower` command staging both follower calibrations. In single
+        // mode the right_* fields are inert (mode defaults to "single"
+        // server-side). robot_name is the BiSO staging base id.
+        mode: robot.mode,
+        right_follower_port: robot.right_follower_port,
+        right_follower_config: robot.right_follower_config,
+        robot_name: robot.name,
+        // Forward the checkpoint's flat state width so the server enforces the
+        // same arm-count guard authoritatively (null when the checkpoint omits
+        // observation.state — the server then defers to its shape check).
+        checkpoint_state_dim: policyConfig.state_dim ?? undefined,
       });
       onOpenChange(false);
       navigate("/inference");
@@ -248,8 +430,7 @@ const InferenceModal: React.FC<Props> = ({
   };
 
   const onCameraBindingChange = (name: string, value: string) => {
-    const idx = Number(value);
-    setCameraBindings((prev) => ({ ...prev, [name]: idx }));
+    setCameraBindings((prev) => ({ ...prev, [name]: value }));
   };
 
   return (
@@ -296,6 +477,7 @@ const InferenceModal: React.FC<Props> = ({
                 <CheckCircle className="w-4 h-4 text-green-400" />
                 <span className="text-slate-200">
                   Running on <strong>{robot.name}</strong>
+                  {isBimanual ? " (bimanual — both followers)" : ""}
                 </span>
               </div>
             )}
@@ -319,6 +501,30 @@ const InferenceModal: React.FC<Props> = ({
                 onChange={setSelectedStep}
               />
             )}
+            {robotCheckpointArmMismatch ? (
+              <Alert className="bg-amber-900/40 border-amber-700 text-amber-100">
+                <AlertTriangle className="h-4 w-4" />
+                <AlertDescription>
+                  {checkpointIsBimanual ? (
+                    <>
+                      This checkpoint was trained on a{" "}
+                      <strong>bimanual robot</strong> ({checkpointDim}-dim state,{" "}
+                      {checkpointArms} arms), but <strong>{robot?.name}</strong>{" "}
+                      is a single-arm robot. Pick a single-arm checkpoint, or
+                      select a bimanual robot on the Landing page.
+                    </>
+                  ) : (
+                    <>
+                      This checkpoint was trained on a{" "}
+                      <strong>single-arm robot</strong> ({checkpointDim}-dim
+                      state), but <strong>{robot?.name}</strong> is a bimanual
+                      robot. Pick a bimanual checkpoint, or select a single-arm
+                      robot on the Landing page.
+                    </>
+                  )}
+                </AlertDescription>
+              </Alert>
+            ) : null}
           </div>
 
           <div className="space-y-4">
@@ -374,7 +580,7 @@ const InferenceModal: React.FC<Props> = ({
                   Couldn't load policy config: {policyConfigError}
                 </AlertDescription>
               </Alert>
-            ) : !policyConfig ? null : expectedCameraNames.length === 0 ? (
+            ) : !policyConfig ? null : cameraMap.length === 0 ? (
               <p className="text-xs text-gray-500">
                 This policy doesn't use cameras.
               </p>
@@ -384,26 +590,23 @@ const InferenceModal: React.FC<Props> = ({
                   Bind a physical camera to each name the policy was trained
                   with. Resolution comes from the checkpoint.
                 </p>
-                {expectedCameraNames.map((name) => {
-                  const dims = policyConfig.image_features[name];
-                  const value = cameraBindings[name];
-                  const bound =
-                    value != null
-                      ? availableCameras.find((c) => c.index === value)
-                      : undefined;
+                {cameraMap.map((m) => {
+                  const dims = policyConfig.image_features[m.feature];
+                  const value = cameraBindings[m.requestKey];
+                  const selectedCamera = liveCameraByKey(value);
                   return (
-                    <div key={name} className="flex items-center gap-3">
+                    <div key={m.requestKey} className="flex items-center gap-3">
                       <div className="flex-1">
                         <Label className="text-sm font-medium text-gray-200">
-                          {name}
+                          {m.display}
                         </Label>
                         <p className="text-xs text-gray-500">
                           {dims.width}×{dims.height}
                         </p>
                       </div>
                       <Select
-                        value={value != null ? String(value) : undefined}
-                        onValueChange={(v) => onCameraBindingChange(name, v)}
+                        value={value ?? undefined}
+                        onValueChange={(v) => onCameraBindingChange(m.requestKey, v)}
                       >
                         <SelectTrigger className="bg-gray-800 border-gray-700 text-white w-56">
                           <SelectValue placeholder="Select a camera" />
@@ -416,8 +619,8 @@ const InferenceModal: React.FC<Props> = ({
                           ) : (
                             availableCameras.map((cam) => (
                               <SelectItem
-                                key={cam.index}
-                                value={String(cam.index)}
+                                key={cameraKey(cam)}
+                                value={cameraKey(cam)}
                               >
                                 #{cam.index} — {cam.name}
                               </SelectItem>
@@ -425,7 +628,12 @@ const InferenceModal: React.FC<Props> = ({
                           )}
                         </SelectContent>
                       </Select>
-                      <CameraThumbnail deviceId={bound?.deviceId ?? ""} paused={submitting} />
+                      {/* getUserMedia preview so the user can verify which
+                          physical camera this role binds to. */}
+                      <CameraThumbnail
+                        deviceId={selectedCamera?.deviceId ?? ""}
+                        paused={submitting}
+                      />
                     </div>
                   );
                 })}

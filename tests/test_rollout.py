@@ -21,11 +21,14 @@ branches here — the parts that matter for safety."""
 
 from __future__ import annotations
 
+import io
+import threading
+
 import pytest
 
 
 @pytest.fixture(autouse=True)
-def _reset_rollout_globals(monkeypatch: pytest.MonkeyPatch) -> None:
+def _reset_rollout_globals(monkeypatch: pytest.MonkeyPatch):
     """Reset rollout's module-level state around each test so a leaking
     `inference_active=True` from one case can't poison the next."""
     from makerlab import rollout
@@ -35,6 +38,36 @@ def _reset_rollout_globals(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(rollout, "_inference_started_at", None)
     monkeypatch.setattr(rollout, "_inference_rollout_started_at", None)
     monkeypatch.setattr(rollout, "_inference_meta", {})
+    monkeypatch.setattr(rollout, "_inference_cancel", None)
+
+
+class _SyncThread:
+    """A ``threading.Thread`` stand-in whose ``.start()`` runs the target inline.
+
+    The start handler now hands the heavy work (download → preflight → spawn) to
+    a background ``threading.Thread``; patching it with this lets a test drive
+    that worker — and the stdout-pump thread it in turn spawns — deterministically
+    in the calling thread, no real threads or sleeps. Only the keyword call shape
+    the code uses (``Thread(target=..., args=..., name=..., daemon=...)``) is
+    supported."""
+
+    def __init__(self, target=None, args=(), kwargs=None, name=None, daemon=None) -> None:
+        self._target = target
+        self._args = args
+        self._kwargs = kwargs or {}
+
+    def start(self) -> None:
+        if self._target is not None:
+            self._target(*self._args, **self._kwargs)
+
+
+class _EmptyStdout:
+    """A subprocess ``stdout`` that is immediately at EOF, so the stdout pump's
+    ``iter(proc.stdout.readline, b"")`` loop exits at once when a test runs it
+    synchronously."""
+
+    def readline(self) -> bytes:
+        return b""
 
 
 def test_inference_request_rejects_missing_required_fields() -> None:
@@ -57,6 +90,96 @@ def test_inference_request_has_expected_defaults() -> None:
     assert req.task == ""
     assert req.cameras == {}
     assert req.duration_s == 60
+
+
+def test_inference_request_bimanual_fields_default_to_single() -> None:
+    """A request that omits the bimanual block is single-arm — the right-arm
+    fields are inert and `mode` defaults to 'single'."""
+    from makerlab.rollout import InferenceRequest
+
+    req = InferenceRequest(
+        follower_port="/dev/ttyUSB0",
+        follower_config="robot_a",
+        policy_ref="user/repo@checkpoints/000050",
+    )
+    assert req.mode == "single"
+    assert req.right_follower_port == ""
+    assert req.right_follower_config == ""
+    assert req.robot_name == ""
+    assert req.checkpoint_state_dim is None
+
+
+def test_inference_request_accepts_bimanual_block() -> None:
+    from makerlab.rollout import InferenceRequest
+
+    req = InferenceRequest(
+        follower_port="/dev/left",
+        follower_config="left_cal",
+        policy_ref="user/repo@checkpoints/000050",
+        mode="bimanual",
+        right_follower_port="/dev/right",
+        right_follower_config="right_cal",
+        robot_name="dual_arm",
+        checkpoint_state_dim=12,
+    )
+    assert req.mode == "bimanual"
+    assert req.right_follower_port == "/dev/right"
+    assert req.right_follower_config == "right_cal"
+    assert req.robot_name == "dual_arm"
+    assert req.checkpoint_state_dim == 12
+
+
+# ---------------------------------------------------------------------------
+# _arm_count_mismatch — the pre-spawn checkpoint/robot arm-count guard
+# ---------------------------------------------------------------------------
+
+
+def test_arm_count_mismatch_none_when_state_dim_unknown() -> None:
+    """A checkpoint with no observation.state (state_dim None) can't be judged
+    cheaply — defer to the subprocess's own shape check."""
+    from makerlab.rollout import _arm_count_mismatch
+
+    assert _arm_count_mismatch("single", None) is None
+    assert _arm_count_mismatch("bimanual", None) is None
+
+
+def test_arm_count_mismatch_none_when_single_matches_single() -> None:
+    from makerlab.rollout import _arm_count_mismatch
+
+    assert _arm_count_mismatch("single", 6) is None
+
+
+def test_arm_count_mismatch_none_when_bimanual_matches_bimanual() -> None:
+    from makerlab.rollout import _arm_count_mismatch
+
+    assert _arm_count_mismatch("bimanual", 12) is None
+
+
+def test_arm_count_mismatch_flags_bimanual_checkpoint_on_single_robot() -> None:
+    from makerlab.rollout import _arm_count_mismatch
+
+    msg = _arm_count_mismatch("single", 12)
+    assert msg is not None
+    assert "bimanual" in msg
+    assert "single-arm" in msg
+
+
+def test_arm_count_mismatch_flags_single_checkpoint_on_bimanual_robot() -> None:
+    from makerlab.rollout import _arm_count_mismatch
+
+    msg = _arm_count_mismatch("bimanual", 6)
+    assert msg is not None
+    assert "single-arm" in msg
+    assert "bimanual" in msg
+
+
+def test_arm_count_mismatch_none_for_unrecognised_width() -> None:
+    """A width that's neither a single arm nor a clean multiple is left to the
+    subprocess rather than guessed at (e.g. 7 = 6 + an extra sensor dim)."""
+    from makerlab.rollout import _arm_count_mismatch
+
+    assert _arm_count_mismatch("single", 7) is None
+    assert _arm_count_mismatch("bimanual", 7) is None
 
 
 def test_detect_device_returns_cpu_when_neither_cuda_nor_mps(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -143,8 +266,10 @@ def test_resolve_policy_path_resolves_hub_ref(monkeypatch: pytest.MonkeyPatch, t
 
 
 def test_resolve_policy_path_resolves_hub_root_ref(monkeypatch, tmp_path) -> None:
-    """A flat-model ref ('user/repo@root') downloads the whole repo and
-    returns its root."""
+    """A flat-model ref ('user/repo@root') downloads the repo root and returns
+    it — but excludes the checkpoints/ and training_state/ sub-trees (neither is
+    needed to run inference, both can be multi-GB) so only the root pretrained
+    files are pulled."""
     from makerlab.rollout import _resolve_policy_path
 
     fake_root = tmp_path / "snapshot"
@@ -158,7 +283,10 @@ def test_resolve_policy_path_resolves_hub_root_ref(monkeypatch, tmp_path) -> Non
     monkeypatch.setattr("huggingface_hub.snapshot_download", fake_snapshot_download)
     result = _resolve_policy_path("user/repo@root")
     assert seen["repo_id"] == "user/repo"
+    # Byte-scoping: no allow_patterns (the whole root IS the model), but the
+    # heavy sibling sub-trees are ignored.
     assert "allow_patterns" not in seen
+    assert seen["ignore_patterns"] == ["checkpoints/**", "training_state/**"]
     assert result == str(fake_root)
 
 
@@ -261,3 +389,772 @@ def test_handle_start_inference_blocked_when_already_active(monkeypatch) -> None
     assert result["success"] is False
     assert result["status_code"] == 409
     assert "already active" in result["message"]
+
+
+def test_handle_start_inference_pins_return_to_initial_position(monkeypatch, tmp_path) -> None:
+    """The stop dialog promises the follower eases back to its start pose on
+    teardown. That behaviour is lerobot's `return_to_initial_position`, which
+    defaults to True today — but we pin it explicitly so an upstream default
+    flip can't silently break the promise. Capture the rollout command and
+    assert the flag is present.
+
+    This is the one command-construction test: it stubs out the subprocess and
+    every hardware-touching preflight so nothing real is started, runs the
+    background startup worker synchronously (via the _SyncThread stub), and
+    redirects HOME so the worker's log file lands in tmp rather than the real
+    cache — we only inspect the argv handed to Popen. The resolve stub takes the
+    `report` kwarg the worker now passes for download progress."""
+    from makerlab import rollout
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(rollout, "setup_follower_calibration_file", lambda cfg: cfg)
+    monkeypatch.setattr(rollout, "_preflight_arm_identity", lambda *a, **k: [])
+    monkeypatch.setattr(rollout, "_preflight_motor_power", lambda *a, **k: [])
+    monkeypatch.setattr(
+        rollout, "_resolve_policy_path", lambda ref, report=None: str(tmp_path / "pretrained_model")
+    )
+    monkeypatch.setattr(rollout, "_detect_device", lambda: "cpu")
+
+    captured: dict = {}
+
+    class _FakeProc:
+        pid = 4321
+
+        def __init__(self, cmd, **kwargs):
+            captured["cmd"] = cmd
+            # A stdin for the newline-seeding block, a stdout the pump can drain.
+            self.stdin = io.BytesIO()
+            self.stdout = _EmptyStdout()
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(rollout.subprocess, "Popen", _FakeProc)
+    # Run the startup worker (and its stdout pump) inline.
+    monkeypatch.setattr(rollout.threading, "Thread", _SyncThread)
+
+    result = rollout.handle_start_inference(_stub_request())
+    assert result["success"] is True, result
+
+    cmd = captured["cmd"]
+    assert "--return_to_initial_position=true" in cmd
+    # Sanity: the core rollout invocation is intact around our pinned flag.
+    assert "lerobot.scripts.lerobot_rollout" in cmd
+    assert "--strategy.type=base" in cmd
+
+
+# ---------------------------------------------------------------------------
+# --robot.* arg construction — single vs bimanual (pure, no I/O)
+# ---------------------------------------------------------------------------
+
+
+def _bimanual_request():
+    from makerlab.rollout import InferenceRequest
+
+    return InferenceRequest(
+        follower_port="/dev/left",
+        follower_config="left_cal",
+        policy_ref="user/repo@checkpoints/000050",
+        mode="bimanual",
+        right_follower_port="/dev/right",
+        right_follower_config="right_cal",
+        robot_name="dual_arm",
+    )
+
+
+def test_single_robot_args_uses_so101_follower_type() -> None:
+    from makerlab.rollout import _single_robot_args
+
+    args = _single_robot_args(_stub_request(), "robot_a")
+    assert "--robot.type=so101_follower" in args
+    assert "--robot.port=/dev/ttyUSB0" in args
+    assert "--robot.id=robot_a" in args
+    # No cameras on the stub request → no --robot.cameras arg.
+    assert not any(a.startswith("--robot.cameras=") for a in args)
+
+
+def test_single_robot_args_appends_cameras_when_present() -> None:
+    from makerlab.rollout import InferenceRequest, _single_robot_args
+
+    req = InferenceRequest(
+        follower_port="/dev/ttyUSB0",
+        follower_config="robot_a",
+        policy_ref="user/repo@checkpoints/000050",
+        cameras={"front": {"type": "opencv", "camera_index": 0, "width": 640, "height": 480}},
+    )
+    args = _single_robot_args(req, "robot_a")
+    cam_arg = next(a for a in args if a.startswith("--robot.cameras="))
+    assert "front:" in cam_arg
+    assert "index_or_path: 0" in cam_arg
+
+
+def test_bimanual_robot_args_uses_bi_so_follower_with_both_ports() -> None:
+    from makerlab.rollout import _bimanual_robot_args
+
+    args = _bimanual_robot_args(_bimanual_request(), "dual_arm", "/staging/follower")
+    assert "--robot.type=bi_so_follower" in args
+    assert "--robot.id=dual_arm" in args
+    assert "--robot.calibration_dir=/staging/follower" in args
+    assert "--robot.left_arm_config.port=/dev/left" in args
+    assert "--robot.right_arm_config.port=/dev/right" in args
+
+
+def test_bimanual_robot_args_puts_cameras_on_left_arm_only() -> None:
+    from makerlab.rollout import InferenceRequest, _bimanual_robot_args
+
+    req = InferenceRequest(
+        follower_port="/dev/left",
+        follower_config="left_cal",
+        policy_ref="user/repo@checkpoints/000050",
+        mode="bimanual",
+        right_follower_port="/dev/right",
+        right_follower_config="right_cal",
+        cameras={"front": {"type": "opencv", "camera_index": 0, "width": 640, "height": 480}},
+    )
+    args = _bimanual_robot_args(req, "dual_arm", "/staging/follower")
+    assert any(a.startswith("--robot.left_arm_config.cameras=") for a in args)
+    assert not any(a.startswith("--robot.right_arm_config.cameras=") for a in args)
+
+
+def test_build_rollout_cmd_wraps_robot_args_with_shared_flags() -> None:
+    from makerlab.rollout import _build_rollout_cmd
+
+    robot_args = ["--robot.type=so101_follower", "--robot.port=/dev/ttyUSB0"]
+    cmd = _build_rollout_cmd(_stub_request(), "/local/pretrained_model", robot_args)
+    assert "lerobot.scripts.lerobot_rollout" in cmd
+    assert "--strategy.type=base" in cmd
+    assert "--policy.path=/local/pretrained_model" in cmd
+    assert "--robot.type=so101_follower" in cmd
+    assert "--return_to_initial_position=true" in cmd
+    assert "--duration=60" in cmd
+
+
+# ---------------------------------------------------------------------------
+# handle_start_inference — the arm-count 409 guard (fires before any port opens)
+# ---------------------------------------------------------------------------
+
+
+def test_handle_start_inference_rejects_bimanual_checkpoint_on_single_robot() -> None:
+    """A bimanual checkpoint on a single-arm robot returns 409 without opening
+    any port or spawning a subprocess."""
+    from makerlab.rollout import InferenceRequest, handle_start_inference
+
+    req = InferenceRequest(
+        follower_port="/dev/ttyUSB0",
+        follower_config="robot_a",
+        policy_ref="user/repo@checkpoints/000050",
+        mode="single",
+        checkpoint_state_dim=12,
+    )
+    result = handle_start_inference(req)
+    assert result["success"] is False
+    assert result["status_code"] == 409
+    assert "bimanual" in result["message"]
+
+
+def test_handle_start_inference_rejects_single_checkpoint_on_bimanual_robot() -> None:
+    from makerlab.rollout import InferenceRequest, handle_start_inference
+
+    req = InferenceRequest(
+        follower_port="/dev/left",
+        follower_config="left_cal",
+        policy_ref="user/repo@checkpoints/000050",
+        mode="bimanual",
+        right_follower_port="/dev/right",
+        right_follower_config="right_cal",
+        checkpoint_state_dim=6,
+    )
+    result = handle_start_inference(req)
+    assert result["success"] is False
+    assert result["status_code"] == 409
+    assert "single-arm" in result["message"]
+
+
+def test_handle_start_inference_arm_count_guard_releases_slot() -> None:
+    """A rejected start must leave inference_active False so the next request
+    isn't wedged behind a phantom session."""
+    from makerlab import rollout
+
+    req = rollout.InferenceRequest(
+        follower_port="/dev/ttyUSB0",
+        follower_config="robot_a",
+        policy_ref="user/repo@checkpoints/000050",
+        mode="single",
+        checkpoint_state_dim=12,
+    )
+    rollout.handle_start_inference(req)
+    assert rollout.inference_active is False
+
+
+def test_handle_start_inference_bimanual_builds_bi_so_follower_command(monkeypatch, tmp_path) -> None:
+    """End-to-end (no hardware): a bimanual request stages the two follower
+    calibrations and hands Popen a `bi_so_follower` argv with both ports and
+    two stdin newlines (one prompt per sub-arm's connect()).
+
+    Mirrors the pin-test's stub pattern: subprocess, the two preflights, and the
+    staging helper are all replaced so nothing real runs; the startup worker (and
+    its stdout pump) run inline via _SyncThread and HOME is redirected so the log
+    file lands in tmp."""
+    from makerlab import rollout
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(rollout, "bimanual_base_id", lambda name: "dual_arm")
+    monkeypatch.setattr(
+        rollout,
+        "stage_bimanual_follower_calibrations",
+        lambda *a, **k: ("/staging/follower", "dual_arm"),
+    )
+    monkeypatch.setattr(rollout, "_preflight_arm_identity", lambda *a, **k: [])
+    monkeypatch.setattr(rollout, "_preflight_motor_power", lambda *a, **k: [])
+    monkeypatch.setattr(
+        rollout, "_resolve_policy_path", lambda ref, report=None: str(tmp_path / "pretrained_model")
+    )
+    monkeypatch.setattr(rollout, "_detect_device", lambda: "cpu")
+
+    captured: dict = {}
+
+    class _FakeStdin:
+        def __init__(self) -> None:
+            self.written = b""
+
+        def write(self, data: bytes) -> None:
+            self.written += data
+
+        def flush(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    class _FakeProc:
+        pid = 9999
+
+        def __init__(self, cmd, **kwargs):
+            captured["cmd"] = cmd
+            self.stdin = _FakeStdin()
+            self.stdout = _EmptyStdout()
+            captured["stdin"] = self.stdin
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(rollout.subprocess, "Popen", _FakeProc)
+    monkeypatch.setattr(rollout.threading, "Thread", _SyncThread)
+
+    result = rollout.handle_start_inference(_bimanual_request())
+    assert result["success"] is True, result
+
+    cmd = captured["cmd"]
+    assert "--robot.type=bi_so_follower" in cmd
+    assert "--robot.left_arm_config.port=/dev/left" in cmd
+    assert "--robot.right_arm_config.port=/dev/right" in cmd
+    assert "--robot.calibration_dir=/staging/follower" in cmd
+    # Two sub-arms → two seeded newlines (single-arm seeds only one).
+    assert captured["stdin"].written == b"\n\n"
+
+
+# ---------------------------------------------------------------------------
+# Startup phase model — the "which substep am I in" status (download / subprocess
+# fully MOCKED; no real inference, no hardware, no port opened).
+# ---------------------------------------------------------------------------
+
+
+def test_status_phase_is_none_when_idle() -> None:
+    """No session has seeded a meta → phase is None (frontend shows nothing)."""
+    from makerlab.rollout import handle_inference_status
+
+    result = handle_inference_status()
+    assert result["phase"] is None
+
+
+def test_resolve_policy_path_sets_downloading_model_phase(monkeypatch, tmp_path) -> None:
+    """During the Hub snapshot_download, an active session's phase must read
+    `downloading_model` so the UI can name that (multi-second) wait."""
+    from makerlab import rollout
+
+    # Seed a live meta the way handle_start_inference does before the download.
+    monkeypatch.setattr(rollout, "_inference_meta", {"phase": rollout.PHASE_STARTING})
+
+    seen_phase: dict = {}
+
+    def fake_snapshot_download(**kwargs):
+        # Capture the phase *at the moment of download*, not after.
+        seen_phase["phase"] = rollout._inference_meta.get("phase")
+        return str(tmp_path)
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", fake_snapshot_download)
+    rollout._resolve_policy_path("user/repo@root")
+
+    assert seen_phase["phase"] == rollout.PHASE_DOWNLOADING_MODEL
+
+
+def test_resolve_policy_path_local_dir_leaves_phase_untouched(monkeypatch, tmp_path) -> None:
+    """A local checkpoint dir needs no download, so it must NOT flip the phase
+    to downloading_model."""
+    from makerlab import rollout
+
+    pretrained = tmp_path / "pretrained_model"
+    pretrained.mkdir()
+    monkeypatch.setattr(rollout, "_inference_meta", {"phase": rollout.PHASE_STARTING})
+
+    rollout._resolve_policy_path(str(pretrained))
+
+    assert rollout._inference_meta["phase"] == rollout.PHASE_STARTING
+
+
+def test_set_phase_noops_without_active_session(monkeypatch) -> None:
+    """A late stdout line arriving after teardown (empty meta) can't resurrect
+    a phase on an empty dict."""
+    from makerlab import rollout
+
+    monkeypatch.setattr(rollout, "_inference_meta", {})
+    rollout._set_phase(rollout.PHASE_CONNECTING)
+    assert rollout._inference_meta == {}
+
+
+class _LineFeeder:
+    def __init__(self, lines: list[bytes]) -> None:
+        self._it = iter(lines + [b""])
+
+    def readline(self) -> bytes:
+        return next(self._it)
+
+
+class _NullLog:
+    def write(self, *a) -> None:
+        pass
+
+    def flush(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
+def test_pump_stdout_advances_phases_through_setup(monkeypatch) -> None:
+    """The stdout pump walks loading_policy → connecting → running off the
+    stable lerobot setup lines, then pins running at the rollout marker."""
+    from makerlab import rollout
+
+    monkeypatch.setattr(rollout, "_inference_meta", {"phase": rollout.PHASE_STARTING})
+    monkeypatch.setattr(rollout, "_inference_started_at", 0.0)
+    monkeypatch.setattr(rollout, "_inference_rollout_started_at", None)
+
+    phases_seen: list[str] = []
+
+    real_set_phase = rollout._set_phase
+
+    def recording_set_phase(phase: str) -> None:
+        real_set_phase(phase)
+        phases_seen.append(phase)
+
+    monkeypatch.setattr(rollout, "_set_phase", recording_set_phase)
+
+    class _Proc:
+        stdout = _LineFeeder(
+            [
+                b"INFO Loading policy from 'user/repo'...\n",
+                b"INFO Policy loaded: type=act, device=cpu\n",
+                b"INFO Connecting robot (so101_follower)...\n",
+                b"INFO Robot connected: so101_follower\n",
+                b"INFO Rollout setup complete, starting rollout...\n",
+                b"INFO step 0\n",
+            ]
+        )
+
+    rollout._pump_stdout(_Proc(), _NullLog())
+
+    assert phases_seen == [
+        rollout.PHASE_LOADING_POLICY,
+        rollout.PHASE_CONNECTING,
+        rollout.PHASE_RUNNING,
+    ]
+    assert rollout._inference_meta["phase"] == rollout.PHASE_RUNNING
+    # The marker also stamped the rollout-start time.
+    assert rollout._inference_rollout_started_at is not None
+
+
+def test_pump_stdout_does_not_regress_phase_after_marker(monkeypatch) -> None:
+    """A setup-looking line AFTER the rollout marker must not drag a running
+    session back to `connecting`."""
+    from makerlab import rollout
+
+    monkeypatch.setattr(rollout, "_inference_meta", {"phase": rollout.PHASE_STARTING})
+    monkeypatch.setattr(rollout, "_inference_started_at", 0.0)
+    monkeypatch.setattr(rollout, "_inference_rollout_started_at", None)
+
+    class _Proc:
+        stdout = _LineFeeder(
+            [
+                b"INFO Rollout setup complete, starting rollout...\n",
+                b"INFO Connecting robot (stray later mention)...\n",
+            ]
+        )
+
+    rollout._pump_stdout(_Proc(), _NullLog())
+    assert rollout._inference_meta["phase"] == rollout.PHASE_RUNNING
+
+
+def test_start_inference_seeds_starting_phase(monkeypatch) -> None:
+    """The start handler seeds a `starting` phase synchronously before handing
+    off to the background worker, so the very first status poll can already name
+    the wait. Here the worker Thread is a no-op — modelling the instant after the
+    POST returns, before the worker has run — so the phase stays `starting`."""
+    from makerlab import rollout
+
+    # A no-op Thread: the background startup worker is never actually run, so the
+    # meta shows the state the POST left behind.
+    monkeypatch.setattr(
+        rollout.threading, "Thread", lambda *a, **k: type("_T", (), {"start": lambda self: None})()
+    )
+
+    result = rollout.handle_start_inference(_stub_request())
+    assert result["success"] is True, result
+    assert rollout._inference_meta["phase"] == rollout.PHASE_STARTING
+
+    status = rollout.handle_inference_status()
+    assert status["phase"] == rollout.PHASE_STARTING
+
+
+def test_stop_inference_sets_stopping_phase(monkeypatch) -> None:
+    """A stop request stamps `stopping` on the meta before terminate/wait, so a
+    racing status poll doesn't report a stale `running`."""
+    from makerlab import rollout
+
+    phase_at_terminate: dict = {}
+
+    class _FakeProc:
+        def terminate(self):
+            phase_at_terminate["phase"] = rollout._inference_meta.get("phase")
+
+        def wait(self, timeout=None):
+            return 0
+
+    monkeypatch.setattr(rollout, "inference_active", True)
+    monkeypatch.setattr(rollout, "_inference_proc", _FakeProc())
+    monkeypatch.setattr(rollout, "_inference_meta", {"phase": rollout.PHASE_RUNNING})
+
+    result = rollout.handle_stop_inference()
+    assert result["success"] is True
+    assert phase_at_terminate["phase"] == rollout.PHASE_STOPPING
+
+
+def test_status_finalisation_reports_stopped_on_clean_exit(monkeypatch) -> None:
+    """A subprocess that exited rc=0 finalises to the terminal `stopped` phase."""
+    from makerlab import rollout
+
+    class _ExitedProc:
+        returncode = 0
+
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr(rollout, "inference_active", True)
+    monkeypatch.setattr(rollout, "_inference_proc", _ExitedProc())
+    monkeypatch.setattr(rollout, "_inference_started_at", 0.0)
+    monkeypatch.setattr(rollout, "_inference_meta", {"phase": rollout.PHASE_RUNNING})
+
+    result = rollout.handle_inference_status()
+    assert result["exited"] is True
+    assert result["phase"] == rollout.PHASE_STOPPED
+
+
+def test_status_finalisation_reports_error_on_nonzero_exit(monkeypatch) -> None:
+    """A non-zero exit code finalises to the terminal `error` phase."""
+    from makerlab import rollout
+
+    class _CrashedProc:
+        returncode = 1
+
+        def poll(self):
+            return 1
+
+    monkeypatch.setattr(rollout, "inference_active", True)
+    monkeypatch.setattr(rollout, "_inference_proc", _CrashedProc())
+    monkeypatch.setattr(rollout, "_inference_started_at", 0.0)
+    monkeypatch.setattr(rollout, "_inference_meta", {"phase": rollout.PHASE_CONNECTING})
+
+    result = rollout.handle_inference_status()
+    assert result["exited"] is True
+    assert result["phase"] == rollout.PHASE_ERROR
+
+
+def test_classify_outcome_ok_warns_and_fails() -> None:
+    from makerlab.rollout import _classify_outcome
+
+    # rc 0/None => the run was fine.
+    assert _classify_outcome(0, True, "overload") == "ok"
+    assert _classify_outcome(None, True, None) == "ok"
+    # Non-zero AFTER the rollout started, with a torque-disable/overload on
+    # shutdown => the skill ran; only cleanup tripped.
+    assert _classify_outcome(1, True, "Motor 6 overload, torque_enable failed") == "ran_with_warning"
+    # Never started, or an unrelated error => a real failure.
+    assert _classify_outcome(1, False, "overload") == "failed"
+    assert _classify_outcome(1, True, "could not connect to the arm") == "failed"
+    # A connection lost mid-run (cable bumped while the policy is driving) is a
+    # real failure, not a shutdown/cleanup warning — connection-loss markers are
+    # deliberately excluded from the cleanup set.
+    assert _classify_outcome(1, True, "DeviceNotConnectedError: follower is not connected") == "failed"
+
+
+def test_friendly_hint_maps_common_failures() -> None:
+    from makerlab.utils.errors import friendly_hint
+
+    assert "gripper" in (friendly_hint("Motor overload detected") or "").lower()
+    assert "connect" in (friendly_hint("Failed to connect to the follower") or "").lower()
+    assert friendly_hint("some unrecognised traceback") is None
+    assert friendly_hint(None) is None
+
+
+def test_extract_error_from_log_pulls_exception_tail(tmp_path) -> None:
+    from makerlab.rollout import _extract_error_from_log
+
+    log = tmp_path / "rollout.log"
+    log.write_text(
+        "INFO starting rollout\n"
+        "Traceback (most recent call last):\n"
+        '  File "x.py", line 1\n'
+        "RuntimeError: gripper overload during shutdown\n",
+        encoding="utf-8",
+    )
+    out = _extract_error_from_log(str(log))
+    assert out is not None and "RuntimeError: gripper overload during shutdown" in out
+    assert _extract_error_from_log(None) is None
+    assert _extract_error_from_log(str(tmp_path / "missing.log")) is None
+
+
+def test_inference_in_use_path_none_when_idle() -> None:
+    """No active inference -> no in-use path (delete guards stay open)."""
+    from makerlab import rollout
+
+    assert rollout.inference_in_use_path() is None
+
+
+def test_inference_in_use_path_returns_resolved_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """While a session is active, the accessor exposes the RESOLVED local
+    checkpoint dir captured at start (not the possibly-hub policy_ref)."""
+    from makerlab import rollout
+
+    monkeypatch.setattr(rollout, "inference_active", True)
+    monkeypatch.setattr(
+        rollout,
+        "_inference_meta",
+        {"policy_ref": "user/repo@root", "policy_path": "/tmp/ckpt/pretrained_model"},
+    )
+    assert rollout.inference_in_use_path() == "/tmp/ckpt/pretrained_model"
+
+
+# ---------------------------------------------------------------------------
+# Navigate-first startup: the POST returns immediately and the heavy work
+# (download → preflight → spawn) runs in the background worker. All of these
+# fully MOCK snapshot_download / the subprocess — no network, no hardware.
+# ---------------------------------------------------------------------------
+
+
+def test_start_inference_returns_immediately_without_downloading(monkeypatch) -> None:
+    """The whole point of the rework: the POST must not block on the Hub
+    download. With the worker Thread stubbed to a no-op, the handler still
+    returns success and claims the session — and snapshot_download is never
+    touched on the request thread (it would raise here if it were)."""
+    from makerlab import rollout
+
+    def _boom(**kwargs):
+        raise AssertionError("snapshot_download must not run on the request thread")
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", _boom)
+    monkeypatch.setattr(
+        rollout.threading, "Thread", lambda *a, **k: type("_T", (), {"start": lambda self: None})()
+    )
+
+    result = rollout.handle_start_inference(_stub_request())
+    assert result["success"] is True
+    assert rollout.inference_active is True
+    # Visible from the very first status poll, before the worker has run.
+    assert rollout._inference_meta["phase"] == rollout.PHASE_STARTING
+
+
+def test_download_progress_reported_into_status(monkeypatch) -> None:
+    """While a Hub checkpoint downloads, snapshot_download's byte updates flow
+    through the progress tqdm into the meta, and /inference-status exposes them
+    as download_bytes_done / _total / _percent. The total can arrive after some
+    bytes (metadata discovery), which is exactly the refresh()-then-update()
+    order huggingface_hub uses on the shared bytes bar."""
+    from makerlab import rollout
+
+    monkeypatch.setattr(rollout, "inference_active", True)
+    monkeypatch.setattr(rollout, "_inference_started_at", 0.0)
+    monkeypatch.setattr(
+        rollout,
+        "_inference_meta",
+        {"phase": rollout.PHASE_STARTING, "policy_ref": "user/repo@checkpoints/000050"},
+    )
+
+    def fake_snapshot_download(**kwargs):
+        # huggingface_hub instantiates the shared bytes bar (unit="B"); a file's
+        # size becoming known grows total via refresh(), chunks arrive via
+        # update(n).
+        cls = kwargs["tqdm_class"]
+        bar = cls(total=None, unit="B")
+        bar.total = 1000
+        bar.refresh()
+        bar.update(250)
+        return "/tmp/snap"
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", fake_snapshot_download)
+    rollout._resolve_policy_path("user/repo@checkpoints/000050", report=rollout._report_download_progress)
+
+    assert rollout._inference_meta["phase"] == rollout.PHASE_DOWNLOADING_MODEL
+    status = rollout.handle_inference_status()
+    assert status["download_bytes_done"] == 250
+    assert status["download_bytes_total"] == 1000
+    assert status["download_percent"] == 25.0
+
+
+def test_download_percent_is_none_until_total_known(monkeypatch) -> None:
+    """Before any file size is known the total is None, so download_percent is
+    None too → the UI shows an indeterminate bar rather than a bogus 0/0%."""
+    from makerlab import rollout
+
+    monkeypatch.setattr(rollout, "inference_active", True)
+    monkeypatch.setattr(
+        rollout, "_inference_meta", {"phase": rollout.PHASE_STARTING, "policy_ref": "user/repo@root"}
+    )
+
+    def fake_snapshot_download(**kwargs):
+        cls = kwargs["tqdm_class"]
+        bar = cls(total=None, unit="B")
+        bar.update(128)  # bytes trickling in before any total is known
+        return "/tmp/snap"
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", fake_snapshot_download)
+    rollout._resolve_policy_path("user/repo@root", report=rollout._report_download_progress)
+
+    status = rollout.handle_inference_status()
+    assert status["download_bytes_done"] == 128
+    assert status["download_bytes_total"] is None
+    assert status["download_percent"] is None
+
+
+def test_startup_download_failure_reports_failed_and_hint_without_spawn(monkeypatch) -> None:
+    """A Hub download that raises (offline / 404 / disk full) is finalised as a
+    `failed` outcome carrying the error text + a friendly hint — and no arm
+    preflight runs and no subprocess spawns."""
+    from makerlab import rollout
+
+    monkeypatch.setattr(rollout, "inference_active", True)
+    monkeypatch.setattr(
+        rollout,
+        "_inference_meta",
+        {"phase": rollout.PHASE_STARTING, "policy_ref": "user/repo@checkpoints/000050"},
+    )
+
+    def _raise(ref, report=None):
+        raise RuntimeError("Repository Not Found for url: https://huggingface.co/api/models/x")
+
+    monkeypatch.setattr(rollout, "_resolve_policy_path", _raise)
+
+    def _no_prepare(*a, **k):
+        raise AssertionError("preflight must not run after a download failure")
+
+    def _no_popen(*a, **k):
+        raise AssertionError("no subprocess may spawn after a download failure")
+
+    monkeypatch.setattr(rollout, "_prepare_robot", _no_prepare)
+    monkeypatch.setattr(rollout.subprocess, "Popen", _no_popen)
+
+    rollout._run_inference_startup(_stub_request(), threading.Event())
+
+    assert rollout.inference_active is False
+    status = rollout.handle_inference_status()
+    assert status["exited"] is True
+    assert status["outcome"] == "failed"
+    assert status["phase"] == rollout.PHASE_ERROR
+    assert "download" in (status["error"] or "").lower()
+    # friendly_hint recognises the Hub-not-found token and adds a hint.
+    assert status["hint"] is not None and "Hub" in status["hint"]
+
+
+def test_stop_during_download_leaves_clean_idle_without_spawn(monkeypatch) -> None:
+    """Pressing Stop while the model is still downloading tears the session down
+    to a clean idle: the worker abandons after the download returns, never
+    opening the bus (_prepare_robot) or spawning a subprocess. Models the real
+    ordering — stop() with no subprocess yet flips the session idle and sets the
+    cancel event; the in-flight download still finishes into the cache."""
+    from makerlab import rollout
+
+    cancel = threading.Event()
+    monkeypatch.setattr(rollout, "inference_active", True)
+    monkeypatch.setattr(rollout, "_inference_cancel", cancel)
+    monkeypatch.setattr(rollout, "_inference_proc", None)
+    monkeypatch.setattr(
+        rollout,
+        "_inference_meta",
+        {"phase": rollout.PHASE_DOWNLOADING_MODEL, "policy_ref": "user/repo@checkpoints/000050"},
+    )
+
+    def _resolve_then_stop(ref, report=None):
+        rollout.handle_stop_inference()
+        return "/tmp/snap/pretrained_model"
+
+    def _no_prepare(*a, **k):
+        raise AssertionError("no bus may be opened after a stop during download")
+
+    def _no_popen(*a, **k):
+        raise AssertionError("no subprocess may spawn after a stop during download")
+
+    monkeypatch.setattr(rollout, "_resolve_policy_path", _resolve_then_stop)
+    monkeypatch.setattr(rollout, "_prepare_robot", _no_prepare)
+    monkeypatch.setattr(rollout.subprocess, "Popen", _no_popen)
+
+    rollout._run_inference_startup(_stub_request(), cancel)
+
+    assert rollout.inference_active is False
+    assert rollout._inference_proc is None
+    assert rollout._inference_meta == {}
+    assert rollout.handle_inference_status()["inference_active"] is False
+
+
+def test_run_inference_startup_local_ref_skips_download_phase(monkeypatch, tmp_path) -> None:
+    """A local checkpoint dir needs no download: the worker resolves it instantly,
+    never enters the downloading_model phase, and proceeds straight to preflight
+    + spawn."""
+    from makerlab import rollout
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    pretrained = tmp_path / "pretrained_model"
+    pretrained.mkdir()
+
+    monkeypatch.setattr(rollout, "inference_active", True)
+    monkeypatch.setattr(
+        rollout, "_inference_meta", {"phase": rollout.PHASE_STARTING, "policy_ref": str(pretrained)}
+    )
+
+    phases: list[str] = []
+    real_set_phase = rollout._set_phase
+
+    def _rec(phase: str) -> None:
+        phases.append(phase)
+        real_set_phase(phase)
+
+    monkeypatch.setattr(rollout, "_set_phase", _rec)
+    monkeypatch.setattr(rollout, "_prepare_robot", lambda req: (["--robot.type=so101_follower"], []))
+    monkeypatch.setattr(rollout, "_detect_device", lambda: "cpu")
+
+    class _FakeProc:
+        pid = 1
+
+        def __init__(self, cmd, **kwargs):
+            self.stdin = io.BytesIO()
+            self.stdout = _EmptyStdout()
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(rollout.subprocess, "Popen", _FakeProc)
+    monkeypatch.setattr(rollout.threading, "Thread", _SyncThread)
+
+    req = rollout.InferenceRequest(follower_port="/dev/x", follower_config="c", policy_ref=str(pretrained))
+    rollout._run_inference_startup(req, threading.Event())
+
+    assert rollout.PHASE_DOWNLOADING_MODEL not in phases
+    assert rollout._inference_proc is not None
