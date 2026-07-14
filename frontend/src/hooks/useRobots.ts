@@ -1,20 +1,32 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useSyncExternalStore } from "react";
 import { useLocation } from "react-router-dom";
 import { useApi } from "@/contexts/ApiContext";
 import { useToast } from "@/hooks/use-toast";
 import type { CameraConfig } from "@/components/recording/CameraConfiguration";
 
+export type RobotMode = "single" | "bimanual";
+
 export interface RobotRecord {
   name: string;
+  mode: RobotMode;
+  // Primary pair (single mode), or the LEFT arm pair (bimanual mode).
   leader_port: string;
   follower_port: string;
   leader_config: string;
   follower_config: string;
+  // Right arm pair — populated only in bimanual mode.
+  right_leader_port: string;
+  right_follower_port: string;
+  right_leader_config: string;
+  right_follower_config: string;
   cameras: CameraConfig[];
+  // Follower torque as a percentage of full power (10-100, default 100).
+  // Written to the servos' volatile torque-limit register at session start.
+  motor_power: number;
   is_clean: boolean;
 }
 
-const SELECTED_KEY = "lelab.selectedRobot";
+const SELECTED_KEY = "makerlab.selectedRobot";
 
 const readSelected = (): string | null => {
   try {
@@ -34,36 +46,88 @@ const writeSelected = (name: string | null) => {
   }
 };
 
+// Module-level store shared by every useRobots() instance. The Landing card,
+// JobsSection, and Training page mount simultaneously, so per-instance
+// useState copies drift: selecting a robot on Landing left the inference
+// modal (mounted under JobsSection) holding the stale previous selection.
+// One store, one truth — instances subscribe via useSyncExternalStore.
+interface RobotsState {
+  records: Record<string, RobotRecord>;
+  selectedName: string | null;
+  isLoading: boolean;
+}
+
+let state: RobotsState = {
+  records: {},
+  selectedName: readSelected(),
+  isLoading: false,
+};
+const listeners = new Set<() => void>();
+
+const setState = (patch: Partial<RobotsState>) => {
+  state = { ...state, ...patch };
+  listeners.forEach((l) => l());
+};
+
+const subscribe = (l: () => void) => {
+  listeners.add(l);
+  return () => {
+    listeners.delete(l);
+  };
+};
+
+const getSnapshot = (): RobotsState => state;
+
+const setSelectedShared = (name: string | null) => {
+  writeSelected(name);
+  setState({ selectedName: name });
+};
+
+const patchRecords = (
+  updater: (prev: Record<string, RobotRecord>) => Record<string, RobotRecord>
+) => {
+  setState({ records: updater(state.records) });
+};
+
+// Several instances can fetch concurrently (each mount refreshes); isLoading
+// is true while ANY fetch is in flight, not just the last one to finish.
+let pendingFetches = 0;
+
 export const useRobots = () => {
   const { baseUrl, fetchWithHeaders } = useApi();
   const { toast } = useToast();
   const location = useLocation();
 
-  const [records, setRecords] = useState<Record<string, RobotRecord>>({});
-  const [selectedName, setSelectedName] = useState<string | null>(() => readSelected());
-  const [isLoading, setIsLoading] = useState(false);
+  const { records, selectedName, isLoading } = useSyncExternalStore(
+    subscribe,
+    getSnapshot
+  );
 
   // Re-fetch records when location changes (RobotConfigManager mounts only on Landing,
   // so this fires on initial mount and on back-navigation to Landing)
   useEffect(() => {
     let cancelled = false;
     const fetchAll = async () => {
-      setIsLoading(true);
+      pendingFetches += 1;
+      setState({ isLoading: true });
       try {
         const res = await fetchWithHeaders(`${baseUrl}/robots`);
         const data = await res.json();
         if (cancelled) return;
         const next: Record<string, RobotRecord> = {};
         for (const r of data.robots ?? []) next[r.name] = r;
-        setRecords(next);
+        setState({ records: next });
         // Drop the selection if the underlying record vanished (deleted from another tab)
-        setSelectedName((prev) => (prev && prev in next ? prev : null));
+        if (state.selectedName && !(state.selectedName in next)) {
+          setSelectedShared(null);
+        }
       } catch (e) {
         if (!cancelled) {
           console.error("Failed to fetch robots:", e);
         }
       } finally {
-        if (!cancelled) setIsLoading(false);
+        pendingFetches -= 1;
+        setState({ isLoading: pendingFetches > 0 });
       }
     };
     fetchAll();
@@ -72,21 +136,16 @@ export const useRobots = () => {
     };
   }, [baseUrl, fetchWithHeaders, location.key]);
 
-  // Persist selection to localStorage
-  useEffect(() => {
-    writeSelected(selectedName);
-  }, [selectedName]);
-
   const selectRobot = useCallback((name: string) => {
-    setSelectedName(name);
+    setSelectedShared(name);
   }, []);
 
   const clearSelection = useCallback(() => {
-    setSelectedName(null);
+    setSelectedShared(null);
   }, []);
 
   const createRobot = useCallback(
-    async (rawName: string): Promise<boolean> => {
+    async (rawName: string, mode: RobotMode = "single"): Promise<boolean> => {
       const name = rawName.trim();
       if (!name) {
         toast({ title: "Missing name", description: "Robot name cannot be empty.", variant: "destructive" });
@@ -100,7 +159,7 @@ export const useRobots = () => {
         const res = await fetchWithHeaders(`${baseUrl}/robots/${encodeURIComponent(name)}?create=true`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: "{}",
+          body: JSON.stringify({ mode }),
         });
         if (res.status === 409) {
           toast({
@@ -117,8 +176,8 @@ export const useRobots = () => {
         }
         const data = await res.json();
         if (data.robot) {
-          setRecords((prev) => ({ ...prev, [name]: data.robot }));
-          setSelectedName(name);
+          patchRecords((prev) => ({ ...prev, [name]: data.robot }));
+          setSelectedShared(name);
         }
         return true;
       } catch (e) {
@@ -135,16 +194,73 @@ export const useRobots = () => {
         const res = await fetchWithHeaders(`${baseUrl}/robots/${encodeURIComponent(name)}`, {
           method: "DELETE",
         });
-        if (!res.ok) {
+        // 404 = the record is already gone (deleted elsewhere, or removed on
+        // disk out-of-band). The user's intent is fulfilled either way — drop
+        // it from the local list instead of showing a scary failure.
+        if (!res.ok && res.status !== 404) {
           const text = await res.text();
-          toast({ title: "Failed to delete", description: text, variant: "destructive" });
+          toast({ title: "Delete failed", description: text, variant: "destructive" });
           return false;
         }
-        setRecords((prev) => {
+        patchRecords((prev) => {
           const { [name]: _omit, ...rest } = prev;
           return rest;
         });
-        setSelectedName((prev) => (prev === name ? null : prev));
+        if (state.selectedName === name) setSelectedShared(null);
+        toast({
+          title: "Robot deleted",
+          description:
+            res.status === 404
+              ? `"${name}" was already removed — updated the list.`
+              : `Removed "${name}". Calibration files are kept in the library.`,
+        });
+        return true;
+      } catch (e) {
+        toast({ title: "Delete failed", description: String(e), variant: "destructive" });
+        return false;
+      }
+    },
+    [baseUrl, fetchWithHeaders, toast]
+  );
+
+  const renameRobot = useCallback(
+    async (oldName: string, rawNew: string): Promise<boolean> => {
+      const newName = rawNew.trim();
+      if (!newName) {
+        toast({ title: "Missing name", description: "Robot name cannot be empty.", variant: "destructive" });
+        return false;
+      }
+      if (newName === oldName) return true; // no-op
+      if (/[/\\]|\.\./.test(newName)) {
+        toast({ title: "Invalid name", description: "Robot names cannot contain '/', '\\', or '..'", variant: "destructive" });
+        return false;
+      }
+      try {
+        const res = await fetchWithHeaders(`${baseUrl}/robots/${encodeURIComponent(oldName)}/rename`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ new_name: newName }),
+        });
+        if (res.status === 409) {
+          toast({
+            title: "Already exists",
+            description: `A robot named "${newName}" already exists. Choose a different name.`,
+            variant: "destructive",
+          });
+          return false;
+        }
+        if (!res.ok) {
+          const text = await res.text();
+          toast({ title: "Failed to rename", description: text, variant: "destructive" });
+          return false;
+        }
+        const data = await res.json();
+        // Swap the key oldName → newName in the local map, preserving order roughly.
+        patchRecords((prev) => {
+          const { [oldName]: _omit, ...rest } = prev;
+          return data.robot ? { ...rest, [newName]: data.robot } : rest;
+        });
+        if (state.selectedName === oldName) setSelectedShared(newName);
         return true;
       } catch (e) {
         toast({ title: "Network error", description: String(e), variant: "destructive" });
@@ -173,6 +289,7 @@ export const useRobots = () => {
     selectRobot,
     clearSelection,
     createRobot,
+    renameRobot,
     deleteRobot,
   };
 };

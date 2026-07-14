@@ -24,6 +24,13 @@ const TARGETS_BY_DEVICE_TYPE: Record<string, Record<string, number>> = {
   robot: SO101_FOLLOWER_TARGETS,
 };
 
+// Continuous full-turn joints. Official lerobot-calibrate excludes these from
+// the range sweep and hardcodes 0-4095 (lerobot so_follower.py/so_leader.py
+// calibrate()); the makerlab backend mirrors that (FULL_TURN_MOTORS in
+// makerlab/calibrate.py). They must NOT be swept — rolling past the encoder wrap
+// used to trip the discontinuity check — so their checkmark is always green.
+const FULL_TURN_MOTORS = new Set(["wrist_roll"]);
+
 const RANGE_TOLERANCE = 0.98;
 
 export function isMotorRangeComplete(
@@ -31,6 +38,7 @@ export function isMotorRangeComplete(
   motor: string,
   rangeAchieved: number
 ): boolean {
+  if (FULL_TURN_MOTORS.has(motor)) return true;
   if (!deviceType) return false;
   const target = TARGETS_BY_DEVICE_TYPE[deviceType]?.[motor];
   if (!target) return false;
