@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import logging
 
+from makerlab.utils.devices import safe_disconnect_device
+
 
 def test_safe_disconnect_force_closes_serial_port_after_disconnect_failure() -> None:
-    from makerlab.utils.devices import safe_disconnect_device
-
     class PortHandler:
         def __init__(self) -> None:
             self.cleared = False
@@ -43,8 +43,6 @@ def test_safe_disconnect_force_closes_serial_port_after_disconnect_failure() -> 
 
 
 def test_safe_disconnect_uses_normal_disconnect_when_it_succeeds() -> None:
-    from makerlab.utils.devices import safe_disconnect_device
-
     class PortHandler:
         def __init__(self) -> None:
             self.closed = False

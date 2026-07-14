@@ -15,6 +15,8 @@
 import contextlib
 import importlib.util
 import logging
+import os
+import platform
 import queue
 import shutil
 import subprocess
@@ -28,13 +30,46 @@ from pydantic import BaseModel
 logger = logging.getLogger(__name__)
 
 
-# Cached at module load — never re-checked. After install, the user must
-# restart makerlab for a freshly-installed package to be importable.
-TRAINING_AVAILABLE: bool = importlib.util.find_spec("accelerate") is not None
+def open_folder_in_file_browser(path: str) -> None:
+    """Open `path` in the OS file browser (Finder/Explorer/xdg-open).
+
+    Creates the directory (parents included) first so a fresh install with no
+    calibration files yet still opens a real, empty folder instead of failing.
+    Does NOT block on the launched process — the file browser runs detached.
+    This is a LOCAL action only (spawns a GUI on the host); it never touches the
+    network. Raises on an unsupported platform or a spawn failure so the caller
+    can report a clear error.
+    """
+    os.makedirs(path, exist_ok=True)
+    system = platform.system()
+    if system == "Darwin":
+        subprocess.Popen(["open", path])
+    elif system == "Windows":
+        os.startfile(path)  # type: ignore[attr-defined]  # Windows-only
+    elif system == "Linux":
+        subprocess.Popen(["xdg-open", path])
+    else:
+        raise OSError(f"Opening a folder is not supported on this platform: {system!r}")
+
+
+# accelerate and wandb are only ever consumed by training SUBPROCESSES (fresh
+# processes that see new installs immediately) — nothing needs them imported
+# into this server process. So availability is probed live per request via
+# ``_extra_available`` (mirroring ``handle_get_policy_extra``), never cached at
+# import. A just-installed package becomes available without a server restart.
+TRAINING_PROBE_MODULE: str = "accelerate"
 TRAINING_INSTALL_HINT: str = "pip install accelerate"
 
-WANDB_AVAILABLE: bool = importlib.util.find_spec("wandb") is not None
+WANDB_PROBE_MODULE: str = "wandb"
 WANDB_INSTALL_HINT: str = "pip install wandb"
+
+
+def _extra_available(module: str) -> bool:
+    """Whether ``module`` is importable right now (probed live, not cached)."""
+    try:
+        return importlib.util.find_spec(module) is not None
+    except (ImportError, ValueError):
+        return False
 
 
 def _build_install_cmd(package: str) -> list[str]:
@@ -135,6 +170,13 @@ class InstallManager:
 
         self.process.wait()
         return_code = self.process.returncode
+        if return_code == 0:
+            # The subprocess just wrote a new entry into this process's
+            # site-packages. Python's import system caches directory listings
+            # (FileFinder), so a long-running server can miss the newly created
+            # package on the next find_spec. Invalidate those caches so the very
+            # next availability poll (handle_get_*_extra) finds it — no restart.
+            importlib.invalidate_caches()
         with self._lock:
             if return_code == 0:
                 self.state = "done"
@@ -163,7 +205,10 @@ wandb_install_manager = InstallManager("wandb")
 
 
 def handle_get_training_extra() -> dict[str, Any]:
-    return {"available": TRAINING_AVAILABLE, "install_hint": TRAINING_INSTALL_HINT}
+    return {
+        "available": _extra_available(TRAINING_PROBE_MODULE),
+        "install_hint": TRAINING_INSTALL_HINT,
+    }
 
 
 def handle_install_training_extra() -> dict[str, Any]:
@@ -175,7 +220,10 @@ def handle_install_training_extra_status() -> dict[str, Any]:
 
 
 def handle_get_wandb_extra() -> dict[str, Any]:
-    return {"available": WANDB_AVAILABLE, "install_hint": WANDB_INSTALL_HINT}
+    return {
+        "available": _extra_available(WANDB_PROBE_MODULE),
+        "install_hint": WANDB_INSTALL_HINT,
+    }
 
 
 def handle_install_wandb_extra() -> dict[str, Any]:
@@ -324,10 +372,6 @@ def detect_cuda_status() -> dict[str, Any]:
         "install_hint": CUDA_TORCH_INSTALL_HINT,
         "docs_url": CUDA_TORCH_DOCS_URL,
     }
-
-
-def handle_get_cuda_status() -> dict[str, Any]:
-    return detect_cuda_status()
 
 
 def warn_if_cuda_mismatch() -> None:

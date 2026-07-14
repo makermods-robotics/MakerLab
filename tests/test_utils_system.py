@@ -122,13 +122,6 @@ def test_warn_if_cuda_mismatch_silent_when_ok(monkeypatch, caplog) -> None:
     assert caplog.records == []
 
 
-def test_cuda_status_endpoint_returns_expected_shape(client) -> None:
-    response = client.get("/system/cuda-status")
-    assert response.status_code == 200
-    body = response.json()
-    assert set(body) >= {"gpu_present", "cuda_available", "mismatch", "install_hint", "docs_url"}
-
-
 def test_policy_extra_maps_policies_to_install_targets() -> None:
     """smolvla/pi0/pi0_fast/diffusion map to the right probe module + lerobot[extra]."""
     from makerlab.utils.system import handle_get_policy_extra
@@ -164,6 +157,99 @@ def test_policy_extra_available_reflects_find_spec(monkeypatch) -> None:
     assert system.handle_get_policy_extra("smolvla")["available"] is True
     monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
     assert system.handle_get_policy_extra("smolvla")["available"] is False
+
+
+def test_training_extra_available_flips_with_find_spec(monkeypatch) -> None:
+    """Availability is probed live: it flips within one process when find_spec
+    starts returning a spec — no server restart required after install."""
+    import importlib.util
+
+    from makerlab.utils import system
+
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
+    assert system.handle_get_training_extra()["available"] is False
+    # Simulate the package appearing (e.g. an install finished mid-process).
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: object())
+    assert system.handle_get_training_extra()["available"] is True
+    assert system.handle_get_training_extra()["install_hint"] == "pip install accelerate"
+
+
+def test_wandb_extra_available_flips_with_find_spec(monkeypatch) -> None:
+    import importlib.util
+
+    from makerlab.utils import system
+
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
+    assert system.handle_get_wandb_extra()["available"] is False
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: object())
+    assert system.handle_get_wandb_extra()["available"] is True
+    assert system.handle_get_wandb_extra()["install_hint"] == "pip install wandb"
+
+
+def test_extra_available_swallows_find_spec_errors(monkeypatch) -> None:
+    import importlib.util
+
+    from makerlab.utils import system
+
+    def _boom(name: str):
+        raise ValueError("bad module name")
+
+    monkeypatch.setattr(importlib.util, "find_spec", _boom)
+    assert system._extra_available("whatever") is False
+
+
+def test_install_success_invalidates_import_caches(monkeypatch) -> None:
+    """On a successful install the InstallManager must call
+    importlib.invalidate_caches() so the next find_spec sees the new package."""
+    import importlib
+
+    from makerlab.utils import system
+
+    calls: list[int] = []
+    monkeypatch.setattr(importlib, "invalidate_caches", lambda: calls.append(1))
+
+    mgr = system.InstallManager("some-package")
+
+    class _FakeProcess:
+        returncode = 0
+
+        def __init__(self) -> None:
+            self.stdout = iter([])
+
+        def wait(self) -> None:
+            return None
+
+    mgr.process = _FakeProcess()
+    mgr._monitor()
+
+    assert calls == [1]
+    assert mgr.get_status()["state"] == "done"
+
+
+def test_install_failure_does_not_invalidate_caches(monkeypatch) -> None:
+    import importlib
+
+    from makerlab.utils import system
+
+    calls: list[int] = []
+    monkeypatch.setattr(importlib, "invalidate_caches", lambda: calls.append(1))
+
+    mgr = system.InstallManager("some-package")
+
+    class _FailProcess:
+        returncode = 1
+
+        def __init__(self) -> None:
+            self.stdout = iter([])
+
+        def wait(self) -> None:
+            return None
+
+    mgr.process = _FailProcess()
+    mgr._monitor()
+
+    assert calls == []
+    assert mgr.get_status()["state"] == "error"
 
 
 def test_policy_extra_install_is_noop_for_core_policy() -> None:

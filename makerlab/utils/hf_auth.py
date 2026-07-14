@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import logging
+import os
 import types
 
 from huggingface_hub import HfApi, get_token, login as hf_login, whoami
@@ -21,6 +22,34 @@ from huggingface_hub.errors import HfHubHTTPError, LocalTokenNotFoundError
 logger = logging.getLogger(__name__)
 
 LOGIN_COMMAND = "hf auth login"
+
+# Roles (whoami's per-org "roleInGroup") that grant push/write access to an
+# org's repos, so a dataset in that org's namespace can be uploaded to the Hub.
+# "admin" and "write" can push; "read" cannot. "contributor" is intentionally
+# excluded: on the Hub a contributor can open PRs / push to existing repos they
+# were granted access to, but cannot create new repos in the org namespace, and
+# a fresh dataset upload creates a repo — so treating contributor as writable
+# would show an upload button that fails at create time. Admin+write is the
+# safe, always-correct set. Revisit if per-repo contributor uploads are needed.
+WRITE_ROLES = frozenset({"admin", "write"})
+
+
+def hf_hub_offline() -> bool:
+    """True when huggingface_hub is running in offline mode.
+
+    Set via HF_HUB_OFFLINE (the canonical hub var) or the legacy
+    TRANSFORMERS_OFFLINE. In offline mode every Hub write is disabled, so the
+    cloud-training flow can't upload a local-only dataset — the UI uses this to
+    keep the Start button disabled and say so, instead of failing on submit.
+    A "1"/"true"/"yes"/"on" (any case) counts as enabled; anything else (incl.
+    unset / "0") is treated as online.
+    """
+    for var in ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE"):
+        val = os.environ.get(var, "").strip().lower()
+        if val in ("1", "true", "yes", "on"):
+            return True
+    return False
+
 
 # /whoami-v2 is heavily rate-limited (security). Share one HfApi across the
 # app so its in-process whoami cache (cache=True) actually hits — otherwise
@@ -74,10 +103,16 @@ def invalidate_whoami_cache() -> None:
 def handle_hf_auth_status() -> dict:
     try:
         info = whoami()
+        orgs = info.get("orgs", [])
         return {
             "authenticated": True,
             "username": info["name"],
-            "orgs": [o["name"] for o in info.get("orgs", [])],
+            "orgs": [o["name"] for o in orgs],
+            # Namespaces the user can push a NEW dataset to: their own account
+            # plus any org where their role grants write access. Consumed by the
+            # frontend to gate each dataset row's "Upload to Hub" button.
+            "writable_namespaces": [info["name"]]
+            + [o["name"] for o in orgs if o.get("roleInGroup") in WRITE_ROLES],
             "login_command": LOGIN_COMMAND,
         }
     except (LocalTokenNotFoundError, HfHubHTTPError, OSError) as e:
@@ -86,6 +121,7 @@ def handle_hf_auth_status() -> dict:
             "authenticated": False,
             "username": None,
             "orgs": [],
+            "writable_namespaces": [],
             "login_command": LOGIN_COMMAND,
         }
 
