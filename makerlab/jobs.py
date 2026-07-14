@@ -23,6 +23,7 @@ import contextlib
 import json
 import logging
 import os
+import platform
 import re
 import shutil
 import signal
@@ -126,6 +127,41 @@ class MetricsHistoryPoint(BaseModel):
     loss: float | None = None
     lr: float | None = None
     grad_norm: float | None = None
+
+
+def _process_isolation_kwargs() -> dict[str, object]:
+    """Popen kwargs that keep a spawned child alive through signals sent to
+    this process (uvicorn --reload restarting its worker on a .py file
+    change, or a user hitting Ctrl+C on the server's console) so training
+    survives and the next worker re-attaches via TailingJobRunner using
+    job.json's pid.
+
+    start_new_session=True (setsid) is how POSIX does this, but it is
+    silently discarded on Windows: CPython's Windows _execute_child names
+    the parameter unused_start_new_session and never passes it to
+    CreateProcess, so it provides zero isolation there — confirmed by
+    reading that source directly, not inferred. The Windows equivalent is
+    creationflags=CREATE_NEW_PROCESS_GROUP, which Microsoft's docs state
+    makes a process ignore a console-wide Ctrl+C.
+
+    NOTE: unlike the POSIX path, the Windows branch has only been verified
+    by reading CPython's source and Microsoft's documented behavior — not
+    by observing a live Ctrl+C actually fail to cascade on Windows (that
+    requires a real interactive console/session, which wasn't available
+    when this was written). Re-verify manually on a real Windows terminal
+    before relying on it under load.
+    """
+    if platform.system() == "Windows":
+        # getattr, not a direct attribute reference: CREATE_NEW_PROCESS_GROUP
+        # only exists on the Windows build of the subprocess module
+        # (CPython docs mark it "Availability: Windows"). A direct reference
+        # would raise AttributeError under a mocked-platform unit test
+        # running on our POSIX CI, even though this branch never actually
+        # executes there in production (platform.system() isn't mocked
+        # there). 0x00000200 is the documented win32 constant value.
+        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+        return {"creationflags": creationflags}
+    return {"start_new_session": True}
 
 
 def _pid_alive(pid: int) -> bool:
@@ -341,11 +377,8 @@ class LocalJobRunner:
         child_env["PYTHONUNBUFFERED"] = "1"
         child_env["PYTHONIOENCODING"] = "utf-8"
 
-        # start_new_session=True puts the child in its own session/process
-        # group. Without it, signals sent to the uvicorn worker (e.g. when
-        # --reload restarts it on a .py file change) cascade to the child
-        # and kill the training. With it, the child survives reloads; the
-        # next worker re-attaches via TailingJobRunner using job.json's pid.
+        # See _process_isolation_kwargs() for why this isn't a plain
+        # start_new_session=True.
         self._process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -355,7 +388,7 @@ class LocalJobRunner:
             errors="replace",
             bufsize=1,
             env=child_env,
-            start_new_session=True,
+            **_process_isolation_kwargs(),
         )
 
         self._monitor_thread = threading.Thread(

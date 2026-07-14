@@ -384,6 +384,31 @@ def test_pid_alive_returns_false_for_unlikely_pid() -> None:
     assert _pid_alive(999999999) is False
 
 
+def test_process_isolation_kwargs_uses_new_process_group_on_windows(monkeypatch) -> None:
+    """start_new_session=True is a documented no-op on Windows (CPython's
+    Windows _execute_child ignores it), so the Windows branch must use
+    creationflags=CREATE_NEW_PROCESS_GROUP instead — not start_new_session."""
+    import subprocess as subprocess_module
+
+    from makerlab.jobs import _process_isolation_kwargs
+
+    monkeypatch.setattr("makerlab.jobs.platform.system", lambda: "Windows")
+    kwargs = _process_isolation_kwargs()
+    # getattr with the same 0x00000200 fallback as the implementation: this
+    # test forces the Windows branch to run on whatever OS actually hosts
+    # it (including our POSIX CI), where the real attribute doesn't exist.
+    expected_flag = getattr(subprocess_module, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+    assert kwargs == {"creationflags": expected_flag}
+    assert "start_new_session" not in kwargs
+
+
+def test_process_isolation_kwargs_uses_start_new_session_on_posix(monkeypatch) -> None:
+    from makerlab.jobs import _process_isolation_kwargs
+
+    monkeypatch.setattr("makerlab.jobs.platform.system", lambda: "Linux")
+    assert _process_isolation_kwargs() == {"start_new_session": True}
+
+
 def test_hub_checkpoints_from_files_parses_tree() -> None:
     from makerlab.jobs import _hub_checkpoints_from_files
 
