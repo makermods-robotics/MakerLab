@@ -613,7 +613,7 @@ def get_job_log_file(job_id: str):
 def get_job_metrics_history(job_id: str):
     """Return the per-step loss/lr/grad-norm series reconstructed from the
     job's log.jsonl. Used to seed the monitoring charts so curves persist
-    across page reloads, navigation, and lelab restarts."""
+    across page reloads, navigation, and makerlab restarts."""
     try:
         points = job_registry.read_metrics_history(job_id)
     except JobNotFoundError as exc:
@@ -737,7 +737,7 @@ def install_training_extra_status():
 
 @app.get("/system/wandb-extra")
 def get_wandb_extra():
-    """Return whether the `wandb` package is importable in this lelab process."""
+    """Return whether the `wandb` package is importable in this makerlab process."""
     return handle_get_wandb_extra()
 
 
@@ -774,13 +774,13 @@ def install_policy_extra_status(policy_type: str):
 
 @app.get("/system/update-check")
 def update_check():
-    """Report whether a newer LeLab commit exists on GitHub (cached, silent on failure)."""
+    """Report whether a newer MakerLab commit exists on GitHub (cached, silent on failure)."""
     return handle_update_check()
 
 
 @app.post("/system/update")
 def run_update():
-    """Run the pip upgrade in-process; the user must restart lelab afterwards."""
+    """Run the pip upgrade in-process; the user must restart makerlab afterwards."""
     return handle_run_update()
 
 
@@ -1286,5 +1286,5 @@ if FRONTEND_DIST.exists():
     app.mount("/", SPAStaticFiles(directory=FRONTEND_DIST, html=True), name="frontend")
 else:
     logger.warning(
-        f"frontend/dist not found at {FRONTEND_DIST}; run `npm run build` in frontend/ or use `lelab --dev`."
+        f"frontend/dist not found at {FRONTEND_DIST}; run `npm run build` in frontend/ or use `makerlab --dev`."
     )

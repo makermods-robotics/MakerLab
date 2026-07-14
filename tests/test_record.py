@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for lelab.record — request schemas and handler entry points."""
+"""Tests for makerlab.record — request schemas and handler entry points."""
 
 from __future__ import annotations
 
@@ -21,14 +21,14 @@ import pytest
 def test_recording_request_rejects_missing_required_fields() -> None:
     from pydantic import ValidationError
 
-    from lelab.record import RecordingRequest
+    from makerlab.record import RecordingRequest
 
     with pytest.raises(ValidationError):
         RecordingRequest()
 
 
 def test_recording_status_handler_exposes_state_fields() -> None:
-    from lelab.record import handle_recording_status
+    from makerlab.record import handle_recording_status
 
     result = handle_recording_status()
     assert isinstance(result, dict)
@@ -40,7 +40,7 @@ def test_recording_status_handler_exposes_state_fields() -> None:
 
 
 def test_handle_stop_recording_when_idle_returns_dict(tmp_lerobot_home) -> None:
-    from lelab.record import handle_stop_recording
+    from makerlab.record import handle_stop_recording
 
     result = handle_stop_recording()
     assert isinstance(result, dict)
@@ -50,7 +50,7 @@ def test_create_record_config_pins_dshow_on_windows(monkeypatch: pytest.MonkeyPa
     """On Windows, recording must use the DSHOW backend so a camera_index opens
     the same device /available-cameras enumerated (via pygrabber, DSHOW order).
     """
-    import lelab.record as record
+    import makerlab.record as record
     from lerobot.cameras.configs import Cv2Backends
 
     monkeypatch.setattr("platform.system", lambda: "Windows")
@@ -71,7 +71,7 @@ def test_create_record_config_pins_dshow_on_windows(monkeypatch: pytest.MonkeyPa
 
 
 def test_build_camera_configs_uses_default_backend_when_unset() -> None:
-    from lelab.record import _build_camera_configs
+    from makerlab.record import _build_camera_configs
     from lerobot.cameras.configs import Cv2Backends
 
     cameras = {"cam": {"type": "opencv", "camera_index": 0, "width": 640, "height": 480, "fps": 30}}
@@ -83,7 +83,7 @@ def test_build_camera_configs_uses_default_backend_when_unset() -> None:
 
 
 def test_build_camera_configs_passes_fourcc_through() -> None:
-    from lelab.record import _build_camera_configs
+    from makerlab.record import _build_camera_configs
     from lerobot.cameras.configs import Cv2Backends
 
     cameras = {"cam": {"type": "opencv", "camera_index": 0, "fourcc": "MJPG"}}
@@ -93,7 +93,7 @@ def test_build_camera_configs_passes_fourcc_through() -> None:
 
 
 def test_build_camera_configs_explicit_backend_overrides_default() -> None:
-    from lelab.record import _build_camera_configs
+    from makerlab.record import _build_camera_configs
     from lerobot.cameras.configs import Cv2Backends
 
     cameras = {"cam": {"type": "opencv", "camera_index": 0, "backend": "V4L2"}}
@@ -103,7 +103,7 @@ def test_build_camera_configs_explicit_backend_overrides_default() -> None:
 
 
 def test_build_camera_configs_invalid_backend_raises() -> None:
-    from lelab.record import _build_camera_configs
+    from makerlab.record import _build_camera_configs
     from lerobot.cameras.configs import Cv2Backends
 
     cameras = {"cam": {"type": "opencv", "camera_index": 0, "backend": "NOPE"}}
@@ -112,7 +112,7 @@ def test_build_camera_configs_invalid_backend_raises() -> None:
 
 
 def test_build_camera_configs_skips_non_opencv_type() -> None:
-    from lelab.record import _build_camera_configs
+    from makerlab.record import _build_camera_configs
     from lerobot.cameras.configs import Cv2Backends
 
     cameras = {"cam": {"type": "realsense", "camera_index": 0}}

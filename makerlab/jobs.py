@@ -673,14 +673,14 @@ class JobRegistry:
         """One-shot migration from cwd-relative `outputs/train/` to the new
         absolute root.
 
-        Older lelab versions wrote job dirs to `<cwd>/outputs/train/`, which
+        Older makerlab versions wrote job dirs to `<cwd>/outputs/train/`, which
         meant history disappeared when you launched from a different cwd. We
         now anchor to ~/.cache/.../outputs/train. On first boot under the new
         layout, move any pre-existing cwd-relative job dirs over and rewrite
         each job.json's `output_dir` field to the new absolute path.
 
         Idempotent: skipped if (a) the new root is the legacy one itself
-        (LELAB_OUTPUT_ROOT=outputs/train still wins for tests), or (b) the
+        (MAKERLAB_OUTPUT_ROOT=outputs/train still wins for tests), or (b) the
         legacy dir is absent / already empty.
         """
         legacy_root = (Path.cwd() / "outputs" / "train").resolve()
@@ -932,7 +932,7 @@ class JobRegistry:
         """Read all log lines that have been written to disk for this job.
 
         Used by the frontend on Monitoring-page mount to seed the log panel
-        with history (e.g. after navigating away and back, or after a lelab
+        with history (e.g. after navigating away and back, or after a makerlab
         restart marked the job 'interrupted').
         """
         with self._lock:
@@ -957,7 +957,7 @@ class JobRegistry:
         """Reconstruct the per-step loss/lr/grad-norm series from log.jsonl.
 
         Used by the frontend on Monitoring-page mount to seed the curves so
-        they survive page reloads, navigation, and lelab restarts. Re-parses
+        they survive page reloads, navigation, and makerlab restarts. Re-parses
         on every call; cache later if a slow file ever shows up.
         """
         with self._lock:
@@ -1246,9 +1246,9 @@ class JobRegistry:
 
 # Module-level singleton. Anchored to ~/.cache so history survives launches
 # from different cwds. JobRegistry.__init__ migrates legacy `<cwd>/outputs/train/`
-# job dirs into this root on first boot. LELAB_OUTPUT_ROOT overrides for tests.
+# job dirs into this root on first boot. MAKERLAB_OUTPUT_ROOT overrides for tests.
 _DEFAULT_OUTPUT_ROOT = Path(
-    os.environ.get("LELAB_OUTPUT_ROOT")
+    os.environ.get("MAKERLAB_OUTPUT_ROOT")
     or (Path.home() / ".cache" / "huggingface" / "lerobot" / "outputs" / "train")
 ).expanduser()
 job_registry = JobRegistry(_DEFAULT_OUTPUT_ROOT)

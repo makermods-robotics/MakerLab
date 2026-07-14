@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for lelab.datasets — local cache walk and merge logic."""
+"""Tests for makerlab.datasets — local cache walk and merge logic."""
 
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ def test_list_local_datasets_empty_when_root_missing(
     # "missing root" branch.
     import shutil
 
-    from lelab.datasets import list_local_datasets
+    from makerlab.datasets import list_local_datasets
 
     shutil.rmtree(tmp_lerobot_home)
     assert list_local_datasets() == []
@@ -42,7 +42,7 @@ def test_list_local_datasets_empty_when_root_missing(
 def test_list_local_datasets_finds_top_level_dataset(
     tmp_lerobot_home: Path,
 ) -> None:
-    from lelab.datasets import list_local_datasets
+    from makerlab.datasets import list_local_datasets
 
     _make_dataset(tmp_lerobot_home, "pusht")
     result = list_local_datasets()
@@ -53,7 +53,7 @@ def test_list_local_datasets_finds_top_level_dataset(
 def test_list_local_datasets_finds_nested_user_dataset(
     tmp_lerobot_home: Path,
 ) -> None:
-    from lelab.datasets import list_local_datasets
+    from makerlab.datasets import list_local_datasets
 
     _make_dataset(tmp_lerobot_home, "alice/pusht")
     result = list_local_datasets()
@@ -64,7 +64,7 @@ def test_list_local_datasets_finds_nested_user_dataset(
 def test_list_local_datasets_skips_non_dataset_dirs(
     tmp_lerobot_home: Path,
 ) -> None:
-    from lelab.datasets import list_local_datasets
+    from makerlab.datasets import list_local_datasets
 
     (tmp_lerobot_home / "calibration").mkdir(exist_ok=True)
     (tmp_lerobot_home / "ports").mkdir(exist_ok=True)
@@ -80,21 +80,21 @@ def test_list_local_datasets_skips_non_dataset_dirs(
 def test_list_user_datasets_returns_empty_when_not_logged_in(
     tmp_lerobot_home: Path,
 ) -> None:
-    from lelab.datasets import list_user_datasets
+    from makerlab.datasets import list_user_datasets
 
-    with patch("lelab.datasets.cached_whoami", return_value=None):
+    with patch("makerlab.datasets.cached_whoami", return_value=None):
         assert list_user_datasets() == []
 
 
 def test_list_all_datasets_merges_hub_and_local(
     tmp_lerobot_home: Path,
 ) -> None:
-    from lelab.datasets import list_all_datasets
+    from makerlab.datasets import list_all_datasets
 
     _make_dataset(tmp_lerobot_home, "alice/pusht")
 
     with patch(
-        "lelab.datasets.list_user_datasets",
+        "makerlab.datasets.list_user_datasets",
         return_value=[
             {"repo_id": "alice/pusht", "last_modified": "2026-01-01T00:00:00Z", "private": False},
             {"repo_id": "alice/aloha", "last_modified": "2026-02-01T00:00:00Z", "private": True},

@@ -17,13 +17,13 @@ Populated tests will land later. This file exists so the tests/ structure
 is in place from day one.
 """
 
-import lelab
-from lelab.server import app
+import makerlab
+from makerlab.server import app
 
 
-def test_lelab_has_version():
-    assert isinstance(lelab.__version__, str)
-    assert lelab.__version__
+def test_makerlab_has_version():
+    assert isinstance(makerlab.__version__, str)
+    assert makerlab.__version__
 
 
 def test_server_app_has_routes():

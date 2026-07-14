@@ -97,7 +97,7 @@ def build_training_command(
 
     `python_executable` defaults to "python" for the cloud runner (whose
     container has lerobot on PATH); the local runner must pass sys.executable
-    so the subprocess uses the same interpreter as lelab itself — otherwise
+    so the subprocess uses the same interpreter as makerlab itself — otherwise
     PATH lookup picks up a different env (uv tool venv, miniforge3 base, etc.)
     that lacks lerobot.
     """

@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for lelab.teleoperate — request schema and status handlers."""
+"""Tests for makerlab.teleoperate — request schema and status handlers."""
 
 from __future__ import annotations
 
@@ -21,28 +21,28 @@ import pytest
 def test_teleoperate_request_rejects_missing_fields() -> None:
     from pydantic import ValidationError
 
-    from lelab.teleoperate import TeleoperateRequest
+    from makerlab.teleoperate import TeleoperateRequest
 
     with pytest.raises(ValidationError):
         TeleoperateRequest()
 
 
 def test_handle_teleoperation_status_returns_dict() -> None:
-    from lelab.teleoperate import handle_teleoperation_status
+    from makerlab.teleoperate import handle_teleoperation_status
 
     result = handle_teleoperation_status()
     assert isinstance(result, dict)
 
 
 def test_handle_get_joint_positions_returns_dict_when_idle() -> None:
-    from lelab.teleoperate import handle_get_joint_positions
+    from makerlab.teleoperate import handle_get_joint_positions
 
     result = handle_get_joint_positions()
     assert isinstance(result, dict)
 
 
 def test_get_joint_positions_from_robot_uses_provided_object() -> None:
-    from lelab.teleoperate import get_joint_positions_from_robot
+    from makerlab.teleoperate import get_joint_positions_from_robot
     from tests.mocks import FakeRobot
 
     robot = FakeRobot()
@@ -59,7 +59,7 @@ def test_start_teleoperation_reports_connection_failure(
     empty teleop screen) and reset state so a retry isn't blocked. Previously
     the connect ran in a worker thread and the handler always claimed success.
     """
-    import lelab.teleoperate as teleop
+    import makerlab.teleoperate as teleop
 
     monkeypatch.setattr(teleop, "teleoperation_active", False)
     monkeypatch.setattr(teleop, "setup_calibration_files", lambda leader, follower: ("leader", "follower"))
@@ -102,7 +102,7 @@ def test_start_teleoperation_disconnects_follower_when_leader_fails(
     """The partial-connect path: if the follower connects but the leader then
     fails, the follower must be disconnected so its serial port is released.
     """
-    import lelab.teleoperate as teleop
+    import makerlab.teleoperate as teleop
 
     monkeypatch.setattr(teleop, "teleoperation_active", False)
     monkeypatch.setattr(teleop, "setup_calibration_files", lambda leader, follower: ("leader", "follower"))

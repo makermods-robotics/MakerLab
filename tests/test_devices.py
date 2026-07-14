@@ -4,7 +4,7 @@ import logging
 
 
 def test_safe_disconnect_force_closes_serial_port_after_disconnect_failure() -> None:
-    from lelab.utils.devices import safe_disconnect_device
+    from makerlab.utils.devices import safe_disconnect_device
 
     class PortHandler:
         def __init__(self) -> None:
@@ -43,7 +43,7 @@ def test_safe_disconnect_force_closes_serial_port_after_disconnect_failure() -> 
 
 
 def test_safe_disconnect_uses_normal_disconnect_when_it_succeeds() -> None:
-    from lelab.utils.devices import safe_disconnect_device
+    from makerlab.utils.devices import safe_disconnect_device
 
     class PortHandler:
         def __init__(self) -> None:

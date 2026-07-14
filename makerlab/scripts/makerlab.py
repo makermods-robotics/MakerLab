@@ -13,7 +13,7 @@
 # limitations under the License.
 
 """
-LeLab launcher.
+MakerLab launcher.
 
 Default mode: starts the FastAPI backend on :8000, which serves the
 pre-built frontend at /. Opens the user's browser to the local app.
@@ -76,17 +76,17 @@ def _run_prod():
     """Serve built frontend from backend on a single port."""
     if not FRONTEND_DIST.exists():
         logger.error(f"❌ Built frontend not found at {FRONTEND_DIST}")
-        logger.error("   Run `npm run build` in frontend/ first, or use `lelab --dev`.")
+        logger.error("   Run `npm run build` in frontend/ first, or use `makerlab --dev`.")
         sys.exit(1)
 
-    logger.info("🚀 Starting LeLab on http://localhost:%d ...", BACKEND_PORT)
+    logger.info("🚀 Starting MakerLab on http://localhost:%d ...", BACKEND_PORT)
 
     threading.Thread(target=_open_browser_when_ready, daemon=True).start()
 
     # Run uvicorn in the main thread so its native SIGINT handler works,
     # and bound graceful shutdown so a stuck WebSocket can't hang Ctrl+C.
     uvicorn.run(
-        "lelab.server:app",
+        "makerlab.server:app",
         host="127.0.0.1",
         port=BACKEND_PORT,
         log_level="info",
@@ -124,7 +124,7 @@ def _run_dev():
             sys.executable,
             "-m",
             "uvicorn",
-            "lelab.server:app",
+            "makerlab.server:app",
             "--host",
             "127.0.0.1",
             "--port",
@@ -182,7 +182,7 @@ def _run_dev():
 
 
 def main():
-    parser = argparse.ArgumentParser(prog="lelab", description="Run LeLab")
+    parser = argparse.ArgumentParser(prog="makerlab", description="Run MakerLab")
     parser.add_argument(
         "--dev",
         action="store_true",

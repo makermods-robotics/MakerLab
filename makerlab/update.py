@@ -11,9 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Notify users when a newer LeLab is available on GitHub.
+"""Notify users when a newer MakerLab is available on GitHub.
 
-LeLab installs from git (`pip install git+https://github.com/.../leLab.git`),
+MakerLab installs from git (`pip install git+https://github.com/.../leLab.git`),
 so "newer" means the default branch has moved past the installed commit. We
 read the installed commit from pip's `direct_url.json` and compare it to the
 repo HEAD via the GitHub API. Editable/local clones have no commit_id, so they
@@ -89,7 +89,7 @@ def get_installed_source() -> dict[str, str] | None:
     compare against).
     """
     try:
-        dist = distribution("lelab")
+        dist = distribution("makerlab")
     except PackageNotFoundError:
         return None
     raw = dist.read_text("direct_url.json")
@@ -114,7 +114,7 @@ def _github_json(path: str) -> Any | None:
     req = urllib.request.Request(
         f"{GITHUB_API}{path}",
         headers={
-            "User-Agent": "lelab-update-check",
+            "User-Agent": "makerlab-update-check",
             "Accept": "application/vnd.github+json",
         },
     )
@@ -129,7 +129,7 @@ def _github_json(path: str) -> Any | None:
 
 
 def _is_uv_tool_install() -> bool:
-    """True when LeLab runs from a `uv tool install` (the standard install).
+    """True when MakerLab runs from a `uv tool install` (the standard install).
 
     uv tools live in an isolated env under `<data>/uv/tools/<name>/`, so the
     running interpreter sits inside a `uv/tools` path segment.
@@ -138,7 +138,7 @@ def _is_uv_tool_install() -> bool:
 
 
 def _build_update_cmd(owner: str, repo: str) -> list[str]:
-    """Pick the right updater for how LeLab was installed.
+    """Pick the right updater for how MakerLab was installed.
 
     - Standard install is `uv tool install`: update the tool in place with
       `--force`, which re-fetches the latest commit even though the version
@@ -241,7 +241,7 @@ def handle_run_update() -> UpdateResult:
         _cache = None  # bust cache so the next check reflects the new install
         return UpdateResult(
             success=True,
-            message="Updated. Restart lelab to apply the new version.",
+            message="Updated. Restart makerlab to apply the new version.",
             output=output,
         )
     return UpdateResult(

@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for lelab.utils.system — pip-extra install helpers + CUDA detection."""
+"""Tests for makerlab.utils.system — pip-extra install helpers + CUDA detection."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ import sys
 
 
 def test_build_install_cmd_contains_pip_and_package() -> None:
-    from lelab.utils.system import _build_install_cmd
+    from makerlab.utils.system import _build_install_cmd
 
     cmd = _build_install_cmd("lerobot[training]")
     # Command may use `uv pip install` or `python -m pip install` depending on env.
@@ -32,7 +32,7 @@ def test_build_install_cmd_contains_pip_and_package() -> None:
 def test_build_install_cmd_uses_current_python_when_no_uv(monkeypatch) -> None:
     import shutil
 
-    from lelab.utils.system import _build_install_cmd
+    from makerlab.utils.system import _build_install_cmd
 
     # If uv is not on PATH, command must use sys.executable.
     monkeypatch.setattr(shutil, "which", lambda name: None)
@@ -44,7 +44,7 @@ def test_build_install_cmd_uses_current_python_when_no_uv(monkeypatch) -> None:
 
 
 def test_install_manager_initial_state_is_idle() -> None:
-    from lelab.utils.system import InstallManager
+    from makerlab.utils.system import InstallManager
 
     # InstallManager requires a package name argument.
     mgr = InstallManager("some-package")
@@ -59,7 +59,7 @@ def test_install_manager_initial_state_is_idle() -> None:
 
 def test_detect_cuda_status_flags_mismatch_when_gpu_but_cpu_torch(monkeypatch) -> None:
     """GPU present + no CUDA in PyTorch should report a mismatch."""
-    from lelab.utils import system
+    from makerlab.utils import system
 
     monkeypatch.setattr(system, "_nvidia_gpu_present", lambda: True)
     monkeypatch.setattr(system, "_torch_cuda", lambda: (False, "2.10.0+cpu"))
@@ -73,7 +73,7 @@ def test_detect_cuda_status_flags_mismatch_when_gpu_but_cpu_torch(monkeypatch) -
 
 
 def test_detect_cuda_status_no_mismatch_when_cuda_available(monkeypatch) -> None:
-    from lelab.utils import system
+    from makerlab.utils import system
 
     monkeypatch.setattr(system, "_nvidia_gpu_present", lambda: True)
     monkeypatch.setattr(system, "_torch_cuda", lambda: (True, "2.10.0+cu124"))
@@ -83,7 +83,7 @@ def test_detect_cuda_status_no_mismatch_when_cuda_available(monkeypatch) -> None
 
 def test_detect_cuda_status_no_mismatch_without_gpu(monkeypatch) -> None:
     """No GPU (e.g. a Mac/CPU box) must not nag — CPU torch is expected there."""
-    from lelab.utils import system
+    from makerlab.utils import system
 
     monkeypatch.setattr(system, "_nvidia_gpu_present", lambda: False)
     monkeypatch.setattr(system, "_torch_cuda", lambda: (False, "2.10.0+cpu"))
@@ -94,30 +94,30 @@ def test_detect_cuda_status_no_mismatch_without_gpu(monkeypatch) -> None:
 def test_nvidia_gpu_present_false_when_smi_absent(monkeypatch) -> None:
     import shutil
 
-    from lelab.utils import system
+    from makerlab.utils import system
 
     monkeypatch.setattr(shutil, "which", lambda name: None)
     assert system._nvidia_gpu_present() is False
 
 
 def test_warn_if_cuda_mismatch_logs_on_mismatch(monkeypatch, caplog) -> None:
-    from lelab.utils import system
+    from makerlab.utils import system
 
     monkeypatch.setattr(system, "_nvidia_gpu_present", lambda: True)
     monkeypatch.setattr(system, "_torch_cuda", lambda: (False, "2.10.0+cpu"))
 
-    with caplog.at_level(logging.WARNING, logger="lelab.utils.system"):
+    with caplog.at_level(logging.WARNING, logger="makerlab.utils.system"):
         system.warn_if_cuda_mismatch()
     assert any("use CUDA" in rec.message for rec in caplog.records)
 
 
 def test_warn_if_cuda_mismatch_silent_when_ok(monkeypatch, caplog) -> None:
-    from lelab.utils import system
+    from makerlab.utils import system
 
     monkeypatch.setattr(system, "_nvidia_gpu_present", lambda: True)
     monkeypatch.setattr(system, "_torch_cuda", lambda: (True, "2.10.0+cu124"))
 
-    with caplog.at_level(logging.WARNING, logger="lelab.utils.system"):
+    with caplog.at_level(logging.WARNING, logger="makerlab.utils.system"):
         system.warn_if_cuda_mismatch()
     assert caplog.records == []
 
@@ -131,7 +131,7 @@ def test_cuda_status_endpoint_returns_expected_shape(client) -> None:
 
 def test_policy_extra_maps_policies_to_install_targets() -> None:
     """smolvla/pi0/pi0_fast/diffusion map to the right probe module + lerobot[extra]."""
-    from lelab.utils.system import handle_get_policy_extra
+    from makerlab.utils.system import handle_get_policy_extra
 
     smol = handle_get_policy_extra("smolvla")
     assert smol["needs_extra"] is True
@@ -147,7 +147,7 @@ def test_policy_extra_maps_policies_to_install_targets() -> None:
 
 
 def test_policy_extra_core_policy_needs_nothing() -> None:
-    from lelab.utils.system import handle_get_policy_extra
+    from makerlab.utils.system import handle_get_policy_extra
 
     act = handle_get_policy_extra("act")
     assert act["needs_extra"] is False
@@ -158,7 +158,7 @@ def test_policy_extra_core_policy_needs_nothing() -> None:
 def test_policy_extra_available_reflects_find_spec(monkeypatch) -> None:
     import importlib.util
 
-    from lelab.utils import system
+    from makerlab.utils import system
 
     monkeypatch.setattr(importlib.util, "find_spec", lambda name: object())
     assert system.handle_get_policy_extra("smolvla")["available"] is True
@@ -167,7 +167,7 @@ def test_policy_extra_available_reflects_find_spec(monkeypatch) -> None:
 
 
 def test_policy_extra_install_is_noop_for_core_policy() -> None:
-    from lelab.utils.system import handle_install_policy_extra, handle_install_policy_extra_status
+    from makerlab.utils.system import handle_install_policy_extra, handle_install_policy_extra_status
 
     assert handle_install_policy_extra("act")["started"] is False
     assert handle_install_policy_extra_status("act")["state"] == "done"

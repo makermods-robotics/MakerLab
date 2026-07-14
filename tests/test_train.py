@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for lelab.train — request schema and CLI builder."""
+"""Tests for makerlab.train — request schema and CLI builder."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ def _arg_value(cmd: list[str], flag: str) -> str:
 
 
 def test_minimal_request_yields_well_formed_argv() -> None:
-    from lelab.train import TrainingRequest, build_training_command
+    from makerlab.train import TrainingRequest, build_training_command
 
     req = TrainingRequest(dataset_repo_id="lerobot/pusht")
     cmd = build_training_command(req, output_dir="/tmp/out")
@@ -38,7 +38,7 @@ def test_minimal_request_yields_well_formed_argv() -> None:
 
 
 def test_optional_dataset_fields_only_present_when_set() -> None:
-    from lelab.train import TrainingRequest, build_training_command
+    from makerlab.train import TrainingRequest, build_training_command
 
     req = TrainingRequest(dataset_repo_id="lerobot/pusht")
     cmd = build_training_command(req, "/tmp/out")
@@ -61,7 +61,7 @@ def test_optional_dataset_fields_only_present_when_set() -> None:
 
 
 def test_wandb_block_only_serialized_when_enabled() -> None:
-    from lelab.train import TrainingRequest, build_training_command
+    from makerlab.train import TrainingRequest, build_training_command
 
     off = build_training_command(TrainingRequest(dataset_repo_id="x", wandb_enable=False), "/tmp/out")
     assert _arg_value(off, "--wandb.enable") == "false"
@@ -84,7 +84,7 @@ def test_wandb_block_only_serialized_when_enabled() -> None:
 
 
 def test_push_to_hub_emits_repo_id_only_when_enabled() -> None:
-    from lelab.train import TrainingRequest, build_training_command
+    from makerlab.train import TrainingRequest, build_training_command
 
     off = build_training_command(
         TrainingRequest(dataset_repo_id="x", policy_push_to_hub=False, policy_repo_id="me/x"),
@@ -102,7 +102,7 @@ def test_push_to_hub_emits_repo_id_only_when_enabled() -> None:
 
 
 def test_seed_omitted_when_none() -> None:
-    from lelab.train import TrainingRequest, build_training_command
+    from makerlab.train import TrainingRequest, build_training_command
 
     req = TrainingRequest(dataset_repo_id="x", seed=None)
     cmd = build_training_command(req, "/tmp/out")
@@ -116,7 +116,7 @@ def test_seed_omitted_when_none() -> None:
 def test_training_request_validates_required_field() -> None:
     from pydantic import ValidationError
 
-    from lelab.train import TrainingRequest
+    from makerlab.train import TrainingRequest
 
     with pytest.raises(ValidationError):
         TrainingRequest()  # dataset_repo_id is required

@@ -30,7 +30,7 @@ from lerobot.robots.so_follower import SO101FollowerConfig
 from lerobot.scripts.lerobot_record import RecordConfig
 from lerobot.teleoperators.so_leader import SO101LeaderConfig
 
-from .utils.config import setup_calibration_files, with_lelab_tag
+from .utils.config import setup_calibration_files, with_makerlab_tag
 
 logger = logging.getLogger(__name__)
 
@@ -179,7 +179,7 @@ def create_record_config(request: RecordingRequest) -> RecordConfig:
         push_to_hub=request.push_to_hub,
         # Upstream typing: tags is `list[str] | None`. None when push is off
         # keeps the lerobot default.
-        tags=with_lelab_tag(request.tags) if request.push_to_hub else None,
+        tags=with_makerlab_tag(request.tags) if request.push_to_hub else None,
         private=request.private,
         streaming_encoding=request.streaming_encoding,
     )
@@ -530,7 +530,7 @@ def handle_upload_dataset(request: UploadRequest) -> dict[str, Any]:
         dataset = LeRobotDataset(request.dataset_repo_id)
 
         logger.info(f"Dataset loaded with {dataset.num_episodes} episodes")
-        tags = with_lelab_tag(request.tags)
+        tags = with_makerlab_tag(request.tags)
         logger.info(f"Uploading to HuggingFace Hub with tags: {tags}, private: {request.private}")
 
         # Upload dataset to HuggingFace Hub

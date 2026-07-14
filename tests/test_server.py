@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for lelab.server — FastAPI app and ConnectionManager."""
+"""Tests for makerlab.server — FastAPI app and ConnectionManager."""
 
 from __future__ import annotations
 
@@ -46,7 +46,7 @@ REQUIRED_PATHS = {
 
 
 def test_app_exposes_required_endpoints() -> None:
-    from lelab.server import app
+    from makerlab.server import app
 
     paths = {route.path for route in app.routes}
     missing = REQUIRED_PATHS - paths
@@ -121,13 +121,13 @@ def test_spa_fallback_respects_explicit_html_refusal(client: TestClient) -> None
     ],
 )
 def test_accepts_html(accept: str, expected: bool) -> None:
-    from lelab.server import _accepts_html
+    from makerlab.server import _accepts_html
 
     assert _accepts_html(accept) is expected
 
 
 def test_connection_manager_tracks_connect_and_disconnect() -> None:
-    from lelab.server import ConnectionManager
+    from makerlab.server import ConnectionManager
 
     mgr = ConnectionManager()
     fake_ws = MagicMock()
@@ -143,7 +143,7 @@ def test_connection_manager_tracks_connect_and_disconnect() -> None:
 
 
 def test_connection_manager_broadcast_sync_does_not_block_without_loop() -> None:
-    from lelab.server import ConnectionManager
+    from makerlab.server import ConnectionManager
 
     mgr = ConnectionManager()
     # Should enqueue without raising even if there are no consumers.
@@ -164,7 +164,7 @@ def test_windows_cameras_uses_real_directshow_names(monkeypatch: pytest.MonkeyPa
     """The Windows path returns pygrabber's real device names in index order so
     the frontend can match each camera to its browser deviceId (issues #12/#16).
     """
-    from lelab import server
+    from makerlab import server
 
     class _FakeGraph:
         def get_input_devices(self) -> list[str]:
@@ -183,7 +183,7 @@ def test_windows_cameras_falls_back_when_pygrabber_unavailable(
 ) -> None:
     """If pygrabber is missing or its COM init fails, enumeration degrades to the
     generic cv2 probe instead of erroring."""
-    from lelab import server
+    from makerlab import server
 
     class _BoomGraph:
         def __init__(self) -> None:
@@ -199,21 +199,21 @@ def test_windows_cameras_falls_back_when_pygrabber_unavailable(
 def test_v4l2_camera_name_reads_sysfs(monkeypatch: pytest.MonkeyPatch) -> None:
     import io
 
-    from lelab import server
+    from makerlab import server
 
     monkeypatch.setattr("builtins.open", lambda *a, **k: io.StringIO("HD Pro Webcam C920\n"))
     assert server._v4l2_camera_name(0) == "HD Pro Webcam C920"
 
 
 def test_v4l2_camera_name_returns_none_when_missing() -> None:
-    from lelab import server
+    from makerlab import server
 
     # No such sysfs node (also the case on non-Linux): graceful None, not error.
     assert server._v4l2_camera_name(999999) is None
 
 
 def test_import_model_route_returns_record(client, monkeypatch) -> None:
-    from lelab import server
+    from makerlab import server
 
     fake = {
         "id": "act_imported_x",
@@ -226,7 +226,7 @@ def test_import_model_route_returns_record(client, monkeypatch) -> None:
         "runner": "imported",
         "hf_repo_id": None,
     }
-    from lelab.jobs import JobRecord
+    from makerlab.jobs import JobRecord
 
     monkeypatch.setattr(
         server.job_registry,
@@ -239,7 +239,7 @@ def test_import_model_route_returns_record(client, monkeypatch) -> None:
 
 
 def test_import_model_route_maps_value_error_to_400(client, monkeypatch) -> None:
-    from lelab import server
+    from makerlab import server
 
     def boom(source, name=None):
         raise ValueError("No usable model at '/tmp/x'")

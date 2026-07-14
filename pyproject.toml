@@ -3,7 +3,7 @@ requires = ["setuptools>=45", "wheel", "setuptools_scm[toml]>=6.2"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "LeLab"
+name = "MakerLab"
 version = "0.1.0"
 description = "LeRobot Lab - A web interface for robotics with lerobot integration"
 readme = "README.md"
@@ -35,11 +35,11 @@ test = [
 ]
 
 [project.scripts]
-lelab = "lelab.scripts.lelab:main"
+makerlab = "makerlab.scripts.makerlab:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["lelab*", "frontend"]
+include = ["makerlab*", "frontend"]
 
 [tool.setuptools.package-data]
 frontend = ["dist/**/*"]
@@ -115,5 +115,5 @@ ignore_missing_imports = true
 follow_imports = "skip"
 
 [[tool.mypy.overrides]]
-module = "lelab.*"
+module = "makerlab.*"
 ignore_errors = true

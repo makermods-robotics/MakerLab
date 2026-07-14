@@ -11,8 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""LeLab — FastAPI + React web interface around the LeRobot framework."""
+"""To enable `makerlab.__version__`."""
 
-from lelab.__version__ import __version__
+from importlib.metadata import PackageNotFoundError, version
 
-__all__ = ["__version__"]
+try:
+    __version__ = version("makerlab")
+except PackageNotFoundError:
+    __version__ = "unknown"

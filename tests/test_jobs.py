@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for lelab.jobs — parsers and Pydantic models. Does not exercise
+"""Tests for makerlab.jobs — parsers and Pydantic models. Does not exercise
 LocalJobRunner.start() (see plan, "Discovered issue")."""
 
 from __future__ import annotations
@@ -22,21 +22,21 @@ import pytest
 
 
 def test_extract_wandb_run_url_finds_canonical_url() -> None:
-    from lelab.jobs import extract_wandb_run_url
+    from makerlab.jobs import extract_wandb_run_url
 
     line = "wandb: \U0001f680 View run at https://wandb.ai/me/myproj/runs/abc123 trailing text"
     assert extract_wandb_run_url(line) == "https://wandb.ai/me/myproj/runs/abc123"
 
 
 def test_extract_wandb_run_url_returns_none_when_absent() -> None:
-    from lelab.jobs import extract_wandb_run_url
+    from makerlab.jobs import extract_wandb_run_url
 
     assert extract_wandb_run_url("nothing here") is None
     assert extract_wandb_run_url("https://example.com/runs/abc") is None
 
 
 def test_parse_duration_handles_mm_ss_and_hh_mm_ss() -> None:
-    from lelab.jobs import _parse_duration
+    from makerlab.jobs import _parse_duration
 
     assert _parse_duration("01:30") == 90
     assert _parse_duration("01:00:00") == 3600
@@ -45,7 +45,7 @@ def test_parse_duration_handles_mm_ss_and_hh_mm_ss() -> None:
 
 
 def test_parse_metrics_into_extracts_loss_and_step() -> None:
-    from lelab.jobs import TrainingMetrics, parse_metrics_into
+    from makerlab.jobs import TrainingMetrics, parse_metrics_into
 
     m = TrainingMetrics()
     line = "INFO ... step:42 smpl:336 loss:0.0123 grdn:1.5 lr:0.0001 ..."
@@ -58,7 +58,7 @@ def test_parse_metrics_into_extracts_loss_and_step() -> None:
 
 
 def test_parse_metrics_into_extracts_tqdm_progress() -> None:
-    from lelab.jobs import TrainingMetrics, parse_metrics_into
+    from makerlab.jobs import TrainingMetrics, parse_metrics_into
 
     m = TrainingMetrics()
     # tqdm format: "Training:  10%|...| 100/1000 [00:30<04:30, ..."
@@ -71,7 +71,7 @@ def test_parse_metrics_into_extracts_tqdm_progress() -> None:
 
 
 def test_parse_metrics_into_ignores_unrelated_lines() -> None:
-    from lelab.jobs import TrainingMetrics, parse_metrics_into
+    from makerlab.jobs import TrainingMetrics, parse_metrics_into
 
     m = TrainingMetrics()
     parse_metrics_into("just a log line with no metrics", m)
@@ -79,7 +79,7 @@ def test_parse_metrics_into_ignores_unrelated_lines() -> None:
 
 
 def test_log_line_round_trips_to_json() -> None:
-    from lelab.jobs import LogLine
+    from makerlab.jobs import LogLine
 
     line = LogLine(timestamp=1.5, message="hello")
     payload = line.model_dump_json()
@@ -89,7 +89,7 @@ def test_log_line_round_trips_to_json() -> None:
 
 
 def test_pid_alive_returns_false_for_unlikely_pid() -> None:
-    from lelab.jobs import _pid_alive
+    from makerlab.jobs import _pid_alive
 
     # DISCOVERED: os.kill(-1, 0) on macOS sends to process group and succeeds
     # (returns True), so we use a large PID that certainly does not exist.
@@ -97,7 +97,7 @@ def test_pid_alive_returns_false_for_unlikely_pid() -> None:
 
 
 def test_hub_checkpoints_from_files_parses_tree() -> None:
-    from lelab.jobs import _hub_checkpoints_from_files
+    from makerlab.jobs import _hub_checkpoints_from_files
 
     files = [
         "README.md",
@@ -117,7 +117,7 @@ def _make_pretrained(dir_path) -> None:
 
 
 def test_list_imported_local_single_model(tmp_path) -> None:
-    from lelab.jobs import _list_imported_local
+    from makerlab.jobs import _list_imported_local
 
     _make_pretrained(tmp_path)  # config.json at the root
     out = _list_imported_local(str(tmp_path))
@@ -128,7 +128,7 @@ def test_list_imported_local_single_model(tmp_path) -> None:
 
 
 def test_list_imported_local_checkpoints_tree(tmp_path) -> None:
-    from lelab.jobs import _list_imported_local
+    from makerlab.jobs import _list_imported_local
 
     _make_pretrained(tmp_path / "checkpoints" / "000010" / "pretrained_model")
     out = _list_imported_local(str(tmp_path))
@@ -138,13 +138,13 @@ def test_list_imported_local_checkpoints_tree(tmp_path) -> None:
 
 
 def test_list_imported_local_empty_when_no_model(tmp_path) -> None:
-    from lelab.jobs import _list_imported_local
+    from makerlab.jobs import _list_imported_local
 
     assert _list_imported_local(str(tmp_path)) == []
 
 
 def test_list_imported_hub_single_model() -> None:
-    from lelab.jobs import _list_imported_hub
+    from makerlab.jobs import _list_imported_hub
 
     class FakeApi:
         def list_repo_files(self, repo_id, repo_type):
@@ -158,7 +158,7 @@ def test_list_imported_hub_single_model() -> None:
 
 
 def test_list_imported_hub_prefers_checkpoints_tree() -> None:
-    from lelab.jobs import _list_imported_hub
+    from makerlab.jobs import _list_imported_hub
 
     class FakeApi:
         def list_repo_files(self, repo_id, repo_type):
@@ -173,7 +173,7 @@ def test_list_imported_hub_prefers_checkpoints_tree() -> None:
 
 
 def test_list_imported_hub_empty_when_no_model() -> None:
-    from lelab.jobs import _list_imported_hub
+    from makerlab.jobs import _list_imported_hub
 
     class FakeApi:
         def list_repo_files(self, repo_id, repo_type):
@@ -183,7 +183,7 @@ def test_list_imported_hub_empty_when_no_model() -> None:
 
 
 def test_read_checkpoint_config_local_reads_config_json(tmp_path) -> None:
-    from lelab.jobs import JobCheckpoint, _read_checkpoint_config
+    from makerlab.jobs import JobCheckpoint, _read_checkpoint_config
 
     (tmp_path / "config.json").write_text(_json.dumps({"type": "act"}))
     ckpt = JobCheckpoint(step=0, source="local", ref=str(tmp_path))
@@ -191,7 +191,7 @@ def test_read_checkpoint_config_local_reads_config_json(tmp_path) -> None:
 
 
 def test_read_checkpoint_config_hub_root(monkeypatch, tmp_path) -> None:
-    from lelab.jobs import JobCheckpoint, _read_checkpoint_config
+    from makerlab.jobs import JobCheckpoint, _read_checkpoint_config
 
     cfg_file = tmp_path / "config.json"
     cfg_file.write_text(_json.dumps({"type": "smolvla"}))
@@ -209,7 +209,7 @@ def test_read_checkpoint_config_hub_root(monkeypatch, tmp_path) -> None:
 
 
 def test_read_checkpoint_config_hub_tree(monkeypatch, tmp_path) -> None:
-    from lelab.jobs import JobCheckpoint, _read_checkpoint_config
+    from makerlab.jobs import JobCheckpoint, _read_checkpoint_config
 
     cfg_file = tmp_path / "config.json"
     cfg_file.write_text(_json.dumps({"type": "act"}))
@@ -227,7 +227,7 @@ def test_read_checkpoint_config_hub_tree(monkeypatch, tmp_path) -> None:
 
 
 def test_register_imported_local_dir(tmp_path) -> None:
-    from lelab.jobs import JobRegistry
+    from makerlab.jobs import JobRegistry
 
     model = tmp_path / "model"
     _make_pretrained(model)  # config.json at root
@@ -246,7 +246,7 @@ def test_register_imported_local_dir(tmp_path) -> None:
 
 
 def test_register_imported_rejects_unusable_source(tmp_path) -> None:
-    from lelab.jobs import JobRegistry
+    from makerlab.jobs import JobRegistry
 
     empty = tmp_path / "empty"
     empty.mkdir()
@@ -256,13 +256,13 @@ def test_register_imported_rejects_unusable_source(tmp_path) -> None:
 
 
 def test_register_imported_hub_repo(monkeypatch, tmp_path) -> None:
-    from lelab.jobs import JobRegistry
+    from makerlab.jobs import JobRegistry
 
     class FakeApi:
         def list_repo_files(self, repo_id, repo_type):
             return ["config.json", "model.safetensors"]
 
-    monkeypatch.setattr("lelab.utils.hf_auth.shared_hf_api", lambda: FakeApi())
+    monkeypatch.setattr("makerlab.utils.hf_auth.shared_hf_api", lambda: FakeApi())
     reg = JobRegistry(tmp_path / "root")
     rec = reg.register_imported("user/some-model")
 

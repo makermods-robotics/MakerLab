@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for lelab.rollout — request schema, pure helpers, and the
+"""Tests for makerlab.rollout — request schema, pure helpers, and the
 non-subprocess branches of the start/stop/status handlers.
 
 handle_start_inference's happy path spawns a real subprocess and a stdout-
@@ -28,7 +28,7 @@ import pytest
 def _reset_rollout_globals(monkeypatch: pytest.MonkeyPatch) -> None:
     """Reset rollout's module-level state around each test so a leaking
     `inference_active=True` from one case can't poison the next."""
-    from lelab import rollout
+    from makerlab import rollout
 
     monkeypatch.setattr(rollout, "inference_active", False)
     monkeypatch.setattr(rollout, "_inference_proc", None)
@@ -40,14 +40,14 @@ def _reset_rollout_globals(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_inference_request_rejects_missing_required_fields() -> None:
     from pydantic import ValidationError
 
-    from lelab.rollout import InferenceRequest
+    from makerlab.rollout import InferenceRequest
 
     with pytest.raises(ValidationError):
         InferenceRequest()
 
 
 def test_inference_request_has_expected_defaults() -> None:
-    from lelab.rollout import InferenceRequest
+    from makerlab.rollout import InferenceRequest
 
     req = InferenceRequest(
         follower_port="/dev/ttyUSB0",
@@ -62,7 +62,7 @@ def test_inference_request_has_expected_defaults() -> None:
 def test_detect_device_returns_cpu_when_neither_cuda_nor_mps(monkeypatch: pytest.MonkeyPatch) -> None:
     import torch
 
-    from lelab.rollout import _detect_device
+    from makerlab.rollout import _detect_device
 
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     monkeypatch.setattr(torch.backends.mps, "is_available", lambda: False)
@@ -72,7 +72,7 @@ def test_detect_device_returns_cpu_when_neither_cuda_nor_mps(monkeypatch: pytest
 def test_detect_device_prefers_cuda_over_mps(monkeypatch: pytest.MonkeyPatch) -> None:
     import torch
 
-    from lelab.rollout import _detect_device
+    from makerlab.rollout import _detect_device
 
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
@@ -82,7 +82,7 @@ def test_detect_device_prefers_cuda_over_mps(monkeypatch: pytest.MonkeyPatch) ->
 def test_detect_device_falls_back_to_mps_when_no_cuda(monkeypatch: pytest.MonkeyPatch) -> None:
     import torch
 
-    from lelab.rollout import _detect_device
+    from makerlab.rollout import _detect_device
 
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
@@ -94,7 +94,7 @@ def test_detect_device_returns_cpu_when_torch_probe_raises(monkeypatch: pytest.M
     broken at runtime we still need a sensible fallback."""
     import torch
 
-    from lelab.rollout import _detect_device
+    from makerlab.rollout import _detect_device
 
     def _boom() -> bool:
         raise RuntimeError("simulated torch.cuda failure")
@@ -104,7 +104,7 @@ def test_detect_device_returns_cpu_when_torch_probe_raises(monkeypatch: pytest.M
 
 
 def test_resolve_policy_path_returns_local_dir_unchanged(tmp_path) -> None:
-    from lelab.rollout import _resolve_policy_path
+    from makerlab.rollout import _resolve_policy_path
 
     pretrained = tmp_path / "pretrained_model"
     pretrained.mkdir()
@@ -112,7 +112,7 @@ def test_resolve_policy_path_returns_local_dir_unchanged(tmp_path) -> None:
 
 
 def test_resolve_policy_path_raises_on_unparsable_ref() -> None:
-    from lelab.rollout import _resolve_policy_path
+    from makerlab.rollout import _resolve_policy_path
 
     with pytest.raises(ValueError, match="Unrecognised policy ref"):
         _resolve_policy_path("not-a-real-ref-no-at-sign")
@@ -122,7 +122,7 @@ def test_resolve_policy_path_resolves_hub_ref(monkeypatch: pytest.MonkeyPatch, t
     """Hub refs ('user/repo@checkpoints/000050') must be passed through
     snapshot_download and joined to the standard checkpoints/<step>/pretrained_model
     layout."""
-    from lelab.rollout import _resolve_policy_path
+    from makerlab.rollout import _resolve_policy_path
 
     fake_root = tmp_path / "snapshot"
     fake_root.mkdir()
@@ -145,7 +145,7 @@ def test_resolve_policy_path_resolves_hub_ref(monkeypatch: pytest.MonkeyPatch, t
 def test_resolve_policy_path_resolves_hub_root_ref(monkeypatch, tmp_path) -> None:
     """A flat-model ref ('user/repo@root') downloads the whole repo and
     returns its root."""
-    from lelab.rollout import _resolve_policy_path
+    from makerlab.rollout import _resolve_policy_path
 
     fake_root = tmp_path / "snapshot"
     fake_root.mkdir()
@@ -163,7 +163,7 @@ def test_resolve_policy_path_resolves_hub_root_ref(monkeypatch, tmp_path) -> Non
 
 
 def test_format_cameras_arg_empty_yields_empty_braces() -> None:
-    from lelab.rollout import _format_cameras_arg
+    from makerlab.rollout import _format_cameras_arg
 
     assert _format_cameras_arg({}) == "{}"
 
@@ -171,7 +171,7 @@ def test_format_cameras_arg_empty_yields_empty_braces() -> None:
 def test_format_cameras_arg_renames_camera_index_to_index_or_path() -> None:
     """lerobot's CLI expects `index_or_path`, but the frontend posts
     `camera_index`. The rename is the whole point of this helper."""
-    from lelab.rollout import _format_cameras_arg
+    from makerlab.rollout import _format_cameras_arg
 
     result = _format_cameras_arg(
         {"front": {"type": "opencv", "camera_index": 0, "width": 640, "height": 480, "fps": 30}}
@@ -183,7 +183,7 @@ def test_format_cameras_arg_renames_camera_index_to_index_or_path() -> None:
 
 
 def test_format_cameras_arg_omits_none_values() -> None:
-    from lelab.rollout import _format_cameras_arg
+    from makerlab.rollout import _format_cameras_arg
 
     result = _format_cameras_arg({"front": {"camera_index": 0, "fps": None}})
     assert "fps" not in result
@@ -191,7 +191,7 @@ def test_format_cameras_arg_omits_none_values() -> None:
 
 
 def test_format_cameras_arg_handles_multiple_cameras() -> None:
-    from lelab.rollout import _format_cameras_arg
+    from makerlab.rollout import _format_cameras_arg
 
     result = _format_cameras_arg(
         {
@@ -204,7 +204,7 @@ def test_format_cameras_arg_handles_multiple_cameras() -> None:
 
 
 def test_handle_stop_inference_when_idle_returns_409() -> None:
-    from lelab.rollout import handle_stop_inference
+    from makerlab.rollout import handle_stop_inference
 
     result = handle_stop_inference()
     assert result["success"] is False
@@ -212,7 +212,7 @@ def test_handle_stop_inference_when_idle_returns_409() -> None:
 
 
 def test_handle_inference_status_when_idle_returns_dict_with_expected_keys() -> None:
-    from lelab.rollout import handle_inference_status
+    from makerlab.rollout import handle_inference_status
 
     result = handle_inference_status()
     assert isinstance(result, dict)
@@ -222,7 +222,7 @@ def test_handle_inference_status_when_idle_returns_dict_with_expected_keys() -> 
 
 
 def _stub_request():
-    from lelab.rollout import InferenceRequest
+    from makerlab.rollout import InferenceRequest
 
     return InferenceRequest(
         follower_port="/dev/ttyUSB0",
@@ -234,9 +234,9 @@ def _stub_request():
 def test_handle_start_inference_blocked_when_teleoperation_active(monkeypatch) -> None:
     """If teleop owns the bus, inference must refuse rather than race for
     the serial port."""
-    from lelab.rollout import handle_start_inference
+    from makerlab.rollout import handle_start_inference
 
-    monkeypatch.setattr("lelab.teleoperate.teleoperation_active", True)
+    monkeypatch.setattr("makerlab.teleoperate.teleoperation_active", True)
     result = handle_start_inference(_stub_request())
     assert result["success"] is False
     assert result["status_code"] == 409
@@ -244,9 +244,9 @@ def test_handle_start_inference_blocked_when_teleoperation_active(monkeypatch) -
 
 
 def test_handle_start_inference_blocked_when_recording_active(monkeypatch) -> None:
-    from lelab.rollout import handle_start_inference
+    from makerlab.rollout import handle_start_inference
 
-    monkeypatch.setattr("lelab.record.recording_active", True)
+    monkeypatch.setattr("makerlab.record.recording_active", True)
     result = handle_start_inference(_stub_request())
     assert result["success"] is False
     assert result["status_code"] == 409
@@ -254,7 +254,7 @@ def test_handle_start_inference_blocked_when_recording_active(monkeypatch) -> No
 
 
 def test_handle_start_inference_blocked_when_already_active(monkeypatch) -> None:
-    from lelab import rollout
+    from makerlab import rollout
 
     monkeypatch.setattr(rollout, "inference_active", True)
     result = rollout.handle_start_inference(_stub_request())

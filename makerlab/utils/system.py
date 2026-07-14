@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 
 # Cached at module load — never re-checked. After install, the user must
-# restart lelab for a freshly-installed package to be importable.
+# restart makerlab for a freshly-installed package to be importable.
 TRAINING_AVAILABLE: bool = importlib.util.find_spec("accelerate") is not None
 TRAINING_INSTALL_HINT: str = "pip install accelerate"
 
@@ -265,7 +265,7 @@ def handle_install_policy_extra_status(policy_type: str) -> dict[str, Any]:
     return mgr.get_status()
 
 
-# Detect the common Windows/LeLab mismatch where an NVIDIA GPU is visible to the
+# Detect the common Windows/MakerLab mismatch where an NVIDIA GPU is visible to the
 # OS, but the active PyTorch build cannot use CUDA. Do not auto-install torch.
 
 CUDA_TORCH_DOCS_URL = "https://pytorch.org/get-started/locally/"
@@ -273,7 +273,7 @@ CUDA_TORCH_INSTALL_HINT = (
     "To use the GPU, install a CUDA build of PyTorch. Pick your CUDA version at "
     f"{CUDA_TORCH_DOCS_URL} "
     "(for example: pip install torch --index-url https://download.pytorch.org/whl/cu124), "
-    "then restart LeLab."
+    "then restart MakerLab."
 )
 
 

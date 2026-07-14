@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for lelab.scripts.lelab — covers `_wait_for_port`. The launcher's
+"""Tests for makerlab.scripts.makerlab — covers `_wait_for_port`. The launcher's
 `_run_prod` / `_run_dev` / `main` functions are CLI/process glue (they call
 uvicorn.run, spawn npm, install SIGINT handlers) and have no unit-testable
 seam without rewriting them; they are left to manual smoke testing."""
@@ -34,7 +34,7 @@ def _bind_listener() -> tuple[socket.socket, int]:
 
 
 def test_wait_for_port_returns_true_when_port_is_open() -> None:
-    from lelab.scripts.lelab import _wait_for_port
+    from makerlab.scripts.makerlab import _wait_for_port
 
     server, port = _bind_listener()
     try:
@@ -48,9 +48,9 @@ def test_wait_for_port_returns_false_when_port_never_opens(
 ) -> None:
     """Patch sleep so we don't actually block for `timeout` seconds — the
     function's whole loop body is fast otherwise."""
-    from lelab.scripts.lelab import _wait_for_port
+    from makerlab.scripts.makerlab import _wait_for_port
 
-    monkeypatch.setattr("lelab.scripts.lelab.time.sleep", lambda _s: None)
+    monkeypatch.setattr("makerlab.scripts.makerlab.time.sleep", lambda _s: None)
     # Pick an ephemeral port from the OS, then close it so it's not bound.
     probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     probe.bind(("127.0.0.1", 0))
@@ -65,10 +65,10 @@ def test_wait_for_port_returns_true_immediately_for_already_open_port(
 ) -> None:
     """Sanity check that the success path doesn't sleep at all — guards
     against accidentally adding a leading delay."""
-    from lelab.scripts.lelab import _wait_for_port
+    from makerlab.scripts.makerlab import _wait_for_port
 
     sleep_calls = []
-    monkeypatch.setattr("lelab.scripts.lelab.time.sleep", lambda s: sleep_calls.append(s))
+    monkeypatch.setattr("makerlab.scripts.makerlab.time.sleep", lambda s: sleep_calls.append(s))
 
     server, port = _bind_listener()
     # Drain any incoming connection so the listener stays healthy.

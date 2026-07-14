@@ -35,7 +35,7 @@ from huggingface_hub.errors import RepositoryNotFoundError
 
 from ..jobs import LogLine, TrainingMetrics, extract_wandb_run_url, parse_metrics_into
 from ..train import TrainingRequest, build_training_command
-from ..utils.config import with_lelab_tag
+from ..utils.config import with_makerlab_tag
 from ..utils.hf_auth import cached_whoami, shared_hf_api
 
 logger = logging.getLogger(__name__)
@@ -46,12 +46,12 @@ LEROBOT_IMAGE = "huggingface/lerobot-gpu:latest"
 # path the registry hands us (under ~/.cache/...) doesn't exist on the remote
 # pod, so we ignore it and pin a writable container-local path instead. The
 # wrapper reads --output_dir from the trainer argv and uploads checkpoints from
-# here to the Hub, so the lelab UI never reads this path directly.
-_CONTAINER_OUTPUT_DIR = "/tmp/lelab/train"  # nosec B108 — fixed path inside the remote HF Jobs container, not host-local
+# here to the Hub, so the makerlab UI never reads this path directly.
+_CONTAINER_OUTPUT_DIR = "/tmp/makerlab/train"  # nosec B108 — fixed path inside the remote HF Jobs container, not host-local
 
 # Inlined sidecar uploader for HF Jobs. Spawns the lerobot trainer as a
 # subprocess and concurrently uploads new <output_dir>/checkpoints/<step>/
-# directories to the Hub model repo, so the lelab UI can list them while
+# directories to the Hub model repo, so the makerlab UI can list them while
 # training is in progress.
 #
 # Sent verbatim as the value of `python -c '...'`. Anything after `--` in
@@ -374,7 +374,7 @@ class HfCloudJobRunner:
         from lerobot.datasets import LeRobotDataset
 
         try:
-            LeRobotDataset(repo_id).push_to_hub(tags=with_lelab_tag(None), private=False)
+            LeRobotDataset(repo_id).push_to_hub(tags=with_makerlab_tag(None), private=False)
         except Exception as exc:
             msg = f"Failed to upload local dataset {repo_id} to Hub: {exc}"
             self._log_line(f"[upload] {msg}")
@@ -438,7 +438,7 @@ class HfCloudJobRunner:
 
         Sole writer of _terminal_status under normal operation. Decoupled
         from the log stream: a dropped SSE connection during a long run
-        (NAT eviction, sleep, proxy idle timeout) no longer causes LeLab
+        (NAT eviction, sleep, proxy idle timeout) no longer causes MakerLab
         to declare a still-running job as failed.
         """
         assert self._hf_job_id is not None

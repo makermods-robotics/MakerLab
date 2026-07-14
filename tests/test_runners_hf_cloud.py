@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for lelab.runners.hf_cloud — covers the host-side wandb credential
+"""Tests for makerlab.runners.hf_cloud — covers the host-side wandb credential
 resolution path. HfCloudJobRunner itself talks to HF Jobs and is not unit-
 testable without a heavy mock of HfApi; we intentionally leave it for
 integration tests."""
@@ -26,7 +26,7 @@ import pytest
 def test_resolve_wandb_api_key_prefers_environment_variable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from lelab.runners.hf_cloud import resolve_wandb_api_key
+    from makerlab.runners.hf_cloud import resolve_wandb_api_key
 
     monkeypatch.setenv("WANDB_API_KEY", "env-key-123")
     assert resolve_wandb_api_key() == "env-key-123"
@@ -35,7 +35,7 @@ def test_resolve_wandb_api_key_prefers_environment_variable(
 def test_resolve_wandb_api_key_falls_back_to_netrc(monkeypatch: pytest.MonkeyPatch) -> None:
     """When WANDB_API_KEY is unset, the function must read the same place
     `wandb login` writes — ~/.netrc under machine api.wandb.ai."""
-    from lelab.runners.hf_cloud import resolve_wandb_api_key
+    from makerlab.runners.hf_cloud import resolve_wandb_api_key
 
     monkeypatch.delenv("WANDB_API_KEY", raising=False)
 
@@ -51,7 +51,7 @@ def test_resolve_wandb_api_key_falls_back_to_netrc(monkeypatch: pytest.MonkeyPat
 def test_resolve_wandb_api_key_returns_none_when_netrc_has_no_wandb_entry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from lelab.runners.hf_cloud import resolve_wandb_api_key
+    from makerlab.runners.hf_cloud import resolve_wandb_api_key
 
     monkeypatch.delenv("WANDB_API_KEY", raising=False)
 
@@ -67,7 +67,7 @@ def test_resolve_wandb_api_key_returns_none_when_netrc_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """No env var, no ~/.netrc — neither source has it, caller decides."""
-    from lelab.runners.hf_cloud import resolve_wandb_api_key
+    from makerlab.runners.hf_cloud import resolve_wandb_api_key
 
     monkeypatch.delenv("WANDB_API_KEY", raising=False)
 
@@ -81,7 +81,7 @@ def test_resolve_wandb_api_key_returns_none_when_netrc_missing(
 def test_resolve_wandb_api_key_returns_none_when_netrc_parse_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from lelab.runners.hf_cloud import resolve_wandb_api_key
+    from makerlab.runners.hf_cloud import resolve_wandb_api_key
 
     monkeypatch.delenv("WANDB_API_KEY", raising=False)
 
@@ -98,7 +98,7 @@ def test_resolve_wandb_api_key_returns_none_when_password_is_empty(
     """An empty password from netrc is treated as missing — the helper
     contract is 'returns the usable key or None', not 'returns whatever
     netrc happened to have'."""
-    from lelab.runners.hf_cloud import resolve_wandb_api_key
+    from makerlab.runners.hf_cloud import resolve_wandb_api_key
 
     monkeypatch.delenv("WANDB_API_KEY", raising=False)
 
