@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import shlex
 import shutil
 import subprocess
@@ -36,6 +35,8 @@ from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel
+
+from .utils.subprocess_env import utf8_child_env
 
 logger = logging.getLogger(__name__)
 
@@ -225,12 +226,8 @@ def handle_run_update() -> UpdateResult:
             message="This install can't auto-update (editable or non-git). "
             "Update it the way you installed it.",
         )
-    # PYTHONIOENCODING forces a python-based updater's (pip fallback) own
-    # stdout to UTF-8: on Windows a piped (non-console) stdout otherwise falls
-    # back to the ANSI codepage, which can't encode non-ASCII pip/git output —
-    # see makerlab/auto_calibrate.py for the crash this pattern caused.
-    child_env = os.environ.copy()
-    child_env["PYTHONIOENCODING"] = "utf-8"
+    # See utils/subprocess_env.py for why PYTHONIOENCODING is forced.
+    child_env = utf8_child_env()
     try:
         proc = subprocess.run(
             _build_update_cmd(source["owner"], source["repo"]),

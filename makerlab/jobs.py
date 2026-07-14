@@ -37,11 +37,13 @@ from pathlib import Path
 from queue import Empty, Queue
 from typing import Literal, Protocol, runtime_checkable
 
+import psutil
 from pydantic import BaseModel
 
 from .train import TrainingRequest
 from .utils.config import is_valid_robot_name
 from .utils.hf_auth import shared_hf_api
+from .utils.subprocess_env import utf8_child_env
 
 logger = logging.getLogger(__name__)
 
@@ -144,12 +146,11 @@ def _process_isolation_kwargs() -> dict[str, object]:
     creationflags=CREATE_NEW_PROCESS_GROUP, which Microsoft's docs state
     makes a process ignore a console-wide Ctrl+C.
 
-    NOTE: unlike the POSIX path, the Windows branch has only been verified
-    by reading CPython's source and Microsoft's documented behavior — not
-    by observing a live Ctrl+C actually fail to cascade on Windows (that
-    requires a real interactive console/session, which wasn't available
-    when this was written). Re-verify manually on a real Windows terminal
-    before relying on it under load.
+    NOTE: unlike the POSIX path, this hasn't been verified by observing a live
+    Ctrl+C actually fail to cascade on Windows (that requires a real
+    interactive console/session, which wasn't available when this was
+    written). Re-verify manually on a real Windows terminal before relying on
+    it under load.
     """
     if platform.system() == "Windows":
         # getattr, not a direct attribute reference: CREATE_NEW_PROCESS_GROUP
@@ -165,17 +166,9 @@ def _process_isolation_kwargs() -> dict[str, object]:
 
 
 def _pid_alive(pid: int) -> bool:
-    """Return True if a process with this PID exists. Cheap; uses signal 0.
-
-    Catches OSError broadly, not just ProcessLookupError/PermissionError: on
-    Windows, os.kill(pid, 0) on a stale/reused PID raises a plain OSError
-    (WinError 87), not ProcessLookupError — narrower handling here crashed
-    JobRegistry's startup load for any leftover job record on Windows."""
-    try:
-        os.kill(pid, 0)
-    except OSError:
-        return False
-    return True
+    """Return True if a process with this PID exists. Cross-platform via psutil,
+    which handles PID liveness correctly on both POSIX and Windows."""
+    return psutil.pid_exists(pid)
 
 
 @runtime_checkable
@@ -368,14 +361,8 @@ class LocalJobRunner:
 
         # PYTHONUNBUFFERED makes the child's stdout flush per line. Without it
         # block-buffering hides log lines from our parser for many seconds.
-        # PYTHONIOENCODING forces the child's own stdout to UTF-8: on Windows a
-        # piped (non-console) stdout otherwise falls back to the ANSI codepage,
-        # and training output (tqdm bars, wandb, etc.) commonly prints non-ASCII
-        # characters that codepage can't encode — see makerlab/auto_calibrate.py
-        # for the auto-calibration crash this exact pattern caused.
-        child_env = os.environ.copy()
-        child_env["PYTHONUNBUFFERED"] = "1"
-        child_env["PYTHONIOENCODING"] = "utf-8"
+        # See utils/subprocess_env.py for why PYTHONIOENCODING is forced.
+        child_env = utf8_child_env(PYTHONUNBUFFERED="1")
 
         # See _process_isolation_kwargs() for why this isn't a plain
         # start_new_session=True.

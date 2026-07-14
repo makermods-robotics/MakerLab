@@ -42,6 +42,7 @@ from pydantic import BaseModel
 from lerobot.datasets.aggregate import aggregate_datasets
 
 from .utils.config import validate_dataset_repo_id
+from .utils.subprocess_env import utf8_child_env
 
 
 def _lerobot_cache_root() -> Path:
@@ -282,12 +283,8 @@ class MergeManager:
 
         cmd = [sys.executable, "-m", "makerlab.merge", output, *sources]
         logger.info("Starting dataset merge: %s", " ".join(cmd))
-        # PYTHONIOENCODING forces the child's own stdout to UTF-8: on Windows a
-        # piped (non-console) stdout otherwise falls back to the ANSI codepage,
-        # which can't encode non-ASCII output (progress bars, dataset names,
-        # etc.) — see makerlab/auto_calibrate.py for the crash this caused.
-        child_env = os.environ.copy()
-        child_env["PYTHONIOENCODING"] = "utf-8"
+        # See utils/subprocess_env.py for why PYTHONIOENCODING is forced.
+        child_env = utf8_child_env()
         try:
             self.process = subprocess.Popen(
                 cmd,

@@ -114,3 +114,29 @@ def mock_subprocess_popen(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     spy = MagicMock(name="subprocess.Popen", return_value=fake_proc)
     monkeypatch.setattr("makerlab.jobs.subprocess.Popen", spy, raising=False)
     return spy
+
+
+class _FakeStdout:
+    """.readline() double matching text-mode Popen.stdout, yielding a
+    line with the replacement char then the "" sentinel that ends
+    iter(readline, "")."""
+
+    def __init__(self, lines: list[str]) -> None:
+        self._lines = iter(lines)
+
+    def readline(self) -> str:
+        return next(self._lines, "")
+
+
+class _FakeProcess:
+    """Process double pairing with `_FakeStdout`: a fixed `returncode` and a
+    no-op `wait()`, matching the subset of `subprocess.Popen`'s interface
+    that `_monitor()`-style methods use after draining stdout."""
+
+    returncode = 0
+
+    def __init__(self, lines: list[str]) -> None:
+        self.stdout = _FakeStdout(lines)
+
+    def wait(self) -> None:
+        return None

@@ -15,7 +15,6 @@
 import contextlib
 import importlib.util
 import logging
-import os
 import queue
 import shutil
 import subprocess
@@ -25,6 +24,8 @@ import time
 from typing import Any
 
 from pydantic import BaseModel
+
+from .subprocess_env import utf8_child_env
 
 logger = logging.getLogger(__name__)
 
@@ -106,12 +107,8 @@ class InstallManager:
             self.error = None
             self._drain_queue()
 
-        # PYTHONIOENCODING forces a python-based installer's (pip fallback) own
-        # stdout to UTF-8: on Windows a piped (non-console) stdout otherwise
-        # falls back to the ANSI codepage, which can't encode non-ASCII pip
-        # output — see makerlab/auto_calibrate.py for the crash this caused.
-        child_env = os.environ.copy()
-        child_env["PYTHONIOENCODING"] = "utf-8"
+        # See subprocess_env.py for why PYTHONIOENCODING is forced.
+        child_env = utf8_child_env()
         try:
             self.process = subprocess.Popen(
                 _build_install_cmd(self.package),

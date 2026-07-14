@@ -134,25 +134,7 @@ def test_monitor_survives_non_utf8_replacement_char() -> None:
     guards otherwise."""
     from makerlab.merge import MergeManager
 
-    class _FakeStdout:
-        """.readline() double matching text-mode Popen.stdout, yielding a
-        line with the replacement char then the "" sentinel that ends
-        iter(readline, "")."""
-
-        def __init__(self, lines: list[str]) -> None:
-            self._lines = iter(lines)
-
-        def readline(self) -> str:
-            return next(self._lines, "")
-
-    class _FakeProcess:
-        returncode = 0
-
-        def __init__(self, lines: list[str]) -> None:
-            self.stdout = _FakeStdout(lines)
-
-        def wait(self) -> None:
-            return None
+    from .conftest import _FakeProcess
 
     mgr = MergeManager()
     mgr.process = _FakeProcess(["bad � byte\n"])

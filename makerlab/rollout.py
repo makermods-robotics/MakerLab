@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import contextlib
 import logging
-import os
 import re
 import subprocess
 import sys
@@ -46,6 +45,7 @@ from .utils.config import (
     setup_follower_calibration_file,
     stage_bimanual_follower_calibrations,
 )
+from .utils.subprocess_env import utf8_child_env
 
 logger = logging.getLogger(__name__)
 
@@ -497,14 +497,8 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
         # default encoding can fail the same way on Windows (ANSI codepage).
         log_handle = log_path.open("w", buffering=1, encoding="utf-8")
 
-        env = os.environ.copy()
-        env["PYTHONUNBUFFERED"] = "1"
-        # Forces the rollout subprocess's own stdout to UTF-8: on Windows a
-        # piped (non-console) stdout otherwise falls back to the ANSI
-        # codepage, which can't encode non-ASCII output the policy/robot code
-        # may print — see makerlab/auto_calibrate.py for the crash this
-        # pattern caused.
-        env["PYTHONIOENCODING"] = "utf-8"
+        # See utils/subprocess_env.py for why PYTHONIOENCODING is forced.
+        env = utf8_child_env(PYTHONUNBUFFERED="1")
         # Feed a newline into stdin PER follower arm so SOFollower.calibrate()'s
         # `input("Press ENTER to use the calibration file ...")` returns "" and
         # writes the existing calibration to the motors instead of hanging

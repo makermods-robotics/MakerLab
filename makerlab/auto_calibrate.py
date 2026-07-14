@@ -41,6 +41,7 @@ from .utils.config import (
     LEADER_CONFIG_PATH,
     save_robot_record,
 )
+from .utils.subprocess_env import utf8_child_env
 from .vendor.feetech_autocal.calibration_defaults import SO_FOLLOWER_MOTORS
 
 logger = logging.getLogger(__name__)
@@ -188,17 +189,12 @@ class AutoCalibrationManager:
             self._logs.clear()
             self._request = request
             self._stop_thread = None
-            # Force UTF-8 for the child's own stdout: on Windows, a redirected
-            # (piped) stdout falls back to the process's ANSI codepage instead
-            # of UTF-8, and the vendored script prints non-ASCII characters
-            # (e.g. "≈") that codepage can't encode, crashing the child with
-            # UnicodeEncodeError. encoding="utf-8" below then makes the parent
-            # decode the pipe the same way the child was told to encode it.
-            # tests/test_auto_calibrate.py fakes Popen, so it can't exercise
-            # this — if you touch these kwargs, re-verify with a real
-            # subprocess on Windows.
-            child_env = os.environ.copy()
-            child_env["PYTHONIOENCODING"] = "utf-8"
+            # See utils/subprocess_env.py for why PYTHONIOENCODING is forced.
+            # encoding="utf-8" below then makes the parent decode the pipe the
+            # same way the child was told to encode it. tests/test_auto_calibrate.py
+            # fakes Popen, so it can't exercise this — if you touch these
+            # kwargs, re-verify with a real subprocess on Windows.
+            child_env = utf8_child_env()
             try:
                 self._proc = subprocess.Popen(
                     command,

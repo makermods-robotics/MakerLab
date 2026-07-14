@@ -208,16 +208,7 @@ def test_pump_stdout_survives_non_utf8_replacement_char() -> None:
 
     from makerlab.jobs import LocalJobRunner, TrainingMetrics
 
-    class _FakeStdout:
-        """.readline() double matching text-mode Popen.stdout, yielding a
-        line with the replacement char then the "" sentinel that ends
-        iter(readline, "")."""
-
-        def __init__(self, lines: list[str]) -> None:
-            self._lines = iter(lines)
-
-        def readline(self) -> str:
-            return next(self._lines, "")
+    from .conftest import _FakeStdout
 
     runner = LocalJobRunner(TrainingMetrics())
     runner._process = SimpleNamespace(stdout=_FakeStdout(["bad � byte\n"]))
