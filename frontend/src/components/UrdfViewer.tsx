@@ -25,15 +25,42 @@ if (typeof window !== "undefined" && !customElements.get("urdf-viewer")) {
 }
 import * as THREE from "three";
 
+// three r163+ renders through WebGL2 only. On browsers without it (e.g.
+// Chromium on Jetson, where Tegra GPU acceleration is unavailable to the
+// sandboxed browser and SwiftShader may be disabled), the urdf-viewer
+// element throws while creating its context ("Error creating WebGL
+// context" → undefined scene → ".add of undefined"), which white-screens
+// the whole teleop page and its unmount auto-stops the running session.
+// Probe once and render a fallback instead of mounting the element.
+let webglSupportCache: boolean | null = null;
+function isWebglSupported(): boolean {
+  if (webglSupportCache === null) {
+    try {
+      webglSupportCache = !!document
+        .createElement("canvas")
+        .getContext("webgl2");
+    } catch {
+      webglSupportCache = false;
+    }
+  }
+  return webglSupportCache;
+}
+
 // Extend the interface for the URDF viewer element to include background property
 interface UrdfViewerElement extends HTMLElement {
   background?: string;
   setJointValue?: (jointName: string, value: number) => void;
 }
 
-const UrdfViewer: React.FC = () => {
+interface UrdfViewerProps {
+  /** Which joint stream to follow — "joints" (default) or "joints_right" (bimanual). */
+  jointsKey?: string;
+}
+
+const UrdfViewer: React.FC<UrdfViewerProps> = ({ jointsKey = "joints" }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const [highlightedJoint, setHighlightedJoint] = useState<string | null>(null);
+  const webglOk = isWebglSupported();
   const { registerUrdfProcessor, alternativeUrdfModels, isDefaultModel } =
     useUrdf();
 
@@ -44,7 +71,10 @@ const UrdfViewer: React.FC = () => {
   // Real-time joint updates via WebSocket
   const { isConnected: isWebSocketConnected } = useRealTimeJoints({
     viewerRef,
-    enabled: isDefaultModel, // Only enable WebSocket for default model
+    // Only enable WebSocket for default model; without WebGL there is no
+    // viewer to drive, so skip the connection too.
+    enabled: isDefaultModel && webglOk,
+    jointsKey,
   });
 
   // Add state for custom URDF path
@@ -127,7 +157,7 @@ const UrdfViewer: React.FC = () => {
 
   // Main effect to create and setup the viewer only once
   useEffect(() => {
-    if (!containerRef.current) return;
+    if (!webglOk || !containerRef.current) return;
 
     // Create and configure the URDF viewer element
     const viewer = createUrdfViewer(containerRef.current, true);
@@ -255,12 +285,33 @@ const UrdfViewer: React.FC = () => {
       viewer.removeEventListener("urdf-processed", onModelProcessed);
     };
   }, [
+    webglOk,
     isDefaultModel,
     customUrdfPath,
     urlModifierFunc,
     defaultUrlModifier,
     alternativeUrdfModels,
   ]);
+
+  if (!webglOk) {
+    return (
+      <div
+        className={cn(
+          "w-full h-full relative flex items-center justify-center",
+          "bg-gradient-to-br from-gray-900 to-gray-800"
+        )}
+      >
+        <div className="text-center px-6 max-w-sm">
+          <p className="text-gray-300 font-medium mb-1">3D viewer unavailable</p>
+          <p className="text-gray-500 text-sm">
+            This browser can't create a WebGL context (no GPU acceleration),
+            so the robot model preview is disabled. Teleoperation itself keeps
+            working.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div

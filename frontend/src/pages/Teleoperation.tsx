@@ -1,19 +1,73 @@
-import React, { useCallback, useEffect, useRef } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import VisualizerPanel from "@/components/control/VisualizerPanel";
 import TeleopCameraPanel from "@/components/control/TeleopCameraPanel";
 import { useToast } from "@/hooks/use-toast";
 import { useApi } from "@/contexts/ApiContext";
+import { useRobots } from "@/hooks/useRobots";
 
 const TeleoperationPage = () => {
   const navigate = useNavigate();
   const { toast } = useToast();
   const { baseUrl, fetchWithHeaders } = useApi();
+  // The teleop session is for the currently-selected robot; show two arms when
+  // it's bimanual.
+  const { selectedRecord } = useRobots();
+  const bimanual = selectedRecord?.mode === "bimanual";
 
   // Stop teleoperation exactly once, however the user leaves, so the back
   // button, an in-app link, and the unmount safety net can't double-stop or
   // double-toast.
   const stoppedRef = useRef(false);
+
+  // Terminal outcome of a session that ended UNDER us (the status poll below
+  // caught the worker dying mid-loop, or a stop from elsewhere whose cleanup
+  // tripped) — rendered as an inline banner: failed red, ran_with_warning
+  // amber (mirrors Inference.tsx). Null while the session is live.
+  const [finished, setFinished] = useState<{
+    outcome: "ran_with_warning" | "failed";
+    error: string | null;
+    hint: string | null;
+  } | null>(null);
+
+  // Poll the session status so a mid-loop death (unplugged bus, camera crash)
+  // surfaces here instead of failing silently — the backend clears the
+  // outcome fields on start, so a previous session's result can't trigger
+  // this on mount. Stops polling once we've caught an outcome or the user
+  // initiated a stop (the stop flow owns its own toasts).
+  useEffect(() => {
+    let cancelled = false;
+    const tick = async () => {
+      if (cancelled || stoppedRef.current) return;
+      try {
+        const res = await fetchWithHeaders(`${baseUrl}/teleoperation-status`);
+        if (!res.ok) return;
+        const status = await res.json();
+        if (cancelled || stoppedRef.current) return;
+        if (
+          !status.teleoperation_active &&
+          !status.releasing &&
+          (status.outcome === "failed" || status.outcome === "ran_with_warning")
+        ) {
+          // The session is already gone — mark the leave safety net handled so
+          // unmount doesn't POST a spurious stop against a dead session.
+          stoppedRef.current = true;
+          setFinished({
+            outcome: status.outcome,
+            error: status.error ?? null,
+            hint: status.hint ?? null,
+          });
+        }
+      } catch {
+        /* best-effort; the next tick retries */
+      }
+    };
+    const id = setInterval(tick, 2000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [baseUrl, fetchWithHeaders]);
   const stopTeleoperation = useCallback(async () => {
     if (stoppedRef.current) return;
     stoppedRef.current = true;
@@ -22,7 +76,47 @@ const TeleoperationPage = () => {
         method: "POST",
       });
       const data = await res.json();
-      if (data?.success) {
+      if (data?.warning) {
+        // Cleanup could not release an arm — torque may still be enabled and
+        // the arm can stay rigid. Make this loud instead of claiming success.
+        toast({
+          title: "Teleoperation stopped — check the arm",
+          description: data.warning,
+          variant: "destructive",
+        });
+      } else if (data?.releasing) {
+        // The backend drives the follower straight back to its session-start
+        // pose (no timed hold), then releases torque.
+        toast({
+          title: "Teleoperation stopped",
+          description:
+            data.message ?? "The arm returns to its starting position, then goes limp.",
+        });
+        // The release happens after this response returns, so check once
+        // after the return (progress-based, 10 s ceiling) whether it actually
+        // succeeded (the toast store is global, so this fires even after
+        // navigating away).
+        setTimeout(async () => {
+          try {
+            const status = await fetchWithHeaders(`${baseUrl}/teleoperation-status`).then((r) =>
+              r.json()
+            );
+            if (status?.last_cleanup_error) {
+              toast({
+                title: "Check the arm",
+                // Lead with the plain-language hint when the backend mapped
+                // one (e.g. gripper overload) — the raw text follows.
+                description: status.hint
+                  ? `${status.hint} (${status.last_cleanup_error})`
+                  : status.last_cleanup_error,
+                variant: "destructive",
+              });
+            }
+          } catch {
+            /* best-effort */
+          }
+        }, 13000);
+      } else if (data?.success) {
         toast({
           title: "Teleoperation stopped",
           description: "The arm was disconnected cleanly.",
@@ -45,7 +139,7 @@ const TeleoperationPage = () => {
   useEffect(() => {
     const handlePageHide = () => {
       try {
-        sessionStorage.setItem("lelab:teleop-stopped", "1");
+        sessionStorage.setItem("makerlab:teleop-stopped", "1");
       } catch {
         /* sessionStorage may be unavailable; the stop below still runs */
       }
@@ -67,12 +161,53 @@ const TeleoperationPage = () => {
     navigate("/");
   };
 
+  const finishedWarn = finished?.outcome === "ran_with_warning";
+
   return (
-    <div className="min-h-screen bg-black flex items-center justify-center p-2 sm:p-4">
+    <div className="relative min-h-screen bg-black flex items-center justify-center p-2 sm:p-4">
+      {finished && (
+        <div
+          className={`absolute top-4 left-1/2 -translate-x-1/2 z-50 w-[calc(100%-2rem)] max-w-xl rounded-lg border p-4 ${
+            finishedWarn
+              ? "border-amber-500/40 bg-amber-500/10"
+              : "border-red-500/40 bg-red-500/10"
+          }`}
+        >
+          <div
+            className={`flex items-center gap-2 text-sm font-semibold ${
+              finishedWarn ? "text-amber-300" : "text-red-300"
+            }`}
+          >
+            <span
+              className={`w-2 h-2 rounded-full ${
+                finishedWarn ? "bg-amber-500" : "bg-red-500"
+              }`}
+            />
+            {finishedWarn
+              ? "Teleoperation ended with a cleanup warning"
+              : "Teleoperation failed"}
+          </div>
+          {finished.hint && (
+            <p
+              className={`mt-2 text-sm leading-relaxed ${
+                finishedWarn ? "text-amber-100/90" : "text-red-100/90"
+              }`}
+            >
+              {finished.hint}
+            </p>
+          )}
+          {finished.error && (
+            <pre className="mt-3 max-h-40 overflow-auto rounded bg-black/40 p-2 text-xs text-slate-300 whitespace-pre-wrap break-words">
+              {finished.error}
+            </pre>
+          )}
+        </div>
+      )}
       <div className="w-full h-[95vh] flex">
         <VisualizerPanel
           onGoBack={handleGoBack}
           className="lg:w-full"
+          bimanual={bimanual}
           rightSlot={<TeleopCameraPanel />}
         />
       </div>

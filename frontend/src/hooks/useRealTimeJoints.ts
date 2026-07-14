@@ -4,14 +4,17 @@ import { useApi } from "@/contexts/ApiContext";
 
 interface JointData {
   type: "joint_update";
-  joints: Record<string, number>;
   timestamp: number;
+  // "joints" (primary/left arm) and, for bimanual, "joints_right".
+  [key: string]: unknown;
 }
 
 interface UseRealTimeJointsProps {
   viewerRef: React.RefObject<URDFViewerElement>;
   enabled?: boolean;
   websocketUrl?: string;
+  /** Which field of the joint message to apply — "joints" (default) or "joints_right". */
+  jointsKey?: string;
 }
 
 const INITIAL_RECONNECT_DELAY_MS = 1000;
@@ -21,6 +24,7 @@ export const useRealTimeJoints = ({
   viewerRef,
   enabled = true,
   websocketUrl,
+  jointsKey = "joints",
 }: UseRealTimeJointsProps) => {
   const { wsBaseUrl } = useApi();
   const finalWebSocketUrl = websocketUrl || `${wsBaseUrl}/ws/joint-data`;
@@ -76,8 +80,9 @@ export const useRealTimeJoints = ({
       ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data) as JointData;
-          if (data.type === "joint_update" && data.joints) {
-            updateJointValues(data.joints);
+          const joints = data[jointsKey] as Record<string, number> | undefined;
+          if (data.type === "joint_update" && joints) {
+            updateJointValues(joints);
           }
         } catch (error) {
           console.error("Error parsing WebSocket message:", error);
@@ -124,7 +129,7 @@ export const useRealTimeJoints = ({
       }
       setIsConnected(false);
     };
-  }, [enabled, finalWebSocketUrl, updateJointValues]);
+  }, [enabled, finalWebSocketUrl, updateJointValues, jointsKey]);
 
   return { isConnected };
 };
