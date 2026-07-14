@@ -1,22 +1,21 @@
-import React, { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import { ChevronsUpDown } from "lucide-react";
-import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
 import LandingTopBar from "@/components/landing/LandingTopBar";
 import Footer from "@/components/Footer";
 import RobotConfigManager from "@/components/landing/RobotConfigManager";
 import RecordingModal from "@/components/landing/RecordingModal";
-import DatasetPicker from "@/components/landing/DatasetPicker";
+import DatasetsPanel from "@/components/landing/DatasetsPanel";
+import ModelsPanel from "@/components/landing/ModelsPanel";
 import JobsSection from "@/components/jobs/JobsSection";
 
 import UsageInstructionsModal from "@/components/landing/UsageInstructionsModal";
 import { useHfAuth } from "@/contexts/HfAuthContext";
 import { useRobots } from "@/hooks/useRobots";
-import { useDatasets } from "@/hooks/useDatasets";
-import { DatasetItem } from "@/lib/replayApi";
+import { DatasetInfo } from "@/lib/replayApi";
 import { CameraConfig } from "@/components/recording/CameraConfiguration";
 import { isHostedSpace } from "@/lib/isHostedSpace";
+import { validateDatasetName } from "@/lib/datasetName";
 
 const ON_SPACE = isHostedSpace();
 
@@ -25,19 +24,26 @@ const Landing = () => {
   const { auth } = useHfAuth();
 
   const {
+    records,
     selectedName,
     selectedRecord,
     availableNames,
     isLoading: isLoadingRobots,
     selectRobot,
+    clearSelection,
     createRobot,
+    renameRobot,
     deleteRobot,
   } = useRobots();
 
-  const { datasets, loading: datasetsLoading } = useDatasets();
-
   // Recording modal state
   const [showRecordingModal, setShowRecordingModal] = useState(false);
+  // Non-null while the modal configures a RESUME session appending episodes to
+  // this existing dataset. Carries the /datasets/info summary so the modal can
+  // render its compatibility advisory; its repo_id goes to the backend
+  // VERBATIM (no username prepend, no name gate, no timestamp — the backend
+  // validates and skips stamping on resume). Cleared when the modal closes.
+  const [resumeInfo, setResumeInfo] = useState<DatasetInfo | null>(null);
   const [datasetName, setDatasetName] = useState("");
   const [singleTask, setSingleTask] = useState("");
   const [numEpisodes, setNumEpisodes] = useState(5);
@@ -80,45 +86,33 @@ const Landing = () => {
 
   const handleRecordingModalClose = (open: boolean) => {
     setShowRecordingModal(open);
-    if (!open && releaseStreamsRef.current) {
-      console.log("🧹 Modal closed: Releasing camera streams");
-      releaseStreamsRef.current();
+    if (!open) {
+      // A cancelled resume must not leak into the next plain "Record a
+      // dataset" session.
+      setResumeInfo(null);
+      if (releaseStreamsRef.current) {
+        console.log("🧹 Modal closed: Releasing camera streams");
+        releaseStreamsRef.current();
+      }
     }
   };
 
-  const handleTrainingClick = () => navigate("/training");
-
-  const openHubViewer = (repoId: string, isPrivate: boolean) => {
-    const spacePath = `/spaces/lerobot/visualize_dataset?path=${encodeURIComponent(`/${repoId}`)}`;
-    const target = isPrivate
-      ? `https://huggingface.co/login?next=${encodeURIComponent(spacePath)}`
-      : `https://huggingface.co${spacePath}`;
-    window.open(target, "_blank", "noopener,noreferrer");
-  };
-
-  const handlePickExisting = (item: DatasetItem) => {
-    if (item.source === "local" || item.source === "both") {
-      navigate("/upload", {
-        state: {
-          datasetInfo: {
-            dataset_repo_id: item.repo_id,
-            source: item.source,
-          },
-        },
-      });
-      return;
-    }
-    openHubViewer(item.repo_id, item.private);
-  };
-
-  const handleOpenCustom = (repoId: string) => {
-    // Custom-typed repo IDs are always treated as Hub paths. We don't know
-    // privacy, so route through the login redirect to be safe.
-    openHubViewer(repoId, true);
-  };
-
-  const handleCreateDataset = (name: string) => {
+  // "Record a dataset" in the Datasets panel: seed the recording form with the
+  // new name and open the recording modal (configured here with the selected
+  // robot + cameras).
+  const handleRecordNew = (name: string) => {
     setDatasetName(name);
+    openRecordingModal();
+  };
+
+  // "Record more episodes" on a local dataset's info card: open the recording
+  // modal in resume mode, seeding the task from the dataset's first task
+  // string (user-editable in the modal).
+  const handleResumeRecording = (info: DatasetInfo) => {
+    setResumeInfo(info);
+    if (info.tasks.length > 0 && info.tasks[0].task) {
+      setSingleTask(info.tasks[0].task);
+    }
     openRecordingModal();
   };
 
@@ -140,7 +134,8 @@ const Landing = () => {
       });
       return;
     }
-    if (!datasetName || !singleTask) {
+    const isResume = resumeInfo !== null;
+    if ((!isResume && !datasetName) || !singleTask) {
       toast({
         title: "Missing dataset details",
         description: "Please enter a dataset name and task description.",
@@ -148,9 +143,26 @@ const Landing = () => {
       });
       return;
     }
+    // THE ID-SHAPE TRAP: a resume must pass the selected dataset's on-disk
+    // repo_id VERBATIM — no username prepend, no bare-name validation gate
+    // (the backend validates the full repo id), and the backend skips its
+    // timestamp stamping on resume. Only a NEW dataset goes through the
+    // name-validate + namespace-prepend path.
+    if (!isResume) {
+      const nameError = validateDatasetName(datasetName);
+      if (nameError) {
+        toast({
+          title: "Invalid dataset name",
+          description: nameError,
+          variant: "destructive",
+        });
+        return;
+      }
+    }
 
-    const datasetRepoId =
-      auth.status === "authenticated"
+    const datasetRepoId = isResume
+      ? resumeInfo.repo_id
+      : auth.status === "authenticated"
         ? `${auth.username}/${datasetName}`
         : datasetName;
 
@@ -202,6 +214,17 @@ const Landing = () => {
       follower_port: robot.follower_port,
       leader_config: robot.leader_config,
       follower_config: robot.follower_config,
+      // Bimanual: forward mode + the right arm so the backend records a BiSO pair.
+      mode: robot.mode,
+      right_leader_port: robot.right_leader_port,
+      right_follower_port: robot.right_follower_port,
+      right_leader_config: robot.right_leader_config,
+      right_follower_config: robot.right_follower_config,
+      // Robot name → BiSO staging base id (bimanual). Names the per-session
+      // staging dir; does not affect which calibration drives which arm.
+      robot_name: robot.name,
+      // Follower torque limit for the session (10-100% of full power).
+      motor_power: robot.motor_power ?? 100,
       dataset_repo_id: datasetRepoId,
       single_task: singleTask,
       num_episodes: numEpisodes,
@@ -210,7 +233,7 @@ const Landing = () => {
       fps: 30,
       video: true,
       push_to_hub: false,
-      resume: false,
+      resume: isResume,
       streaming_encoding: streamingEncoding,
       cameras: cameraDict,
     };
@@ -222,62 +245,31 @@ const Landing = () => {
   return (
     <div
       className="min-h-screen bg-black text-white pb-16"
-      style={{ ["--lelab-topbar-h" as string]: "48px" }}
+      style={{ ["--makerlab-topbar-h" as string]: "48px" }}
     >
       <LandingTopBar />
 
-      <div
-        className="sticky z-20 bg-black/95 backdrop-blur supports-[backdrop-filter]:bg-black/70 border-b border-gray-800"
-        style={{ top: "var(--lelab-topbar-h)" }}
-      >
-        <div className="mx-auto max-w-7xl px-4 py-4 grid gap-4 grid-cols-1 lg:grid-cols-[1.2fr_2fr]">
+      {/* Scrolls with the page (user preference) — only the slim top bar stays
+          sticky; the card row previously pinned itself below it. */}
+      <div className="bg-black border-b border-gray-800">
+        <div className="mx-auto max-w-7xl px-4 py-4 grid gap-4 grid-cols-1 md:grid-cols-2 lg:grid-cols-3">
           <RobotConfigManager
+            records={records}
             selectedName={selectedName}
             selectedRecord={selectedRecord}
             availableNames={availableNames}
             isLoading={isLoadingRobots}
             selectRobot={selectRobot}
+            clearSelection={clearSelection}
             createRobot={createRobot}
+            renameRobot={renameRobot}
             deleteRobot={deleteRobot}
           />
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            <div className="bg-gray-800 rounded-lg border border-gray-700 p-3 flex flex-col gap-2">
-              <h3 className="font-semibold text-lg text-left h-10 flex items-center">
-                Dataset
-              </h3>
-              <DatasetPicker
-                datasets={datasets}
-                loading={datasetsLoading}
-                onPickExisting={handlePickExisting}
-                onOpenCustom={handleOpenCustom}
-                onCreateNew={handleCreateDataset}
-              >
-                <Button
-                  variant="outline"
-                  role="combobox"
-                  className="w-full justify-between bg-gray-800 border-gray-600 text-white hover:bg-gray-700"
-                >
-                  <span className="truncate text-gray-300">
-                    {datasetsLoading
-                      ? "Loading datasets…"
-                      : "Select or create a dataset…"}
-                  </span>
-                  <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
-                </Button>
-              </DatasetPicker>
-            </div>
-            <div className="bg-gray-800 rounded-lg border border-gray-700 p-3 flex flex-col gap-2">
-              <h3 className="font-semibold text-lg text-left h-10 flex items-center">
-                Create a model
-              </h3>
-              <Button
-                onClick={handleTrainingClick}
-                className="w-full bg-green-500 hover:bg-green-600 text-white"
-              >
-                Training
-              </Button>
-            </div>
-          </div>
+          <DatasetsPanel
+            onRecordNew={handleRecordNew}
+            onResumeRecording={handleResumeRecording}
+          />
+          <ModelsPanel />
         </div>
       </div>
 
@@ -296,6 +288,7 @@ const Landing = () => {
       <RecordingModal
         open={showRecordingModal}
         onOpenChange={handleRecordingModalClose}
+        resumeInfo={resumeInfo}
         robot={selectedRecord}
         datasetName={datasetName}
         setDatasetName={setDatasetName}

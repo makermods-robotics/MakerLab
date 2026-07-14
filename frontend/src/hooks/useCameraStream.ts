@@ -58,7 +58,21 @@ export function useCameraStream(deviceId: string, paused: boolean) {
     const start = async (attempt: number) => {
       try {
         stream = await navigator.mediaDevices.getUserMedia({
-          video: { deviceId: { exact: deviceId } },
+          video: {
+            deviceId: { exact: deviceId },
+            // Ask for 720p30 so Chromium negotiates MJPEG instead of raw
+            // YUYV. On Linux/V4L2 an unconstrained request lands on
+            // YUYV 640x480, and one raw stream costs ~150 Mbps of a
+            // 480 Mbps USB-2 bus — a third concurrent preview then fails
+            // NotReadableError ("could not start video source"). These
+            // cameras can't do 720p@30 uncompressed, so this forces the
+            // ~10x lighter MJPEG, matching what macOS/AVFoundation picks
+            // on its own. `ideal` degrades gracefully on cameras without
+            // 720p (no OverconstrainedError).
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+            frameRate: { ideal: 30 },
+          },
         });
         if (cancelled) {
           stream.getTracks().forEach((t) => t.stop());

@@ -10,7 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Terminal, ExternalLink, Copy, Check } from "lucide-react";
 
 const ONE_LINER =
-  "uv tool install git+https://github.com/huggingface/leLab.git && lelab";
+  "uv tool install git+https://github.com/makermods-robotics/MakerLab.git && makerlab";
 const LOCAL_URL = "http://localhost:8000/";
 
 interface UsageInstructionsModalProps {
@@ -55,10 +55,10 @@ const UsageInstructionsModal: React.FC<UsageInstructionsModalProps> = ({
         <DialogHeader className="text-center sm:text-center min-w-0">
           <DialogTitle className="text-white flex items-center justify-center gap-2 text-xl">
             <Terminal className="w-6 h-6" />
-            Get Started with LeLab
+            Get Started with MakerLab
           </DialogTitle>
           <DialogDescription>
-            LeLab runs on your machine. Click the command to copy it, then paste
+            MakerLab runs on your machine. Click the command to copy it, then paste
             in a terminal:
           </DialogDescription>
         </DialogHeader>
@@ -87,7 +87,7 @@ const UsageInstructionsModal: React.FC<UsageInstructionsModalProps> = ({
             </span>
           </button>
           <p className="text-gray-400 text-sm text-center">
-            After running, your browser will open the local LeLab app.
+            After running, your browser will open the local MakerLab app.
           </p>
           <Button
             asChild
@@ -95,7 +95,7 @@ const UsageInstructionsModal: React.FC<UsageInstructionsModalProps> = ({
           >
             <a href={LOCAL_URL} target="_blank" rel="noopener noreferrer">
               <ExternalLink className="w-4 h-4 mr-2" />
-              Open LeLab
+              Open MakerLab
             </a>
           </Button>
         </div>

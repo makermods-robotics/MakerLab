@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useApi } from "@/contexts/ApiContext";
 
 export interface AvailableCamera {
@@ -27,21 +27,49 @@ export function useAvailableCameras({
   const { baseUrl, fetchWithHeaders } = useApi();
   const [cameras, setCameras] = useState<AvailableCamera[]>([]);
   const [isLoading, setIsLoading] = useState(false);
+  // Latest result, readable without making `refresh` depend on `cameras`
+  // (which would re-fire the effect and its listener every enumeration).
+  const camerasRef = useRef<AvailableCamera[]>([]);
+  // Drop overlapping refreshes so a devicechange burst can't stack getUserMedia
+  // probes / backend enumerations on top of each other.
+  const refreshingRef = useRef(false);
+  // Opening a camera stream is only needed ONCE, to unlock enumerateDevices()
+  // labels. Re-opening it on every refresh — and re-entrantly from the
+  // devicechange handler — is what made the preview flash and macOS reshuffle
+  // camera indices (waking Continuity Camera / Desk View shifts the uniqueID
+  // sort). After the first grant, labels persist, so we never probe again.
+  const permissionProbedRef = useRef(false);
 
   const refresh = useCallback(async (): Promise<AvailableCamera[]> => {
+    if (refreshingRef.current) return camerasRef.current;
+    refreshingRef.current = true;
     setIsLoading(true);
     try {
-      // Need a permission grant before enumerateDevices() returns labels.
-      try {
-        const probe = await navigator.mediaDevices.getUserMedia({ video: true });
-        probe.getTracks().forEach((t) => t.stop());
-      } catch {
-        // ignore — we'll still try to enumerate, just without labels
+      // navigator.mediaDevices only exists in secure contexts (https or
+      // localhost). Without it, skip browser matching — backend cv2 indices
+      // still list and recording works, there are just no live previews.
+      let browserDevices: { deviceId: string; label: string }[] = [];
+      const md = navigator.mediaDevices;
+      if (md) {
+        let devices = await md.enumerateDevices();
+        const hasLabels = devices.some((d) => d.kind === "videoinput" && d.label);
+        // Only open a real stream if labels are still hidden (permission not yet
+        // granted) AND we've never probed. Never from a devicechange re-entry —
+        // that feedback loop was the root of the flashing/index churn.
+        if (!hasLabels && !permissionProbedRef.current) {
+          permissionProbedRef.current = true;
+          try {
+            const probe = await md.getUserMedia({ video: true });
+            probe.getTracks().forEach((t) => t.stop());
+            devices = await md.enumerateDevices();
+          } catch {
+            // ignore — we'll still try to enumerate, just without labels
+          }
+        }
+        browserDevices = devices
+          .filter((d) => d.kind === "videoinput")
+          .map((d) => ({ deviceId: d.deviceId, label: d.label }));
       }
-
-      const browserDevices = (await navigator.mediaDevices.enumerateDevices())
-        .filter((d) => d.kind === "videoinput")
-        .map((d) => ({ deviceId: d.deviceId, label: d.label }));
 
       const r = await fetchWithHeaders(`${baseUrl}/available-cameras`);
       if (!r.ok) {
@@ -80,22 +108,36 @@ export function useAvailableCameras({
         };
       });
       setCameras(merged);
+      camerasRef.current = merged;
       return merged;
     } catch {
       setCameras([]);
+      camerasRef.current = [];
       return [];
     } finally {
       setIsLoading(false);
+      refreshingRef.current = false;
     }
   }, [baseUrl, fetchWithHeaders]);
 
   useEffect(() => {
     if (!enabled) return;
     refresh();
-    const handler = () => refresh();
-    navigator.mediaDevices.addEventListener("devicechange", handler);
-    return () =>
-      navigator.mediaDevices.removeEventListener("devicechange", handler);
+    const md = navigator.mediaDevices;
+    if (!md) return; // insecure context: no hotplug events, refresh() ran once
+    // Debounce hotplug bursts (a single plug event can fire several
+    // devicechanges, and any getUserMedia churn elsewhere adds more) into one
+    // refresh instead of a storm that keeps re-opening cameras.
+    let debounce: ReturnType<typeof setTimeout> | null = null;
+    const handler = () => {
+      if (debounce) clearTimeout(debounce);
+      debounce = setTimeout(() => refresh(), 500);
+    };
+    md.addEventListener("devicechange", handler);
+    return () => {
+      if (debounce) clearTimeout(debounce);
+      md.removeEventListener("devicechange", handler);
+    };
   }, [enabled, refresh]);
 
   return { cameras, isLoading, refresh };

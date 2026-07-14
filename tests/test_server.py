@@ -15,21 +15,29 @@
 
 from __future__ import annotations
 
+import asyncio
+import datetime as _dt
+import logging
+import threading
+import time
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
+
+import makerlab.server as server_mod
+from makerlab.utils import config as cfg
 
 # A browser sends an Accept header that prefers HTML on navigations/hard-reloads.
 BROWSER_ACCEPT = {"accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"}
 
 REQUIRED_PATHS = {
     "/health",
-    "/get-configs",
     "/move-arm",
     "/stop-teleoperation",
     "/teleoperation-status",
-    "/joint-positions",
     "/start-recording",
     "/stop-recording",
     "/recording-status",
@@ -79,6 +87,263 @@ def test_delete_calibration_config_rejects_unsafe_name(client: TestClient, unsaf
     body = response.json()
     assert body["success"] is False
     assert "Invalid configuration name" in body["message"]
+
+
+def test_delete_in_use_calibration_config_unassigns_robots(
+    client: TestClient, tmp_lerobot_home, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Deleting an in-use config is ALLOWED; the referencing robots are
+    unassigned (arm returns to "needs calibration") and reported back."""
+    robots_dir = tmp_lerobot_home / "robots"
+    robots_dir.mkdir(exist_ok=True)
+    monkeypatch.setattr(cfg, "ROBOTS_PATH", str(robots_dir))
+    # server.py binds LEADER_CONFIG_PATH at import; repoint it at the tmp dir.
+    monkeypatch.setattr(server_mod, "LEADER_CONFIG_PATH", cfg.LEADER_CONFIG_PATH)
+
+    config_file = Path(cfg.LEADER_CONFIG_PATH) / "mycal.json"
+    config_file.write_text("{}")
+    cfg.save_robot_record("armA", {"mode": "single", "leader_config": "mycal"}, allow_create=True)
+
+    resp = client.delete("/calibration-configs/teleop/mycal")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["success"] is True
+    assert body["unassigned"] == [{"robot": "armA", "fields": ["leader_config"]}]
+    assert "armA" in body["message"]
+    # The file is gone (this dir IS where lerobot loads calibrations from, so
+    # no stale copy can keep working) and the record is unassigned + dirty.
+    assert not config_file.exists()
+    record = cfg.get_robot_record("armA")
+    assert record["leader_config"] == ""
+    assert cfg.is_robot_record_clean(record) is False
+
+
+def test_delete_unused_calibration_config_reports_no_unassignments(
+    client: TestClient, tmp_lerobot_home, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(server_mod, "LEADER_CONFIG_PATH", cfg.LEADER_CONFIG_PATH)
+    config_file = Path(cfg.LEADER_CONFIG_PATH) / "spare.json"
+    config_file.write_text("{}")
+
+    resp = client.delete("/calibration-configs/teleop/spare")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["success"] is True
+    assert body["unassigned"] == []
+    assert not config_file.exists()
+
+
+def test_upsert_robot_rejects_same_side_config_conflict(client: TestClient, tmp_lerobot_home) -> None:
+    """Assigning one config to both same-side arms of a bimanual robot is a 409."""
+    client.post(
+        "/robots/bi?create=true",
+        json={"mode": "bimanual", "leader_config": "L1", "right_leader_config": "L2"},
+    )
+    # right leader = left leader -> conflict.
+    resp = client.post("/robots/bi", json={"right_leader_config": "L1"})
+    assert resp.status_code == 409
+    assert "leader" in resp.json()["message"]
+
+    # A non-slot edit (cameras) is never blocked.
+    assert client.post("/robots/bi", json={"cameras": []}).status_code == 200
+
+
+def test_upsert_robot_rejects_shared_port(client: TestClient, tmp_lerobot_home) -> None:
+    """Two arms can't share a serial port (each is its own USB device)."""
+    client.post("/robots/p?create=true", json={"leader_port": "/dev/a"})
+    # follower on the same port as leader -> 409.
+    resp = client.post("/robots/p", json={"follower_port": "/dev/a"})
+    assert resp.status_code == 409
+    assert "/dev/a" in resp.json()["message"]
+    # A distinct port is fine.
+    assert client.post("/robots/p", json={"follower_port": "/dev/b"}).status_code == 200
+
+
+def test_upsert_robot_clears_port_with_empty_string(client: TestClient, tmp_lerobot_home) -> None:
+    """Posting an empty-string port releases the assignment (disconnect without
+    reconnecting), and two cleared ports never count as a shared-port conflict."""
+    client.post("/robots/d?create=true", json={"leader_port": "/dev/a", "follower_port": "/dev/b"})
+
+    resp = client.post("/robots/d", json={"leader_port": ""})
+    assert resp.status_code == 200
+    assert resp.json()["robot"]["leader_port"] == ""
+
+    # Clearing the other arm too must not trip the duplicate-port guard.
+    resp = client.post("/robots/d", json={"follower_port": ""})
+    assert resp.status_code == 200
+    assert resp.json()["robot"]["follower_port"] == ""
+
+    # A cleared port doesn't block re-assigning that port to the other arm.
+    assert client.post("/robots/d", json={"leader_port": "/dev/b"}).status_code == 200
+
+
+@pytest.mark.parametrize("mode", ["single", "bimanual"])
+def test_create_robot_accepts_mode(client: TestClient, tmp_lerobot_home, mode: str) -> None:
+    """Mode is established at creation for both values."""
+    resp = client.post(f"/robots/created_{mode}?create=true", json={"mode": mode})
+    assert resp.status_code == 200
+    assert resp.json()["robot"]["mode"] == mode
+
+
+def test_upsert_robot_rejects_mode_change_on_existing_record(client: TestClient, tmp_lerobot_home) -> None:
+    """Mode is fixed at creation. A patch that flips the stored mode is a 409;
+    creating a new robot is the migration path instead."""
+    client.post("/robots/fixed?create=true", json={"mode": "single"})
+
+    resp = client.post("/robots/fixed", json={"mode": "bimanual"})
+    assert resp.status_code == 409
+    assert "fixed at creation" in resp.json()["message"]
+    # The stored mode is untouched by the rejected patch.
+    assert client.get("/robots/fixed").json()["robot"]["mode"] == "single"
+
+
+def test_upsert_robot_allows_same_mode_echo(client: TestClient, tmp_lerobot_home) -> None:
+    """Calibration write-backs echo the full record (including its current
+    mode); a same-value mode in the body must stay a no-op, not a 409."""
+    client.post("/robots/echo?create=true", json={"mode": "bimanual"})
+
+    # Echo the existing mode alongside a real edit — must succeed.
+    resp = client.post("/robots/echo", json={"mode": "bimanual", "leader_port": "/dev/a"})
+    assert resp.status_code == 200
+    robot = resp.json()["robot"]
+    assert robot["mode"] == "bimanual"
+    assert robot["leader_port"] == "/dev/a"
+
+
+def _access_record(method: str, path: str, status: int) -> logging.LogRecord:
+    """Build a LogRecord shaped like uvicorn.access emits:
+    args = (client_addr, method, full_path, http_version, status_code)."""
+    return logging.LogRecord(
+        name="uvicorn.access",
+        level=logging.INFO,
+        pathname="",
+        lineno=0,
+        msg='%s - "%s %s HTTP/%s" %d',
+        args=("127.0.0.1:1234", method, path, "1.1", status),
+        exc_info=None,
+    )
+
+
+def test_status_poll_access_filter_drops_only_successful_status_gets() -> None:
+    """The uvicorn.access filter silences ~2 Hz status polls but keeps errors,
+    writes, and every other path."""
+    f = server_mod._StatusPollAccessFilter()
+
+    # High-frequency polls with 2xx are dropped (query string ignored).
+    assert f.filter(_access_record("GET", "/teleoperation-status", 200)) is False
+    assert f.filter(_access_record("GET", "/auto-calibration-status", 200)) is False
+    assert f.filter(_access_record("GET", "/jobs?limit=20", 200)) is False
+
+    # Errors on those same paths must still log.
+    assert f.filter(_access_record("GET", "/recording-status", 500)) is True
+    assert f.filter(_access_record("GET", "/jobs", 404)) is True
+
+    # Writes and non-status paths are untouched.
+    assert f.filter(_access_record("POST", "/jobs/training", 201)) is True
+    assert f.filter(_access_record("GET", "/health", 200)) is True
+    # Subpaths of /jobs (log tails, checkpoints) are NOT silenced.
+    assert f.filter(_access_record("GET", "/jobs/abc123/logs", 200)) is True
+
+    # Records that don't look like uvicorn access lines pass through.
+    other = logging.LogRecord("uvicorn.access", logging.INFO, "", 0, "plain", None, None)
+    assert f.filter(other) is True
+
+
+def test_policy_optimizer_defaults_reports_availability(client: TestClient) -> None:
+    """`available` marks which policy types this lerobot pin can construct.
+    act must work everywhere; reward_classifier registers under lerobot's
+    rewards registry (not the policy registry) in this pin, so it's out."""
+    data = client.get("/policy-optimizer-defaults").json()
+    assert set(data["available"]) == set(data["defaults"])
+    assert data["available"]["act"] is True
+    assert data["defaults"]["act"] is not None
+    assert data["available"]["pi0_fast"] is True
+    assert data["available"]["reward_classifier"] is False
+    assert data["defaults"]["reward_classifier"] is None
+
+
+@pytest.mark.parametrize("unsafe_name", ["evil..name", "..config", "back\\door"])
+def test_download_calibration_config_rejects_unsafe_name(client: TestClient, unsafe_name: str) -> None:
+    response = client.get(f"/calibration-configs/teleop/{unsafe_name}/download")
+    assert response.status_code == 400
+    assert "Invalid configuration name" in response.json()["message"]
+
+
+def test_download_calibration_config_rejects_bad_device_type(client: TestClient) -> None:
+    response = client.get("/calibration-configs/bogus/arm/download")
+    assert response.status_code == 400
+
+
+def test_download_calibration_config_returns_file(
+    client: TestClient, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A leader config downloads byte-for-byte as a raw JSON attachment."""
+    leader_dir = tmp_path / "leader"
+    leader_dir.mkdir()
+    (leader_dir / "armA.json").write_text('{"shoulder_pan": {"id": 1}}')
+    # server.py binds its own LEADER_CONFIG_PATH at import — patch that one.
+    monkeypatch.setattr("makerlab.server.LEADER_CONFIG_PATH", str(leader_dir))
+
+    response = client.get("/calibration-configs/teleop/armA/download")
+    assert response.status_code == 200
+    assert response.headers["content-disposition"] == 'attachment; filename="armA.json"'
+    assert response.json() == {"shoulder_pan": {"id": 1}}
+
+
+def test_download_calibration_config_accepts_dot_json_suffix(
+    client: TestClient, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Robot records store config names with the .json extension; passing that
+    form must resolve to the file, not "<name>.json.json"."""
+    leader_dir = tmp_path / "leader"
+    leader_dir.mkdir()
+    (leader_dir / "so101.json").write_text('{"shoulder_pan": {"id": 1}}')
+    monkeypatch.setattr("makerlab.server.LEADER_CONFIG_PATH", str(leader_dir))
+
+    response = client.get("/calibration-configs/teleop/so101.json/download")
+    assert response.status_code == 200
+    assert response.headers["content-disposition"] == 'attachment; filename="so101.json"'
+
+
+def test_download_calibration_config_missing_returns_404(
+    client: TestClient, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    leader_dir = tmp_path / "leader"
+    leader_dir.mkdir()
+    monkeypatch.setattr("makerlab.server.LEADER_CONFIG_PATH", str(leader_dir))
+
+    response = client.get("/calibration-configs/teleop/nope/download")
+    assert response.status_code == 404
+
+
+_GOOD_CALIBRATION = {
+    "shoulder_pan": {"id": 1, "drive_mode": 0, "homing_offset": 1927, "range_min": 741, "range_max": 3472},
+}
+
+
+def test_upload_calibration_config_rejects_bad_device_type(client: TestClient) -> None:
+    response = client.post("/calibration-configs/bogus/upload", json={"name": "x", "data": _GOOD_CALIBRATION})
+    assert response.status_code == 400
+
+
+def test_upload_calibration_config_rejects_malformed_data(client: TestClient) -> None:
+    response = client.post("/calibration-configs/teleop/upload", json={"name": "x", "data": {"m": {"id": 1}}})
+    assert response.status_code == 400
+    assert "missing" in response.json()["message"]
+
+
+def test_upload_calibration_config_writes_then_409_on_collision(client: TestClient, tmp_lerobot_home) -> None:
+    """First upload writes; a second under the same name is rejected (no overwrite)."""
+    first = client.post(
+        "/calibration-configs/teleop/upload", json={"name": "armA", "data": _GOOD_CALIBRATION}
+    )
+    assert first.status_code == 200
+    assert first.json()["name"] == "armA"
+
+    second = client.post(
+        "/calibration-configs/teleop/upload", json={"name": "armA", "data": _GOOD_CALIBRATION}
+    )
+    assert second.status_code == 409
 
 
 def _spa_mounted(client: TestClient) -> bool:
@@ -133,8 +398,6 @@ def test_connection_manager_tracks_connect_and_disconnect() -> None:
     fake_ws = MagicMock()
     fake_ws.accept = AsyncMock()
 
-    import asyncio
-
     asyncio.run(mgr.connect(fake_ws))
     assert fake_ws in mgr.active_connections
 
@@ -148,6 +411,132 @@ def test_connection_manager_broadcast_sync_does_not_block_without_loop() -> None
     mgr = ConnectionManager()
     # Should enqueue without raising even if there are no consumers.
     mgr.broadcast_joint_data_sync({"shoulder_pan.pos": 1.0})
+
+
+class _LoopThread:
+    """A real asyncio loop on a background thread, standing in for uvicorn's
+    event loop in ConnectionManager tests: websockets are accepted on it and
+    the broadcast worker must marshal sends back onto it."""
+
+    def __init__(self) -> None:
+        self.loop = asyncio.new_event_loop()
+        self._thread = threading.Thread(target=self.loop.run_forever, daemon=True)
+        self._thread.start()
+
+    def run(self, coro):
+        return asyncio.run_coroutine_threadsafe(coro, self.loop).result(timeout=2.0)
+
+    def close(self) -> None:
+        self.loop.call_soon_threadsafe(self.loop.stop)
+        self._thread.join(timeout=2.0)
+        self.loop.close()
+
+
+@pytest.fixture
+def ws_loop():
+    loop_thread = _LoopThread()
+    yield loop_thread
+    loop_thread.close()
+
+
+def _wait_for(predicate, timeout: float = 2.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return False
+
+
+def _fake_ws(send_json=None) -> MagicMock:
+    ws = MagicMock()
+    ws.accept = AsyncMock()
+    ws.send_json = send_json if send_json is not None else AsyncMock()
+    return ws
+
+
+def test_broadcast_sends_on_owning_loop_and_survives_dead_connection(ws_loop) -> None:
+    """A send failure must drop only that connection — not kill the worker —
+    and healthy sends must run on the loop that accepted the websocket
+    (regression: 'Task got Future attached to a different loop')."""
+    from makerlab.server import ConnectionManager
+
+    mgr = ConnectionManager()
+    seen: dict[str, object] = {}
+
+    async def _record(data):
+        seen["loop"] = asyncio.get_running_loop()
+        seen["data"] = data
+
+    ws_ok = _fake_ws(send_json=AsyncMock(side_effect=_record))
+    ws_dead = _fake_ws(send_json=AsyncMock(side_effect=RuntimeError("client went away")))
+
+    ws_loop.run(mgr.connect(ws_ok))
+    ws_loop.run(mgr.connect(ws_dead))
+    worker = mgr.broadcast_thread
+    try:
+        mgr.broadcast_joint_data_sync({"shoulder_pan.pos": 1.0})
+
+        assert _wait_for(lambda: ws_dead not in mgr.active_connections)
+        assert ws_ok in mgr.active_connections
+        assert seen["loop"] is ws_loop.loop
+        assert seen["data"] == {"shoulder_pan.pos": 1.0}
+        assert mgr.is_running
+        assert worker.is_alive()
+
+        # The surviving connection keeps receiving broadcasts.
+        mgr.broadcast_joint_data_sync({"shoulder_pan.pos": 2.0})
+        assert _wait_for(lambda: seen.get("data") == {"shoulder_pan.pos": 2.0})
+    finally:
+        mgr.disconnect(ws_ok)
+
+
+def test_connection_manager_rapid_reconnect_restarts_worker(ws_loop) -> None:
+    """Disconnect-then-reconnect while broadcasts flow (browser reload during
+    teleop) must hand off cleanly to a fresh worker with no self-join
+    (regression: 'cannot join current thread' killing joint streaming)."""
+    from makerlab.server import ConnectionManager
+
+    mgr = ConnectionManager()
+    ws1 = _fake_ws()
+    ws2 = _fake_ws()
+
+    ws_loop.run(mgr.connect(ws1))
+    first_worker = mgr.broadcast_thread
+    mgr.broadcast_joint_data_sync({"n": 1})
+    assert _wait_for(lambda: ws1.send_json.call_count >= 1)
+
+    # Last client drops: the worker is signaled to stop but never joined.
+    mgr.disconnect(ws1)
+    assert not mgr.is_running
+
+    # Immediate reconnect restarts broadcasting on a fresh worker.
+    ws_loop.run(mgr.connect(ws2))
+    assert mgr.is_running
+    second_worker = mgr.broadcast_thread
+    assert second_worker is not first_worker
+
+    try:
+        mgr.broadcast_joint_data_sync({"n": 2})
+        assert _wait_for(lambda: ws2.send_json.call_count >= 1)
+        ws2.send_json.assert_called_with({"n": 2})
+
+        # The replaced worker notices it's been superseded and exits on its
+        # own even though is_running is True again.
+        first_worker.join(timeout=2.0)
+        assert not first_worker.is_alive()
+    finally:
+        mgr.disconnect(ws2)
+
+
+def _install_fake_pygrabber(monkeypatch: pytest.MonkeyPatch, filter_graph_cls) -> None:
+    import sys
+    import types
+
+    module = types.ModuleType("pygrabber.dshow_graph")
+    module.FilterGraph = filter_graph_cls
+    monkeypatch.setitem(sys.modules, "pygrabber", types.ModuleType("pygrabber"))
+    monkeypatch.setitem(sys.modules, "pygrabber.dshow_graph", module)
 
 
 def _install_fake_pygrabber(monkeypatch: pytest.MonkeyPatch, filter_graph_cls) -> None:
@@ -228,6 +617,8 @@ def test_import_model_route_returns_record(client, monkeypatch) -> None:
     }
     from makerlab.jobs import JobRecord
 
+    # No pre-existing entry for this source → fresh 201 path.
+    monkeypatch.setattr(server.job_registry, "find_imported", lambda source: None)
     monkeypatch.setattr(
         server.job_registry,
         "register_imported",
@@ -236,6 +627,38 @@ def test_import_model_route_returns_record(client, monkeypatch) -> None:
     resp = client.post("/jobs/import", json={"source": "/tmp/model"})
     assert resp.status_code == 201
     assert resp.json()["runner"] == "imported"
+    assert "already_imported" not in resp.json()
+
+
+def test_import_model_route_flags_duplicate_with_200(client, monkeypatch) -> None:
+    """Re-importing an already-registered source returns the EXISTING record
+    with already_imported=true and a 200 (not 201)."""
+    from makerlab import server
+    from makerlab.jobs import JobRecord
+
+    existing = JobRecord(
+        id="act_imported_x",
+        name="Imported · model",
+        display_name="my alias",
+        state="done",
+        config={"dataset_repo_id": "(imported)", "policy_type": "act"},
+        output_dir="/tmp/model",
+        started_at=1.0,
+        ended_at=1.0,
+        runner="imported",
+    )
+    monkeypatch.setattr(server.job_registry, "find_imported", lambda source: existing)
+    monkeypatch.setattr(
+        server.job_registry,
+        "register_imported",
+        lambda source, name=None: existing,
+    )
+    resp = client.post("/jobs/import", json={"source": "/tmp/model"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["already_imported"] is True
+    assert body["id"] == "act_imported_x"
+    assert body["display_name"] == "my alias"  # alias preserved on re-import
 
 
 def test_import_model_route_maps_value_error_to_400(client, monkeypatch) -> None:
@@ -244,7 +667,366 @@ def test_import_model_route_maps_value_error_to_400(client, monkeypatch) -> None
     def boom(source, name=None):
         raise ValueError("No usable model at '/tmp/x'")
 
+    monkeypatch.setattr(server.job_registry, "find_imported", lambda source: None)
     monkeypatch.setattr(server.job_registry, "register_imported", boom)
     resp = client.post("/jobs/import", json={"source": "/tmp/x"})
     assert resp.status_code == 400
     assert "No usable model" in resp.json()["detail"]
+
+
+def test_rename_job_route_returns_updated_record(client, monkeypatch) -> None:
+    from makerlab import server
+    from makerlab.jobs import JobRecord
+
+    fake = {
+        "id": "act_ds_x",
+        "name": "ACT · user/ds",
+        "display_name": "my run",
+        "state": "done",
+        "config": {"dataset_repo_id": "user/ds", "policy_type": "act"},
+        "output_dir": "/tmp/run",
+        "started_at": 1.0,
+    }
+    seen = {}
+
+    def fake_rename(job_id, new_name):
+        seen["args"] = (job_id, new_name)
+        return JobRecord(**fake)
+
+    monkeypatch.setattr(server.job_registry, "rename", fake_rename)
+    resp = client.post("/jobs/act_ds_x/rename", json={"new_name": "my run"})
+    assert resp.status_code == 200
+    assert resp.json()["display_name"] == "my run"
+    assert seen["args"] == ("act_ds_x", "my run")
+
+
+def test_rename_job_route_maps_not_found_to_404(client, monkeypatch) -> None:
+    from makerlab import server
+    from makerlab.jobs import JobNotFoundError
+
+    def boom(job_id, new_name):
+        raise JobNotFoundError(job_id)
+
+    monkeypatch.setattr(server.job_registry, "rename", boom)
+    resp = client.post("/jobs/nope/rename", json={"new_name": "x"})
+    assert resp.status_code == 404
+
+
+def test_rename_job_route_maps_value_error_to_400(client, monkeypatch) -> None:
+    from makerlab import server
+
+    def boom(job_id, new_name):
+        raise ValueError("Display name cannot be empty.")
+
+    monkeypatch.setattr(server.job_registry, "rename", boom)
+    resp = client.post("/jobs/act_ds_x/rename", json={"new_name": "   "})
+    assert resp.status_code == 400
+    assert "empty" in resp.json()["detail"]
+
+
+# --- DELETE /jobs/hub/models/{repo_id} -------------------------------------
+#
+# Deleting an orphaned hub MODEL repo. Uses a mocked shared HfApi so no real
+# Hub call is made. The endpoint is scoped to the caller's own namespace and
+# treats a missing repo (delete_repo missing_ok=True) as idempotent success.
+
+
+def _patch_hub_delete(monkeypatch, *, username, api):
+    """Point the endpoint at a fake whoami (namespace) and a fake HfApi."""
+    monkeypatch.setattr(
+        server_mod,
+        "cached_whoami",
+        lambda: {"name": username} if username else None,
+    )
+    monkeypatch.setattr(server_mod, "shared_hf_api", lambda: api)
+
+
+def test_delete_hub_model_success(client: TestClient, monkeypatch) -> None:
+    api = MagicMock()
+    _patch_hub_delete(monkeypatch, username="makermods", api=api)
+
+    resp = client.delete("/jobs/hub/models/makermods/smolvla_orphan_2026")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "success"
+    assert body["repo_id"] == "makermods/smolvla_orphan_2026"
+    api.delete_repo.assert_called_once_with(
+        "makermods/smolvla_orphan_2026", repo_type="model", missing_ok=True
+    )
+
+
+def test_delete_hub_model_missing_repo_is_idempotent_success(client: TestClient, monkeypatch) -> None:
+    # missing_ok=True means the Hub 404 never surfaces — delete_repo just
+    # returns. The endpoint therefore reports success for an already-gone repo.
+    api = MagicMock()
+    api.delete_repo.return_value = None
+    _patch_hub_delete(monkeypatch, username="makermods", api=api)
+
+    resp = client.delete("/jobs/hub/models/makermods/already_gone")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "success"
+
+
+def test_delete_hub_model_permission_error_is_friendly(client: TestClient, monkeypatch) -> None:
+    import requests
+    from huggingface_hub.errors import HfHubHTTPError
+
+    response = requests.Response()
+    response.status_code = 403
+    api = MagicMock()
+    api.delete_repo.side_effect = HfHubHTTPError("forbidden", response=response)
+    _patch_hub_delete(monkeypatch, username="makermods", api=api)
+
+    resp = client.delete("/jobs/hub/models/makermods/no_write_scope")
+    assert resp.status_code == 403
+    detail = resp.json()["detail"]
+    assert "write access" in detail
+
+
+def test_delete_hub_model_refuses_foreign_namespace(client: TestClient, monkeypatch) -> None:
+    # The caller is "makermods" but tries to delete a repo under "someoneelse".
+    # Refused up front — the Hub is never called.
+    api = MagicMock()
+    _patch_hub_delete(monkeypatch, username="makermods", api=api)
+
+    resp = client.delete("/jobs/hub/models/someoneelse/their_model")
+    assert resp.status_code == 403
+    assert "namespace" in resp.json()["detail"]
+    api.delete_repo.assert_not_called()
+
+
+def test_delete_hub_model_unauthenticated_is_401(client: TestClient, monkeypatch) -> None:
+    api = MagicMock()
+    _patch_hub_delete(monkeypatch, username=None, api=api)
+
+    resp = client.delete("/jobs/hub/models/makermods/whatever")
+    assert resp.status_code == 401
+    api.delete_repo.assert_not_called()
+
+
+# --- GET /jobs/hub model listing (tagged + untagged run-repo union) --------
+#
+# The listing must surface the user's own empty/untagged run repos (orphans a
+# crashed cloud run pre-creates) alongside the tagged ones, so the untracked
+# cleanup path can reach them. It does this with ONE unfiltered list_models()
+# call per author, filtered client-side: a repo qualifies if it carries the
+# "lerobot" library tag OR its name matches makerlab's "_<timestamp>" run-repo
+# naming (see _list_author_models). The single unfiltered call replaced an older
+# two-pass (filter="lerobot" + unfiltered) approach — half the Hub calls, same
+# result set.
+
+
+class _FakeModel:
+    def __init__(self, repo_id, last_modified=None, private=False, tags=None):
+        self.id = repo_id
+        self.last_modified = last_modified
+        self.private = private
+        # The `lerobot` library tag is now modeled as a real attribute (the
+        # single unfiltered call filters client-side on it), not via a separate
+        # filter="lerobot" pass.
+        self.tags = list(tags or [])
+
+
+def _hub_api_with_models(*, all_author):
+    """Fake HfApi whose (single, unfiltered) list_models() returns `all_author`
+    for any author. list_jobs() returns nothing. The `lerobot` tag lives on each
+    model's `.tags`, so the endpoint's client-side filter sees it."""
+    api = MagicMock()
+    api.list_jobs.return_value = []
+
+    def _list_models(author=None, filter=None, limit=None, expand=None):
+        return list(all_author)
+
+    api.list_models.side_effect = _list_models
+    return api
+
+
+def _patch_hub_list(monkeypatch, *, username, api, orgs=None):
+    info = {"name": username, "orgs": orgs or []}
+    monkeypatch.setattr(server_mod, "cached_whoami", lambda: info)
+    monkeypatch.setattr(server_mod, "shared_hf_api", lambda: api)
+
+
+def test_list_hub_jobs_includes_empty_untagged_run_repos(client: TestClient, monkeypatch) -> None:
+    # The motivating case: an empty repo a crashed run pre-created. It has no
+    # "lerobot" tag, so it appears ONLY in the unfiltered author listing — and
+    # matches the run-repo timestamp suffix, so it must be surfaced.
+    empty = _FakeModel(
+        "makermods/smolvla_makermods_so101_merged_20260701_2026-07-03_09-15-57",
+        last_modified=None,
+    )
+    api = _hub_api_with_models(all_author=[empty])
+    _patch_hub_list(monkeypatch, username="makermods", api=api)
+
+    resp = client.get("/jobs/hub")
+    assert resp.status_code == 200
+    repo_ids = [m["repo_id"] for m in resp.json()["models"]]
+    assert empty.id in repo_ids
+
+
+def test_list_hub_jobs_unions_and_dedups_tagged_and_untagged(client: TestClient, monkeypatch) -> None:
+    tagged = _FakeModel(
+        "makermods/act_makermods_pick_2026-07-03_10-00-00",
+        last_modified=_dt.datetime(2026, 7, 3, 10, 0, tzinfo=_dt.UTC),
+        tags=["lerobot"],
+    )
+    empty = _FakeModel(
+        "makermods/smolvla_makermods_so101_merged_20260701_2026-07-03_09-15-57",
+        last_modified=_dt.datetime(2026, 7, 3, 9, 15, tzinfo=_dt.UTC),
+    )
+    # The single unfiltered pass returns both. `tagged` qualifies via BOTH its
+    # lerobot tag and its run-repo suffix; the client-side filter + _add() dedup
+    # must still surface it exactly once, and sort newest-first.
+    api = _hub_api_with_models(all_author=[tagged, empty])
+    _patch_hub_list(monkeypatch, username="makermods", api=api)
+
+    resp = client.get("/jobs/hub")
+    assert resp.status_code == 200
+    repo_ids = [m["repo_id"] for m in resp.json()["models"]]
+    assert repo_ids == [tagged.id, empty.id]  # deduped, newest first
+    assert repo_ids.count(tagged.id) == 1
+
+
+def test_list_hub_jobs_excludes_foreign_personal_models(client: TestClient, monkeypatch) -> None:
+    # A user's unrelated personal model (no lerobot tag, name doesn't match the
+    # run-repo timestamp convention) must NOT be surfaced — it's theirs, not a
+    # makerlab orphan. But a tagged repo is always kept even without the suffix.
+    personal = _FakeModel("makermods/my-cool-llm", last_modified=None)
+    run_repo = _FakeModel(
+        "makermods/smolvla_makermods_so101_merged_20260701_2026-07-03_09-15-57",
+        last_modified=None,
+    )
+    tagged_no_suffix = _FakeModel("makermods/some-tagged-model", last_modified=None, tags=["lerobot"])
+    api = _hub_api_with_models(all_author=[personal, run_repo, tagged_no_suffix])
+    _patch_hub_list(monkeypatch, username="makermods", api=api)
+
+    resp = client.get("/jobs/hub")
+    assert resp.status_code == 200
+    repo_ids = {m["repo_id"] for m in resp.json()["models"]}
+    assert run_repo.id in repo_ids  # run-repo naming → surfaced
+    assert tagged_no_suffix.id in repo_ids  # tagged → surfaced regardless of name
+    assert personal.id not in repo_ids  # foreign personal model → excluded
+
+
+# --- POST /jobs/hub/jobs/{job_id}/dismiss + listing filter ------------------
+#
+# The HF Jobs API has no delete — a finished job stays in list_jobs()
+# indefinitely — so removing a dead untracked job from the UI is a local,
+# persisted dismissal (utils/config.DISMISSED_HUB_JOBS_FILE). The /jobs/hub
+# listing drops dismissed ids, but only in a terminal stage: a live run can
+# never be dismissed out of sight.
+
+
+class _FakeHubJob:
+    def __init__(self, job_id, stage):
+        self.id = job_id
+        self.created_at = None
+        self.docker_image = "huggingface/lerobot-gpu:latest"
+        self.space_id = None
+        self.flavor = "a100-large"
+        self.status = SimpleNamespace(stage=stage, message=None)
+        self.owner = None
+        self.url = f"https://huggingface.co/jobs/{job_id}"
+
+
+def _hub_api_with_jobs(jobs):
+    """Fake HfApi whose list_jobs() returns `jobs`. list_models() returns
+    nothing (models are irrelevant to the dismissal tests)."""
+    api = MagicMock()
+    api.list_jobs.return_value = list(jobs)
+    api.list_models.return_value = []
+    return api
+
+
+def test_dismiss_hub_job_persists_and_hides_terminal_job(
+    client: TestClient, monkeypatch, tmp_lerobot_home: Path
+) -> None:
+    dead = _FakeHubJob("job-dead", "ERROR")
+    other = _FakeHubJob("job-other", "COMPLETED")
+    _patch_hub_list(monkeypatch, username="makermods", api=_hub_api_with_jobs([dead, other]))
+
+    resp = client.post("/jobs/hub/jobs/job-dead/dismiss")
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "success", "job_id": "job-dead"}
+    assert cfg.get_dismissed_hub_jobs() == {"job-dead"}
+
+    resp = client.get("/jobs/hub")
+    assert resp.status_code == 200
+    job_ids = [j["id"] for j in resp.json()["jobs"]]
+    assert job_ids == ["job-other"]  # dismissed terminal job hidden, rest kept
+
+
+def test_dismissed_hub_job_in_active_stage_stays_listed(
+    client: TestClient, monkeypatch, tmp_lerobot_home: Path
+) -> None:
+    # Dismissing an id whose job is still RUNNING must not hide it — the
+    # listing keeps it until the job reaches a terminal stage.
+    live = _FakeHubJob("job-live", "RUNNING")
+    _patch_hub_list(monkeypatch, username="makermods", api=_hub_api_with_jobs([live]))
+    cfg.add_dismissed_hub_job("job-live")
+
+    resp = client.get("/jobs/hub")
+    assert resp.status_code == 200
+    assert [j["id"] for j in resp.json()["jobs"]] == ["job-live"]
+
+
+def test_list_hub_jobs_prunes_dismissed_ids_gone_from_listing(
+    client: TestClient, monkeypatch, tmp_lerobot_home: Path
+) -> None:
+    kept = _FakeHubJob("job-kept", "FAILED")
+    _patch_hub_list(monkeypatch, username="makermods", api=_hub_api_with_jobs([kept]))
+    cfg.add_dismissed_hub_job("job-kept")
+    cfg.add_dismissed_hub_job("job-expired")  # no longer in the Hub listing
+
+    resp = client.get("/jobs/hub")
+    assert resp.status_code == 200
+    assert resp.json()["jobs"] == []
+    assert cfg.get_dismissed_hub_jobs() == {"job-kept"}
+
+
+def test_list_hub_jobs_keeps_dismissals_when_listing_fails(
+    client: TestClient, monkeypatch, tmp_lerobot_home: Path
+) -> None:
+    # A transient list_jobs() failure returns an empty jobs list; pruning
+    # against it would forget every dismissal, so it must be skipped.
+    api = _hub_api_with_jobs([])
+    api.list_jobs.side_effect = RuntimeError("hub outage")
+    _patch_hub_list(monkeypatch, username="makermods", api=api)
+    cfg.add_dismissed_hub_job("job-dead")
+
+    resp = client.get("/jobs/hub")
+    assert resp.status_code == 200
+    assert resp.json()["jobs"] == []
+    assert cfg.get_dismissed_hub_jobs() == {"job-dead"}
+
+
+def test_dismiss_hub_job_rejects_blank_id(client: TestClient, monkeypatch, tmp_lerobot_home: Path) -> None:
+    resp = client.post("/jobs/hub/jobs/%20/dismiss")
+    assert resp.status_code == 400
+    assert cfg.get_dismissed_hub_jobs() == set()
+
+
+def test_delete_job_dismisses_its_hub_job_id(client: TestClient, monkeypatch, tmp_lerobot_home: Path) -> None:
+    # Deleting a tracked cloud run must also dismiss its hf_job_id, otherwise
+    # the Hub job resurfaces as an untracked card on the next /jobs/hub poll.
+    record = MagicMock()
+    record.hf_job_id = "hub-job-123"
+    monkeypatch.setattr(server_mod.job_registry, "get", lambda job_id: record)
+    monkeypatch.setattr(server_mod.job_registry, "delete", lambda job_id: None)
+
+    resp = client.delete("/jobs/some-cloud-run")
+    assert resp.status_code == 204
+    assert cfg.get_dismissed_hub_jobs() == {"hub-job-123"}
+
+
+def test_delete_local_job_records_no_dismissal(
+    client: TestClient, monkeypatch, tmp_lerobot_home: Path
+) -> None:
+    record = MagicMock()
+    record.hf_job_id = None
+    monkeypatch.setattr(server_mod.job_registry, "get", lambda job_id: record)
+    monkeypatch.setattr(server_mod.job_registry, "delete", lambda job_id: None)
+
+    resp = client.delete("/jobs/some-local-run")
+    assert resp.status_code == 204
+    assert cfg.get_dismissed_hub_jobs() == set()

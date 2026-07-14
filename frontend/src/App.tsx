@@ -9,6 +9,7 @@ import Teleoperation from "@/pages/Teleoperation";
 import Calibration from "@/pages/Calibration";
 import Recording from "@/pages/Recording";
 import Training from "@/pages/Training";
+import CreateModel from "@/pages/CreateModel";
 import Inference from "@/pages/Inference";
 import EditDataset from "@/pages/EditDataset";
 import Upload from "@/pages/Upload";
@@ -41,6 +42,7 @@ function App() {
                         <Route path="/teleoperation" element={<Teleoperation />} />
                         <Route path="/recording" element={<Recording />} />
                         <Route path="/upload" element={<Upload />} />
+                        <Route path="/create-model" element={<CreateModel />} />
                         <Route path="/training" element={<Training />} />
                         <Route path="/training/:jobId" element={<Training />} />
                         <Route path="/inference" element={<Inference />} />
