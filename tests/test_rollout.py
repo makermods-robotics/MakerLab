@@ -345,6 +345,7 @@ def test_handle_inference_status_when_idle_returns_dict_with_expected_keys() -> 
     result = handle_inference_status()
     assert isinstance(result, dict)
     assert result["inference_active"] is False
+    assert result["phase"] is None
     for key in ("started_at", "rollout_started_at", "elapsed_s", "rollout_elapsed_s"):
         assert key in result
 
@@ -657,14 +658,6 @@ def test_handle_start_inference_bimanual_builds_bi_so_follower_command(monkeypat
 # Startup phase model — the "which substep am I in" status (download / subprocess
 # fully MOCKED; no real inference, no hardware, no port opened).
 # ---------------------------------------------------------------------------
-
-
-def test_status_phase_is_none_when_idle() -> None:
-    """No session has seeded a meta → phase is None (frontend shows nothing)."""
-    from makerlab.rollout import handle_inference_status
-
-    result = handle_inference_status()
-    assert result["phase"] is None
 
 
 def test_resolve_policy_path_sets_downloading_model_phase(monkeypatch, tmp_path) -> None:

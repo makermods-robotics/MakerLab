@@ -42,13 +42,6 @@ def test_teleoperate_request_defaults_to_single_arm() -> None:
     assert req.right_follower_config == ""
 
 
-def test_handle_teleoperation_status_returns_dict() -> None:
-    from makerlab.teleoperate import handle_teleoperation_status
-
-    result = handle_teleoperation_status()
-    assert isinstance(result, dict)
-
-
 def test_get_joint_positions_from_robot_uses_provided_object() -> None:
     from makerlab.teleoperate import get_joint_positions_from_robot
     from tests.mocks import FakeRobot

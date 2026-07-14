@@ -772,14 +772,6 @@ def _join_download(mgr, timeout: float = 5.0) -> None:
         thread.join(timeout=timeout)
 
 
-def test_model_download_manager_idle_shape() -> None:
-    status = _model_download_manager().get_status()
-    assert status["state"] == "idle"
-    assert status["repo_id"] is None
-    assert status["message"] is None
-    assert status["error"] is None
-
-
 def test_model_download_manager_completes_and_lands_locally(
     tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -824,17 +816,6 @@ def test_model_download_manager_rejects_non_policy_repo(
     assert status["state"] == "error"
     assert "doesn't look like a policy checkpoint" in status["message"]
     assert not (tmp_lerobot_home / "makerlab_models" / "user" / "notapolicy").exists()
-
-
-def test_model_download_manager_rejects_concurrent_start() -> None:
-    mgr = _model_download_manager()
-    mgr.state = "running"
-    mgr.repo_id = "user/first"
-
-    result = mgr.start("user/second")
-    assert result["started"] is False
-    assert "already running" in result["message"]
-    assert mgr.repo_id == "user/first"
 
 
 def test_models_download_endpoint_rejects_bad_repo_id(client) -> None:

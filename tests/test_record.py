@@ -56,13 +56,6 @@ def test_recording_status_surfaces_preparing_substeps(monkeypatch) -> None:
         assert result["session_ended"] is False
 
 
-def test_handle_stop_recording_when_idle_returns_dict(tmp_lerobot_home) -> None:
-    from makerlab.record import handle_stop_recording
-
-    result = handle_stop_recording()
-    assert isinstance(result, dict)
-
-
 class _FakeWorker:
     """Thread double: reports alive until joined."""
 

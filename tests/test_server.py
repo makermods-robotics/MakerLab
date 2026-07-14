@@ -61,15 +61,10 @@ def test_app_exposes_required_endpoints() -> None:
     assert not missing, f"missing routes: {missing}"
 
 
-def test_health_endpoint_returns_200(client: TestClient) -> None:
+def test_health_endpoint_returns_200_with_json_object(client: TestClient) -> None:
     response = client.get("/health")
     assert response.status_code == 200
-
-
-def test_health_endpoint_returns_dict(client: TestClient) -> None:
-    response = client.get("/health")
-    body = response.json()
-    assert isinstance(body, dict)
+    assert isinstance(response.json(), dict)
 
 
 def test_unknown_route_returns_404(client: TestClient) -> None:
