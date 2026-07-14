@@ -39,6 +39,8 @@ from typing import Literal, Protocol, runtime_checkable
 from pydantic import BaseModel
 
 from .train import TrainingRequest
+from .utils.config import is_valid_robot_name
+from .utils.hf_auth import shared_hf_api
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +73,11 @@ class LogLine(BaseModel):
 class JobRecord(BaseModel):
     id: str
     name: str
+    # User-editable display alias set via JobRegistry.rename. Display-only:
+    # the immutable identity (id / output_dir / hf_repo_id) never changes on
+    # rename, so resume lineage, imported-model dedup, and remote HF/W&B
+    # names stay intact. None ⇒ the UI falls back to `name`.
+    display_name: str | None = None
     state: JobState
     config: TrainingRequest
     output_dir: str
@@ -170,22 +177,36 @@ def _parse_duration(s: str) -> float | None:
     return None
 
 
-def parse_metrics_into(line: str, metrics: TrainingMetrics) -> None:
+def parse_metrics_into(
+    line: str, metrics: TrainingMetrics, resume_total: int | None = None
+) -> None:
     """Update `metrics` in-place from one stdout line.
 
     Two complementary sources:
       * tqdm progress for current_step + total_steps + ETA (~1s cadence).
       * 'INFO ... step:N smpl:... loss:X grdn:Y lr:Z ...' for loss/lr/grdn
         (only at log_freq cadence, default every 250 steps).
+
+    `resume_total` is the run's full step target for a *resumed* run (None for a
+    fresh run). On resume lerobot's tqdm bar counts only the remaining window
+    (0 → steps−checkpoint), so the raw bar understates the true global step; we
+    rebase it to `checkpoint + bar = resume_total − remaining_total + bar` so
+    the UI shows e.g. 150/200 instead of 50/100. The `step:N` log line already
+    carries the true global step, so it needs no rebasing.
     """
     try:
         tqdm_match = _TQDM_RE.search(line)
         if tqdm_match:
             try:
-                metrics.current_step = int(tqdm_match.group(1))
+                tqdm_step = int(tqdm_match.group(1))
                 total = int(tqdm_match.group(2))
-                if total > 0:
-                    metrics.total_steps = total
+                if resume_total is not None and total > 0:
+                    metrics.current_step = resume_total - total + tqdm_step
+                    metrics.total_steps = resume_total
+                else:
+                    metrics.current_step = tqdm_step
+                    if total > 0:
+                        metrics.total_steps = total
                 eta = _parse_duration(tqdm_match.group(3))
                 if eta is not None:
                     metrics.eta_seconds = eta
@@ -208,6 +229,58 @@ def parse_metrics_into(line: str, metrics: TrainingMetrics) -> None:
         logger.debug("Error parsing log line %r: %s", line, exc)
 
 
+def _resume_total_steps(config: TrainingRequest) -> int | None:
+    """The full step target to rebase a resumed run's tqdm bar against (see
+    parse_metrics_into). None for a fresh run — its bar is already global."""
+    return config.steps if config.resume else None
+
+
+def _read_log_metrics(
+    path: Path, resume_total: int | None
+) -> builtins.list[MetricsHistoryPoint]:
+    """Parse one job's log.jsonl into (step, loss, lr, grad_norm) points.
+
+    Feed every line through ONE accumulator rather than a fresh one per line.
+    lerobot formats the log-line step with format_big_number, so at >=1000 steps
+    its token becomes "1K"/"2K" and int() can't parse it; a fresh-per-line parse
+    would leave current_step at 0 and silently drop every point past step 1000.
+    Carrying state keeps the exact integer step from the interleaved tqdm lines
+    for the loss lines that follow.
+    """
+    if not path.exists():
+        return []
+    points: list[MetricsHistoryPoint] = []
+    acc = TrainingMetrics()
+    with path.open() as f:
+        for raw in f:
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                log_line = LogLine.model_validate_json(raw)
+            except Exception:
+                continue  # skip malformed line, same as read_persisted_logs
+            msg = log_line.message
+            parse_metrics_into(msg, acc, resume_total)
+            # Only the log-freq lines carry loss/lr; tqdm lines just advance the
+            # step. Emit a point only when a loss value is present so we don't
+            # add a flat point per tqdm tick.
+            if "loss:" not in msg or acc.current_step <= 0 or acc.current_loss is None:
+                continue
+            point = MetricsHistoryPoint(
+                step=acc.current_step,
+                loss=acc.current_loss,
+                lr=acc.current_lr,
+                grad_norm=acc.grad_norm,
+            )
+            # Dedupe by step: overwrite on consecutive same-step lines.
+            if points and points[-1].step == point.step:
+                points[-1] = point
+            else:
+                points.append(point)
+    return points
+
+
 class LocalJobRunner:
     """Run a training as a local subprocess.
 
@@ -228,6 +301,7 @@ class LocalJobRunner:
         self._log_file_path = log_file_path
         self._log_file = None  # type: ignore[assignment]
         self._wandb_run_url: str | None = None
+        self._resume_total: int | None = None
 
     def start(
         self,
@@ -237,6 +311,8 @@ class LocalJobRunner:
     ) -> None:
         if self._process is not None:
             raise RuntimeError("LocalJobRunner already started")
+
+        self._resume_total = _resume_total_steps(config)
 
         # Build the command via the helper that lives in train.py.
         from .train import build_training_command  # avoid import cycle at module load
@@ -325,7 +401,7 @@ class LocalJobRunner:
                 stripped = line.rstrip()
                 if not stripped:
                     continue
-                parse_metrics_into(stripped, self._metrics)
+                parse_metrics_into(stripped, self._metrics, self._resume_total)
                 if self._wandb_run_url is None:
                     url = extract_wandb_run_url(stripped)
                     if url is not None:
@@ -364,10 +440,12 @@ class TailingJobRunner:
         metrics: TrainingMetrics,
         log_file_path: Path,
         pid: int,
+        resume_total: int | None = None,
     ) -> None:
         self._metrics = metrics
         self._log_file_path = log_file_path
         self._pid = pid
+        self._resume_total = resume_total
         self._log_queue: Queue[LogLine] = Queue()
         self._tail_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
@@ -447,7 +525,9 @@ class TailingJobRunner:
                             log_line = LogLine.model_validate_json(raw.strip())
                         except Exception:
                             continue
-                        parse_metrics_into(log_line.message, self._metrics)
+                        parse_metrics_into(
+                            log_line.message, self._metrics, self._resume_total
+                        )
                         if self._wandb_run_url is None:
                             url = extract_wandb_run_url(log_line.message)
                             if url is not None:
@@ -492,6 +572,164 @@ def _list_local_checkpoints(output_dir: str) -> list[JobCheckpoint]:
         )
     out.sort(key=lambda c: c.step)
     return out
+
+
+# lerobot writes this per-checkpoint config inside pretrained_model/; resuming
+# needs it as --config_path so lerobot can reconstruct the run.
+_TRAIN_CONFIG_NAME = "train_config.json"
+
+
+# A Hub checkpoint's training_state/ is what makes it resumable (optimizer +
+# step). The cloud wrapper uploads the whole checkpoints/<step>/ entry, so both
+# subtrees land in the repo; this file is the cheapest existence probe.
+_HUB_TRAINING_STATE_FILE = "training_state/training_step.json"
+
+
+def _resolve_cloud_resume(source: JobRecord, step: int | None) -> tuple[str, str]:
+    """Return (repo_id, step_dir) identifying the Hub checkpoint a cloud run
+    should resume from (`step` = None ⇒ the latest available on the Hub).
+
+    The cloud container downloads checkpoints/<step_dir>/ (both pretrained_model/
+    and training_state/) from `repo_id` and hands lerobot the reconstructed
+    output-dir layout, so resume restores the optimizer and step counter — true
+    resume, not a weights-only re-init.
+
+    Raises ValueError (→ HTTP 400) with a user-facing message when the source
+    can't be resumed on the cloud: not a cloud run, no output repo, no
+    checkpoints at all (the run died before its first save), an unknown step, or
+    a checkpoint whose training_state/ never made it to the Hub.
+    """
+    if source.runner != "hf_cloud":
+        raise ValueError(
+            "This resume path is for cloud runs; local runs resume from their on-disk checkpoint instead."
+        )
+    if not source.hf_repo_id:
+        raise ValueError(f"Cloud run {source.id!r} has no output repo on the Hub to resume from.")
+    api = shared_hf_api()
+    checkpoints = _list_hub_checkpoints(api, source.hf_repo_id)
+    if not checkpoints:
+        raise ValueError(
+            f"Cloud run {source.id!r} left no checkpoints on the Hub — nothing to "
+            "resume from (the run died before its first save)."
+        )
+    if step is None:
+        chosen = checkpoints[-1]  # step-sorted; take the latest
+    else:
+        chosen = next((c for c in checkpoints if c.step == step), None)
+        if chosen is None:
+            raise ValueError(f"Cloud run {source.id!r} has no checkpoint at step {step}.")
+    # chosen.ref is 'repo@checkpoints/<step_dir>'; recover the zero-padded dir.
+    m = _HUB_CKPT_REF_RE.match(chosen.ref)
+    if not m:
+        raise ValueError(f"Unexpected checkpoint ref for cloud run {source.id!r}: {chosen.ref!r}")
+    step_dir = m.group("step_dir")
+    try:
+        files = set(api.list_repo_files(source.hf_repo_id, repo_type="model"))
+    except Exception as exc:
+        raise ValueError(
+            f"Could not read cloud run {source.id!r}'s repo to verify the "
+            f"checkpoint at step {chosen.step}: {exc}"
+        ) from exc
+    if f"checkpoints/{step_dir}/{_HUB_TRAINING_STATE_FILE}" not in files:
+        raise ValueError(
+            f"Checkpoint at step {chosen.step} has no optimizer/step state "
+            "(training_state/) on the Hub, so it can't be resumed."
+        )
+    return source.hf_repo_id, step_dir
+
+
+def _resolve_resume_config_path(source: JobRecord, step: int | None) -> str:
+    """Return the train_config.json path lerobot needs to resume `source` from
+    `step` (or its latest checkpoint if step is None).
+
+    Raises ValueError (→ HTTP 400) with a user-facing message when the source
+    can't be resumed: not a local run, no checkpoints, unknown step, or a
+    weights-only checkpoint missing the training_state/ (optimizer + step)
+    needed to continue.
+    """
+    if source.runner != "local":
+        raise ValueError(
+            "Only local training runs can be resumed — lerobot doesn't support "
+            "resuming from the Hub."
+        )
+    checkpoints = _list_local_checkpoints(source.output_dir)
+    if not checkpoints:
+        raise ValueError(f"Run {source.id!r} has no saved checkpoints to resume from.")
+    if step is None:
+        chosen = checkpoints[-1]  # list is step-sorted; take the latest
+    else:
+        chosen = next((c for c in checkpoints if c.step == step), None)
+        if chosen is None:
+            raise ValueError(f"Run {source.id!r} has no checkpoint at step {step}.")
+    # chosen.ref is <output_dir>/checkpoints/<step>/pretrained_model
+    pretrained_dir = Path(chosen.ref)
+    train_config = pretrained_dir / _TRAIN_CONFIG_NAME
+    training_state = pretrained_dir.parent / "training_state"
+    if not train_config.is_file():
+        raise ValueError(
+            f"Checkpoint at step {chosen.step} is missing {_TRAIN_CONFIG_NAME}, "
+            "so it can't be resumed."
+        )
+    if not training_state.is_dir():
+        raise ValueError(
+            f"Checkpoint at step {chosen.step} has no optimizer/step state "
+            "(training_state/), so it can't be resumed. Weights-only models "
+            "(e.g. imported) can only start a fresh run."
+        )
+    return str(train_config.resolve())
+
+
+def _resolve_finetune_pretrained_path(source: JobRecord, step: int | None) -> str:
+    """Return a `--policy.pretrained_path` value that initializes a FRESH run's
+    weights from `source`'s checkpoint at `step` (or its latest if step is None).
+
+    Unlike resume, this does NOT require training_state/ — weights-only is the
+    whole point of fine-tuning. lerobot's PreTrainedConfig.pretrained_path loads
+    the policy weights (and processors) from a local pretrained_model dir or a
+    Hub repo on a non-resume run.
+
+    Handles every source shape via its own checkpoint listing:
+      * imported local / normal local run → a `local` ref that is the absolute
+        pretrained_model dir; returned directly (e.g. a flat imported dir
+        becomes a step-0 checkpoint whose ref is the dir itself).
+      * imported hub / cloud run → a `hub` ref ('repo@checkpoints/<step>' or
+        'repo@root'); we return the plain repo id (the root model). lerobot's
+        pretrained_path takes a repo id, not a sub-path, so a specific hub
+        sub-step can't be targeted — see the limitation note below.
+
+    Raises ValueError (→ HTTP 400) with a user-facing message when the source
+    has no usable checkpoint.
+    """
+    if source.runner == "imported":
+        if source.hf_repo_id:
+            checkpoints = _list_imported_hub(shared_hf_api(), source.hf_repo_id)
+        else:
+            checkpoints = _list_imported_local(source.output_dir)
+    elif source.runner == "local":
+        checkpoints = _list_local_checkpoints(source.output_dir)
+    else:  # hf_cloud
+        checkpoints = _list_hub_checkpoints(shared_hf_api(), source.hf_repo_id)
+
+    if not checkpoints:
+        raise ValueError(
+            f"Source {source.id!r} has no usable checkpoint to fine-tune from."
+        )
+    if step is None:
+        chosen = checkpoints[-1]  # step-sorted; take the latest
+    else:
+        chosen = next((c for c in checkpoints if c.step == step), None)
+        if chosen is None:
+            raise ValueError(f"Source {source.id!r} has no checkpoint at step {step}.")
+
+    if chosen.source == "local":
+        # chosen.ref is the absolute pretrained_model dir lerobot loads directly.
+        return chosen.ref
+    # Hub ref: 'repo@checkpoints/<step_dir>' or 'repo@root'. lerobot's
+    # pretrained_path accepts a repo id (root model), not a sub-step path, so we
+    # hand back the repo portion. Fine-tuning from a specific hub sub-step isn't
+    # supported here — it uses whatever weights live at the repo root.
+    repo_id = chosen.ref.split("@", 1)[0]
+    return repo_id
 
 
 _CLOUD_CKPT_TTL_SECONDS = 30.0
@@ -598,6 +836,25 @@ def _read_checkpoint_config(ckpt: JobCheckpoint) -> dict[str, object]:
         return json.load(f)
 
 
+def _flat_feature_dim(feat: object) -> int | None:
+    """Flat width of a policy feature (e.g. observation.state, action).
+
+    Checkpoint config features carry a `shape` list; for the proprioceptive
+    state and action these are 1-D — `[6]` for a single SO-101 arm, `[12]` for
+    a bimanual (two-arm) checkpoint. Returns the single dim, or None when the
+    feature is absent or not 1-D (nothing downstream should guess in that
+    case)."""
+    if not isinstance(feat, dict):
+        return None
+    shape = feat.get("shape")
+    if not isinstance(shape, (list, tuple)) or len(shape) != 1:
+        return None
+    try:
+        return int(shape[0])
+    except (TypeError, ValueError):
+        return None
+
+
 def _generate_job_id(policy_type: str, dataset_repo_id: str) -> str:
     """Build a sortable, collision-free job id from policy type and dataset slug."""
     from .train import _SLUG_RE
@@ -605,6 +862,49 @@ def _generate_job_id(policy_type: str, dataset_repo_id: str) -> str:
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     dataset_slug = _SLUG_RE.sub("_", dataset_repo_id).strip("_") or "dataset"
     return f"{policy_type}_{dataset_slug}_{timestamp}"
+
+
+# Accepted in place of a bare repo id when importing from the Hub — users
+# paste the model page URL as often as the id.
+_HUB_URL_PREFIXES = (
+    "https://huggingface.co/",
+    "http://huggingface.co/",
+    "https://hf.co/",
+    "http://hf.co/",
+    "huggingface.co/",
+    "hf.co/",
+)
+
+
+def _normalize_import_source(source: str) -> str:
+    """Boundary normalization for import sources, applied before both storing
+    and comparing: trim whitespace, strip a pasted Hub URL prefix down to the
+    bare repo id, and drop trailing slashes. Local absolute paths start with
+    '/' so the URL prefixes never match them."""
+    src = source.strip()
+    lowered = src.lower()
+    for prefix in _HUB_URL_PREFIXES:
+        if lowered.startswith(prefix):
+            src = src[len(prefix) :]
+            break
+    return src.rstrip("/")
+
+
+def _paths_are_same_dir(a: str, b: str) -> bool:
+    """True when two path strings refer to the same directory on disk.
+
+    os.path.samefile compares device+inode, so it survives spellings that a
+    string compare misses — most importantly case variants on the (default)
+    case-insensitive macOS filesystem: a real duplicate pair was registered as
+    '/Users/mokuroh54/…' and '/Users/Mokuroh54/…' because Path.resolve()
+    preserves the typed case. Falls back to exact string equality when either
+    path can't be stat'ed (e.g. the recorded source has since moved)."""
+    if a == b:
+        return True
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return False
 
 
 def _job_dir(output_root: Path, job_id: str) -> Path:
@@ -629,6 +929,24 @@ class JobNotFoundError(Exception):
 
 class JobNotRunningError(Exception):
     """Raised when stop() is called on a non-running job."""
+
+
+class DatasetNotOnHubError(Exception):
+    """Raised by JobRegistry.start when a cloud (hf_cloud) run is requested on a
+    dataset that isn't on the Hub. HF Jobs pods resolve the dataset by repo_id
+    from the Hub — they can't see this machine's local cache — so a local-only
+    dataset would make the remote job fail. The UI's upload-then-train flow
+    makes this unreachable from the browser; this guard exists for non-UI
+    callers (and as belt-and-braces) so they get a clear 409 instead of a
+    remote crash. `repo_id` is the offending dataset."""
+
+    def __init__(self, repo_id: str) -> None:
+        self.repo_id = repo_id
+        super().__init__(
+            f"Dataset '{repo_id}' is not on the Hugging Face Hub. Cloud training "
+            "runs from the Hub, so upload the dataset first (or record/select one "
+            "that's already on the Hub)."
+        )
 
 
 class JobRegistry:
@@ -667,6 +985,7 @@ class JobRegistry:
 
         self._migrate_legacy_cwd_jobs()
         self._load_from_disk()
+        self._dedupe_imported_records()
         self._start_watchdog()
 
     def _migrate_legacy_cwd_jobs(self) -> None:
@@ -785,6 +1104,21 @@ class JobRegistry:
         if target.runner == "hf_cloud" and not target.flavor:
             raise ValueError("flavor is required when runner is hf_cloud")
 
+        # Cloud preflight (belt-and-braces): the HF Jobs pod resolves the
+        # dataset by repo_id from the Hub and can't see this machine's local
+        # cache, so a local-only dataset would fail the remote job. Reject up
+        # front with a clear error instead of submitting a doomed job. Only a
+        # definitive "local_only" blocks; "unknown" (offline / transient
+        # transport error) is left to the existing _ensure_dataset_on_hub
+        # fallback so a network blip doesn't wrongly refuse a Hub dataset. The
+        # browser flow uploads-then-trains before ever reaching here, so this
+        # path is primarily for non-UI callers.
+        if target.runner == "hf_cloud":
+            from .datasets import get_hub_status
+
+            if get_hub_status(config.dataset_repo_id).get("status") == "local_only":
+                raise DatasetNotOnHubError(config.dataset_repo_id)
+
         with self._lock:
             # Local trainings are bounded by this machine's GPU/USB resources,
             # so at most one runs at a time. Cloud trainings each get their
@@ -794,10 +1128,74 @@ class JobRegistry:
                     if r.state == "running" and r.runner == "local":
                         raise JobAlreadyRunningError(r.id)
 
-            job_id = _generate_job_id(config.policy_type, config.dataset_repo_id)
+            # Resume and fine-tune are distinct and mutually exclusive: resume
+            # continues optimizer+step from a checkpoint (needs training_state);
+            # fine-tune starts a FRESH run whose weights are init'd from a
+            # checkpoint (weights-only is fine). Reject the nonsensical combo up
+            # front rather than letting one silently win.
+            if config.resume and config.finetune_from_job_id:
+                raise ValueError(
+                    "A run can't both resume and fine-tune. Resume continues an "
+                    "existing run's optimizer/step; fine-tune starts a fresh run "
+                    "from a checkpoint's weights."
+                )
+
+            # Fine-tune: turn the selected source run + step into the
+            # pretrained_path lerobot loads weights from. A fresh run (resume
+            # stays false); no training_state required. Resolved under the lock
+            # and before the record so a bad selection fails with no orphan.
+            if config.finetune_from_job_id:
+                source = self._records.get(config.finetune_from_job_id)
+                if source is None:
+                    raise ValueError(
+                        f"Fine-tune source {config.finetune_from_job_id!r} not found."
+                    )
+                config.policy_pretrained_path = _resolve_finetune_pretrained_path(
+                    source, config.finetune_from_step
+                )
+
+            # Resume: turn the selected source run + step into the config_path
+            # lerobot needs. Do this under the lock (source lookup) and before
+            # creating the record so a bad selection fails cleanly with no
+            # orphaned job.
+            if config.resume:
+                if config.resume_from_job_id:
+                    source = self._records.get(config.resume_from_job_id)
+                    if source is None:
+                        raise ValueError(
+                            f"Resume source {config.resume_from_job_id!r} not found."
+                        )
+                    if source.runner == "hf_cloud":
+                        # An HF Job is immutable once ended: resuming a cloud run
+                        # launches a NEW cloud job that continues from the parent's
+                        # Hub checkpoint. Record the source repo + step dir; the
+                        # HfCloudJobRunner turns them into an in-container download
+                        # + reconstruct + --config_path. The dataset-on-Hub guard
+                        # (target.runner == hf_cloud above) still applies, so a
+                        # run whose dataset vanished fails the same way a fresh
+                        # cloud run would.
+                        repo_id, step_dir = _resolve_cloud_resume(source, config.resume_from_step)
+                        config.resume_from_hub_repo = repo_id
+                        config.resume_from_hub_step = step_dir
+                    else:
+                        config.config_path = _resolve_resume_config_path(
+                            source, config.resume_from_step
+                        )
+                elif not config.config_path:
+                    raise ValueError(
+                        "Resume is on but no source checkpoint was selected. Use "
+                        '"Continue" on a completed local run rather than toggling '
+                        "resume manually."
+                    )
+
+            job_id = self._unique_job_id(config.policy_type, config.dataset_repo_id)
             job_dir = _job_dir(self._output_root, job_id)
             lerobot_output_dir = str(job_dir / "run")
-            name = f"{config.policy_type.upper()} · {config.dataset_repo_id}"
+            name = (
+                config.job_name.strip()
+                if (config.job_name and config.job_name.strip())
+                else f"{config.policy_type.upper()} · {config.dataset_repo_id}"
+            )
             record = JobRecord(
                 id=job_id,
                 name=name,
@@ -844,6 +1242,49 @@ class JobRegistry:
         self._notify_change()
         return record
 
+    def _unique_job_id(self, policy_type: str, dataset_repo_id: str) -> str:
+        """_generate_job_id with a collision guard. The generated id embeds a
+        second-granularity timestamp, so two jobs created within the same
+        second would otherwise share an id and silently overwrite each other
+        in the registry (and on disk). Suffix -2, -3, … until unused."""
+        base = _generate_job_id(policy_type, dataset_repo_id)
+        job_id = base
+        n = 2
+        while job_id in self._records or _job_dir(self._output_root, job_id).exists():
+            job_id = f"{base}-{n}"
+            n += 1
+        return job_id
+
+    def find_imported(self, source: str) -> JobRecord | None:
+        """Return the already-registered imported record for `source`, if any.
+
+        `source` is normalized first (whitespace, pasted Hub URLs, trailing
+        slashes — see _normalize_import_source). Identity per import kind:
+          * local dir → filesystem identity of the resolved path vs the stored
+            output_dir (_paths_are_same_dir: samefile, so case variants on a
+            case-insensitive filesystem and moved-cwd spellings still match —
+            a plain string compare demonstrably missed a real duplicate pair);
+          * hub repo → hf_repo_id compared CASE-INSENSITIVELY. Reversal of the
+            earlier exact-match choice: HF repo ids are practically unique
+            case-insensitively (the Hub redirects across casings), and the
+            failure mode of exact matching is silent duplicates.
+        """
+        src = _normalize_import_source(source)
+        if not src:
+            return None
+        local_path = Path(src).expanduser()
+        local_key = str(local_path.resolve()) if local_path.is_dir() else None
+        with self._lock:
+            for r in self._records.values():
+                if r.runner != "imported":
+                    continue
+                if local_key is not None:
+                    if not r.hf_repo_id and r.output_dir and _paths_are_same_dir(r.output_dir, local_key):
+                        return r
+                elif (r.hf_repo_id or "").lower() == src.lower():
+                    return r
+        return None
+
     def register_imported(self, source: str, name: str | None = None) -> JobRecord:
         """Register an externally-trained model as a pointer-only pseudo-job.
 
@@ -851,10 +1292,20 @@ class JobRegistry:
         output_dir) or, failing that, a Hugging Face repo id (stored in
         hf_repo_id). The source must expose at least one checkpoint under the
         auto-detect rules, else ValueError. Nothing is copied; delete only
-        removes the pointer."""
-        src = source.strip()
+        removes the pointer.
+
+        Idempotent per source: importing an already-registered path/repo
+        returns the EXISTING record (its id and display alias untouched)
+        instead of creating a second entry — see find_imported for the
+        identity keys. The source is normalized first (whitespace, pasted Hub
+        URLs, trailing slashes), and the normalized form is what gets stored."""
+        src = _normalize_import_source(source)
         if not src:
             raise ValueError("source is required")
+
+        existing = self.find_imported(src)
+        if existing is not None:
+            return existing
 
         local_path = Path(src).expanduser()
         if local_path.is_dir():
@@ -863,8 +1314,6 @@ class JobRegistry:
             output_dir, hf_repo_id = resolved, None
             label = local_path.name or resolved
         else:
-            from .utils.hf_auth import shared_hf_api
-
             ckpts = _list_imported_hub(shared_hf_api(), src)
             output_dir, hf_repo_id = "", src
             label = src
@@ -883,20 +1332,46 @@ class JobRegistry:
         with contextlib.suppress(Exception):
             policy_type = str(_read_checkpoint_config(ckpts[-1]).get("type") or "model")
 
-        job_id = _generate_job_id(policy_type, "imported")
-        record = JobRecord(
-            id=job_id,
-            name=name or f"Imported · {label}",
-            state="done",
-            config=TrainingRequest(dataset_repo_id="(imported)", policy_type=policy_type),
-            output_dir=output_dir,
-            started_at=time.time(),
-            ended_at=time.time(),
-            runner="imported",
-            hf_repo_id=hf_repo_id,
-        )
         with self._lock:
+            job_id = self._unique_job_id(policy_type, "imported")
+            record = JobRecord(
+                id=job_id,
+                name=name or f"Imported · {label}",
+                state="done",
+                config=TrainingRequest(dataset_repo_id="(imported)", policy_type=policy_type),
+                output_dir=output_dir,
+                started_at=time.time(),
+                ended_at=time.time(),
+                runner="imported",
+                hf_repo_id=hf_repo_id,
+            )
             self._records[job_id] = record
+            self._persist(record, force=True)
+        self._notify_change()
+        return record
+
+    def rename(self, job_id: str, new_name: str) -> JobRecord:
+        """Set a job's display alias. Metadata-only by design: the immutable
+        identity (run id, output_dir, hub repo id) is never touched, so resume
+        lineage (charts stitch across runs by id), live training/inference
+        reads, imported-model hub identity (dedup on re-import), and remote
+        HF Jobs / W&B names all keep working. The UI shows the alias and falls
+        back to `name` when unset.
+
+        Aliases are display-only, so uniqueness is NOT enforced (unlike
+        calibration/robot renames, where the name is a file key). The same
+        is_valid-style guard is applied for consistency (rejects path-ish
+        characters); trimmed; empty ⇒ ValueError (→ HTTP 400)."""
+        name = new_name.strip()
+        if not name:
+            raise ValueError("Display name cannot be empty.")
+        if not is_valid_robot_name(name):
+            raise ValueError("Invalid display name.")
+        with self._lock:
+            record = self._records.get(job_id)
+            if record is None:
+                raise JobNotFoundError(job_id)
+            record.display_name = name
             self._persist(record, force=True)
         self._notify_change()
         return record
@@ -956,49 +1431,36 @@ class JobRegistry:
     def read_metrics_history(self, job_id: str) -> builtins.list[MetricsHistoryPoint]:
         """Reconstruct the per-step loss/lr/grad-norm series from log.jsonl.
 
-        Used by the frontend on Monitoring-page mount to seed the curves so
-        they survive page reloads, navigation, and makerlab restarts. Re-parses
-        on every call; cache later if a slow file ever shows up.
+        Walks the resume lineage (job -> resume source -> …, oldest first) and
+        concatenates each run's points, so a resumed run's curve is continuous
+        across the whole training rather than starting at the resume step. Stops
+        at a missing ancestor (a deleted source) — the curve just starts later.
+
+        Used by the frontend on Monitoring-page mount to seed the curves so they
+        survive page reloads, navigation, and makerlab restarts. Re-parses on every
+        call; cache later if a slow file ever shows up.
         """
         with self._lock:
             if job_id not in self._records:
                 raise JobNotFoundError(job_id)
-        path = _job_log_path(self._output_root, job_id)
-        if not path.exists():
-            return []
-        points: list[MetricsHistoryPoint] = []
-        with path.open() as f:
-            for raw in f:
-                raw = raw.strip()
-                if not raw:
-                    continue
-                try:
-                    log_line = LogLine.model_validate_json(raw)
-                except Exception:
-                    continue  # skip malformed line, same as read_persisted_logs
-                msg = log_line.message
-                # Only the log-freq lines carry per-step metric values.
-                # Tqdm lines have a step but no loss/lr — skip them so we
-                # don't emit a flat-line point per tqdm tick.
-                if "step:" not in msg or "loss:" not in msg:
-                    continue
-                fresh = TrainingMetrics()
-                parse_metrics_into(msg, fresh)
-                if fresh.current_step <= 0:
-                    continue
-                point = MetricsHistoryPoint(
-                    step=fresh.current_step,
-                    loss=fresh.current_loss,
-                    lr=fresh.current_lr,
-                    grad_norm=fresh.grad_norm,
-                )
-                # Dedupe by step: overwrite on consecutive same-step lines.
-                if points and points[-1].step == point.step:
-                    points[-1] = point
-                else:
-                    points.append(point)
-        points.sort(key=lambda p: p.step)
-        return points
+            chain: list[JobRecord] = []
+            seen: set[str] = set()
+            cur: JobRecord | None = self._records[job_id]
+            while cur is not None and cur.id not in seen:
+                chain.append(cur)
+                seen.add(cur.id)
+                parent_id = cur.config.resume_from_job_id
+                cur = self._records.get(parent_id) if parent_id else None
+        chain.reverse()  # oldest (root) first so steps ascend across the chain
+
+        # Concatenate each run's points; dedupe by step (later run wins) in case
+        # a resume boundary overlaps, then sort for a clean ascending curve.
+        by_step: dict[int, MetricsHistoryPoint] = {}
+        for record in chain:
+            log_path = _job_log_path(self._output_root, record.id)
+            for point in _read_log_metrics(log_path, _resume_total_steps(record.config)):
+                by_step[point.step] = point
+        return sorted(by_step.values(), key=lambda p: p.step)
 
     def _checkpoints_for(self, record: JobRecord) -> builtins.list[JobCheckpoint]:
         if record.runner == "imported":
@@ -1033,8 +1495,6 @@ class JobRegistry:
         cached = self._cloud_ckpt_cache.get(repo_id)
         if cached is not None and cached[0] > now:
             return cached[1]
-        from .utils.hf_auth import shared_hf_api  # lazy: keeps unit-test imports cheap
-
         result = fetch(shared_hf_api(), repo_id)
         self._cloud_ckpt_cache[repo_id] = (now + _CLOUD_CKPT_TTL_SECONDS, result)
         return result
@@ -1056,8 +1516,9 @@ class JobRegistry:
             raise FileNotFoundError(f"No checkpoint at step {step} for job {record.id}")
         cfg = _read_checkpoint_config(match)
         policy_type = cfg.get("type")
+        input_features = cfg.get("input_features") or {}
         image_features: dict[str, dict[str, int]] = {}
-        for full_name, feat in (cfg.get("input_features") or {}).items():
+        for full_name, feat in input_features.items():
             if feat.get("type") != "VISUAL":
                 continue
             shape = feat.get("shape") or []
@@ -1072,6 +1533,13 @@ class JobRegistry:
             "policy_type": policy_type,
             "image_features": image_features,
             "requires_task": policy_type in _LANGUAGE_CONDITIONED_POLICY_TYPES,
+            # Flat proprioceptive state / action widths. For an SO-101 arm this
+            # is 6 (one per joint); a bimanual-trained checkpoint carries 12
+            # (two arms). The inference modal compares this against the selected
+            # robot's arm count to explain a single-arm/bimanual mismatch before
+            # the user hits Start. None when the checkpoint omits the feature.
+            "state_dim": _flat_feature_dim(input_features.get("observation.state")),
+            "action_dim": _flat_feature_dim((cfg.get("output_features") or {}).get("action")),
         }
 
     def delete(self, job_id: str) -> None:
@@ -1118,6 +1586,7 @@ class JobRegistry:
                             record.metrics,
                             _job_log_path(self._output_root, record.id),
                             pid,
+                            _resume_total_steps(record.config),
                         )
                         runner.start_tailing()
                         self._runners[record.id] = runner
@@ -1153,6 +1622,82 @@ class JobRegistry:
                         record.ended_at = time.time()
                     self._write_meta(record)
             self._records[record.id] = record
+
+    def _dedupe_imported_records(self) -> None:
+        """One-time collapse of duplicate imported pointers left behind before
+        dedup-at-registration existed (same local path or hub repo id
+        registered more than once).
+
+        Runs at boot, after _load_from_disk and before the watchdog starts
+        (single-threaded, so no lock needed). Per identity group: keep the
+        OLDEST record; if the keeper has no alias, migrate the newest
+        duplicate's display_name onto it. Duplicates are dropped from the
+        in-memory map; their job dir is deleted ONLY when it contains nothing
+        but job.json — anything else (weights, logs, leftovers) means the
+        files stay put and we just log. Conservative by design: malformed
+        pointers (no identity) are left alone entirely."""
+        groups: dict[tuple[str, str], list[JobRecord]] = {}
+        for r in self._records.values():
+            if r.runner != "imported":
+                continue
+            if r.hf_repo_id:
+                # Case-insensitive: HF repo ids are practically unique
+                # case-insensitively (same reversal as find_imported).
+                key = ("hub", r.hf_repo_id.lower())
+            elif r.output_dir:
+                # Filesystem identity (device:inode) so spellings that differ
+                # only by case on a case-insensitive filesystem — the real
+                # duplicate pair — group together. Unstat-able paths (source
+                # moved/deleted) fall back to the raw string: conservative,
+                # they only group with byte-identical spellings.
+                try:
+                    st = os.stat(r.output_dir)
+                    key = ("local", f"{st.st_dev}:{st.st_ino}")
+                except OSError:
+                    key = ("local", r.output_dir)
+            else:
+                continue  # no identity — when in doubt, keep it
+            groups.setdefault(key, []).append(r)
+
+        for (kind, _ident), records in groups.items():
+            if len(records) < 2:
+                continue
+            records.sort(key=lambda r: r.started_at)
+            keeper, dupes = records[0], records[1:]
+            if keeper.display_name is None:
+                # Newest aliased duplicate wins — it's the user's latest word.
+                for dup in reversed(dupes):
+                    if dup.display_name:
+                        keeper.display_name = dup.display_name
+                        self._write_meta(keeper)
+                        break
+            for dup in dupes:
+                self._records.pop(dup.id, None)
+                dup_dir = _job_dir(self._output_root, dup.id)
+                removed = False
+                if dup_dir.is_dir():
+                    try:
+                        only_meta = [p.name for p in dup_dir.iterdir()] == ["job.json"]
+                    except OSError:
+                        only_meta = False
+                    if only_meta:
+                        shutil.rmtree(dup_dir, ignore_errors=True)
+                        removed = True
+                    else:
+                        logger.info(
+                            "Duplicate imported model %s: leaving %s in place "
+                            "(contains more than job.json).",
+                            dup.id,
+                            dup_dir,
+                        )
+                logger.info(
+                    "Collapsed duplicate imported model %s into %s (same %s %r)%s",
+                    dup.id,
+                    keeper.id,
+                    kind,
+                    keeper.hf_repo_id or keeper.output_dir,
+                    "" if removed else " — pointer dropped from the registry only",
+                )
 
     def _start_watchdog(self) -> None:
         self._watchdog_thread = threading.Thread(

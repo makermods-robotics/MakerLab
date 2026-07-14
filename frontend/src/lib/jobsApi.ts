@@ -28,6 +28,8 @@ export type MetricsHistoryPoint = {
 export interface TrainingRequest {
   dataset_repo_id: string;
   policy_type: string;
+  // Optional user-supplied display name; blank ⇒ backend auto-names the run.
+  job_name?: string;
   steps: number;
   batch_size: number;
   seed?: number;
@@ -36,6 +38,16 @@ export interface TrainingRequest {
   save_freq: number;
   save_checkpoint: boolean;
   resume: boolean;
+  // Set by the "Continue training" flow: source run + checkpoint step to
+  // resume from. The backend resolves these into the checkpoint's config_path.
+  resume_from_job_id?: string;
+  resume_from_step?: number;
+  // Set by the "Fine-tune" flow: start a fresh run whose weights are init'd
+  // from an imported/existing checkpoint. The backend resolves these into
+  // policy_pretrained_path (which it also accepts directly).
+  finetune_from_job_id?: string;
+  finetune_from_step?: number;
+  policy_pretrained_path?: string;
   wandb_enable: boolean;
   wandb_project?: string;
   wandb_entity?: string;
@@ -51,11 +63,18 @@ export interface TrainingRequest {
   use_policy_training_preset: boolean;
   // Optional target for runner dispatch; omitted ⇒ local.
   target?: { runner: "local" | "hf_cloud"; flavor?: string };
+  // HF Cloud only: optional override for the HF Jobs timeout, as a duration
+  // string ("2h", "45m", "3h30m"). Omitted ⇒ backend falls back to its
+  // default. The backend validates the format and ignores it for local runs.
+  hf_job_timeout?: string;
 }
 
 export interface JobRecord {
   id: string;
   name: string;
+  // User-set display alias (rename is metadata-only; the id / output dir /
+  // hub repo id never change). Null/absent ⇒ show `name`.
+  display_name?: string | null;
   state: JobState;
   config: TrainingRequest;
   output_dir: string;
@@ -176,16 +195,41 @@ export async function startTrainingJob(
   }
 }
 
+// Importing an already-registered source is idempotent: the backend returns
+// the EXISTING record with `already_imported: true` instead of a new entry.
+export type ImportModelResult = JobRecord & { already_imported?: boolean };
+
 export async function importModel(
   baseUrl: string,
   fetcher: Fetcher,
   source: string,
   name?: string,
-): Promise<JobRecord> {
-  return apiRequest<JobRecord>(baseUrl, fetcher, "/jobs/import", {
+): Promise<ImportModelResult> {
+  return apiRequest<ImportModelResult>(baseUrl, fetcher, "/jobs/import", {
     method: "POST",
     body: name ? { source, name } : { source },
     action: "Import model",
+  });
+}
+
+/** The name to display for a job: the user's alias, falling back to the
+ * original (auto-generated or import-time) name. */
+export function jobDisplayName(job: JobRecord): string {
+  return job.display_name?.trim() || job.name;
+}
+
+/** Set a job's display alias. Metadata-only — the job id, output dir, and
+ * hub repo id are immutable identity and never change on rename. */
+export async function renameJob(
+  baseUrl: string,
+  fetcher: Fetcher,
+  id: string,
+  newName: string,
+): Promise<JobRecord> {
+  return apiRequest<JobRecord>(baseUrl, fetcher, `/jobs/${id}/rename`, {
+    method: "POST",
+    body: { new_name: newName },
+    action: "Rename job",
   });
 }
 
@@ -225,12 +269,18 @@ export interface RunnerHardwareResponse {
   authenticated: boolean;
   username: string | null;
   flavors: RunnerFlavor[];
+  // True when the backend is in HF_HUB_OFFLINE mode: every Hub write is
+  // disabled, so a local-only dataset can't be uploaded for a cloud run. The
+  // training page uses this to keep Start disabled + explain why. Absent on
+  // older backends → treated as online (false).
+  offline?: boolean;
 }
 
 const EMPTY_HARDWARE: RunnerHardwareResponse = {
   authenticated: false,
   username: null,
   flavors: [],
+  offline: false,
 };
 
 export async function listRunnerHardware(
@@ -264,6 +314,14 @@ export interface HubJob {
   url: string;
 }
 
+// Hub stages still doing work. Anything outside this set (COMPLETED, FAILED,
+// CANCELED, …) is a terminal leftover — demoted to UNTRACKED and dismissible.
+// Mirrors _HUB_ACTIVE_STAGES on the backend.
+export const HUB_ACTIVE_STAGES = new Set(["RUNNING", "QUEUED", "SCHEDULING"]);
+
+export const isHubJobActive = (job: HubJob): boolean =>
+  HUB_ACTIVE_STAGES.has((job.status?.stage ?? "").toUpperCase());
+
 export interface HubModel {
   repo_id: string;
   last_modified: string | null;
@@ -272,6 +330,9 @@ export interface HubModel {
 
 export interface HubJobsResponse {
   authenticated: boolean;
+  // False when the token is valid but lacks the job.read scope (jobs can't be
+  // listed). Absent/true otherwise. Only meaningful when authenticated.
+  jobs_permission?: boolean;
   jobs: HubJob[];
   models: HubModel[];
 }
@@ -281,6 +342,42 @@ const EMPTY_HUB: HubJobsResponse = {
   jobs: [],
   models: [],
 };
+
+/**
+ * Permanently delete a model repo from the Hugging Face Hub. Scoped to the
+ * caller's own namespace on the backend. A repo already gone (404) resolves
+ * as success (idempotent), matching the backend semantics.
+ */
+export async function deleteHubModel(
+  baseUrl: string,
+  fetcher: Fetcher,
+  repoId: string,
+): Promise<void> {
+  await apiRequest<void>(
+    baseUrl,
+    fetcher,
+    `/jobs/hub/models/${repoId}`,
+    { method: "DELETE", action: "Delete hub model" },
+  );
+}
+
+/**
+ * Hide a Hub job from the /jobs/hub listing. A local, persisted dismissal on
+ * the backend — the HF Jobs API has no delete, so the job record on the Hub
+ * itself is untouched.
+ */
+export async function dismissHubJob(
+  baseUrl: string,
+  fetcher: Fetcher,
+  jobId: string,
+): Promise<void> {
+  await apiRequest<void>(
+    baseUrl,
+    fetcher,
+    `/jobs/hub/jobs/${encodeURIComponent(jobId)}/dismiss`,
+    { method: "POST", action: "Dismiss hub job" },
+  );
+}
 
 export async function listHubJobs(
   baseUrl: string,
