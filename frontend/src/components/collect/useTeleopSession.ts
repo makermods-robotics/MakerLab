@@ -126,8 +126,8 @@ export const useTeleopSession = () => {
             // Robot name -> BiSO staging base id (bimanual). Names the per-session
             // staging dir; does not affect which calibration drives which arm.
             robot_name: robot.name,
-            // Raw follower torque limit for the session (0-1000, default 380).
-            max_torque_limit: robot.max_torque_limit ?? 380,
+            // Raw follower torque limit for the session (0-1000, default 400).
+            max_torque_limit: robot.max_torque_limit ?? 400,
           }),
         });
         const data = (await res.json()) as TeleopStartResponse;

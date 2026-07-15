@@ -38,8 +38,8 @@ def test_recording_request_max_torque_limit_default_and_override() -> None:
         dataset_repo_id="user/data",
         single_task="task",
     )
-    # Defaults to the auto-cal-matching torque cap, not the old full-power 100.
-    assert RecordingRequest(**base).max_torque_limit == 380
+    # Defaults to the gentler session torque cap, not the old full-power 100.
+    assert RecordingRequest(**base).max_torque_limit == 400
     # An explicit raw value is carried through verbatim (clamping happens at the
     # register write, not on the schema).
     assert RecordingRequest(**base, max_torque_limit=650).max_torque_limit == 650
@@ -172,6 +172,25 @@ def test_recording_status_reports_releasing(monkeypatch: pytest.MonkeyPatch) -> 
     status = record.handle_recording_status()
     assert status["releasing"] is True
     assert "returning the arm" in status["message"].lower()
+
+
+def test_ended_status_reports_final_saved_count(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The worker's cleanup zeroes the live saved_episodes counter as it ends
+    the session, so the session-end status must report the snapshot taken
+    before that reset — otherwise every successful session reads as 0 saved
+    (regression: the completion banner showed 'nothing was saved')."""
+    import makerlab.record as record
+
+    monkeypatch.setattr(record, "recording_active", False)
+    monkeypatch.setattr(record, "current_phase", "completed")
+    monkeypatch.setattr(record, "saved_episodes", 0)  # already reset by cleanup
+    monkeypatch.setattr(record, "last_session_saved_episodes", 4)
+    monkeypatch.setattr(record, "last_session_discarded_empty", False)
+
+    status = record.handle_recording_status()
+    assert status["session_ended"] is True
+    assert status["saved_episodes"] == 4
+    assert status["discarded_empty"] is False
 
 
 def test_create_record_config_pins_dshow_on_windows(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -435,6 +454,72 @@ def test_record_start_clears_stale_release_state_from_previous_double_stop(
     assert result["success"] is False
     assert not stale.is_set()
     assert record.releasing is False
+    assert record.recording_active is False
+
+
+def _idle_recording_state(monkeypatch) -> None:
+    """Both feature modules idle so handle_start_recording reaches its body."""
+    import makerlab.record as record
+    import makerlab.teleoperate as teleop
+
+    monkeypatch.setattr(record, "recording_active", False)
+    monkeypatch.setattr(record, "recording_thread", None)
+    monkeypatch.setattr(record, "releasing", False)
+    monkeypatch.setattr(teleop, "teleoperation_active", False)
+    monkeypatch.setattr(teleop, "teleoperation_thread", None)
+
+
+def test_start_uses_dataset_name_verbatim(monkeypatch, tmp_lerobot_home) -> None:
+    """The repo id the frontend previews ("saving dataset as user/name") is the
+    id the session records under — no timestamp suffix is appended."""
+    import makerlab.record as record
+
+    _idle_recording_state(monkeypatch)
+
+    captured: dict = {}
+
+    def _capture(request):
+        captured["repo_id"] = request.dataset_repo_id
+        raise RuntimeError("stop before hardware")
+
+    monkeypatch.setattr(record, "create_record_config", _capture)
+
+    result = record.handle_start_recording(
+        record.RecordingRequest(
+            leader_port="COM_LEADER",
+            follower_port="COM_FOLLOWER",
+            leader_config="leader",
+            follower_config="follower",
+            dataset_repo_id="tester/verbatim_name",
+            single_task="pick",
+        )
+    )
+
+    assert result["success"] is False  # stopped before hardware, by design
+    assert captured["repo_id"] == "tester/verbatim_name"
+
+
+def test_start_refuses_existing_dataset_without_resume(monkeypatch, tmp_lerobot_home) -> None:
+    """A fresh (resume=False) session must not clobber or append to an existing
+    dataset directory — appending is the explicit resume path."""
+    import makerlab.record as record
+
+    _idle_recording_state(monkeypatch)
+    (tmp_lerobot_home / "tester" / "taken").mkdir(parents=True)
+
+    result = record.handle_start_recording(
+        record.RecordingRequest(
+            leader_port="COM_LEADER",
+            follower_port="COM_FOLLOWER",
+            leader_config="leader",
+            follower_config="follower",
+            dataset_repo_id="tester/taken",
+            single_task="pick",
+        )
+    )
+
+    assert result["success"] is False
+    assert "already exists" in result["message"]
     assert record.recording_active is False
 
 

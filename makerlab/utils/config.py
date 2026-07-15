@@ -389,11 +389,12 @@ _ROBOT_LIST_FIELDS = ("cameras",)
 
 # Follower session torque cap, written RAW to the Feetech RAM Torque_Limit
 # register (see makerlab/motor_power.py) — 0 = no torque, 1000 = full torque.
-# Default 380 matches auto-calibration's DEFAULT_TORQUE_LIMIT: a gentler cap than
-# stock so collisions and pose snaps are softer out of the box.
+# Default 400: a gentler cap than stock so collisions and pose snaps are softer
+# out of the box. (Auto-calibration itself still moves at a gentler 380 — its own
+# DEFAULT_TORQUE_LIMIT self-motion safety cap — which is unrelated to this default.)
 MAX_TORQUE_LIMIT_MIN = 0
 MAX_TORQUE_LIMIT_MAX = 1000
-DEFAULT_MAX_TORQUE_LIMIT = 380
+DEFAULT_MAX_TORQUE_LIMIT = 400
 
 # Legacy records stored motor_power as a percentage (10-100); the RAM register is
 # scaled in 0.1% units, so the equivalent raw value is percent × 10.

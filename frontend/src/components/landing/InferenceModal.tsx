@@ -360,8 +360,8 @@ const InferenceModal: React.FC<Props> = ({
         task,
         cameras: cameraDict,
         duration_s: durationS,
-        // Raw follower torque limit for the session (0-1000, default 380).
-        max_torque_limit: robot.max_torque_limit ?? 380,
+        // Raw follower torque limit for the session (0-1000, default 400).
+        max_torque_limit: robot.max_torque_limit ?? 400,
         // Bimanual: forward the mode + right-arm follower so the server builds a
         // `bi_so_follower` command staging both follower calibrations. In single
         // mode the right_* fields are inert (mode defaults to "single"

@@ -36,7 +36,7 @@ interface RecordingConfig {
   follower_port: string;
   leader_config: string;
   follower_config: string;
-  // Raw follower torque limit for the session (0-1000, default 380).
+  // Raw follower torque limit for the session (0-1000, default 400).
   max_torque_limit?: number;
   dataset_repo_id: string;
   single_task: string;

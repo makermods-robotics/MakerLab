@@ -113,6 +113,17 @@ def _dir_mtime_iso(path: Path) -> str | None:
         return None
 
 
+def _dir_birthtime_iso(path: Path) -> str | None:
+    """Directory creation time (macOS st_birthtime), falling back to mtime on
+    filesystems that don't record it. Feeds the newest-added-first ordering."""
+    try:
+        st = path.stat()
+        ts = getattr(st, "st_birthtime", None) or st.st_mtime
+        return datetime.fromtimestamp(ts, tz=UTC).isoformat()
+    except OSError:
+        return None
+
+
 def list_local_datasets() -> list[dict[str, Any]]:
     """Scan the LeRobot cache for local datasets (dirs containing meta/info.json).
 
@@ -146,6 +157,7 @@ def list_local_datasets() -> list[dict[str, Any]]:
                     {
                         "repo_id": top.name,
                         "last_modified": _dir_mtime_iso(top),
+                        "created_at": _dir_birthtime_iso(top),
                         "private": False,
                     }
                 )
@@ -167,11 +179,12 @@ def list_local_datasets() -> list[dict[str, Any]]:
                     {
                         "repo_id": f"{top.name}/{sub.name}",
                         "last_modified": _dir_mtime_iso(sub),
+                        "created_at": _dir_birthtime_iso(sub),
                         "private": False,
                     }
                 )
 
-    out.sort(key=lambda d: d["last_modified"] or "", reverse=True)
+    out.sort(key=_recency_key, reverse=True)
     return out
 
 
@@ -444,29 +457,44 @@ def list_user_datasets() -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for author in authors:
         try:
-            for ds in api.list_datasets(author=author, filter="LeRobot", limit=200):
+            for ds in api.list_datasets(
+                author=author,
+                filter="LeRobot",
+                limit=200,
+                expand=["lastModified", "private", "createdAt"],
+            ):
                 if ds.id in seen:
                     continue
                 seen.add(ds.id)
+                created = getattr(ds, "created_at", None)
                 out.append(
                     {
                         "repo_id": ds.id,
                         "last_modified": ds.last_modified.isoformat() if ds.last_modified else None,
+                        "created_at": created.isoformat() if created else None,
                         "private": bool(getattr(ds, "private", False)),
                     }
                 )
         except HfHubHTTPError as e:
             logger.warning(f"list_datasets({author}) failed: {e}")
 
-    out.sort(key=lambda d: d["last_modified"] or "", reverse=True)
+    out.sort(key=_recency_key, reverse=True)
     return out
 
 
+def _recency_key(entry: dict[str, Any]) -> str:
+    """Most-recently-ADDED ordering: created_at when known, else last_modified.
+    ISO strings sort lexically."""
+    return entry.get("created_at") or entry.get("last_modified") or ""
+
+
 def list_all_datasets() -> list[dict[str, Any]]:
-    """Merged listing: Hub datasets + local cache, with `source` field.
+    """Merged listing: Hub datasets + local cache, with `source` field, sorted
+    newest-added first.
 
     A repo_id present in both lists is collapsed to one entry with
-    source="both" and last_modified set to the more recent of the two.
+    source="both", last_modified set to the more recent of the two, and
+    created_at to the older (when the dataset first existed anywhere).
     """
     hub = list_user_datasets()
     local = list_local_datasets()
@@ -483,9 +511,11 @@ def list_all_datasets() -> list[dict[str, Any]]:
             a = existing.get("last_modified") or ""
             b = item.get("last_modified") or ""
             existing["last_modified"] = max(a, b) or None
+            created = [c for c in (existing.get("created_at"), item.get("created_at")) if c]
+            existing["created_at"] = min(created) if created else None
         else:
             merged[rid] = {**item, "source": "local"}
 
     out = list(merged.values())
-    out.sort(key=lambda d: d["last_modified"] or "", reverse=True)
+    out.sort(key=_recency_key, reverse=True)
     return out

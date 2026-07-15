@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { ChevronRight, GitMerge, Trash2 } from "lucide-react";
+import { ChevronRight, GitMerge, Search, Trash2 } from "lucide-react";
 
 import { MarketListingCard } from "@/components/market/MarketListingCard";
 import { Badge } from "@/components/ui/badge";
@@ -10,6 +10,7 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
+import { Input } from "@/components/ui/input";
 import { useHfAuth } from "@/contexts/HfAuthContext";
 import { DatasetItem } from "@/lib/replayApi";
 import { cn } from "@/lib/utils";
@@ -37,15 +38,15 @@ const filters: Array<{ id: DatasetFilter; label: string }> = [
   { id: "private", label: "Private" },
 ];
 
-function relativeTime(iso: string | null): string {
-  if (!iso) return "updated unknown";
+function relativeTime(iso: string | null, verb: string): string {
+  if (!iso) return `${verb} unknown`;
   const time = Date.parse(iso);
-  if (Number.isNaN(time)) return "updated unknown";
+  if (Number.isNaN(time)) return `${verb} unknown`;
   const seconds = Math.max(0, Math.floor((Date.now() - time) / 1000));
-  if (seconds < 60) return "updated just now";
-  if (seconds < 3600) return `updated ${Math.floor(seconds / 60)}m ago`;
-  if (seconds < 86400) return `updated ${Math.floor(seconds / 3600)}h ago`;
-  return `updated ${Math.floor(seconds / 86400)}d ago`;
+  if (seconds < 60) return `${verb} just now`;
+  if (seconds < 3600) return `${verb} ${Math.floor(seconds / 60)}m ago`;
+  if (seconds < 86400) return `${verb} ${Math.floor(seconds / 3600)}h ago`;
+  return `${verb} ${Math.floor(seconds / 86400)}d ago`;
 }
 
 function repoNamespace(repoId: string): string | null {
@@ -90,15 +91,19 @@ export function DatasetLibrary({
 }: DatasetLibraryProps) {
   const { auth } = useHfAuth();
   const [filter, setFilter] = useState<DatasetFilter>("all");
+  const [query, setQuery] = useState("");
   const [internalOpen, setInternalOpen] = useState(false);
 
   const expanded = open ?? internalOpen;
   const username = auth.status === "authenticated" ? auth.username : null;
-  const visibleDatasets = useMemo(
-    () =>
-      datasets.filter((dataset) => matchesFilter(dataset, filter, username)),
-    [datasets, filter, username],
-  );
+  const visibleDatasets = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    return datasets.filter(
+      (dataset) =>
+        matchesFilter(dataset, filter, username) &&
+        (needle === "" || dataset.repo_id.toLowerCase().includes(needle)),
+    );
+  }, [datasets, filter, username, query]);
 
   const handleOpenChange = (nextOpen: boolean) => {
     if (open === undefined) setInternalOpen(nextOpen);
@@ -129,26 +134,39 @@ export function DatasetLibrary({
 
         <CollapsibleContent>
           <div className="border-t border-border p-4 sm:p-6">
-            <div
-              className="mb-4 flex flex-wrap gap-1 rounded-full bg-secondary p-1 sm:w-fit"
-              aria-label="Filter datasets"
-            >
-              {filters.map((item) => (
-                <Button
-                  key={item.id}
-                  type="button"
-                  size="sm"
-                  variant={filter === item.id ? "outline" : "ghost"}
-                  aria-pressed={filter === item.id}
-                  onClick={() => setFilter(item.id)}
-                  className={cn(
-                    "h-8 rounded-full px-3",
-                    filter === item.id && "bg-card shadow-sm",
-                  )}
-                >
-                  {item.label}
-                </Button>
-              ))}
+            <div className="mb-4 flex flex-wrap items-center gap-3">
+              <div
+                className="flex flex-wrap gap-1 rounded-full bg-secondary p-1 sm:w-fit"
+                aria-label="Filter datasets"
+              >
+                {filters.map((item) => (
+                  <Button
+                    key={item.id}
+                    type="button"
+                    size="sm"
+                    variant={filter === item.id ? "outline" : "ghost"}
+                    aria-pressed={filter === item.id}
+                    onClick={() => setFilter(item.id)}
+                    className={cn(
+                      "h-8 rounded-full px-3",
+                      filter === item.id && "bg-card shadow-sm",
+                    )}
+                  >
+                    {item.label}
+                  </Button>
+                ))}
+              </div>
+              <div className="relative w-full sm:w-64">
+                <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  type="search"
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  placeholder="Search datasets…"
+                  aria-label="Search datasets"
+                  className="pl-9"
+                />
+              </div>
             </div>
 
             {loading ? (
@@ -156,7 +174,7 @@ export function DatasetLibrary({
                 {Array.from({ length: 3 }).map((_, index) => (
                   <div
                     key={index}
-                    className="h-[280px] animate-pulse rounded-xl border border-border bg-secondary"
+                    className="h-[150px] animate-pulse rounded-xl border border-border bg-secondary"
                   />
                 ))}
               </div>
@@ -184,17 +202,31 @@ export function DatasetLibrary({
                         onSelect(dataset.repo_id);
                       }}
                     >
-                      {(hasLocalCopy ||
-                        dataset.private ||
-                        (onDelete && dataset.source !== "hub")) && (
-                        <div className="absolute right-3 top-3 z-10 flex flex-wrap items-center justify-end gap-1.5">
-                          {hasLocalCopy && (
-                            <Badge variant="secondary">local copy</Badge>
-                          )}
-                          {dataset.private && (
-                            <Badge variant="outline">private</Badge>
-                          )}
-                          {onDelete && dataset.source !== "hub" && (
+                      <MarketListingCard
+                        kind="dataset"
+                        name={dataset.repo_id}
+                        source={dataset.source === "local" ? "local" : "hub"}
+                        meta={
+                          dataset.created_at
+                            ? relativeTime(dataset.created_at, "added")
+                            : relativeTime(dataset.last_modified, "updated")
+                        }
+                        actionLabel="Select"
+                        completeLabel="Selected"
+                        complete={selected}
+                        onAction={() => onSelect(dataset.repo_id)}
+                        badges={
+                          <>
+                            {hasLocalCopy && (
+                              <Badge variant="secondary">local copy</Badge>
+                            )}
+                            {dataset.private && (
+                              <Badge variant="outline">private</Badge>
+                            )}
+                          </>
+                        }
+                        topRight={
+                          onDelete && dataset.source !== "hub" ? (
                             <Button
                               variant="ghost"
                               size="sm"
@@ -204,18 +236,8 @@ export function DatasetLibrary({
                             >
                               <Trash2 className="h-3.5 w-3.5" />
                             </Button>
-                          )}
-                        </div>
-                      )}
-                      <MarketListingCard
-                        kind="dataset"
-                        name={dataset.repo_id}
-                        source={dataset.source === "local" ? "local" : "hub"}
-                        meta={relativeTime(dataset.last_modified)}
-                        actionLabel="Select"
-                        completeLabel="Selected"
-                        complete={selected}
-                        onAction={() => onSelect(dataset.repo_id)}
+                          ) : undefined
+                        }
                       />
                     </div>
                   );
@@ -223,7 +245,9 @@ export function DatasetLibrary({
               </div>
             ) : (
               <div className="rounded-xl border border-dashed border-border p-8 text-center text-sm text-muted-foreground">
-                No datasets match this filter.
+                {query.trim()
+                  ? "No datasets match this search."
+                  : "No datasets match this filter."}
               </div>
             )}
           </div>

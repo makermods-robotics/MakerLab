@@ -13,48 +13,57 @@ import {
 import { UserModel } from "@/lib/modelsApi";
 import { cn } from "@/lib/utils";
 
-type ModelFilter = "all" | "cloud" | "uploaded" | "public" | "private";
+type ModelFilter = "all" | "local" | "cloud" | "uploaded" | "public" | "private";
 
 interface ModelLibraryProps {
-  /** The user's Hub model repos — cloud-trained runs and hand-uploaded alike. */
+  /** Hub repos the user owns plus models on this machine, newest-added first. */
   models: UserModel[];
   loading: boolean;
   authenticated: boolean;
   robotLabel: string;
-  onRun: (repoId: string) => void;
-  onFinetune: (repoId: string) => void;
+  onRun: (model: UserModel) => void;
+  onFinetune: (model: UserModel) => void;
   onRefresh: () => void;
 }
 
 const filters: Array<{ id: ModelFilter; label: string }> = [
   { id: "all", label: "All" },
+  { id: "local", label: "Local" },
   { id: "cloud", label: "Cloud runs" },
   { id: "uploaded", label: "Uploaded" },
   { id: "public", label: "Public" },
   { id: "private", label: "Private" },
 ];
 
-function relativeTime(iso: string | null): string {
-  if (!iso) return "updated unknown";
+function relativeTime(iso: string | null, verb: string): string {
+  if (!iso) return `${verb} unknown`;
   const time = Date.parse(iso);
-  if (Number.isNaN(time)) return "updated unknown";
+  if (Number.isNaN(time)) return `${verb} unknown`;
   const seconds = Math.max(0, Math.floor((Date.now() - time) / 1000));
-  if (seconds < 60) return "updated just now";
-  if (seconds < 3600) return `updated ${Math.floor(seconds / 60)}m ago`;
-  if (seconds < 86400) return `updated ${Math.floor(seconds / 3600)}h ago`;
-  return `updated ${Math.floor(seconds / 86400)}d ago`;
+  if (seconds < 60) return `${verb} just now`;
+  if (seconds < 3600) return `${verb} ${Math.floor(seconds / 60)}m ago`;
+  if (seconds < 86400) return `${verb} ${Math.floor(seconds / 3600)}h ago`;
+  return `${verb} ${Math.floor(seconds / 86400)}d ago`;
+}
+
+function modelMeta(model: UserModel): string {
+  return model.created_at
+    ? relativeTime(model.created_at, "added")
+    : relativeTime(model.last_modified, "updated");
 }
 
 function matchesFilter(model: UserModel, filter: ModelFilter): boolean {
   switch (filter) {
+    case "local":
+      return model.source === "local";
     case "cloud":
-      return model.cloud_run;
+      return model.source === "hub" && model.cloud_run;
     case "uploaded":
-      return !model.cloud_run;
+      return model.source === "hub" && !model.cloud_run;
     case "public":
-      return !model.private;
+      return model.source === "hub" && !model.private;
     case "private":
-      return model.private;
+      return model.source === "hub" && model.private;
     default:
       return true;
   }
@@ -107,9 +116,8 @@ export function ModelLibrary({
         <CollapsibleContent>
           <div className="border-t border-border p-4 sm:p-6">
             <p className="mb-4 text-sm text-muted-foreground">
-              Every model you own on Hugging Face — trained in the cloud or
-              uploaded by hand. Run one on {robotLabel}, or fine-tune it on a
-              new dataset.
+              Every model you own — on the Hugging Face Hub or on this machine.
+              Run one on {robotLabel}, or fine-tune it on a new dataset.
             </p>
             <div
               className="mb-4 flex flex-wrap gap-1 rounded-full bg-secondary p-1 sm:w-fit"
@@ -138,47 +146,54 @@ export function ModelLibrary({
                 {Array.from({ length: 3 }).map((_, index) => (
                   <div
                     key={index}
-                    className="h-[280px] animate-pulse rounded-xl border border-border bg-secondary"
+                    className="h-[150px] animate-pulse rounded-xl border border-border bg-secondary"
                   />
                 ))}
               </div>
-            ) : !authenticated ? (
+            ) : !authenticated && visibleModels.length === 0 ? (
+              // Local models list even when signed out; the sign-in prompt only
+              // shows when there is nothing at all to browse.
               <div className="rounded-xl border border-dashed border-border p-8 text-center text-sm text-muted-foreground">
-                Sign in to Hugging Face to see your models.
+                Sign in to Hugging Face to see your Hub models.
               </div>
             ) : visibleModels.length > 0 ? (
               <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
                 {visibleModels.map((model) => (
-                  <div key={model.repo_id} className="relative rounded-xl">
-                    <div className="absolute right-3 top-3 z-10 flex flex-wrap items-center justify-end gap-1.5">
-                      {model.cloud_run && (
-                        <Badge variant="secondary">cloud run</Badge>
-                      )}
-                      {model.lerobot && <Badge variant="outline">lerobot</Badge>}
-                      {model.private && <Badge variant="outline">private</Badge>}
+                  <MarketListingCard
+                    key={model.job_id ?? model.repo_id}
+                    kind="model"
+                    name={model.repo_id}
+                    source={model.source}
+                    meta={modelMeta(model)}
+                    actionLabel="Run"
+                    actionIcon={<Play className="h-4 w-4" />}
+                    completeLabel="Run"
+                    complete={false}
+                    onAction={() => onRun(model)}
+                    badges={
+                      <>
+                        {model.cloud_run && (
+                          <Badge variant="secondary">cloud run</Badge>
+                        )}
+                        {model.lerobot && <Badge variant="outline">lerobot</Badge>}
+                        {model.source === "hub" && model.private && (
+                          <Badge variant="outline">private</Badge>
+                        )}
+                      </>
+                    }
+                    topRight={
                       <Button
                         variant="ghost"
                         size="sm"
                         className="h-6 px-1.5"
                         aria-label={`Fine-tune ${model.repo_id}`}
                         title="Fine-tune on a new dataset"
-                        onClick={() => onFinetune(model.repo_id)}
+                        onClick={() => onFinetune(model)}
                       >
                         <SlidersHorizontal className="h-3.5 w-3.5" />
                       </Button>
-                    </div>
-                    <MarketListingCard
-                      kind="model"
-                      name={model.repo_id}
-                      source="hub"
-                      meta={relativeTime(model.last_modified)}
-                      actionLabel="Run"
-                      actionIcon={<Play className="h-4 w-4" />}
-                      completeLabel="Run"
-                      complete={false}
-                      onAction={() => onRun(model.repo_id)}
-                    />
-                  </div>
+                    }
+                  />
                 ))}
               </div>
             ) : (

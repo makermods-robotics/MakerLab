@@ -15,6 +15,7 @@ import {
 import { ConfigComponentProps, policyTypeDisplayName } from "../types";
 import WandbInstallDialog from "../WandbInstallDialog";
 import { useApi } from "@/contexts/ApiContext";
+import { validateDatasetRepoId } from "@/lib/datasetName";
 
 const EssentialsCard: React.FC<ConfigComponentProps> = ({
   config,
@@ -23,6 +24,9 @@ const EssentialsCard: React.FC<ConfigComponentProps> = ({
   const { baseUrl, fetchWithHeaders } = useApi();
   const [wandbDialogOpen, setWandbDialogOpen] = useState(false);
   const [wandbInstallHint, setWandbInstallHint] = useState("pip install wandb");
+  const datasetError = config.dataset_repo_id
+    ? validateDatasetRepoId(config.dataset_repo_id)
+    : null;
 
   const handleWandbToggle = async (checked: boolean) => {
     if (!checked) {
@@ -56,21 +60,29 @@ const EssentialsCard: React.FC<ConfigComponentProps> = ({
       </CardHeader>
       <CardContent className="space-y-6">
         <div>
-          <Label>Dataset *</Label>
-          <div className="mt-1 rounded-sm border border-input bg-secondary px-3 py-2 text-sm">
-            {config.dataset_repo_id ? (
-              <span className="font-mono text-foreground">
-                {config.dataset_repo_id}
-              </span>
-            ) : (
-              <span className="text-muted-foreground">No dataset selected</span>
-            )}
-          </div>
-          <p className="mt-1 text-xs text-muted-foreground">
-            {config.dataset_repo_id
-              ? "Selected on the home page."
-              : "Select a dataset on the home page first."}
-          </p>
+          <Label htmlFor="dataset_repo_id">Dataset *</Label>
+          <Input
+            id="dataset_repo_id"
+            value={config.dataset_repo_id || ""}
+            onChange={(e) =>
+              updateConfig("dataset_repo_id", e.target.value.trim())
+            }
+            placeholder="username/dataset"
+            // A resume inherits the source run's dataset — editing it here
+            // would silently diverge from the checkpoint being continued.
+            disabled={config.resume}
+            aria-invalid={datasetError !== null}
+            className="mt-1 font-mono aria-[invalid=true]:border-destructive"
+          />
+          {datasetError ? (
+            <p className="mt-1 text-xs text-destructive">{datasetError}</p>
+          ) : (
+            <p className="mt-1 text-xs text-muted-foreground">
+              {config.resume
+                ? "Inherited from the run being resumed."
+                : "Prefilled from your selection — edit to train on any Hub dataset, including public ones you don't own."}
+            </p>
+          )}
         </div>
 
         <div>

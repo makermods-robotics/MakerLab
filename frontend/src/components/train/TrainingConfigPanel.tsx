@@ -28,6 +28,7 @@ import {
   RunnerFlavor,
 } from "@/lib/jobsApi";
 import { useDatasets } from "@/hooks/useDatasets";
+import { validateDatasetRepoId } from "@/lib/datasetName";
 import { useDatasetUpload } from "@/hooks/useDatasetUpload";
 import { getDatasetInfo } from "@/lib/replayApi";
 import LocalDatasetCloudNotice from "@/components/training/config/LocalDatasetCloudNotice";
@@ -453,10 +454,16 @@ const TrainingConfigPanel: React.FC = () => {
   // in offline mode, in which case uploads are impossible and Start is a hard
   // block. (needsUpload is already gated on isCloud.)
   const uploadBlockedOffline = needsUpload && offline;
+  // The dataset field is free text now (any Hub dataset) — block Start on a
+  // malformed id instead of launching a job doomed to fail.
+  const datasetRepoIdError = datasetRepoId
+    ? validateDatasetRepoId(datasetRepoId)
+    : null;
   const startDisabled =
     isStarting ||
     uploading ||
     !datasetRepoId ||
+    datasetRepoIdError != null ||
     localBlocked ||
     (targetRequiresAuth && !authenticated) ||
     targetMissingFlavor ||
@@ -470,7 +477,9 @@ const TrainingConfigPanel: React.FC = () => {
         ? "Select a hardware flavor"
         : uploadBlockedOffline
           ? "Offline mode is on — the dataset can't be uploaded to the Hub"
-          : undefined;
+          : datasetRepoIdError
+            ? datasetRepoIdError
+            : undefined;
 
   return (
     <Card className="mb-5">

@@ -19,6 +19,10 @@ interface MarketListingCardProps {
   loading?: boolean;
   /** Overrides the kind-derived action icon (Plus/Download). */
   actionIcon?: ReactNode;
+  /** Extra badges rendered in the badge row, after kind/source. */
+  badges?: ReactNode;
+  /** Buttons/controls rendered on the title row, right-aligned. */
+  topRight?: ReactNode;
   onAction: () => void;
 }
 
@@ -32,27 +36,33 @@ export function MarketListingCard({
   complete,
   loading = false,
   actionIcon,
+  badges,
+  topRight,
   onAction,
 }: MarketListingCardProps) {
   const ActionIcon = kind === "dataset" ? Plus : Download;
 
   return (
     <Card className="overflow-hidden rounded-xl p-0 shadow-sm">
-      <div
-        className="media-slot h-[130px] min-h-[130px] rounded-none border-0 border-b border-dashed"
-        data-label="task preview"
-      />
       <div className="grid gap-3 p-4">
-        <div className="min-w-0">
-          <h2 className="truncate text-base font-semibold text-foreground" title={name}>
+        <div className="flex min-w-0 items-start justify-between gap-2">
+          {/* Repo ids have no spaces — break-all lets long names wrap instead
+              of truncating away the distinguishing suffix. */}
+          <h2 className="min-w-0 break-all text-base font-semibold leading-snug text-foreground">
             {name}
           </h2>
+          {topRight && (
+            <div className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
+              {topRight}
+            </div>
+          )}
         </div>
         <div className="flex flex-wrap gap-1.5">
           <Badge variant={kind === "dataset" ? "secondary" : "outline"}>
             {kind}
           </Badge>
           <Badge variant="outline">{source}</Badge>
+          {badges}
         </div>
         <p className="min-h-[20px] truncate text-[12.5px] text-muted-foreground" title={meta}>
           {meta}

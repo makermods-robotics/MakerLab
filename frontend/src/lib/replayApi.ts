@@ -5,6 +5,7 @@ export type DatasetSource = "local" | "hub" | "both";
 export interface DatasetItem {
   repo_id: string;
   last_modified: string | null;
+  created_at: string | null;
   private: boolean;
   source: DatasetSource;
 }

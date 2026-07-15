@@ -1,9 +1,15 @@
 import React, { useEffect, useState } from "react";
 import { useLocation } from "react-router-dom";
-import { Plus, X } from "lucide-react";
+import { Plus } from "lucide-react";
 import TrainingConfigPanel from "@/components/train/TrainingConfigPanel";
 import JobsSection from "@/components/jobs/JobsSection";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 
 /**
  * Train & Deploy — the stage page at /training: start new training runs and
@@ -22,8 +28,16 @@ const TrainDeploy: React.FC = () => {
   );
   const [configOpen, setConfigOpen] = useState(deepLinked);
 
+  // Title reflects the deep-link source; the detail banners inside the panel
+  // explain which model is being continued/fine-tuned from.
+  const dialogTitle = navState?.finetune
+    ? "Fine-tune model"
+    : navState?.resume
+      ? "Resume training"
+      : "New training run";
+
   // A later deep-link (e.g. Fine-tune from a model card while already on the
-  // page) must also open the panel.
+  // page) must also open the dialog.
   useEffect(() => {
     if (deepLinked) setConfigOpen(true);
   }, [deepLinked, location.key]);
@@ -40,24 +54,19 @@ const TrainDeploy: React.FC = () => {
             the active robot.
           </p>
         </div>
-        <Button onClick={() => setConfigOpen((v) => !v)}>
-          {configOpen ? (
-            <>
-              <X className="h-4 w-4" /> Close config
-            </>
-          ) : (
-            <>
-              <Plus className="h-4 w-4" /> New training run
-            </>
-          )}
+        <Button onClick={() => setConfigOpen(true)}>
+          <Plus className="h-4 w-4" /> New training run
         </Button>
       </div>
 
-      {configOpen && (
-        <div className="mt-5">
+      <Dialog open={configOpen} onOpenChange={setConfigOpen}>
+        <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-3xl">
+          <DialogHeader>
+            <DialogTitle>{dialogTitle}</DialogTitle>
+          </DialogHeader>
           <TrainingConfigPanel />
-        </div>
-      )}
+        </DialogContent>
+      </Dialog>
 
       <div className="mt-6">
         <JobsSection />

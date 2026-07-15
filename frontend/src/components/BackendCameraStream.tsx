@@ -6,6 +6,11 @@ import { cn } from "@/lib/utils";
 interface BackendCameraStreamProps {
   /** cv2 camera index on the server (CameraConfig.camera_index). */
   cameraIndex: number;
+  /** Stable device identity (CameraConfig.unique_id). When set, the server
+   * re-anchors the index to this physical device before opening — its cv2
+   * resolves indices against a startup snapshot that drifts from the fresh
+   * enumeration after a replug, so index alone can open the wrong camera. */
+  uniqueId?: string;
   className?: string;
 }
 
@@ -34,6 +39,7 @@ const RETRY_MAX_MS = 12000;
  */
 const BackendCameraStream: React.FC<BackendCameraStreamProps> = ({
   cameraIndex,
+  uniqueId,
   className,
 }) => {
   const { baseUrl, fetchWithHeaders } = useApi();
@@ -44,14 +50,18 @@ const BackendCameraStream: React.FC<BackendCameraStreamProps> = ({
   const [attempt, setAttempt] = useState(0);
   const [down, setDown] = useState(false);
   const [reason, setReason] = useState<string | null>(null);
+  const uniqueIdQuery = uniqueId
+    ? `?unique_id=${encodeURIComponent(uniqueId)}`
+    : "";
 
-  // A new index is a new stream — forget the previous one's failure state.
+  // A new index or identity is a new stream — forget the previous one's
+  // failure state.
   useEffect(() => {
     attemptRef.current = 0;
     setAttempt(0);
     setDown(false);
     setReason(null);
-  }, [cameraIndex]);
+  }, [cameraIndex, uniqueId]);
 
   useEffect(() => {
     const img = imgRef.current;
@@ -82,7 +92,7 @@ const BackendCameraStream: React.FC<BackendCameraStreamProps> = ({
     // the status detail so the tile can say "recording is using the cameras"
     // instead of a generic failure. Best-effort: any probe error is itself
     // a reason ("server unreachable").
-    fetchWithHeaders(`${baseUrl}/camera-preview/${cameraIndex}`, {
+    fetchWithHeaders(`${baseUrl}/camera-preview/${cameraIndex}${uniqueIdQuery}`, {
       method: "GET",
       headers: { Range: "bytes=0-0" },
     })
@@ -102,7 +112,7 @@ const BackendCameraStream: React.FC<BackendCameraStreamProps> = ({
       })
       .catch(() => setReason("server unreachable"))
       .finally(scheduleRetry);
-  }, [baseUrl, fetchWithHeaders, cameraIndex, scheduleRetry]);
+  }, [baseUrl, fetchWithHeaders, cameraIndex, uniqueIdQuery, scheduleRetry]);
 
   const retryNow = useCallback(() => {
     if (retryTimer.current) clearTimeout(retryTimer.current);
@@ -137,7 +147,9 @@ const BackendCameraStream: React.FC<BackendCameraStreamProps> = ({
     <img
       key={attempt}
       ref={imgRef}
-      src={`${baseUrl}/camera-preview/${cameraIndex}?r=${attempt}`}
+      src={`${baseUrl}/camera-preview/${cameraIndex}?r=${attempt}${
+        uniqueId ? `&unique_id=${encodeURIComponent(uniqueId)}` : ""
+      }`}
       onError={handleError}
       className={className}
       alt="Server camera preview"

@@ -70,7 +70,7 @@ def test_apply_torque_limit_writes_raw_ram_register_to_every_motor() -> None:
 
 def test_apply_torque_limit_clamps_to_register_bounds() -> None:
     """Values are clamped to [0, 1000] (the register range); junk falls back to
-    the default 380 — a corrupted setting can never block a session start."""
+    the default 400 — a corrupted setting can never block a session start."""
     from makerlab.motor_power import apply_torque_limit
 
     bus = _FakeBus(["gripper"])
@@ -81,7 +81,7 @@ def test_apply_torque_limit_clamps_to_register_bounds() -> None:
     assert bus.writes[-1] == ("Torque_Limit", "gripper", 0, False, 2)
 
     apply_torque_limit(_FakeArm(bus), None)
-    assert bus.writes[-1] == ("Torque_Limit", "gripper", 380, False, 2)
+    assert bus.writes[-1] == ("Torque_Limit", "gripper", 400, False, 2)
 
 
 def test_apply_torque_limit_writes_even_at_full_power() -> None:
@@ -203,9 +203,9 @@ def test_request_models_default_max_torque_limit() -> None:
         single_task="task",
     )
     inference = InferenceRequest(follower_port="/dev/f", follower_config="F", policy_ref="/tmp/x")
-    assert teleop.max_torque_limit == 380
-    assert record.max_torque_limit == 380
-    assert inference.max_torque_limit == 380
+    assert teleop.max_torque_limit == 400
+    assert record.max_torque_limit == 400
+    assert inference.max_torque_limit == 400
 
 
 def test_voltage_from_raw_scales_tenths_of_a_volt() -> None:

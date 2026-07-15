@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -128,6 +129,73 @@ def test_list_all_datasets_merges_hub_and_local(
     by_id = {d["repo_id"]: d for d in result}
     assert by_id["alice/pusht"]["source"] == "both"
     assert by_id["alice/aloha"]["source"] == "hub"
+
+
+def test_local_dataset_carries_created_at(tmp_lerobot_home: Path) -> None:
+    from makerlab.datasets import list_local_datasets
+
+    _make_dataset(tmp_lerobot_home, "alice/pusht")
+    (entry,) = list_local_datasets()
+    # On filesystems without birthtime this falls back to mtime — either way
+    # the field is present and ISO-parsable.
+    assert entry["created_at"] is not None
+    datetime.fromisoformat(entry["created_at"])
+
+
+def test_list_all_datasets_sorted_newest_added_first(tmp_lerobot_home: Path) -> None:
+    """Ordering keys off created_at, falling back to last_modified, and a
+    both-sourced entry keeps the OLDER created_at (when it first existed)."""
+    from makerlab.datasets import list_all_datasets
+
+    with (
+        patch(
+            "makerlab.datasets.list_user_datasets",
+            return_value=[
+                {
+                    "repo_id": "alice/oldest",
+                    "last_modified": "2026-06-01T00:00:00",
+                    "created_at": "2026-01-01T00:00:00",
+                    "private": False,
+                },
+                {
+                    "repo_id": "alice/no_created",
+                    "last_modified": "2026-03-01T00:00:00",
+                    "created_at": None,
+                    "private": False,
+                },
+            ],
+        ),
+        patch(
+            "makerlab.datasets.list_local_datasets",
+            return_value=[
+                {
+                    "repo_id": "alice/newest",
+                    "last_modified": "2026-05-01T00:00:00",
+                    "created_at": "2026-05-01T00:00:00",
+                    "private": False,
+                },
+                {
+                    # Also on the Hub — merged to "both"; local copy is newer
+                    # but the Hub knew it first.
+                    "repo_id": "alice/oldest",
+                    "last_modified": "2026-06-02T00:00:00",
+                    "created_at": "2026-06-02T00:00:00",
+                    "private": False,
+                },
+            ],
+        ),
+    ):
+        result = list_all_datasets()
+
+    assert [d["repo_id"] for d in result] == [
+        "alice/newest",  # created 2026-05
+        "alice/no_created",  # falls back to last_modified 2026-03
+        "alice/oldest",  # created (older of the two) 2026-01
+    ]
+    merged = result[-1]
+    assert merged["source"] == "both"
+    assert merged["created_at"] == "2026-01-01T00:00:00"
+    assert merged["last_modified"] == "2026-06-02T00:00:00"
 
 
 def _write_info(root: Path, repo_id: str, info: dict[str, Any]) -> Path:

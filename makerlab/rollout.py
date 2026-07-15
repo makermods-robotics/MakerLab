@@ -84,8 +84,8 @@ class InferenceRequest(BaseModel):
     skip_identity_check: bool = False
     # Follower session torque cap: raw Feetech Torque_Limit register value
     # (see makerlab/motor_power.py). Clamped server-side to [0, 1000]; written
-    # before the subprocess starts. Default 380 matches auto-cal's DEFAULT_TORQUE_LIMIT.
-    max_torque_limit: int = 380
+    # before the subprocess starts. Default 400 (auto-cal itself still moves at a gentler 380).
+    max_torque_limit: int = 400
 
 
 inference_active: bool = False

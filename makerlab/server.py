@@ -46,11 +46,12 @@ from lerobot.policies.factory import make_policy_config
 # REBINDS its recording_active global, so only live attribute access sees the
 # current value — a from-import would freeze the startup value.
 from . import datasets as dataset_browser, record as record_state
-from .models import list_user_models
+from .models import list_all_models
 
 # Import our custom calibration functionality
 from .auto_calibrate import AutoCalibrationRequest, auto_calibration_manager
 from .calibrate import CalibrationRequest, calibration_manager
+from .camera_identity import resolve_cv2_index
 from .camera_preview import CameraOpenError, camera_preview_manager
 from .identify import identify_arm_by_motion
 from .jobs import (
@@ -599,11 +600,16 @@ def datasets_info(repo_id: str):
 
 @app.get("/models")
 async def get_models():
-    """All model repos the user owns on the Hub, annotated for library filters."""
-    info = cached_whoami()
-    if info is None:
-        return {"status": "success", "authenticated": False, "models": []}
-    return {"status": "success", "authenticated": True, "models": list_user_models()}
+    """The user's Hub model repos plus local models (training runs, imported
+    dirs), each tagged with `source`, sorted newest-added first.
+
+    Local models are listed even when signed out — they live on this machine
+    and don't need the Hub (list_user_models degrades to empty on its own)."""
+    return {
+        "status": "success",
+        "authenticated": cached_whoami() is not None,
+        "models": list_all_models(job_registry.list(limit=200)),
+    }
 
 
 @app.get("/datasets/hub-status")
@@ -1809,7 +1815,7 @@ def get_available_cameras():
 
 
 @app.get("/camera-preview/{index}")
-def camera_preview_stream(index: int):
+def camera_preview_stream(index: int, unique_id: str | None = None):
     """MJPEG preview stream of a camera attached to the *server* machine.
 
     Fallback for headless deployments (e.g. a Jetson on the LAN): the browser's
@@ -1817,6 +1823,12 @@ def camera_preview_stream(index: int):
     ``<img src="/camera-preview/{index}">`` instead. The capture is shared and
     refcounted per index (see makerlab/camera_preview.py); recording force-releases
     every preview on its start path.
+
+    ``unique_id`` (AVFoundation uniqueID, from /available-cameras) re-anchors
+    the index to the physical device before opening: cv2 resolves indices
+    against this process's startup device snapshot, which diverges from the
+    fresh-subprocess enumeration after a replug — without the re-anchor the
+    stream can silently show a different camera (see makerlab/camera_identity.py).
 
     Returns 409 while recording is active (it owns the cv2 devices) and 503 when
     the camera can't be opened. Teleoperation drives the serial bus and opens no
@@ -1827,8 +1839,15 @@ def camera_preview_stream(index: int):
             status_code=409,
             detail="Recording is active — the cameras are in use. Stop recording to preview them.",
         )
+    resolved = resolve_cv2_index(unique_id, index)
+    if resolved is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Camera not visible to the server — it was plugged in after makerlab "
+            "started. Restart makerlab to use it.",
+        )
     try:
-        stream = camera_preview_manager.open_stream(index)
+        stream = camera_preview_manager.open_stream(resolved)
     except CameraOpenError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return StreamingResponse(stream, media_type="multipart/x-mixed-replace; boundary=frame")

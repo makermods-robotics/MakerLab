@@ -303,8 +303,8 @@ class TeleoperateRequest(BaseModel):
     skip_identity_check: bool = False
     # Follower session torque cap: raw Feetech Torque_Limit register value
     # (see makerlab/motor_power.py). Applied to follower motors only; clamped
-    # server-side to [0, 1000]. Default 380 matches auto-cal's DEFAULT_TORQUE_LIMIT.
-    max_torque_limit: int = 380
+    # server-side to [0, 1000]. Default 400 (auto-cal itself still moves at a gentler 380).
+    max_torque_limit: int = 400
 
 
 def get_joint_positions_from_robot(robot, prefix: str = "", calibration=None) -> dict[str, float]:

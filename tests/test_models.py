@@ -22,16 +22,45 @@ from fastapi.testclient import TestClient
 from huggingface_hub.errors import HfHubHTTPError
 
 
-def _model(repo_id: str, *, last_modified=None, private=False, tags=None):
+def _model(repo_id: str, *, last_modified=None, created_at=None, private=False, tags=None):
     """A stand-in for a huggingface_hub ModelInfo, matching the attributes
     list_user_models reads. `tags` left as the sentinel means "attribute is
     None" (Hub returns None when tags aren't expanded/present)."""
     m = MagicMock()
     m.id = repo_id
     m.last_modified = last_modified
+    m.created_at = created_at
     m.private = private
     m.tags = tags
     return m
+
+
+def _job(
+    job_id: str,
+    *,
+    runner="local",
+    name="run",
+    display_name=None,
+    output_dir="/tmp/out",
+    hf_repo_id=None,
+    checkpoint_count=1,
+    state="done",
+    started_at=1_700_000_000.0,
+    ended_at=None,
+):
+    """Duck-typed JobRecord carrying only the attributes list_all_models reads."""
+    r = MagicMock()
+    r.id = job_id
+    r.runner = runner
+    r.name = name
+    r.display_name = display_name
+    r.output_dir = output_dir
+    r.hf_repo_id = hf_repo_id
+    r.checkpoint_count = checkpoint_count
+    r.state = state
+    r.started_at = started_at
+    r.ended_at = ended_at
+    return r
 
 
 def _dt(iso: str) -> datetime:
@@ -183,20 +212,144 @@ def test_entry_shape_and_types() -> None:
     assert entry == {
         "repo_id": "alice/policy_a",
         "last_modified": "2026-01-01T09:00:00",
+        "created_at": None,
         "private": True,
         "lerobot": True,
         "cloud_run": False,
+        "source": "hub",
     }
+
+
+# --- list_all_models (hub + local merge) -------------------------------------
+
+
+def _all_models_with(records, hub=()):
+    from makerlab.models import list_all_models
+
+    with patch("makerlab.models.list_user_models", return_value=list(hub)):
+        return list_all_models(records)
+
+
+def test_local_run_with_checkpoints_included() -> None:
+    result = _all_models_with([_job("job1", runner="local", name="ACT · alice/cubes")])
+    assert len(result) == 1
+    entry = result[0]
+    assert entry["repo_id"] == "ACT · alice/cubes"
+    assert entry["job_id"] == "job1"
+    assert entry["source"] == "local"
+    assert entry["private"] is True
+    assert entry["created_at"] is not None
+
+
+def test_local_run_without_checkpoints_excluded() -> None:
+    assert _all_models_with([_job("job1", runner="local", checkpoint_count=0)]) == []
+
+
+def test_running_local_job_excluded() -> None:
+    """A still-training run isn't a browsable model — it lives in the jobs
+    list; offering library run/fine-tune on it would collide with the session."""
+    assert _all_models_with([_job("job1", runner="local", state="running")]) == []
+
+
+def test_hub_import_pointer_excluded() -> None:
+    """An imported record with hf_repo_id has no local files — the hub listing
+    already carries the repo, so it must not appear as a local entry."""
+    records = [_job("job1", runner="imported", output_dir="", hf_repo_id="alice/policy_a")]
+    assert _all_models_with(records) == []
+
+
+def test_local_dir_import_included() -> None:
+    records = [_job("job1", runner="imported", output_dir="/models/act", name="Imported · act")]
+    result = _all_models_with(records)
+    assert [m["repo_id"] for m in result] == ["Imported · act"]
+    assert result[0]["source"] == "local"
+
+
+def test_cloud_run_record_excluded() -> None:
+    assert _all_models_with([_job("job1", runner="hf_cloud", hf_repo_id="alice/run")]) == []
+
+
+def test_display_name_wins_over_name() -> None:
+    records = [_job("job1", runner="local", name="ACT · raw", display_name="my nice run")]
+    assert _all_models_with(records)[0]["repo_id"] == "my nice run"
+
+
+def test_merged_ordering_newest_added_first() -> None:
+    hub = [
+        {
+            "repo_id": "alice/old_hub",
+            "last_modified": "2026-05-01T00:00:00",
+            "created_at": "2026-01-01T00:00:00",
+            "private": False,
+            "lerobot": True,
+            "cloud_run": False,
+            "source": "hub",
+        },
+        {
+            "repo_id": "alice/no_created",
+            "last_modified": "2026-03-01T00:00:00",
+            "created_at": None,
+            "private": False,
+            "lerobot": True,
+            "cloud_run": False,
+            "source": "hub",
+        },
+    ]
+    # started_at 2026-06-01T00:00:00Z
+    local = _job("job1", runner="local", name="newest local", started_at=1_780_272_000.0)
+    result = _all_models_with([local], hub=hub)
+    assert [m["repo_id"] for m in result] == [
+        "newest local",  # created 2026-06
+        "alice/no_created",  # falls back to last_modified 2026-03
+        "alice/old_hub",  # created 2026-01
+    ]
 
 
 # --- Route -----------------------------------------------------------------
 
 
-def test_models_route_unauthenticated(client: TestClient) -> None:
-    with patch("makerlab.server.cached_whoami", return_value=None):
+def test_models_route_unauthenticated_still_lists_local(client: TestClient) -> None:
+    """Signed out, the route still returns local models — they don't need the
+    Hub. (list_user_models itself degrades to empty without a login.)"""
+    local_entry = {
+        "repo_id": "my local run",
+        "job_id": "job1",
+        "last_modified": "2026-07-01T00:00:00+00:00",
+        "created_at": "2026-07-01T00:00:00+00:00",
+        "private": True,
+        "lerobot": False,
+        "cloud_run": False,
+        "source": "local",
+    }
+    with (
+        patch("makerlab.server.cached_whoami", return_value=None),
+        patch("makerlab.server.list_all_models", return_value=[local_entry]),
+    ):
         resp = client.get("/models")
     assert resp.status_code == 200
-    assert resp.json() == {"status": "success", "authenticated": False, "models": []}
+    body = resp.json()
+    assert body["authenticated"] is False
+    assert body["models"] == [local_entry]
+
+
+def test_tracked_hub_import_gets_job_id() -> None:
+    """A hub repo already imported as a pointer job keeps source='hub' but
+    carries the pointer's job_id so run/fine-tune skip the re-import."""
+    hub = [
+        {
+            "repo_id": "alice/policy_a",
+            "last_modified": "2026-01-01T00:00:00",
+            "created_at": "2026-01-01T00:00:00",
+            "private": False,
+            "lerobot": True,
+            "cloud_run": False,
+            "source": "hub",
+        }
+    ]
+    records = [_job("job9", runner="imported", output_dir="", hf_repo_id="alice/policy_a")]
+    (entry,) = _all_models_with(records, hub=hub)
+    assert entry["source"] == "hub"
+    assert entry["job_id"] == "job9"
 
 
 def test_models_route_authenticated(client: TestClient) -> None:
@@ -204,14 +357,16 @@ def test_models_route_authenticated(client: TestClient) -> None:
         {
             "repo_id": "alice/policy_a",
             "last_modified": "2026-01-01T00:00:00",
+            "created_at": "2025-12-01T00:00:00",
             "private": False,
             "lerobot": True,
             "cloud_run": False,
+            "source": "hub",
         }
     ]
     with (
         patch("makerlab.server.cached_whoami", return_value={"name": "alice", "orgs": []}),
-        patch("makerlab.server.list_user_models", return_value=fake_models),
+        patch("makerlab.server.list_all_models", return_value=fake_models),
     ):
         resp = client.get("/models")
     assert resp.status_code == 200

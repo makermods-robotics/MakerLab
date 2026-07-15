@@ -980,9 +980,9 @@ const RobotSettingsPanel = ({ robotName, variant }: RobotSettingsPanelProps) => 
   // release so we don't fire a POST per pixel. Written raw to the follower's
   // Feetech Torque_Limit register at the start of each teleop/record/inference
   // session.
-  const [torqueDraft, setTorqueDraft] = useState(380);
+  const [torqueDraft, setTorqueDraft] = useState(400);
   useEffect(() => {
-    setTorqueDraft(robot?.max_torque_limit ?? 380);
+    setTorqueDraft(robot?.max_torque_limit ?? 400);
   }, [robot?.max_torque_limit]);
 
   const commitTorque = useCallback(async () => {
@@ -1281,7 +1281,7 @@ const RobotSettingsPanel = ({ robotName, variant }: RobotSettingsPanelProps) => 
               />
               <p className="text-xs text-muted-foreground">
                 Saves as{" "}
-                <span className="font-mono text-foreground">
+                <span className="text-foreground">
                   {calibrationConfigName || "…"}
                 </span>
                 . Change it to keep the current calibration and save a new one
@@ -1359,8 +1359,8 @@ const RobotSettingsPanel = ({ robotName, variant }: RobotSettingsPanelProps) => 
                     className="w-full accent-primary"
                   />
                   <p className="text-xs text-muted-foreground">
-                    Servo torque cap (0–1000). Default 380 — the
-                    auto-calibration setting.
+                    Servo torque cap (0–1000). Default 400. Auto-calibration
+                    itself moves at a gentler 380.
                   </p>
                 </div>
               )}

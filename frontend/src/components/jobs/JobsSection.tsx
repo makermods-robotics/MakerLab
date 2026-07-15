@@ -25,6 +25,7 @@ import JobCard from "./JobCard";
 import HubJobCard from "./HubJobCard";
 import InferenceModal from "@/components/landing/InferenceModal";
 import { ModelLibrary } from "@/components/train/ModelLibrary";
+import { UserModel } from "@/lib/modelsApi";
 import { useModels } from "@/hooks/useModels";
 import { useRobots } from "@/hooks/useRobots";
 import {
@@ -200,41 +201,53 @@ const JobsSection: React.FC = () => {
     setInferenceModalOpen(true);
   };
 
-  // Lazy auto-import: an untracked Hub model card's Run inference / Fine-tune
-  // buttons route through here. We first register the repo as an imported
+  // Model-library Run / Fine-tune. Local entries (model.job_id set) are
+  // already registry jobs — fetch the record and act on it directly. Hub
+  // entries lazy auto-import first: register the repo as an imported
   // pseudo-job (idempotent — a re-import returns the existing record), then
   // proceed exactly as if the user had clicked the action on the resulting
-  // imported-model card. The listing then re-renders the repo as a tracked
-  // imported card (see trackedRepoIds, which now also covers imported records),
-  // so the Hub card disappears on the next refresh.
+  // imported-model card.
   //
   // Husk repos (a cloud run that died before its first checkpoint save) have no
   // usable model, so register_imported rejects them with a 400 — we catch it and
   // show the plain "no checkpoints" answer instead of opening a broken modal.
-  const handleLazyImportAction = async (
-    repoId: string,
+  const handleModelAction = async (
+    model: UserModel,
     action: "inference" | "finetune",
   ) => {
     let record: JobRecord;
-    try {
-      record = await importModel(baseUrl, fetchWithHeaders, repoId);
-    } catch (e) {
-      const isHusk =
-        e instanceof ApiError && (e.status === 400 || e.status === 404);
-      toast({
-        title: isHusk ? "No checkpoints in this repo" : "Import failed",
-        description: isHusk
-          ? "The run likely died before its first checkpoint save."
-          : e instanceof Error
-            ? e.message
-            : String(e),
-        variant: "destructive",
-      });
-      return;
+    if (model.job_id) {
+      try {
+        record = await getJob(baseUrl, fetchWithHeaders, model.job_id);
+      } catch (e) {
+        toast({
+          title: "Model unavailable",
+          description: e instanceof Error ? e.message : String(e),
+          variant: "destructive",
+        });
+        return;
+      }
+    } else {
+      try {
+        record = await importModel(baseUrl, fetchWithHeaders, model.repo_id);
+      } catch (e) {
+        const isHusk =
+          e instanceof ApiError && (e.status === 400 || e.status === 404);
+        toast({
+          title: isHusk ? "No checkpoints in this repo" : "Import failed",
+          description: isHusk
+            ? "The run likely died before its first checkpoint save."
+            : e instanceof Error
+              ? e.message
+              : String(e),
+          variant: "destructive",
+        });
+        return;
+      }
+      // The imported record now tracks this repo; drop the Hub card immediately
+      // rather than waiting for the WS/refresh round-trip.
+      refresh();
     }
-    // The imported record now tracks this repo; drop the Hub card immediately
-    // rather than waiting for the WS/refresh round-trip.
-    refresh();
     if (action === "inference") {
       // initialStep = null: the inference modal loads the repo's checkpoints and
       // auto-selects the latest (or shows its own empty-checkpoints message).
@@ -465,7 +478,7 @@ const JobsSection: React.FC = () => {
                   : "No active local jobs. Start one from the Training page."}
               </p>
             ) : (
-              <div className="grid grid-cols-1 gap-2.5">
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
                 {localActive.map((job) => (
                   <JobCard
                     key={job.id}
@@ -517,7 +530,7 @@ const JobsSection: React.FC = () => {
                     </p>
                   )
                 ) : (
-                  <div className="grid grid-cols-1 gap-2.5">
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
                     {trackedCloudActive.map((job) => (
                       <JobCard
                         key={job.id}
@@ -550,7 +563,7 @@ const JobsSection: React.FC = () => {
               Untracked ({untrackedCount})
             </CollapsibleTrigger>
             <CollapsibleContent className="pt-2">
-              <div className="grid grid-cols-1 gap-2.5">
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
                 {localUntracked.map((job) => (
                   <JobCard
                     key={job.id}
@@ -588,15 +601,16 @@ const JobsSection: React.FC = () => {
       </div>
 
 
-      {/* Every model repo the user owns on the Hub — the single browsing
-          surface for models; running/fine-tuning lazily imports the repo. */}
+      {/* Every model the user owns — Hub repos and local runs/imports — in one
+          browsing surface. Hub entries lazily import on run/fine-tune; local
+          entries act on their registry job directly. */}
       <ModelLibrary
         models={models}
         loading={modelsLoading}
         authenticated={modelsAuthenticated}
         robotLabel={selectedName ?? "your robot"}
-        onRun={(repoId) => handleLazyImportAction(repoId, "inference")}
-        onFinetune={(repoId) => handleLazyImportAction(repoId, "finetune")}
+        onRun={(model) => handleModelAction(model, "inference")}
+        onFinetune={(model) => handleModelAction(model, "finetune")}
         onRefresh={refreshModels}
       />
 

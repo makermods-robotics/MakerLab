@@ -13,7 +13,7 @@ export interface StartInferenceRequest {
     fps?: number;
   }>;
   duration_s: number;
-  // Raw follower torque limit for the session (0-1000, default 380).
+  // Raw follower torque limit for the session (0-1000, default 400).
   max_torque_limit?: number;
   // Bimanual: "single" (default) drives one follower; "bimanual" drives two.
   // In bimanual mode follower_port/follower_config above is the LEFT arm and

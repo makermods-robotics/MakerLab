@@ -18,7 +18,8 @@ import {
 } from "@/components/ui/collapsible";
 import { useToast } from "@/hooks/use-toast";
 import { useAvailableCameras } from "@/hooks/useAvailableCameras";
-import { useCameraStream } from "@/hooks/useCameraStream";
+import BackendCameraStream from "@/components/BackendCameraStream";
+import { isCameraConnected } from "@/lib/cameraResolve";
 
 // Sentinels distinguish "leave unset" (auto-detect / platform default) from an
 // explicit choice. Radix Select disallows an empty-string value, so we map these
@@ -43,6 +44,10 @@ export interface CameraConfig {
   type: string;
   camera_index?: number; // cv2 index — what the recorder opens
   device_id: string; // Browser deviceId matched to the cv2 index by AVFoundation localizedName
+  // Stable OS device identity (AVFoundation uniqueID). The authoritative link
+  // to the physical camera: cv2 indices shift on replug and device names can
+  // collide (two "USB Camera"s), but this survives both.
+  unique_id?: string;
   width: number;
   height: number;
   fps?: number;
@@ -86,16 +91,24 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
     : undefined;
 
   // cv2's AVFoundation order is uniqueID-sorted, so plugging/unplugging a
-  // device between sessions shifts indices. The browser device_id stays
-  // stable per-origin, so use it to refresh each seeded camera's
-  // camera_index — otherwise the recorder opens the wrong physical device
-  // and the dropdown's "already added" check guards a stale index.
+  // device between sessions shifts indices. Refresh each seeded camera's
+  // camera_index by unique_id (exact physical identity) when the record has
+  // one, falling back to the browser device_id for older records — otherwise
+  // the recorder opens the wrong physical device and the dropdown's "already
+  // added" check guards a stale index. device_id alone is a coin flip when
+  // two cameras share a name (twin "USB Camera"s), which is why unique_id
+  // wins when present.
   useEffect(() => {
     if (availableCameras.length === 0 || cameras.length === 0) return;
     let changed = false;
     const refreshed = cameras.map((cam) => {
-      if (!cam.device_id) return cam;
-      const match = availableCameras.find((m) => m.deviceId === cam.device_id);
+      const match =
+        (cam.unique_id
+          ? availableCameras.find((m) => m.uniqueId === cam.unique_id)
+          : undefined) ??
+        (cam.device_id
+          ? availableCameras.find((m) => m.deviceId === cam.device_id)
+          : undefined);
       if (match && match.index !== cam.camera_index) {
         changed = true;
         return { ...cam, camera_index: match.index };
@@ -139,6 +152,7 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
     const isDuplicate = cameras.some(
       (cam) =>
         cam.camera_index === selectedCamera.index ||
+        (selectedCamera.uniqueId && cam.unique_id === selectedCamera.uniqueId) ||
         (selectedCamera.deviceId && cam.device_id === selectedCamera.deviceId),
     );
     if (isDuplicate) {
@@ -156,6 +170,7 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
       type: "opencv",
       camera_index: selectedCamera.index,
       device_id: selectedCamera.deviceId,
+      unique_id: selectedCamera.uniqueId,
       width: 640,
       height: 480,
       fps: 30,
@@ -189,10 +204,11 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
   };
 
   // When the recording session is starting, the parent calls
-  // releaseStreamsRef.current() to pause every preview so their browser tracks
-  // are released and cv2.VideoCapture can grab the cameras exclusively.
-  // Flipping streamsPaused also disables useAvailableCameras above (which still
-  // probes via getUserMedia/enumerateDevices) — see its comment.
+  // releaseStreamsRef.current() to pause every preview so their MJPEG streams
+  // drop (the server releases its shared captures) and cv2.VideoCapture can
+  // grab the cameras exclusively. Flipping streamsPaused also disables
+  // useAvailableCameras above (which still probes via
+  // getUserMedia/enumerateDevices) — see its comment.
   const releaseAllCameraStreams = useCallback(() => {
     setStreamsPaused(true);
   }, []);
@@ -249,6 +265,7 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
                 const alreadyAdded = cameras.some(
                   (cam) =>
                     cam.camera_index === camera.index ||
+                    (camera.uniqueId && cam.unique_id === camera.uniqueId) ||
                     (camera.deviceId && cam.device_id === camera.deviceId),
                 );
                 return (
@@ -259,7 +276,7 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
                   >
                     <div className="flex flex-col">
                       <span className="font-medium">{camera.name}</span>
-                      <span className="font-mono text-xs text-muted-foreground">
+                      <span className="text-xs text-muted-foreground">
                         Index {camera.index}
                         {alreadyAdded && " · already added"}
                       </span>
@@ -277,12 +294,13 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div className="rounded-lg border border-border bg-card overflow-hidden">
               <CameraStreamBox
-                deviceId={selectedCamera.deviceId}
+                cameraIndex={selectedCamera.index}
+                uniqueId={selectedCamera.uniqueId}
                 paused={streamsPaused}
               />
               <div className="border-t border-border px-2 py-1.5">
                 <span className="text-[11px] text-muted-foreground truncate">
-                  Browser preview — recorder index {selectedCamera.index}
+                  Recorder feed — cv2 index {selectedCamera.index}
                 </span>
               </div>
             </div>
@@ -321,6 +339,7 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
               <CameraPreview
                 key={camera.id}
                 camera={camera}
+                connected={isCameraConnected(camera, availableCameras)}
                 paused={streamsPaused}
                 onRemove={() => removeCamera(camera.id)}
                 onUpdate={(updates) => updateCamera(camera.id, updates)}
@@ -342,39 +361,39 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
 
 interface CameraStreamBoxProps {
   paused: boolean;
-  deviceId?: string;
+  /** cv2 index to stream; undefined renders the disconnected state. */
+  cameraIndex?: number;
+  /** Device identity — lets the server re-anchor the index before opening. */
+  uniqueId?: string;
 }
 
-/** Browser preview used both before adding a camera and in configured cards.
- * Pausing releases the getUserMedia track so cv2 can claim the camera. */
+/** Recorder-truth preview used both before adding a camera and in configured
+ * cards: streams the server's cv2 camera at this index, so the tile shows
+ * exactly the device recording and Collect will open. A browser getUserMedia
+ * preview can show a different physical device when two cameras share a
+ * localizedName (twin "USB Camera"s make the deviceId↔index match a coin
+ * flip). Pausing unmounts the stream so cv2 can claim the camera exclusively. */
 const CameraStreamBox: React.FC<CameraStreamBoxProps> = ({
   paused,
-  deviceId,
+  cameraIndex,
+  uniqueId,
 }) => {
-  const { videoRef, hasError: streamError } = useCameraStream(
-    deviceId ?? "",
-    paused
-  );
-  const showVideo = !paused && Boolean(deviceId) && !streamError;
+  const showVideo = !paused && cameraIndex !== undefined;
   return (
     <div className="aspect-[4/3] bg-secondary relative">
       {showVideo ? (
-        <video
-          ref={videoRef}
-          autoPlay
-          muted
-          playsInline
+        <BackendCameraStream
+          cameraIndex={cameraIndex}
+          uniqueId={uniqueId}
           className="w-full h-full object-cover"
         />
       ) : (
         <div className="w-full h-full flex flex-col items-center justify-center">
           <VideoOff className="w-8 h-8 text-muted-foreground mb-2" />
-          <span className="text-muted-foreground text-sm">
+          <span className="text-muted-foreground text-sm px-2 text-center">
             {paused
               ? "Preview paused"
-              : deviceId
-                ? "Preview failed"
-                : "No browser match — rescan or reconnect the camera"}
+              : "Camera disconnected — reconnect it or rescan"}
           </span>
         </div>
       )}
@@ -384,6 +403,9 @@ const CameraStreamBox: React.FC<CameraStreamBoxProps> = ({
 
 interface CameraPreviewProps {
   camera: CameraConfig;
+  /** False when the camera's unique_id is verifiably absent from the current
+   * enumeration — the tile must show "disconnected", never a wrong device. */
+  connected: boolean;
   paused: boolean;
   onRemove: () => void;
   onUpdate: (updates: Partial<CameraConfig>) => void;
@@ -391,6 +413,7 @@ interface CameraPreviewProps {
 
 const CameraPreview: React.FC<CameraPreviewProps> = ({
   camera,
+  connected,
   paused,
   onRemove,
   onUpdate,
@@ -398,7 +421,8 @@ const CameraPreview: React.FC<CameraPreviewProps> = ({
   return (
     <div className="bg-card rounded-lg border border-border overflow-hidden">
       <CameraStreamBox
-        deviceId={camera.device_id}
+        cameraIndex={connected ? camera.camera_index : undefined}
+        uniqueId={camera.unique_id}
         paused={paused}
       />
 
@@ -423,7 +447,7 @@ const CameraPreview: React.FC<CameraPreviewProps> = ({
             Configuration
           </CollapsibleTrigger>
           <CollapsibleContent className="pt-2 space-y-2">
-            <div className="grid grid-cols-1 gap-2 font-mono text-xs text-muted-foreground">
+            <div className="grid grid-cols-1 gap-2 text-xs text-muted-foreground">
               <div className="flex items-center gap-2">
                 <span className="w-16">Resolution:</span>
                 <div className="flex items-center gap-1">

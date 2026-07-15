@@ -17,7 +17,6 @@ import logging
 import shutil
 import threading
 import time
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +33,7 @@ from lerobot.teleoperators.bi_so_leader import BiSOLeaderConfig
 from lerobot.teleoperators.so_leader import SO101LeaderConfig
 
 from .arm_identity import ArmIdentityError, verify_devices
+from .camera_identity import resolve_cv2_index
 from .camera_preview import camera_preview_manager
 from .datasets import _lerobot_cache_root, invalidate_hub_status
 from .motor_power import apply_torque_limit, clear_goal_velocity
@@ -64,6 +64,10 @@ phase_start_time = None  # Track when current phase started
 # created) dataset directory was discarded. Surfaced in the session-end status
 # so the frontend can tell the user nothing was kept (see Upload.tsx).
 last_session_discarded_empty = False
+# Final saved-episode count of the most recent session. The live counter above
+# is zeroed by the worker's cleanup in the same breath that ends the session,
+# so the session-end status reports this snapshot instead.
+last_session_saved_episodes = 0
 # Warn-but-allow arm-identity findings from the current session's guard (see
 # makerlab/arm_identity.py). The guard runs inside the recording worker (after the
 # start response has already been sent), so the messages are surfaced through
@@ -141,8 +145,8 @@ class RecordingRequest(BaseModel):
     skip_identity_check: bool = False
     # Follower session torque cap: raw Feetech Torque_Limit register value
     # (see makerlab/motor_power.py). Applied to follower motors only; clamped
-    # server-side to [0, 1000]. Default 380 matches auto-cal's DEFAULT_TORQUE_LIMIT.
-    max_torque_limit: int = 380
+    # server-side to [0, 1000]. Default 400 (auto-cal itself still moves at a gentler 380).
+    max_torque_limit: int = 400
 
 
 class UploadRequest(BaseModel):
@@ -181,6 +185,14 @@ def _build_camera_configs(cameras: dict, default_backend) -> dict:
 
     `backend` (a Cv2Backends name) and `fourcc` (a 4-char code) are optional per
     camera; when omitted they fall back to `default_backend` and auto-detect.
+
+    When a camera carries a `unique_id`, its index is re-anchored to the
+    physical device via the in-process AVFoundation list (see
+    makerlab/camera_identity.py): recording runs in this process, whose cv2
+    resolves indices against a startup device snapshot that diverges from the
+    fresh /available-cameras enumeration after a replug. Without the re-anchor
+    a stale index silently records a different camera (e.g. the built-in
+    webcam). A verifiably unreachable camera raises instead.
     """
     from lerobot.cameras.configs import Cv2Backends
     from lerobot.cameras.opencv import OpenCVCameraConfig
@@ -197,8 +209,17 @@ def _build_camera_configs(cameras: dict, default_backend) -> dict:
         backend = Cv2Backends[backend_name] if backend_name else default_backend
         fourcc = camera_data.get("fourcc") or None
 
+        camera_index = resolve_cv2_index(
+            camera_data.get("unique_id"), camera_data.get("camera_index", 0)
+        )
+        if camera_index is None:
+            raise ValueError(
+                f"Camera '{camera_name}' is not visible to the server — it was plugged in "
+                "after makerlab started. Restart makerlab, then start recording again."
+            )
+
         camera_configs[camera_name] = OpenCVCameraConfig(
-            index_or_path=camera_data.get("camera_index", 0),
+            index_or_path=camera_index,
             backend=backend,
             fps=camera_data.get("fps"),
             width=camera_data.get("width"),
@@ -207,7 +228,7 @@ def _build_camera_configs(cameras: dict, default_backend) -> dict:
         )
         logger.info(
             f"✅ CAMERA CONFIG: {camera_name} -> OpenCVCameraConfig("
-            f"index={camera_data.get('camera_index')}, backend={backend.name}, "
+            f"index={camera_index}, backend={backend.name}, "
             f"{camera_data.get('width')}x{camera_data.get('height')}@{camera_data.get('fps')}fps, "
             f"fourcc={fourcc})"
         )
@@ -314,6 +335,7 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
         current_phase, \
         phase_start_time, \
         last_session_discarded_empty, \
+        last_session_saved_episodes, \
         identity_warnings
 
     from . import rollout as _rollout, teleoperate as _teleoperate
@@ -376,6 +398,7 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
         current_phase = "preparing"
         phase_start_time = None
         last_session_discarded_empty = False
+        last_session_saved_episodes = 0
         identity_warnings = []
 
     try:
@@ -385,12 +408,23 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
         # before the worker's 2s browser-stream release sleep.
         camera_preview_manager.stop_all()
 
-        # The name is already validated (validate_dataset_repo_id in the lock), so
-        # no sanitization is needed here. Stamp the repo_id with a timestamp
-        # (matches lerobot-record CLI behavior) so each session lands in a unique
-        # directory and the frontend gets the final id back in the response.
+        # The name is already validated (validate_dataset_repo_id in the lock)
+        # and used VERBATIM — the frontend previews exactly this id ("saving
+        # dataset as user/name"), so nothing may rewrite it here. A fresh
+        # session must not silently clobber or append to an existing dataset
+        # of the same name: appending is the resume path, which the frontend
+        # selects explicitly.
         if not request.resume and request.dataset_repo_id:
-            request.dataset_repo_id = f"{request.dataset_repo_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            existing = _lerobot_cache_root() / request.dataset_repo_id
+            if existing.exists():
+                recording_active = False
+                return {
+                    "success": False,
+                    "message": (
+                        f"Dataset '{request.dataset_repo_id}' already exists — choose a "
+                        "new name, or select it in the library to add episodes."
+                    ),
+                }
 
         logger.info(f"Starting recording for dataset: {request.dataset_repo_id}")
         logger.info(f"Task: {request.single_task}")
@@ -413,7 +447,8 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                 phase_start_time, \
                 current_episode, \
                 saved_episodes, \
-                last_session_discarded_empty
+                last_session_discarded_empty, \
+                last_session_saved_episodes
             recording_start_time = time.time()
             current_episode = 1
             saved_episodes = 0
@@ -480,6 +515,10 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                     last_session_discarded_empty = _discard_empty_dataset(
                         request.dataset_repo_id, request.resume
                     )
+
+                # Snapshot the final count before the reset below — the
+                # session-end status reports it (see handle_recording_status).
+                last_session_saved_episodes = saved_episodes
 
                 recording_active = False
                 recording_start_time = None
@@ -622,9 +661,13 @@ def handle_recording_status() -> dict[str, Any]:
     # When the session has ended, tell the frontend honestly whether anything
     # was kept. A session that saved zero episodes had its (freshly created)
     # dataset directory discarded — the post-recording page shows a "nothing was
-    # saved" variant and does NOT link the (now-gone) repo id.
+    # saved" variant and does NOT link the (now-gone) repo id. The final saved
+    # count rides along too: the episode block below is gated on
+    # recording_active, so without this the completion UI would read 0 saved
+    # after every successful session.
     if session_ended:
         status["discarded_empty"] = last_session_discarded_empty
+        status["saved_episodes"] = last_session_saved_episodes
 
     # Warn-but-allow arm-identity findings (the guard runs in the worker, after
     # the start response) — the frontend shows these as a non-blocking toast.
@@ -703,8 +746,9 @@ def _discard_empty_dataset(repo_id: str, resume: bool) -> bool:
     Guards (all must hold before anything is removed):
       * ``resume`` is False — a resume/append session writes into a
         pre-existing dataset, so we must NEVER delete it even at zero *new*
-        episodes. Only non-resume sessions stamp a fresh timestamped directory
-        (see handle_start_recording), so only those are ours to discard.
+        episodes. Only non-resume sessions create a fresh directory
+        (handle_start_recording refuses a name whose directory already
+        exists), so only those are ours to discard.
       * The directory reports zero episodes — confirmed against ``meta/info.json``'s
         ``total_episodes`` (the same signal the picker uses), not just the
         in-memory counter.
@@ -904,7 +948,7 @@ def record_with_web_events(
     cfg: RecordConfig,
     web_events: dict,
     skip_identity_check: bool = False,
-    max_torque_limit: int = 380,
+    max_torque_limit: int = 400,
     identity_config_names: list[str] | None = None,
 ) -> LeRobotDataset:
     """

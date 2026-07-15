@@ -217,7 +217,7 @@ const MonitoringMode: React.FC<{ jobId: string }> = ({ jobId }) => {
     try {
       await deleteJob(baseUrl, fetchWithHeaders, job.id);
       toast({ title: "Job removed" });
-      navigate("/");
+      navigate("/training");
     } catch (e) {
       toast({
         title: "Delete failed",
@@ -229,7 +229,7 @@ const MonitoringMode: React.FC<{ jobId: string }> = ({ jobId }) => {
 
   if (error && !job) {
     return (
-      <AppShell back={{ to: "/", label: "jobs" }}>
+      <AppShell back={{ to: "/training", label: "Train & Deploy" }}>
         <p className="text-destructive">
           Couldn't load job {jobId}: {error}
         </p>
@@ -239,7 +239,7 @@ const MonitoringMode: React.FC<{ jobId: string }> = ({ jobId }) => {
 
   if (!job) {
     return (
-      <AppShell back={{ to: "/", label: "jobs" }}>
+      <AppShell back={{ to: "/training", label: "Train & Deploy" }}>
         <div className="flex items-center justify-center py-24 text-muted-foreground">
           <Loader2 className="mr-3 h-6 w-6 animate-spin" /> Loading job…
         </div>
@@ -256,7 +256,7 @@ const MonitoringMode: React.FC<{ jobId: string }> = ({ jobId }) => {
 
   return (
     <AppShell
-      back={{ to: "/", label: "jobs" }}
+      back={{ to: "/training", label: "Train & Deploy" }}
       status={<StatusPill phase={statusPhase} label={job.state} />}
       actions={
         isRunning ? (
@@ -273,7 +273,7 @@ const MonitoringMode: React.FC<{ jobId: string }> = ({ jobId }) => {
       <div className="space-y-6">
         <div>
           <div className="flex flex-wrap items-center gap-2">
-            <h1 className="font-mono text-xl font-bold text-foreground">
+            <h1 className="text-xl font-bold text-foreground">
               {jobDisplayName(job)}
             </h1>
             {job.runner === "hf_cloud" ? (
@@ -310,7 +310,7 @@ const MonitoringMode: React.FC<{ jobId: string }> = ({ jobId }) => {
               {job.id}
             </p>
           ) : null}
-          <p className="mt-1 font-mono text-xs text-muted-foreground">
+          <p className="mt-1 text-xs text-muted-foreground">
             {job.state}
             {job.error_message ? ` — ${job.error_message}` : ""}
           </p>

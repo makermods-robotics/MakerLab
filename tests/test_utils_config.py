@@ -181,13 +181,14 @@ def test_clamp_max_torque_limit_bounds_and_fallback(tmp_lerobot_home: Path) -> N
 
 def test_robot_record_max_torque_limit_defaults(tmp_lerobot_home: Path) -> None:
     """Fresh records — and older records saved before the field existed — read
-    back at the DEFAULT (380), matching auto-cal's DEFAULT_TORQUE_LIMIT."""
+    back at the DEFAULT (400). (Auto-calibration itself still moves at a gentler
+    380 — its own DEFAULT_TORQUE_LIMIT — which is unrelated to this default.)"""
     from makerlab.utils import config as cfg
 
-    assert cfg.DEFAULT_MAX_TORQUE_LIMIT == 380
+    assert cfg.DEFAULT_MAX_TORQUE_LIMIT == 400
 
     cfg.save_robot_record("fresh_bot", {"name": "fresh_bot"}, allow_create=True)
-    assert cfg.get_robot_record("fresh_bot")["max_torque_limit"] == 380
+    assert cfg.get_robot_record("fresh_bot")["max_torque_limit"] == 400
 
     # An older record with neither max_torque_limit nor legacy motor_power.
     path = Path(cfg.ROBOTS_PATH) / "old_bot.json"

@@ -321,7 +321,7 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
           onValueChange={setSelected}
           disabled={empty}
         >
-          <SelectTrigger className="h-8 flex-1 font-mono">
+          <SelectTrigger className="h-8 flex-1">
             <SelectValue
               placeholder={empty ? "No saved configs" : "Select a config"}
             />
@@ -333,7 +333,7 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
               const usedByOtherArm =
                 !!excludeConfig && c.name === excludeConfig;
               return (
-                <SelectItem key={c.name} value={c.name} className="font-mono">
+                <SelectItem key={c.name} value={c.name}>
                   <span className="flex items-center gap-2">
                     {c.name}
                     {c.name === assignedConfig && (
@@ -416,7 +416,6 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
             }}
             autoFocus
             placeholder="New name"
-            className="font-mono"
           />
           {renameError && (
             <p className="text-sm text-destructive">{renameError}</p>

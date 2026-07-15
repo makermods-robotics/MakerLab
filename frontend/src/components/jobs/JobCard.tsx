@@ -346,16 +346,19 @@ const JobCard: React.FC<Props> = ({
     goToResume("hf_cloud");
   };
 
-  // Fine-tune: start a FRESH run whose weights are initialized from this
-  // (imported) model's checkpoint. Unlike Continue (which needs optimizer/step
-  // state and is local-only), fine-tuning works from weights-only imports —
-  // which is exactly what imported models are. Gate on an imported source with
-  // a selectable checkpoint.
+  // Fine-tune: start a FRESH run whose weights are initialized from the
+  // selected checkpoint. Unlike Continue (which needs optimizer/step state and
+  // is local-only), fine-tuning only needs the weights — any non-running local
+  // or imported run with a selectable checkpoint qualifies. Cloud runs are the
+  // exception: the backend resolves a Hub fine-tune source to the repo ROOT
+  // model (lerobot's pretrained_path takes a repo id, not a sub-step path), and
+  // only a DONE run has its final model at the root — a failed run's repo holds
+  // only checkpoints/<step>/ subtrees the fine-tune path can't load.
   const canFinetune =
-    selectedJob.runner === "imported" &&
     !isRunning &&
     lineageCheckpoints.length > 0 &&
-    selectedStep != null;
+    selectedStep != null &&
+    (selectedJob.runner !== "hf_cloud" || selectedJob.state === "done");
 
   const handleFinetune = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -449,7 +452,7 @@ const JobCard: React.FC<Props> = ({
       onClick={() => {
         if (!isImported) navigate(`/training/${job.id}`);
       }}
-      className={`rounded-xl bg-card transition-colors ${
+      className={`rounded-xl bg-card shadow-sm transition-colors ${
         isImported ? "" : "cursor-pointer hover:border-input"
       }`}
     >
@@ -457,7 +460,7 @@ const JobCard: React.FC<Props> = ({
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
             <div
-              className="truncate text-[15px] font-semibold text-foreground"
+              className="break-all text-[15px] font-semibold text-foreground"
               title={displayName}
             >
               {displayName}

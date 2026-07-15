@@ -7,15 +7,19 @@ import {
   Plus,
   Radio,
   Square,
+  UploadCloud,
 } from "lucide-react";
 import VisualizerPanel from "@/components/control/VisualizerPanel";
 import CameraFeed from "@/components/control/CameraFeed";
 import { DatasetLibrary } from "@/components/collect/DatasetLibrary";
 import { openRobotSettings } from "@/components/robot/robotSettingsStore";
 import { useTeleopSession } from "@/components/collect/useTeleopSession";
-import CreateDatasetDialog from "@/components/landing/CreateDatasetDialog";
 import DatasetInfoCard from "@/components/landing/DatasetInfoCard";
 import MergeDatasetsDialog from "@/components/landing/MergeDatasetsDialog";
+import RecordingDialog, {
+  RecordingConfig,
+  RecordingResult,
+} from "@/components/recording/RecordingDialog";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -25,8 +29,10 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Badge, BadgeDot } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { NumberInput } from "@/components/ui/number-input";
+import { Switch } from "@/components/ui/switch";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -40,11 +46,18 @@ import {
 import { useApi } from "@/contexts/ApiContext";
 import { useHfAuth } from "@/contexts/HfAuthContext";
 import { useToast } from "@/hooks/use-toast";
+import { useAvailableCameras } from "@/hooks/useAvailableCameras";
 import { useDatasets } from "@/hooks/useDatasets";
 import { useRobots } from "@/hooks/useRobots";
 import { useSelectedDataset } from "@/hooks/useSelectedDataset";
+import { isCameraConnected, resolveCameraIndex } from "@/lib/cameraResolve";
 import { validateDatasetRepoId } from "@/lib/datasetName";
-import { DatasetItem, deleteDataset } from "@/lib/replayApi";
+import {
+  DatasetInfo,
+  DatasetItem,
+  deleteDataset,
+  getDatasetInfo,
+} from "@/lib/replayApi";
 import { cn } from "@/lib/utils";
 
 interface CompletedDatasetState {
@@ -91,16 +104,28 @@ const Collect: React.FC = () => {
   const { selectedDataset, setSelectedDataset } = useSelectedDataset();
   const teleop = useTeleopSession();
 
-  const [showCreateDatasetDialog, setShowCreateDatasetDialog] = useState(false);
   const [showMergeDialog, setShowMergeDialog] = useState(false);
   const [datasetLibraryOpen, setDatasetLibraryOpen] = useState(false);
   const [pendingDeleteDataset, setPendingDeleteDataset] =
     useState<DatasetItem | null>(null);
 
+  // "New dataset" flow: the + button reveals a text box; a bare name gets the
+  // HF username prepended (the helper line previews the resolved id). Choosing
+  // from the library clears the typed name — the typed name wins while set.
+  const [newDatasetName, setNewDatasetName] = useState("");
+  const [showNewDataset, setShowNewDataset] = useState(false);
   const [singleTask, setSingleTask] = useState("");
   const [numEpisodes, setNumEpisodes] = useState(5);
   const [episodeTimeS, setEpisodeTimeS] = useState(60);
   const [resetTimeS, setResetTimeS] = useState(15);
+  const [pushToHub, setPushToHub] = useState(true);
+  // Non-null while a recording session runs — mounts the RecordingDialog.
+  const [activeRecording, setActiveRecording] =
+    useState<RecordingConfig | null>(null);
+  // A session that just finished in THIS mount (the dialog flow); merged with
+  // the location.state fallback other pages still navigate with.
+  const [completedLocal, setCompletedLocal] =
+    useState<CompletedDatasetState | null>(null);
   const [streamsPaused, setStreamsPaused] = useState(false);
   const releaseStreamsRef = useRef<(() => void) | null>(null);
 
@@ -114,7 +139,8 @@ const Collect: React.FC = () => {
     };
   }, []);
 
-  const completedDataset = getCompletedDataset(location.state);
+  const completedDataset =
+    completedLocal ?? getCompletedDataset(location.state);
   const completedRepoId = completedDataset
     ? getCompletedRepoId(completedDataset)
     : null;
@@ -134,6 +160,24 @@ const Collect: React.FC = () => {
     return recordCameras.map((camera) => camera.name).join(" + ");
   }, [selectedRecord?.cameras]);
 
+  // Re-anchor the robot's cameras to physical devices before streaming or
+  // recording: a stored cv2 index is just a position in the device list, and
+  // it silently rebinds when devices come and go (an unplugged robot cam can
+  // leave "front" pointing at the laptop's built-in camera). Backend-only
+  // enumeration — no browser camera-permission prompt on this page.
+  const { cameras: availableCameras } = useAvailableCameras({
+    matchBrowser: false,
+  });
+  const resolvedCameras = useMemo(
+    () =>
+      (selectedRecord?.cameras ?? []).map((cam) => ({
+        ...cam,
+        resolvedIndex: resolveCameraIndex(cam, availableCameras),
+        connected: isCameraConnected(cam, availableCameras),
+      })),
+    [selectedRecord?.cameras, availableCameras],
+  );
+
   const statusLine = useMemo(() => {
     if (teleop.status?.last_cleanup_error) {
       return teleop.status.last_cleanup_error;
@@ -144,15 +188,117 @@ const Collect: React.FC = () => {
     return "joints idle · leader detached";
   }, [teleop.active, teleop.status]);
 
+  // Resolve what the user typed into a full repo id: a bare name gets the HF
+  // username prepended; a namespaced id is taken as-is. The typed name wins
+  // over the library selection while it's non-empty.
+  const username = auth.status === "authenticated" ? auth.username : null;
+  const typedName = showNewDataset ? newDatasetName.trim() : "";
+  const typedRepoId =
+    typedName === ""
+      ? ""
+      : typedName.includes("/") || !username
+        ? typedName
+        : `${username}/${typedName}`;
+  const targetRepoId = typedRepoId || selectedDataset || "";
+  const datasetNameError =
+    typedRepoId === "" ? null : validateDatasetRepoId(typedRepoId);
+  // A target with a LOCAL copy means the session APPENDS to it (resume). A
+  // hub-only name match can't be resumed (no local files) — it records fresh,
+  // with a warning that the name is already taken on the Hub.
+  const existingLocal = useMemo(
+    () =>
+      targetRepoId === ""
+        ? undefined
+        : datasets.find(
+            (d) =>
+              d.repo_id.toLowerCase() === targetRepoId.toLowerCase() &&
+              d.source !== "hub",
+          ),
+    [datasets, targetRepoId],
+  );
+  const existingHubOnly = useMemo(
+    () =>
+      targetRepoId === ""
+        ? undefined
+        : datasets.find(
+            (d) =>
+              d.repo_id.toLowerCase() === targetRepoId.toLowerCase() &&
+              d.source === "hub",
+          ),
+    [datasets, targetRepoId],
+  );
+  // Recording a FRESH dataset under a name that already exists on the Hub and
+  // then uploading it would overwrite the Hub copy's files — force the upload
+  // off for that combination and say so in the warning.
+  const hubNameCollision = !!existingHubOnly && !existingLocal;
+
+  // When appending to an existing local dataset, compare its recorded robot
+  // shape against the selected robot and warn on mismatches (bimanual vs
+  // single arm; camera names) — mixed-shape episodes poison the dataset.
+  const [appendTargetInfo, setAppendTargetInfo] = useState<DatasetInfo | null>(
+    null,
+  );
+  const appendTargetRepoId = existingLocal?.repo_id ?? null;
+  useEffect(() => {
+    // Clear immediately so a previous target's info (and its warnings) never
+    // shows against the new target while its request is in flight. A failed
+    // info fetch degrades to "no warnings" — the check is advisory.
+    setAppendTargetInfo(null);
+    if (!appendTargetRepoId) return;
+    let cancelled = false;
+    getDatasetInfo(baseUrl, fetchWithHeaders, appendTargetRepoId)
+      .then((info) => {
+        if (!cancelled) setAppendTargetInfo(info);
+      })
+      .catch(() => {
+        if (!cancelled) setAppendTargetInfo(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [appendTargetRepoId, baseUrl, fetchWithHeaders]);
+
+  const configMismatches = useMemo(() => {
+    if (!appendTargetInfo || !selectedRecord) return [];
+    const issues: string[] = [];
+    const robotBimanual = selectedRecord.mode === "bimanual";
+    if (appendTargetInfo.robot_type) {
+      const datasetBimanual = appendTargetInfo.robot_type.startsWith("bi");
+      if (datasetBimanual !== robotBimanual) {
+        issues.push(
+          `Robot config mismatch: the dataset was recorded ${
+            datasetBimanual ? "bimanual" : "single-arm"
+          }, but ${selectedRecord.name} is ${
+            robotBimanual ? "bimanual" : "single-arm"
+          }.`,
+        );
+        // A camera comparison across arm modes is just noise on top — the
+        // bimanual pipeline renames every camera feature anyway.
+        return issues;
+      }
+    }
+    const datasetCams = [...appendTargetInfo.cameras].sort();
+    // BiSO records the left arm's cameras under a `left_` feature prefix (a
+    // camera configured "front" lands in the dataset as "left_front"), so
+    // compare against the prefixed names for bimanual robots.
+    const robotCams = (selectedRecord.cameras ?? [])
+      .map((cam) => (robotBimanual ? `left_${cam.name}` : cam.name))
+      .sort();
+    if (datasetCams.join(" ") !== robotCams.join(" ")) {
+      issues.push(
+        `Camera mismatch: the dataset has [${datasetCams.join(", ") || "none"}], this robot records [${
+          robotCams.join(", ") || "none"
+        }]. Camera names must match to add episodes.`,
+      );
+    }
+    return issues;
+  }, [appendTargetInfo, selectedRecord]);
+
   const handleSelectDataset = (repoId: string) => {
     setSelectedDataset(repoId);
-    toast({ title: "Dataset selected", description: repoId });
-  };
-
-  const handleCreateDataset = (name: string) => {
-    const repoId =
-      auth.status === "authenticated" ? `${auth.username}/${name}` : name;
-    setSelectedDataset(repoId);
+    // The library choice replaces whatever was being typed.
+    setNewDatasetName("");
+    setShowNewDataset(false);
     toast({ title: "Dataset selected", description: repoId });
   };
 
@@ -205,27 +351,44 @@ const Collect: React.FC = () => {
       });
       return;
     }
-    if (!selectedDataset || !singleTask) {
+    if (!targetRepoId || !singleTask) {
       toast({
         title: "Missing dataset details",
-        description: "Please select a dataset and enter a task description.",
+        description: "Please name a dataset and enter a task description.",
         variant: "destructive",
       });
       return;
     }
-    const repoError = validateDatasetRepoId(selectedDataset);
-    if (repoError) {
+    if (datasetNameError) {
       toast({
         title: "Invalid dataset name",
-        description: repoError,
+        description: datasetNameError,
         variant: "destructive",
       });
       return;
     }
 
-    const datasetRepoId = selectedDataset;
+    // Keep the existing dataset's canonical casing when appending to one.
+    const datasetRepoId = existingLocal?.repo_id ?? targetRepoId;
 
-    const recordCameras = robot.cameras ?? [];
+    // Refuse to record with a verifiably missing camera — the stale index
+    // would silently rebind to a different physical device (e.g. the built-in
+    // webcam) and poison every episode of the dataset.
+    const disconnected = resolvedCameras.filter((cam) => !cam.connected);
+    if (disconnected.length > 0) {
+      toast({
+        title: "Camera disconnected",
+        description: `${disconnected
+          .map((cam) => cam.name)
+          .join(
+            ", ",
+          )} is not attached right now. Reconnect it or update the robot's cameras before recording.`,
+        variant: "destructive",
+      });
+      return;
+    }
+
+    const recordCameras = resolvedCameras;
 
     if (recordCameras.length > 0 && releaseStreamsRef.current) {
       console.log("🔓 Releasing camera streams before starting recording...");
@@ -247,7 +410,11 @@ const Collect: React.FC = () => {
       (acc, cam) => {
         acc[cam.name] = {
           type: cam.type,
-          camera_index: cam.camera_index,
+          camera_index: cam.resolvedIndex ?? cam.camera_index,
+          // The backend re-anchors the index to this physical device at
+          // record start — its in-process cv2 device order can differ from
+          // the enumeration the index came from.
+          ...(cam.unique_id ? { unique_id: cam.unique_id } : {}),
           width: cam.width,
           height: cam.height,
           fps: cam.fps,
@@ -261,6 +428,7 @@ const Collect: React.FC = () => {
         {
           type: string;
           camera_index?: number;
+          unique_id?: string;
           width: number;
           height: number;
           fps?: number;
@@ -284,8 +452,8 @@ const Collect: React.FC = () => {
       // Robot name -> BiSO staging base id (bimanual). Names the per-session
       // staging dir; does not affect which calibration drives which arm.
       robot_name: robot.name,
-      // Raw follower torque limit for the session (0-1000, default 380).
-      max_torque_limit: robot.max_torque_limit ?? 380,
+      // Raw follower torque limit for the session (0-1000, default 400).
+      max_torque_limit: robot.max_torque_limit ?? 400,
       dataset_repo_id: datasetRepoId,
       single_task: singleTask,
       num_episodes: numEpisodes,
@@ -293,18 +461,46 @@ const Collect: React.FC = () => {
       reset_time_s: resetTimeS,
       fps: 30,
       video: true,
-      push_to_hub: false,
-      resume: false,
+      push_to_hub: pushToHub && !!username && !hubNameCollision,
+      // A local copy of the same name ⇒ append to it. A fresh name records
+      // verbatim (the backend refuses a non-resume start on an existing dir).
+      resume: !!existingLocal,
       streaming_encoding: true,
       cameras: cameraDict,
     };
 
-    navigate("/recording", { state: { recordingConfig } });
+    setSelectedDataset(datasetRepoId);
+    setNewDatasetName("");
+    setShowNewDataset(false);
+    setCompletedLocal(null);
+    setActiveRecording(recordingConfig);
+  };
+
+  const handleRecordingClose = (result: RecordingResult | null) => {
+    setActiveRecording(null);
+    // The pre-recording release paused the browser camera streams; the session
+    // is over, so they can reclaim the devices.
+    setStreamsPaused(false);
+    if (!result) return; // session never started — toasts already shown
+    refreshDatasets();
+    if (result.discarded_empty || result.saved_episodes === 0) {
+      toast({
+        title: "Nothing was saved",
+        description:
+          "The session ended before any episode was saved, so the dataset was discarded.",
+      });
+      return;
+    }
+    setCompletedLocal(result);
   };
 
   const recordDisabled =
     !!robotBlockReason ||
-    !selectedDataset ||
+    !targetRepoId ||
+    !!datasetNameError ||
+    // The resume/append decision needs the dataset list — starting before it
+    // loads could send resume:false for a name that actually exists.
+    datasetsLoading ||
     !singleTask.trim() ||
     numEpisodes < 1 ||
     episodeTimeS < 1 ||
@@ -365,12 +561,18 @@ const Collect: React.FC = () => {
             />
           </div>
           <div className="mt-4 grid gap-4 md:grid-cols-2">
-            {(selectedRecord?.cameras ?? []).length > 0 ? (
-              (selectedRecord?.cameras ?? []).map((camera) => (
+            {resolvedCameras.length > 0 ? (
+              resolvedCameras.map((camera) => (
                 <CameraFeed
                   key={`${camera.name}-${camera.camera_index ?? "none"}`}
-                  cameraIndex={streamsPaused ? undefined : camera.camera_index}
+                  cameraIndex={streamsPaused ? undefined : camera.resolvedIndex}
+                  uniqueId={camera.unique_id}
                   label={camera.name}
+                  emptyText={
+                    camera.connected
+                      ? undefined
+                      : "Camera disconnected — reconnect it or update the robot's cameras"
+                  }
                 />
               ))
             ) : (
@@ -382,7 +584,7 @@ const Collect: React.FC = () => {
         </div>
 
         <div className="grid content-start gap-4">
-          <Card className="shadow-sm">
+          <Card className="min-w-0 shadow-sm">
             <CardHeader>
               <CardTitle>Teleoperate</CardTitle>
               <CardDescription>
@@ -419,7 +621,7 @@ const Collect: React.FC = () => {
             </CardContent>
           </Card>
 
-          <Card className="shadow-sm">
+          <Card className="min-w-0 shadow-sm">
             <CardHeader>
               <CardTitle>Record dataset</CardTitle>
               <CardDescription>
@@ -436,29 +638,26 @@ const Collect: React.FC = () => {
 
               <div className="space-y-2">
                 <Label>Dataset</Label>
-                <div className="flex min-w-0 items-center gap-2">
-                  <span
-                    className={cn(
-                      "min-w-0 flex-1 truncate font-mono text-xs",
-                      selectedDataset
-                        ? "text-foreground"
-                        : "text-muted-foreground",
-                    )}
-                    title={selectedDataset ?? undefined}
-                  >
-                    {selectedDataset ?? "No dataset selected"}
-                  </span>
+                <p
+                  className={cn(
+                    "break-all font-mono text-xs",
+                    targetRepoId ? "text-foreground" : "text-muted-foreground",
+                  )}
+                >
+                  {targetRepoId || "No dataset selected"}
+                </p>
+                <div className="flex flex-wrap gap-2">
                   <Button
                     variant="secondary"
-                    size="icon"
-                    onClick={() => setShowCreateDatasetDialog(true)}
-                    aria-label="Create dataset"
-                    title="Create dataset"
+                    size="sm"
+                    onClick={() => setShowNewDataset((v) => !v)}
+                    aria-expanded={showNewDataset}
                   >
-                    <Plus className="h-4 w-4" />
+                    <Plus className="mr-1.5 h-4 w-4" />
+                    New dataset
                   </Button>
                   <Button
-                    variant="ghost"
+                    variant="outline"
                     size="sm"
                     onClick={() => {
                       setDatasetLibraryOpen(true);
@@ -469,9 +668,64 @@ const Collect: React.FC = () => {
                       });
                     }}
                   >
-                    Choose…
+                    Choose existing…
                   </Button>
                 </div>
+                {showNewDataset && (
+                  <Input
+                    id="datasetName"
+                    autoFocus
+                    value={newDatasetName}
+                    onChange={(e) =>
+                      setNewDatasetName(
+                        e.target.value.replace(/[^A-Za-z0-9._\-/]/g, "_"),
+                      )
+                    }
+                    placeholder="my_dataset"
+                    aria-invalid={datasetNameError !== null}
+                    className="font-mono text-xs aria-[invalid=true]:border-destructive"
+                  />
+                )}
+                {datasetNameError ? (
+                  <p className="text-xs text-destructive">{datasetNameError}</p>
+                ) : existingLocal ? (
+                  <p className="text-xs text-muted-foreground">
+                    Adds episodes to existing dataset{" "}
+                    <span className="break-all font-mono text-foreground">
+                      {existingLocal.repo_id}
+                    </span>
+                  </p>
+                ) : typedRepoId ? (
+                  <p className="text-xs text-muted-foreground">
+                    Saving dataset as{" "}
+                    <span className="break-all font-mono text-foreground">
+                      {typedRepoId}
+                    </span>
+                  </p>
+                ) : !targetRepoId ? (
+                  <p className="text-xs text-muted-foreground">
+                    Create a new dataset, or choose an existing one to add more
+                    episodes to it.
+                  </p>
+                ) : null}
+                {hubNameCollision && (
+                  <p className="flex items-start gap-2 text-xs text-warn">
+                    <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                    This name already exists on your Hub (no local copy). A
+                    fresh local dataset will be recorded, and Upload to Hub is
+                    turned off for this session so the Hub copy isn't
+                    overwritten — pick a different name to upload.
+                  </p>
+                )}
+                {configMismatches.map((issue) => (
+                  <p
+                    key={issue}
+                    className="flex items-start gap-2 text-xs text-warn"
+                  >
+                    <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                    {issue}
+                  </p>
+                ))}
               </div>
 
               <div className="space-y-2">
@@ -538,9 +792,25 @@ const Collect: React.FC = () => {
                 </Button>
               </div>
 
-              {!selectedDataset && (
+              <div className="flex items-center justify-between gap-3 rounded-md border border-border bg-secondary p-3">
+                <div className="flex min-w-0 items-center gap-3">
+                  <UploadCloud className="h-4 w-4 shrink-0 text-muted-foreground" />
+                  <Label htmlFor="pushToHub" className="cursor-pointer">
+                    Upload to Hub
+                  </Label>
+                </div>
+                <Switch
+                  id="pushToHub"
+                  checked={pushToHub && !!username && !hubNameCollision}
+                  onCheckedChange={setPushToHub}
+                  disabled={!username || hubNameCollision}
+                  aria-label="Upload to Hub"
+                />
+              </div>
+
+              {!targetRepoId && (
                 <p className="text-sm text-muted-foreground">
-                  Select or create a dataset before recording.
+                  Name or choose a dataset before recording.
                 </p>
               )}
               <Button
@@ -554,7 +824,7 @@ const Collect: React.FC = () => {
             </CardContent>
           </Card>
 
-          <Card className="shadow-sm">
+          <Card className="min-w-0 shadow-sm">
             <CardHeader>
               <CardTitle>Dataset</CardTitle>
               <CardDescription>Review, upload, or rename.</CardDescription>
@@ -598,12 +868,12 @@ const Collect: React.FC = () => {
         onMerged={refreshDatasets}
       />
 
-      <CreateDatasetDialog
-        open={showCreateDatasetDialog}
-        onOpenChange={setShowCreateDatasetDialog}
-        existingRepoIds={datasets.map((d) => d.repo_id)}
-        onCreateNew={handleCreateDataset}
-      />
+      {activeRecording && (
+        <RecordingDialog
+          config={activeRecording}
+          onClose={handleRecordingClose}
+        />
+      )}
 
       <AlertDialog
         open={pendingDeleteDataset !== null}
