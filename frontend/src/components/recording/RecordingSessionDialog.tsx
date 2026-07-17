@@ -40,8 +40,6 @@ export interface RecordingConfig {
   follower_port: string;
   leader_config: string;
   follower_config: string;
-  // Follower torque limit for the session (10-100% of full power).
-  motor_power?: number;
   dataset_repo_id: string;
   single_task: string;
   num_episodes: number;

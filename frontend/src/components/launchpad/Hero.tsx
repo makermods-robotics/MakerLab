@@ -48,15 +48,22 @@ const Hero: React.FC<HeroProps> = ({ search, onSearchChange }) => {
       <BrandMark size="lg" />
 
       <h1 className="text-center font-display text-4xl font-semibold tracking-tight sm:text-5xl">
-        <span
-          className="inline-block transition-opacity"
-          style={{
-            opacity: visible ? 1 : 0,
-            transitionDuration: `${FADE_MS}ms`,
-          }}
-          aria-live="polite"
-        >
-          {WORDS[index]}
+        {/* All words share one grid cell so the slot is as wide as the widest
+            word — "robot skills" never shifts as the words cycle. */}
+        <span className="inline-grid text-right align-bottom" aria-live="polite">
+          {WORDS.map((word, i) => (
+            <span
+              key={word}
+              className="col-start-1 row-start-1 transition-opacity"
+              style={{
+                opacity: i === index && visible ? 1 : 0,
+                transitionDuration: `${FADE_MS}ms`,
+              }}
+              aria-hidden={i !== index}
+            >
+              {word}
+            </span>
+          ))}
         </span>{" "}
         robot skills
       </h1>

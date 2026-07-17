@@ -1,6 +1,25 @@
 import React from "react";
 import { ModelItem } from "@/lib/modelsApi";
 import { policyTypeDisplayName } from "@/components/training/types";
+import sockThumb from "@/assets/skill-sock-orange.jpg";
+
+/** Curated preview media for featured skills, keyed by Hub repo id. */
+const SKILL_THUMBNAILS: Record<string, string> = {
+  "makermods/act_makermods_sock_2_only_more_orange_2026-07-16_22-14-55":
+    sockThumb,
+};
+
+/** The curated preview image for a skill, or undefined when it has none. */
+export function skillThumbnail(m: ModelItem): string | undefined {
+  return SKILL_THUMBNAILS[m.hf_repo_id ?? m.id];
+}
+
+/** Curated human-readable names for featured skills, keyed by Hub repo id —
+ * shown in place of the raw policy-run name. */
+const SKILL_DISPLAY_NAMES: Record<string, string> = {
+  "makermods/act_makermods_sock_2_only_more_orange_2026-07-16_22-14-55":
+    "Sorting socks",
+};
 
 /** The marketplace provenance of a skill card. */
 export type SkillBadge = "mine" | "makermods" | "community";
@@ -40,16 +59,19 @@ export function isMineSkill(m: ModelItem, username?: string | null): boolean {
   return classifySkill(m, username) === "mine";
 }
 
-/** The card/dialog title: the name segment only (Hub rows carry the full
- * "namespace/name" in `name`), never an empty string. */
+/** The card/dialog title: a curated display name when the skill has one,
+ * otherwise the name segment only (Hub rows carry the full "namespace/name" in
+ * `name`), never an empty string. */
 export function skillTitle(m: ModelItem): string {
+  const curated = SKILL_DISPLAY_NAMES[m.hf_repo_id ?? m.id];
+  if (curated) return curated;
   const raw = m.name || m.id;
   return raw.includes("/") ? (raw.split("/").pop() ?? raw) : raw;
 }
 
 const BADGE_LABEL: Record<SkillBadge, string> = {
   mine: "MINE",
-  makermods: "MAKERMODS",
+  makermods: "MAKERMODS SUPPORTED",
   community: "COMMUNITY",
 };
 
@@ -100,6 +122,7 @@ const SkillCard: React.FC<SkillCardProps> = ({ model, badge, onOpen }) => {
   const policy = model.policy_type
     ? policyTypeDisplayName(model.policy_type)
     : null;
+  const thumbnail = skillThumbnail(model);
 
   return (
     <button
@@ -108,13 +131,21 @@ const SkillCard: React.FC<SkillCardProps> = ({ model, badge, onOpen }) => {
       className="group flex w-64 shrink-0 snap-start flex-col overflow-hidden rounded-lg border border-border bg-card text-left shadow-1 transition-colors hover:border-ring focus-visible:border-ring focus-visible:outline-none"
       aria-label={`Open skill ${skillTitle(model)}`}
     >
-      <div
-        className="media-slot aspect-[4/3] w-full"
-        data-label="rollout preview"
-      />
+      {thumbnail ? (
+        <img
+          src={thumbnail}
+          alt={`${skillTitle(model)} rollout preview`}
+          className="aspect-[4/3] w-full object-cover"
+        />
+      ) : (
+        <div
+          className="media-slot aspect-[4/3] w-full"
+          data-label="rollout preview"
+        />
+      )}
       <div className="flex flex-1 flex-col gap-2 p-3">
-        <div className="flex items-start justify-between gap-2">
-          <span className="min-w-0 truncate font-display font-semibold tracking-tight">
+        <div className="flex flex-col items-start gap-1.5">
+          <span className="w-full min-w-0 truncate font-display font-semibold tracking-tight">
             {skillTitle(model)}
           </span>
           <SkillBadgePill badge={badge} />

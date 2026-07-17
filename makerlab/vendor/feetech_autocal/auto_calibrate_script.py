@@ -107,6 +107,12 @@ RETURN_STALL_WINDOW_S = 1.5
 RETURN_STALL_MIN_PROGRESS = 10  # ticks, summed over all motors
 STOP_HOLD_S = 3.0  # fallback: stay frozen this long before releasing
 
+# Working torque (RAM Torque_Limit) used while the script drives the arm —
+# init, unfold, probing, and the freeze-on-stop all write this value. Runtime-
+# selectable via --torque-limit (MakerLab threads the robot's torque slider
+# through it); main() overwrites this global before any stage runs.
+TORQUE_LIMIT = DEFAULT_TORQUE_LIMIT
+
 
 def _capture_rest_pose(bus: FeetechMotorsBus) -> dict[str, int]:
     """Offset-independent pose of every motor, to return to on an interrupt.
@@ -162,7 +168,7 @@ def _freeze_arm(bus: FeetechMotorsBus) -> None:
     for motor in bus.motors:
         try:
             bus.write("Operating_Mode", motor, 0)
-            bus.write("Torque_Limit", motor, DEFAULT_TORQUE_LIMIT, normalize=False)
+            bus.write("Torque_Limit", motor, TORQUE_LIMIT, normalize=False)
             with contextlib.suppress(COMM_ERR):
                 bus.write("Torque_Enable", motor, 0)  # clear a mid-probe overload latch
             time.sleep(0.05)
@@ -354,6 +360,13 @@ def parse_args() -> argparse.Namespace:
     cal.add_argument(
         "--timeout", type=float, default=DEFAULT_TIMEOUT,
         help=f"Calibration single-direction limit wait timeout (seconds), default {DEFAULT_TIMEOUT}",
+    )
+    cal.add_argument(
+        "--torque-limit", type=int, default=DEFAULT_TORQUE_LIMIT,
+        help=(
+            "Working torque (RAM Torque_Limit, 0-1000 scale) used while driving the arm "
+            f"during calibration (init, unfold, freeze-on-stop). Default {DEFAULT_TORQUE_LIMIT}"
+        ),
     )
     unfold = parser.add_argument_group("Unfold parameters")
     unfold.add_argument(
@@ -697,19 +710,21 @@ def _run_with_bus(
 
 
 # Stage 0 init: per-register write -> read -> compare, table-driven; special items
-# (limits, Torque_Enable) handled separately
-INIT_CHECKS = [
-    ("Lock", 1),
-    ("Return_Delay_Time", 0),
-    ("Operating_Mode", 0),
-    ("Max_Torque_Limit", DEFAULT_MAX_TORQUE),
-    ("Torque_Limit", DEFAULT_TORQUE_LIMIT),
-    ("Acceleration", DEFAULT_ACCELERATION),
-    ("P_Coefficient", DEFAULT_P_COEFFICIENT),
-    ("I_Coefficient", DEFAULT_I_COEFFICIENT),
-    ("D_Coefficient", DEFAULT_D_COEFFICIENT),
-    ("Homing_Offset", 0),
-]
+# (limits, Torque_Enable) handled separately. A function, not a constant, so the
+# Torque_Limit entry picks up the runtime-selected TORQUE_LIMIT.
+def _init_checks() -> list[tuple[str, int]]:
+    return [
+        ("Lock", 1),
+        ("Return_Delay_Time", 0),
+        ("Operating_Mode", 0),
+        ("Max_Torque_Limit", DEFAULT_MAX_TORQUE),
+        ("Torque_Limit", TORQUE_LIMIT),
+        ("Acceleration", DEFAULT_ACCELERATION),
+        ("P_Coefficient", DEFAULT_P_COEFFICIENT),
+        ("I_Coefficient", DEFAULT_I_COEFFICIENT),
+        ("D_Coefficient", DEFAULT_D_COEFFICIENT),
+        ("Homing_Offset", 0),
+    ]
 
 
 def _run_init(bus: FeetechMotorsBus, *, interactive: bool = True) -> None:
@@ -725,7 +740,7 @@ def _run_init(bus: FeetechMotorsBus, *, interactive: bool = True) -> None:
             pass
         param_set_ok = True
         try:
-            for reg, expected in INIT_CHECKS:
+            for reg, expected in _init_checks():
                 bus.write(reg, m, expected, normalize=(reg != "Homing_Offset"))
                 time.sleep(0.01)
                 got = bus.read(reg, m, normalize=False)
@@ -758,7 +773,7 @@ def _run_init(bus: FeetechMotorsBus, *, interactive: bool = True) -> None:
                 pass
     print(
         f"Initialized and torque enabled (P={DEFAULT_P_COEFFICIENT}, "
-        f"Acc={DEFAULT_ACCELERATION}, Torque={DEFAULT_TORQUE_LIMIT})."
+        f"Acc={DEFAULT_ACCELERATION}, Torque={TORQUE_LIMIT})."
     )
 
 
@@ -983,8 +998,14 @@ def _handle_sigterm(signum, frame) -> None:
 
 def main() -> int:
     """CLI: based on arguments, invoke full calibration, unfold-only, or single-servo calibration."""
+    global TORQUE_LIMIT
     signal.signal(signal.SIGTERM, _handle_sigterm)
     args = parse_args()
+    # Clamp to a drivable window: below ~100 the arm can't move its own weight,
+    # above DEFAULT_MAX_TORQUE the register is out of range.
+    TORQUE_LIMIT = max(100, min(DEFAULT_MAX_TORQUE, args.torque_limit))
+    if TORQUE_LIMIT != DEFAULT_TORQUE_LIMIT:
+        print(f"Working torque: Torque_Limit={TORQUE_LIMIT} (default {DEFAULT_TORQUE_LIMIT})")
     # MakerLab runs this as a subprocess (no TTY). Without a TTY the "press Enter"
     # prompts have no one to answer them, so run non-interactively — every
     # input() is guarded by `interactive` and torque still releases afterwards.

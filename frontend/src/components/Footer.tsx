@@ -1,5 +1,7 @@
 import React from "react";
 import { Github, BookOpen } from "lucide-react";
+import hfLogo from "@/assets/hf-logo.svg";
+import lerobotLogo from "@/assets/lerobot-logo.png";
 
 const DiscordIcon: React.FC<{ className?: string }> = ({ className }) => (
   <svg
@@ -15,17 +17,17 @@ const DiscordIcon: React.FC<{ className?: string }> = ({ className }) => (
 
 const links = [
   {
-    href: "https://github.com/huggingface/lerobot",
+    href: "https://github.com/makermods-robotics/MakerLab",
     label: "GitHub",
     Icon: Github,
   },
   {
-    href: "https://huggingface.co/docs/lerobot",
+    href: "https://github.com/makermods-robotics/MakerLab",
     label: "Documentation",
     Icon: BookOpen,
   },
   {
-    href: "https://discord.com/invite/s3KuuzsPFb",
+    href: "https://discord.gg/HpXj3ynhhF",
     label: "Discord",
     Icon: DiscordIcon,
   },
@@ -35,15 +37,33 @@ const Footer: React.FC = () => {
   return (
     <footer className="fixed inset-x-0 bottom-0 z-30 border-t border-border bg-background/95 backdrop-blur">
       <div className="mx-auto flex max-w-7xl flex-col items-center justify-between gap-3 px-4 py-4 text-sm text-muted-foreground sm:flex-row">
-        <span>
-          Powered by{" "}
+        <span className="flex items-center gap-2">
+          <span>
+            Powered by{" "}
+            <a
+              href="https://github.com/huggingface/lerobot"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="font-medium text-foreground hover:text-foreground/80"
+            >
+              LeRobot
+            </a>
+          </span>
+          <a
+            href="https://huggingface.co"
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label="Hugging Face"
+          >
+            <img src={hfLogo} alt="Hugging Face" className="h-5 w-auto" />
+          </a>
           <a
             href="https://github.com/huggingface/lerobot"
             target="_blank"
             rel="noopener noreferrer"
-            className="font-medium text-foreground hover:text-foreground/80"
+            aria-label="LeRobot"
           >
-            LeRobot
+            <img src={lerobotLogo} alt="LeRobot" className="h-5 w-auto rounded" />
           </a>
         </span>
         <nav className="flex items-center gap-4">

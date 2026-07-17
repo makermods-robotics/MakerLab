@@ -5,16 +5,6 @@ import { useApi } from "@/contexts/ApiContext";
 import { useToast } from "@/hooks/use-toast";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
-import {
   InferenceStatus,
   InferencePhase,
   getInferenceStatus,
@@ -91,7 +81,7 @@ const InferenceSessionDialog: React.FC<{
   const { toast } = useToast();
   const [status, setStatus] = useState<InferenceStatus | null>(null);
   const [logs, setLogs] = useState("");
-  const [showStopConfirm, setShowStopConfirm] = useState(false);
+  const [stopping, setStopping] = useState(false);
   const exitedRef = useRef(false);
   // Independent flag: we may request a stop (safety net) before the run
   // is actually inactive. We must not flip exitedRef yet — that
@@ -165,6 +155,19 @@ const InferenceSessionDialog: React.FC<{
           // this payload.
           if (next.exited && next.outcome && next.outcome !== "ok") {
             doneRef.current = true;
+            // Also surface a simple bottom-right toast (min_stable behavior):
+            // the full hint + error snippet stay readable in the dialog, the
+            // toast is the at-a-glance "it broke" signal.
+            const failed = next.outcome === "failed";
+            toast({
+              title: failed ? "Inference failed" : "Ran with a cleanup warning",
+              description:
+                next.hint ??
+                next.error?.split("\n").at(-1) ??
+                "See the inference log for details.",
+              variant: failed ? "destructive" : undefined,
+              duration: 10000,
+            });
             return;
           }
           // A clean finish (completed / user stop): toast + auto-close.
@@ -222,8 +225,11 @@ const InferenceSessionDialog: React.FC<{
     };
   }, [baseUrl, fetchWithHeaders, onExit, toast, markHandled]);
 
+  // Stops immediately — no confirmation dialog. The follower eases back to its
+  // start pose and releases torque; `stopping` guards against double-fires
+  // while the request is in flight.
   const handleStop = async () => {
-    setShowStopConfirm(false);
+    setStopping(true);
     // Explicit Stop — mark handled so the leave guard doesn't double-fire while
     // the run winds down.
     markHandled();
@@ -231,6 +237,7 @@ const InferenceSessionDialog: React.FC<{
       await stopInference(baseUrl, fetchWithHeaders);
       // Status poll will catch the inactive state and close the dialog.
     } catch (e) {
+      setStopping(false);
       toast({
         title: "Stop failed",
         description: e instanceof Error ? e.message : String(e),
@@ -320,7 +327,10 @@ const InferenceSessionDialog: React.FC<{
         onInteractOutside={(e) => {
           if (live) e.preventDefault();
         }}
-        className="max-h-[92vh] max-w-xl gap-0 overflow-y-auto p-6"
+        // w-max, not w-fit: with left-1/2 positioning, fit-content shrink-wraps
+        // into the half-viewport left by the offset; max-content sizes to the
+        // log's longest line and the 95vw clamp does the capping.
+        className="max-h-[92vh] w-max min-w-[min(36rem,95vw)] max-w-[95vw] gap-0 overflow-y-auto p-6"
         aria-describedby={undefined}
       >
         <DialogTitle className="sr-only">Inference session</DialogTitle>
@@ -331,7 +341,9 @@ const InferenceSessionDialog: React.FC<{
             inference…
           </div>
         ) : (
-          <div>
+          // min-w-0 keeps the grid item from inheriting the log's unwrapped
+          // line width — overflow scrolls inside the log panel, not the dialog.
+          <div className="min-w-0">
             <div className="text-center mb-6">
               <div
                 className={`inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-bold tracking-widest ${PILL_BG[pillTone]}`}
@@ -424,13 +436,13 @@ const InferenceSessionDialog: React.FC<{
               </Button>
             ) : (
               <Button
-                onClick={() => setShowStopConfirm(true)}
-                disabled={!status.inference_active}
+                onClick={handleStop}
+                disabled={!status.inference_active || stopping}
                 variant="destructive"
                 className="w-full font-semibold py-6 text-lg disabled:opacity-50"
               >
                 <Square className="w-5 h-5 mr-2" />
-                Stop
+                {stopping ? "Stopping…" : "Stop"}
               </Button>
             )}
 
@@ -470,32 +482,16 @@ const InferenceSessionDialog: React.FC<{
             )}
 
             <div className="mt-4">
-              <LogPanel logs={logs} title="Inference log" defaultCollapsed />
+              <LogPanel
+                logs={logs}
+                title="Inference log"
+                defaultCollapsed
+                wrap={false}
+              />
             </div>
           </div>
         )}
 
-        <AlertDialog open={showStopConfirm} onOpenChange={setShowStopConfirm}>
-          <AlertDialogContent>
-            <AlertDialogHeader>
-              <AlertDialogTitle>Stop inference?</AlertDialogTitle>
-              <AlertDialogDescription>
-                The follower eases back to the pose it started the run in, then
-                releases torque and goes limp. You can launch another run from
-                the job tile.
-              </AlertDialogDescription>
-            </AlertDialogHeader>
-            <AlertDialogFooter>
-              <AlertDialogCancel>Keep running</AlertDialogCancel>
-              <AlertDialogAction
-                onClick={handleStop}
-                className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-              >
-                Stop
-              </AlertDialogAction>
-            </AlertDialogFooter>
-          </AlertDialogContent>
-        </AlertDialog>
       </DialogContent>
     </Dialog>
   );

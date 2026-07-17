@@ -19,7 +19,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { AlertTriangle, CheckCircle, Loader2, Play, VideoOff } from "lucide-react";
-import { RobotRecord } from "@/hooks/useRobots";
+import { RobotRecord, robotSetupGap } from "@/hooks/useRobots";
 import { useApi } from "@/contexts/ApiContext";
 import { useToast } from "@/hooks/use-toast";
 import { useInferenceSession } from "@/contexts/InferenceSessionContext";
@@ -198,6 +198,14 @@ const InferenceModal: React.FC<Props> = ({
         : availableCameras.find((cam) => cameraKey(cam) === key),
     [availableCameras],
   );
+
+  // Re-arm Start on reopen. The success path closes the modal with
+  // `submitting` still true (previews stay released while the rollout owns the
+  // cameras), and the component stays MOUNTED in its consumers — so without
+  // this reset a reopened modal would be stuck on a disabled "Starting…".
+  useEffect(() => {
+    if (open) setSubmitting(false);
+  }, [open]);
 
   // Load checkpoints when modal opens.
   useEffect(() => {
@@ -401,8 +409,6 @@ const InferenceModal: React.FC<Props> = ({
         task,
         cameras: cameraDict,
         duration_s: durationS,
-        // Follower torque limit for the session (10-100% of full power).
-        motor_power: robot.motor_power ?? 100,
         // Bimanual: forward the mode + right-arm follower so the server builds a
         // `bi_so_follower` command staging both follower calibrations. In single
         // mode the right_* fields are inert (mode defaults to "single"
@@ -468,8 +474,8 @@ const InferenceModal: React.FC<Props> = ({
               <Alert className="border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-200">
                 <AlertTriangle className="h-4 w-4" />
                 <AlertDescription>
-                  <strong>{robot.name}</strong> is missing a calibration.
-                  Configure it before running inference.
+                  <strong>{robot.name}</strong> {robotSetupGap(robot)}. Open
+                  Robot settings before running inference.
                 </AlertDescription>
               </Alert>
             ) : (

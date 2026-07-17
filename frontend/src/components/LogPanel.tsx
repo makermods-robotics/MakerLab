@@ -8,6 +8,12 @@ interface LogPanelProps {
   title?: string;
   /** Start collapsed. Defaults to expanded. */
   defaultCollapsed?: boolean;
+  /**
+   * Wrap long lines (default). Pass false to keep each log line on one line so
+   * the panel's natural width is the longest line — for containers that grow
+   * to fit their content instead of wrapping.
+   */
+  wrap?: boolean;
   className?: string;
 }
 
@@ -24,6 +30,7 @@ const LogPanel: React.FC<LogPanelProps> = ({
   logs,
   title = "Log",
   defaultCollapsed = false,
+  wrap = true,
   className = "",
 }) => {
   const [collapsed, setCollapsed] = useState(defaultCollapsed);
@@ -68,7 +75,11 @@ const LogPanel: React.FC<LogPanelProps> = ({
         <div
           ref={scrollRef}
           onScroll={handleScroll}
-          className="max-h-64 overflow-y-auto px-3 pb-3 font-mono text-xs leading-relaxed text-foreground whitespace-pre-wrap break-words"
+          className={`max-h-64 px-3 pb-3 font-mono text-xs leading-relaxed text-foreground ${
+            wrap
+              ? "overflow-y-auto whitespace-pre-wrap break-words"
+              : "overflow-auto whitespace-pre"
+          }`}
         >
           {logs ? (
             logs

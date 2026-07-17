@@ -14,8 +14,6 @@ export interface StartInferenceRequest {
     fourcc?: string;
   }>;
   duration_s: number;
-  // Follower torque limit for the session (10-100% of full power).
-  motor_power?: number;
   // Bimanual: "single" (default) drives one follower; "bimanual" drives two.
   // In bimanual mode follower_port/follower_config above is the LEFT arm and
   // the right_* fields carry the RIGHT arm. Inference has no leader arms.

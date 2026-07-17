@@ -1,10 +1,8 @@
 import React, { useMemo, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { useModels } from "@/hooks/useModels";
-import { useHfAuth } from "@/contexts/HfAuthContext";
 import { ModelItem } from "@/lib/modelsApi";
 import SkillCard, {
-  classifySkill,
   skillNamespace,
   skillTitle,
 } from "@/components/launchpad/SkillCard";
@@ -14,6 +12,24 @@ export interface SkillSliderProps {
   /** Live search filter from the hero search box. */
   search: string;
 }
+
+/** The one curated skill shown on the launchpad. */
+const FEATURED_SKILL_ID =
+  "makermods/act_makermods_sock_2_only_more_orange_2026-07-16_22-14-55";
+
+/** Rendered when /models doesn't carry the featured repo (e.g. logged-out or
+ * offline) so the launchpad always shows the curated card. */
+const FEATURED_FALLBACK: ModelItem = {
+  id: FEATURED_SKILL_ID,
+  name: FEATURED_SKILL_ID,
+  policy_type: "act",
+  dataset: null,
+  steps: null,
+  path: null,
+  last_modified: null,
+  hf_repo_id: FEATURED_SKILL_ID,
+  source: "hub",
+};
 
 /** A single loading skeleton shaped like a SkillCard. */
 const CardSkeleton: React.FC = () => (
@@ -28,24 +44,24 @@ const CardSkeleton: React.FC = () => (
 );
 
 /**
- * Horizontal skill slider — every /models row rendered as a card, mixing
- * MakerMods-highlighted, community, and the user's own skills. Scroll-snap track
- * with ‹ › arrow buttons; the hero search box filters live by name/author. Card
- * click opens the skill detail dialog.
+ * Horizontal skill slider — the launchpad shows only the curated
+ * MakerMods-supported skill (real /models row when available, static fallback
+ * otherwise). Scroll-snap track with ‹ › arrow buttons; the hero search box
+ * filters live by name/author. Card click opens the skill detail dialog.
  */
 const SkillSlider: React.FC<SkillSliderProps> = ({ search }) => {
   const { models, loading } = useModels();
-  const { auth } = useHfAuth();
   const trackRef = useRef<HTMLDivElement>(null);
   const [detail, setDetail] = useState<ModelItem | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
 
-  const username = auth.status === "authenticated" ? auth.username : null;
-
   const filtered = useMemo(() => {
+    const featured =
+      models.find((m) => (m.hf_repo_id ?? m.id) === FEATURED_SKILL_ID) ??
+      FEATURED_FALLBACK;
     const q = search.trim().toLowerCase();
-    if (!q) return models;
-    return models.filter((m) => {
+    if (!q) return [featured];
+    return [featured].filter((m) => {
       const ns = skillNamespace(m) ?? "";
       return (
         skillTitle(m).toLowerCase().includes(q) ||
@@ -83,24 +99,17 @@ const SkillSlider: React.FC<SkillSliderProps> = ({ search }) => {
           className="no-scrollbar flex flex-1 snap-x snap-mandatory gap-4 overflow-x-auto scroll-smooth pb-2"
         >
           {loading ? (
-            <>
-              <CardSkeleton />
-              <CardSkeleton />
-              <CardSkeleton />
-              <CardSkeleton />
-            </>
+            <CardSkeleton />
           ) : filtered.length === 0 ? (
             <div className="flex min-h-[13rem] w-full items-center justify-center rounded-lg border border-dashed border-border bg-card/50 px-6 py-10 text-center text-sm text-muted-foreground">
-              {models.length === 0
-                ? "No skills yet — create the first one below."
-                : "No skills match your search."}
+              No skills match your search.
             </div>
           ) : (
             filtered.map((model) => (
               <SkillCard
                 key={model.id}
                 model={model}
-                badge={classifySkill(model, username)}
+                badge="makermods"
                 onOpen={openDetail}
               />
             ))

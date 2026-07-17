@@ -42,7 +42,7 @@ from tqdm.auto import tqdm as _base_tqdm
 from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
 
 from .arm_identity import ArmIdentityError, ArmSlot, verify_devices
-from .motor_power import apply_motor_power, clear_goal_velocity
+from .motor_power import clear_goal_velocity, reset_torque_limit
 from .record import _DEFAULT_FOURCC
 from .utils.config import (
     bimanual_base_id,
@@ -87,9 +87,6 @@ class InferenceRequest(BaseModel):
     # Escape hatch for the arm-identity guard (see makerlab/arm_identity.py):
     # when true, run even if the connected arm doesn't match its calibration.
     skip_identity_check: bool = False
-    # Follower torque as a percentage of full power (see makerlab/motor_power.py).
-    # Clamped server-side to 10-100; written before the subprocess starts.
-    motor_power: int = 100
 
 
 inference_active: bool = False
@@ -462,7 +459,7 @@ def _preflight_arm_identity(port: str, follower_id: str, config_name: str | None
         )
 
 
-def _preflight_motor_power(port: str, follower_id: str, percent: int) -> list[str]:
+def _preflight_motor_registers(port: str, follower_id: str) -> list[str]:
     """Prime the follower's RAM motor registers before the rollout subprocess
     starts.
 
@@ -471,7 +468,8 @@ def _preflight_motor_power(port: str, follower_id: str, percent: int) -> list[st
     (only a power cycle resets them), and the subprocess's connect()/configure()
     never writes them — so setting them here and releasing the port is enough
     for the whole rollout. Two priming steps:
-      - apply_motor_power: the session torque cap (percent → Torque_Limit).
+      - reset_torque_limit: restore stock torque (a previous auto-calibration's
+        working torque would otherwise cap the whole rollout).
       - clear_goal_velocity: reset any leftover speed cap a previous
         arm-driving feature stamped (auto-cal fold/unfold=1000, rest-pose
         return=400), which would otherwise throttle the whole rollout.
@@ -479,13 +477,13 @@ def _preflight_motor_power(port: str, follower_id: str, percent: int) -> list[st
     and returns warning messages instead of aborting the start."""
     try:
         with _open_follower(port, follower_id) as robot:
-            return apply_motor_power(robot, percent, "follower arm") + clear_goal_velocity(
+            return reset_torque_limit(robot, "follower arm") + clear_goal_velocity(
                 robot, "follower arm"
             )
     except Exception as exc:
         message = (
-            f"Could not set motor power to {percent}% on {port}: {exc}. "
-            "The arm runs at its previous limit (full power after a power-up)."
+            f"Could not reset the motor registers on {port}: {exc}. "
+            "The arm runs at its previous torque/speed limits for this rollout."
         )
         logger.warning(message)
         return [message]
@@ -685,11 +683,9 @@ def _prepare_robot(request: InferenceRequest) -> tuple[list[str], list[str]]:
             identity_warnings += _preflight_arm_identity(
                 request.right_follower_port, right_id, config_name=request.right_follower_config
             )
-        # Motor power on both buses, sequentially (each opens its own port).
-        identity_warnings += _preflight_motor_power(request.follower_port, left_id, request.motor_power)
-        identity_warnings += _preflight_motor_power(
-            request.right_follower_port, right_id, request.motor_power
-        )
+        # Register reset on both buses, sequentially (each opens its own port).
+        identity_warnings += _preflight_motor_registers(request.follower_port, left_id)
+        identity_warnings += _preflight_motor_registers(request.right_follower_port, right_id)
 
         return _bimanual_robot_args(request, base, follower_staging), identity_warnings
 
@@ -707,9 +703,9 @@ def _prepare_robot(request: InferenceRequest) -> tuple[list[str], list[str]]:
     else:
         identity_warnings = _preflight_arm_identity(request.follower_port, follower_id)
 
-    # Always written (even at 100%) so a gentler previous session can't
-    # linger when the arm was never power-cycled.
-    identity_warnings += _preflight_motor_power(request.follower_port, follower_id, request.motor_power)
+    # Always reset so a previous auto-calibration's torque cap can't linger
+    # when the arm was never power-cycled.
+    identity_warnings += _preflight_motor_registers(request.follower_port, follower_id)
 
     return _single_robot_args(request, follower_id), identity_warnings
 

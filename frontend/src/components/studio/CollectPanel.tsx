@@ -10,7 +10,7 @@ import {
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
 import { useHfAuth } from "@/contexts/HfAuthContext";
-import { useRobots } from "@/hooks/useRobots";
+import { useRobots, robotSetupGap } from "@/hooks/useRobots";
 import { useDatasets } from "@/hooks/useDatasets";
 import { useSelectedDataset } from "@/hooks/useSelectedDataset";
 import { validateDatasetName } from "@/lib/datasetName";
@@ -152,7 +152,7 @@ const CollectPanel: React.FC = () => {
     if (!robot.is_clean) {
       toast({
         title: "Robot not ready",
-        description: `${robot.name} is missing a calibration. Configure it before recording.`,
+        description: `${robot.name} ${robotSetupGap(robot)}. Open Robot settings before recording.`,
         variant: "destructive",
       });
       return;
@@ -235,8 +235,6 @@ const CollectPanel: React.FC = () => {
       // Robot name → BiSO staging base id (bimanual). Names the per-session
       // staging dir; does not affect which calibration drives which arm.
       robot_name: robot.name,
-      // Follower torque limit for the session (10-100% of full power).
-      motor_power: robot.motor_power ?? 100,
       dataset_repo_id: datasetRepoId,
       single_task: singleTask,
       num_episodes: numEpisodes,

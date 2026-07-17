@@ -20,11 +20,46 @@ export interface RobotRecord {
   right_leader_config: string;
   right_follower_config: string;
   cameras: CameraConfig[];
-  // Follower torque as a percentage of full power (10-100, default 100).
-  // Written to the servos' volatile torque-limit register at session start.
+  // Auto-calibration drive torque as a percentage of full power (10-100,
+  // default 38 = the vendored script's stock 380). Sessions (teleop/record/
+  // skill runs) use stock LeRobot torque and ignore this value.
   motor_power: number;
   is_clean: boolean;
 }
+
+// Human-readable diagnosis for a record with `is_clean === false`. The backend
+// folds ports, calibration assignments, and on-disk calibration files into one
+// boolean, so warning surfaces can't tell WHAT is missing from the flag alone —
+// and blaming "missing a calibration" when only a port is unassigned sends the
+// user to recalibrate an arm that's already calibrated. Returns a predicate to
+// append after the robot's name, e.g. "has no port assigned for the follower arm".
+export const robotSetupGap = (robot: RobotRecord): string => {
+  const arms =
+    robot.mode === "bimanual"
+      ? [
+          { label: "left leader", port: robot.leader_port, config: robot.leader_config },
+          { label: "left follower", port: robot.follower_port, config: robot.follower_config },
+          { label: "right leader", port: robot.right_leader_port, config: robot.right_leader_config },
+          { label: "right follower", port: robot.right_follower_port, config: robot.right_follower_config },
+        ]
+      : [
+          { label: "leader", port: robot.leader_port, config: robot.leader_config },
+          { label: "follower", port: robot.follower_port, config: robot.follower_config },
+        ];
+  const armList = (labels: string[]) =>
+    `${labels.join(" and ")} arm${labels.length > 1 ? "s" : ""}`;
+  const noConfig = arms.filter((a) => !a.config?.trim()).map((a) => a.label);
+  const noPort = arms.filter((a) => !a.port?.trim()).map((a) => a.label);
+  const parts: string[] = [];
+  if (noConfig.length) parts.push(`is missing a calibration for the ${armList(noConfig)}`);
+  if (noPort.length) parts.push(`has no port assigned for the ${armList(noPort)}`);
+  if (parts.length === 0) {
+    // Every field is populated, so the backend must have flagged a referenced
+    // calibration file that no longer exists on disk.
+    return "references a calibration file that no longer exists — reassign or recalibrate";
+  }
+  return parts.join(" and ");
+};
 
 const SELECTED_KEY = "makerlab.selectedRobot";
 

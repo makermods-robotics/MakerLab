@@ -47,7 +47,7 @@ import TeleopDialog from "@/components/dialogs/TeleopDialog";
 import RobotConfigDialog from "@/components/dialogs/RobotConfigDialog";
 import { useApi } from "@/contexts/ApiContext";
 import { useToast } from "@/hooks/use-toast";
-import { useRobots, RobotRecord, RobotMode } from "@/hooks/useRobots";
+import { useRobots, RobotRecord, RobotMode, robotSetupGap } from "@/hooks/useRobots";
 import { cn } from "@/lib/utils";
 
 /** Status dot: calibrated (ok) vs needs setup (warn ring). */
@@ -175,8 +175,6 @@ const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
           // Robot name → BiSO staging base id (bimanual). Names the per-session
           // staging dir; does not affect which calibration drives which arm.
           robot_name: robot.name,
-          // Follower torque limit for the session (10-100% of full power).
-          motor_power: robot.motor_power ?? 100,
         }),
       });
       const data = await res.json();
@@ -218,7 +216,7 @@ const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
   const teleopDisabledReason = !selectedRecord
     ? "Select a robot first"
     : !selectedRecord.is_clean
-      ? `${selectedRecord.name} is missing a calibration — open Robot settings`
+      ? `${selectedRecord.name} ${robotSetupGap(selectedRecord)} — open Robot settings`
       : null;
 
   return (

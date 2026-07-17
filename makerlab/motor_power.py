@@ -11,28 +11,30 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Follower "motor power": scale the servos' output torque for a session.
+"""Follower motor-register hygiene at session start, plus torque helpers.
 
-A per-robot percentage (10-100) lets the follower run gentler — softer
-collisions, weaker grip, less violent pose snaps — by writing the Feetech
-STS3215's ``Torque_Limit`` register on every motor after the arm is
-connected and configured.
+The per-robot "motor power" percentage (10-100) is the AUTO-CALIBRATION drive
+torque: it is threaded into the vendored autocal subprocess as its
+``--torque-limit`` (percent × 10; see makerlab/auto_calibrate.py). Regular
+sessions — teleoperation, recording, skill runs — deliberately run at stock
+LeRobot torque instead: lerobot never writes ``Torque_Limit``, so "stock"
+means the register's power-on value.
 
 Register facts (pinned lerobot, lerobot/motors/feetech/tables.py):
 
 - ``Torque_Limit`` (address 48, 2 bytes) sits in the SRAM section of
   ``STS_SMS_SERIES_CONTROL_TABLE``. It scales output torque 0-1000
-  (0.1% units, so percent × 10) and, being RAM, RESETS TO FULL ON POWER
-  CYCLE — exactly the safety semantics we want: a gentle setting can never
-  outlive the arm's power.
-- ``Max_Torque_Limit`` (address 16, 2 bytes) is the persistent EEPROM twin;
-  lerobot's ``SOFollower.configure()`` writes it to 500 for the gripper
-  only. We NEVER write it here — this project has been burned by persistent
-  EEPROM state (see makerlab/wiggle.py) — and since ``configure()`` and
-  ``configure_motors()`` never touch the RAM ``Torque_Limit``, a write
-  placed after connect()/configure() sticks for the whole session.
+  (0.1% units, so percent × 10) and, being RAM, re-seeds from its EEPROM
+  twin on every power cycle — but SURVIVES between sessions on the same
+  power-up, so an auto-calibration's working torque would silently throttle
+  the next session unless reset (that's ``reset_torque_limit`` below).
+- ``Max_Torque_Limit`` (address 16, 2 bytes) is the persistent EEPROM twin
+  and the power-on source of ``Torque_Limit``; lerobot's
+  ``SOFollower.configure()`` writes it to 500 for the gripper only. We NEVER
+  write it here — this project has been burned by persistent EEPROM state
+  (see makerlab/wiggle.py).
 
-Only ever apply this to FOLLOWER arms. The leader is human-held with torque
+Only ever touch FOLLOWER arms. The leader is human-held with torque
 disabled; limiting it does nothing useful and risks confusing state.
 """
 
@@ -66,7 +68,7 @@ _TORQUE_LIMIT_PER_PERCENT = 10
 # teleop/record/inference session (bench-confirmed: all six follower motors
 # read Goal_Velocity=1000 after an auto-cal day; teleop tracked sluggishly
 # until it was cleared to 0). We clear it to 0 at every session start, right
-# where apply_motor_power runs, so a stale cap can't outlive the power-up.
+# where reset_torque_limit runs, so a stale cap can't outlive the power-up.
 _GOAL_VELOCITY_REGISTER = "Goal_Velocity"
 
 # "Present_Voltage" (address 62, 1 byte, read-only in the STS3215 table) is the
@@ -112,7 +114,7 @@ def _for_each_motor(device, action, on_fail_message, on_success_message=None) ->
     returned list; otherwise (and only when supplied) log
     ``on_success_message(port)`` at INFO. ``port`` is the bus's ``.port`` or
     "unknown port". Never raises — this is the shared, failure-tolerant
-    scaffold behind apply_motor_power / clear_goal_velocity. Returns the
+    scaffold behind reset_torque_limit / clear_goal_velocity. Returns the
     accumulated warning messages (empty when every motor succeeded).
     """
     warnings: list[str] = []
@@ -133,41 +135,53 @@ def _for_each_motor(device, action, on_fail_message, on_success_message=None) ->
     return warnings
 
 
-def apply_motor_power(device, percent: object, label: str = "follower arm") -> list[str]:
-    """Write the session torque limit to every motor of a FOLLOWER device.
+def reset_torque_limit(device, label: str = "follower arm") -> list[str]:
+    """Restore stock torque on every motor of a FOLLOWER device.
 
-    Call after the device is connected and configured (lerobot's configure()
-    would not overwrite it, but ordering it last keeps that true by
-    construction). Always writes — even at 100% — so a gentler previous
-    session can't linger when the arm was never power-cycled.
+    Sessions (teleop, recording, skill runs) run at LeRobot-default torque —
+    the robot's torque slider only sets AUTO-CALIBRATION's drive torque. But
+    ``Torque_Limit`` is RAM: a lower value written by a previous
+    auto-calibration survives until a power cycle, so simply not writing
+    would silently inherit it. Re-seed the RAM register from each motor's
+    persistent ``Max_Torque_Limit`` — exactly the value the servo boots
+    with — so the session behaves as if freshly power-cycled (stock lerobot).
 
-    Never raises: a failed write is logged as a warning and the motor is left
-    at whatever limit it had (full power on a fresh power-up) — a degraded
-    but safe outcome that must not abort the session start. Returns the
-    warning messages so callers can surface them to the user.
+    Call after the device is connected and configured: lerobot's configure()
+    stamps the gripper's Max_Torque_Limit (500) first, so the value read here
+    matches what the next power-up would load.
+
+    Never raises: a failed read/write is logged as a warning and the motor is
+    left at whatever limit it had — a degraded but safe outcome that must not
+    abort the session start. Returns the warning messages so callers can
+    surface them to the user.
     """
-    percent = clamp_motor_power(percent)
-    value = percent * _TORQUE_LIMIT_PER_PERCENT
+
+    def _reset(bus, motor):
+        stock = bus.read("Max_Torque_Limit", motor, normalize=False)
+        bus.write(_TORQUE_LIMIT_REGISTER, motor, stock, normalize=False, num_retry=2)
 
     def _fail(port, failed):
+        # Wording note: never say "calibration" here — tests (and log triage)
+        # tell benign motor-register warnings apart from arm-identity/
+        # calibration-mismatch warnings by that word.
         return (
-            f"Could not set motor power to {percent}% on {port} "
+            f"Could not restore stock torque (Torque_Limit) on {port} "
             f"({label}; failed motors — {'; '.join(failed)}). "
-            "Those motors run at their previous limit (full power after a power-up) for this session."
+            "Those motors keep whatever torque cap was previously set, for this session."
         )
 
     return _for_each_motor(
         device,
-        lambda bus, motor: bus.write(_TORQUE_LIMIT_REGISTER, motor, value, normalize=False, num_retry=2),
+        _reset,
         _fail,
-        lambda port: f"Motor power set to {percent}% (Torque_Limit={value}) on {port} ({label})",
+        lambda port: f"Stock torque restored (Torque_Limit = Max_Torque_Limit) on {port} ({label})",
     )
 
 
 def clear_goal_velocity(device, label: str = "follower arm") -> list[str]:
     """Reset the RAM speed cap (Goal_Velocity=0) on every motor of a FOLLOWER device.
 
-    Call at session start, alongside apply_motor_power (same post-configure
+    Call at session start, alongside reset_torque_limit (same post-configure
     point, same buses). A previous arm-driving feature — auto-calibration's
     fold/unfold at 1000, the rest-pose return at 400 — leaves a nonzero
     Goal_Velocity stamped in RAM that this session would otherwise inherit,
@@ -177,7 +191,7 @@ def clear_goal_velocity(device, label: str = "follower arm") -> list[str]:
     NEVER call this on the leader: in teleop the leader is human-held with
     torque disabled, so its motion registers are read-only and irrelevant.
 
-    Never raises: mirrors apply_motor_power's failure tolerance — a failed
+    Never raises: mirrors reset_torque_limit's failure tolerance — a failed
     write is logged as a warning and the motor keeps whatever cap it had (a
     degraded but safe outcome that must not abort the session start). Returns
     the warning messages so callers can surface them.

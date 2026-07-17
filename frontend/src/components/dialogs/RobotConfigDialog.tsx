@@ -893,8 +893,15 @@ const RobotConfigWindow = ({
           headers: { "Content-Type": "application/json" },
           // Each arm saves to its own default name, so replacing that arm's
           // existing calibration is the expected outcome — overwrite is always
-          // on and the old name-taken confirmation is gone.
-          body: JSON.stringify({ robot_name: robotName, overwrite: true, arms }),
+          // on and the old name-taken confirmation is gone. motor_power is the
+          // torque slider's CURRENT position (draft, not the saved record) so
+          // what the user sees is what the calibration drives at.
+          body: JSON.stringify({
+            robot_name: robotName,
+            overwrite: true,
+            arms,
+            motor_power: motorPercent,
+          }),
         },
       );
       const data = await res.json();
@@ -1161,33 +1168,29 @@ const RobotConfigWindow = ({
     [robotName],
   );
 
-  // --- Motor power (per-robot, persisted) -------------------------------
-  // The backend stores/applies motor_power as a PERCENT of full torque
-  // (10-100; see makerlab/utils/config.py clamp_motor_power). The servo actually
-  // scales torque via its RAM Torque_Limit register on a 0-1000 scale, and
-  // apply_motor_power writes `percent * _TORQUE_LIMIT_PER_PERCENT` to it (see
-  // makerlab/motor_power.py, _TORQUE_LIMIT_PER_PERCENT = 10). The UI below is
-  // expressed in those RAW register units — same scale as autocal's
-  // DEFAULT_TORQUE_LIMIT = 380 (makerlab/vendor/feetech_autocal/
-  // calibration_defaults.py) — so operators can reason in one vocabulary.
-  // This is a DISPLAY/units change only: we convert raw<->percent at the edges
-  // and still persist a percent, so clamp_motor_power / torque_limit_from_percent
-  // / the apply path are untouched.
+  // --- Auto-calibration torque (per-robot, persisted) --------------------
+  // The backend stores motor_power as a PERCENT of full torque (10-100; see
+  // makerlab/utils/config.py clamp_motor_power). It is the torque the
+  // AUTO-CALIBRATION subprocess drives the arm at (threaded through as its
+  // --torque-limit = percent × 10; see makerlab/auto_calibrate.py). Regular
+  // sessions (teleop/record/skill runs) run at stock LeRobot torque and
+  // ignore this value. The UI below is expressed in RAW Torque_Limit register
+  // units (0-1000) — the same scale as the vendored script's
+  // DEFAULT_TORQUE_LIMIT = 380 — so operators can reason in one vocabulary.
+  // We convert raw<->percent at the edges and persist a percent.
   const TORQUE_LIMIT_PER_PERCENT = 10; // must match makerlab/motor_power.py
   const MOTOR_POWER_MIN_PERCENT = 10; // must match makerlab/utils/config.py
   const MOTOR_POWER_MAX_PERCENT = 100; // must match makerlab/utils/config.py
   const TORQUE_LIMIT_MIN = MOTOR_POWER_MIN_PERCENT * TORQUE_LIMIT_PER_PERCENT; // 100
   const TORQUE_LIMIT_MAX = MOTOR_POWER_MAX_PERCENT * TORQUE_LIMIT_PER_PERCENT; // 1000
-  // Autocal's operating torque, shown as a reference marker only. NOT applied
-  // as the default here — changing the persisted default would be a torque
-  // (safety) behavior change; see config.py DEFAULT_MOTOR_POWER.
+  // The vendored script's own operating torque, shown as a reference marker.
   const DEFAULT_TORQUE_LIMIT_REF = 380; // makerlab/vendor/.../calibration_defaults.py
 
   // Local slider position (in PERCENT). Held as a draft and committed to the
-  // robot record only on Save (previously it POSTed on slider release). Applied
-  // to the follower's motors at the start of each teleop/record/inference
-  // session. Fallback matches backend DEFAULT_MOTOR_POWER (38% = Torque_Limit
-  // 380); re-syncs from the baseline whenever the saved value changes.
+  // robot record only on Save; an auto-calibration START sends the current
+  // draft directly, so the slider is WYSIWYG even before saving. Fallback
+  // matches backend DEFAULT_MOTOR_POWER (38% = Torque_Limit 380); re-syncs
+  // from the baseline whenever the saved value changes.
   const [powerDraft, setPowerDraft] = useState(38);
   useEffect(() => {
     setPowerDraft(robot?.motor_power ?? 38);
@@ -1582,6 +1585,52 @@ const RobotConfigWindow = ({
                     Calibrate manually
                   </Button>
                 </>
+              )}
+
+              {/* Auto-calibration drive torque: sent with the auto-calibrate
+                  start (current slider position), persisted on Save. Manual
+                  calibration and regular sessions don't use it. */}
+              {robot && (
+                <div className="space-y-2 rounded-md border border-border bg-muted/30 p-3">
+                  <div className="flex items-center gap-3">
+                    <Label htmlFor="motorPower" className="shrink-0 text-sm">
+                      Auto-calibration torque
+                    </Label>
+                    <input
+                      id="motorPower"
+                      type="range"
+                      min={TORQUE_LIMIT_MIN}
+                      max={TORQUE_LIMIT_MAX}
+                      step={TORQUE_LIMIT_PER_PERCENT}
+                      value={torqueLimitDraft}
+                      onChange={(e) => {
+                        // Slider is in raw Torque_Limit units; store as percent.
+                        setPowerDraft(
+                          Number(e.target.value) / TORQUE_LIMIT_PER_PERCENT,
+                        );
+                      }}
+                      list="motorTorqueTicks"
+                      className="h-1.5 flex-1 cursor-pointer accent-primary"
+                      aria-label="Auto-calibration torque (Torque_Limit register, 0-1000 scale)"
+                    />
+                    <datalist id="motorTorqueTicks">
+                      {/* The vendored script's stock torque, as a reference tick. */}
+                      <option value={DEFAULT_TORQUE_LIMIT_REF} />
+                    </datalist>
+                    <span className="w-12 shrink-0 text-right font-mono text-sm text-foreground">
+                      {torqueLimitDraft}
+                    </span>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    Torque the arm drives itself at during auto-calibration
+                    (raw servo <code>Torque_Limit</code>, 0–1000 scale; the
+                    tick marks the stock {DEFAULT_TORQUE_LIMIT_REF}). Lower =
+                    gentler unfold and limit-probing; below {TORQUE_LIMIT_MIN}{" "}
+                    the arm can't move its own weight. Teleoperation,
+                    recording, and skill runs always use LeRobot's standard
+                    torque — this slider doesn't affect them.
+                  </p>
+                </div>
               )}
 
               {(batchAutoCalOpen || batchAutoCal.active) && (
@@ -2071,53 +2120,10 @@ const RobotConfigWindow = ({
             </section>
           )}
 
-          {/* 04 · Motor torque */}
-          {robot && (
-            <section className="space-y-3 py-5">
-              <PanelHeader step="04" title="Motor torque" />
-              <div className="flex items-center gap-3">
-                <Label htmlFor="motorPower" className="shrink-0">
-                  Torque limit
-                </Label>
-                <input
-                  id="motorPower"
-                  type="range"
-                  min={TORQUE_LIMIT_MIN}
-                  max={TORQUE_LIMIT_MAX}
-                  step={TORQUE_LIMIT_PER_PERCENT}
-                  value={torqueLimitDraft}
-                  onChange={(e) => {
-                    // Slider is in raw Torque_Limit units; store as percent.
-                    setPowerDraft(
-                      Number(e.target.value) / TORQUE_LIMIT_PER_PERCENT,
-                    );
-                  }}
-                  list="motorTorqueTicks"
-                  className="h-1.5 flex-1 cursor-pointer accent-primary"
-                  aria-label="Motor torque limit (Torque_Limit register, 0-1000 scale)"
-                />
-                <datalist id="motorTorqueTicks">
-                  {/* Autocal's operating torque, as a reference tick. */}
-                  <option value={DEFAULT_TORQUE_LIMIT_REF} />
-                </datalist>
-                <span className="w-12 shrink-0 text-right font-mono text-sm text-foreground">
-                  {torqueLimitDraft}
-                </span>
-              </div>
-              <p className="text-xs text-muted-foreground">
-                Raw servo <code>Torque_Limit</code> (0–1000 scale). Lower =
-                gentler movements and weaker grip; below {TORQUE_LIMIT_MIN} the
-                arm can't hold its own weight. Autocal drives at{" "}
-                {DEFAULT_TORQUE_LIMIT_REF}. Resets to the saved value each
-                session.
-              </p>
-            </section>
-          )}
-
-          {/* 05 · Cameras */}
+          {/* 04 · Cameras */}
           <section className="space-y-4 py-5">
             <div className="flex items-center gap-2">
-              <PanelHeader step="05" title="Attached cameras" />
+              <PanelHeader step="04" title="Attached cameras" />
               <div className="ml-auto flex items-center gap-2">
                 <Label
                   htmlFor="cameras-toggle"

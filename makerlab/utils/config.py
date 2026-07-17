@@ -285,12 +285,13 @@ _BIMANUAL_CONFIG_FIELDS = (
 _ROBOT_STRING_FIELDS = _SINGLE_CONFIG_FIELDS + _BIMANUAL_CONFIG_FIELDS
 _ROBOT_LIST_FIELDS = ("cameras",)
 
-# Follower motor power, as a percentage of full torque (see makerlab/motor_power.py
-# for how it's written to the servos). Bounded below because under ~10% the arm
-# can't reliably hold its own weight; 100 = full/stock torque. Default = the
-# auto-calibration torque level (feetech_autocal DEFAULT_TORQUE_LIMIT 380 ÷
-# _TORQUE_LIMIT_PER_PERCENT 10 = 38%), so a fresh robot operates at the same
-# conservative torque autocal uses rather than at full power.
+# Auto-calibration drive torque, as a percentage of full torque. Threaded into
+# the vendored autocal subprocess as --torque-limit (percent × 10; see
+# makerlab/auto_calibrate.py). Regular sessions (teleop/record/skill runs) run
+# at stock LeRobot torque and ignore this value (makerlab/motor_power.py
+# reset_torque_limit). Bounded below because under ~10% the arm can't reliably
+# move its own weight; default = the vendored script's own DEFAULT_TORQUE_LIMIT
+# (380 ÷ _TORQUE_LIMIT_PER_PERCENT 10 = 38%).
 MOTOR_POWER_MIN = 10
 MOTOR_POWER_MAX = 100
 DEFAULT_MOTOR_POWER = 38

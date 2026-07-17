@@ -24,13 +24,23 @@ from fastapi.testclient import TestClient
 
 
 class _FakeBus:
-    """Minimal Feetech bus stand-in: records writes, can fail per motor."""
+    """Minimal Feetech bus stand-in: records writes, can fail per motor.
 
-    def __init__(self, motors: list[str], fail: tuple[str, ...] = (), port: str = "/dev/fake") -> None:
+    ``max_torque`` maps motor → the EEPROM Max_Torque_Limit value ``read``
+    returns (default 1000; lerobot's configure() sets the gripper to 500)."""
+
+    def __init__(
+        self,
+        motors: list[str],
+        fail: tuple[str, ...] = (),
+        port: str = "/dev/fake",
+        max_torque: dict[str, int] | None = None,
+    ) -> None:
         self.motors = dict.fromkeys(motors)
         self.port = port
         self.writes: list[tuple[str, str, Any, bool, int]] = []
         self._fail = set(fail)
+        self._max_torque = max_torque or {}
 
     def write(
         self, data_name: str, motor: str, value: Any, *, normalize: bool = True, num_retry: int = 0
@@ -38,6 +48,12 @@ class _FakeBus:
         if motor in self._fail:
             raise RuntimeError("write failed")
         self.writes.append((data_name, motor, value, normalize, num_retry))
+
+    def read(self, data_name: str, motor: str, *, normalize: bool = True) -> int:
+        if motor in self._fail:
+            raise RuntimeError("read failed")
+        assert data_name == "Max_Torque_Limit"
+        return self._max_torque.get(motor, 1000)
 
 
 class _FakeArm:
@@ -66,64 +82,58 @@ def test_torque_limit_from_percent_scales_and_clamps() -> None:
     assert torque_limit_from_percent(None) == 380
 
 
-def test_apply_motor_power_writes_ram_register_to_every_motor() -> None:
-    from makerlab.motor_power import apply_motor_power
+def test_reset_torque_limit_reseeds_ram_from_eeprom_per_motor() -> None:
+    """Every motor's RAM Torque_Limit is restored to its own EEPROM
+    Max_Torque_Limit — the exact power-on state (stock lerobot torque)."""
+    from makerlab.motor_power import reset_torque_limit
 
-    bus = _FakeBus(["shoulder_pan", "elbow_flex", "gripper"])
-    warnings = apply_motor_power(_FakeArm(bus), 40)
+    bus = _FakeBus(
+        ["shoulder_pan", "elbow_flex", "gripper"],
+        max_torque={"gripper": 500},  # lerobot's configure() stamps 500 there
+    )
+    warnings = reset_torque_limit(_FakeArm(bus))
 
     assert warnings == []
-    assert len(bus.writes) == 3
-    for data_name, _motor, value, normalize, num_retry in bus.writes:
-        # RAM register only — never the EEPROM "Max_Torque_Limit".
-        assert data_name == "Torque_Limit"
-        assert value == 400
-        assert normalize is False
-        assert num_retry > 0
+    # RAM register only — never a write to the EEPROM "Max_Torque_Limit".
+    assert bus.writes == [
+        ("Torque_Limit", "shoulder_pan", 1000, False, 2),
+        ("Torque_Limit", "elbow_flex", 1000, False, 2),
+        ("Torque_Limit", "gripper", 500, False, 2),
+    ]
 
 
-def test_apply_motor_power_writes_even_at_full_power() -> None:
-    """100% still writes 1000: restores full power when a gentler previous
-    session set the RAM register and the arm was never power-cycled."""
-    from makerlab.motor_power import apply_motor_power
-
-    bus = _FakeBus(["gripper"])
-    apply_motor_power(_FakeArm(bus), 100)
-    assert bus.writes == [("Torque_Limit", "gripper", 1000, False, 2)]
-
-
-def test_apply_motor_power_failure_warns_but_does_not_abort() -> None:
+def test_reset_torque_limit_failure_warns_but_does_not_abort() -> None:
     """One bad motor must not stop the others, and the failure surfaces as a
-    warning message (degraded to previous/full power) — never an exception."""
-    from makerlab.motor_power import apply_motor_power
+    warning message (that motor keeps its previous limit) — never an exception."""
+    from makerlab.motor_power import reset_torque_limit
 
     bus = _FakeBus(["shoulder_pan", "elbow_flex", "gripper"], fail=("elbow_flex",))
-    warnings = apply_motor_power(_FakeArm(bus), 50)
+    warnings = reset_torque_limit(_FakeArm(bus))
 
     written = [w[1] for w in bus.writes]
     assert written == ["shoulder_pan", "gripper"]
     assert len(warnings) == 1
     assert "elbow_flex" in warnings[0]
-    assert "50%" in warnings[0]
+    assert "Torque_Limit" in warnings[0]
     assert "/dev/fake" in warnings[0]
 
 
-def test_apply_motor_power_covers_both_bimanual_arms() -> None:
-    from makerlab.motor_power import apply_motor_power
+def test_reset_torque_limit_covers_both_bimanual_arms() -> None:
+    from makerlab.motor_power import reset_torque_limit
 
-    left = _FakeBus(["gripper"], port="/dev/left")
-    right = _FakeBus(["gripper"], port="/dev/right")
-    warnings = apply_motor_power(_FakeBimanual(left, right), 30)
+    left = _FakeBus(["gripper"], port="/dev/left", max_torque={"gripper": 500})
+    right = _FakeBus(["gripper"], port="/dev/right", max_torque={"gripper": 500})
+    warnings = reset_torque_limit(_FakeBimanual(left, right))
 
     assert warnings == []
-    assert left.writes == [("Torque_Limit", "gripper", 300, False, 2)]
-    assert right.writes == [("Torque_Limit", "gripper", 300, False, 2)]
+    assert left.writes == [("Torque_Limit", "gripper", 500, False, 2)]
+    assert right.writes == [("Torque_Limit", "gripper", 500, False, 2)]
 
 
-def test_apply_motor_power_handles_none_device() -> None:
-    from makerlab.motor_power import apply_motor_power
+def test_reset_torque_limit_handles_none_device() -> None:
+    from makerlab.motor_power import reset_torque_limit
 
-    assert apply_motor_power(None, 50) == []
+    assert reset_torque_limit(None) == []
 
 
 # ---------------------------------------------------------------------------
@@ -184,26 +194,30 @@ def test_clear_goal_velocity_handles_none_device() -> None:
     assert clear_goal_velocity(None) == []
 
 
-def test_request_models_default_to_full_power() -> None:
+def test_session_request_models_have_no_motor_power_field() -> None:
+    """The torque slider drives AUTO-CALIBRATION only; session requests
+    (teleop/record/inference) no longer carry a motor_power knob. A stale
+    client still sending the field is ignored, not an error."""
+    from makerlab.auto_calibrate import AutoCalibrationBatchRequest, AutoCalibrationRequest
     from makerlab.record import RecordingRequest
     from makerlab.rollout import InferenceRequest
     from makerlab.teleoperate import TeleoperateRequest
 
+    for model in (TeleoperateRequest, RecordingRequest, InferenceRequest):
+        assert "motor_power" not in model.model_fields
+
+    # Auto-calibration requests DO carry it (percent, None = script default).
+    assert AutoCalibrationRequest.model_fields["motor_power"].default is None
+    assert AutoCalibrationBatchRequest.model_fields["motor_power"].default is None
+
     teleop = TeleoperateRequest(
-        leader_port="/dev/l", follower_port="/dev/f", leader_config="L", follower_config="F"
-    )
-    record = RecordingRequest(
         leader_port="/dev/l",
         follower_port="/dev/f",
         leader_config="L",
         follower_config="F",
-        dataset_repo_id="user/data",
-        single_task="task",
+        motor_power=40,  # stale-client field: ignored
     )
-    inference = InferenceRequest(follower_port="/dev/f", follower_config="F", policy_ref="/tmp/x")
-    assert teleop.motor_power == 100
-    assert record.motor_power == 100
-    assert inference.motor_power == 100
+    assert not hasattr(teleop, "motor_power")
 
 
 def test_voltage_from_raw_scales_tenths_of_a_volt() -> None:

@@ -27,7 +27,7 @@ from lerobot.teleoperators.bi_so_leader import BiSOLeader
 from lerobot.teleoperators.so_leader import SO101Leader
 
 from .arm_identity import verify_devices
-from .motor_power import apply_motor_power, clear_goal_velocity, torque_limit_from_percent
+from .motor_power import clear_goal_velocity, reset_torque_limit
 from .rest_pose import capture_rest_pose, return_to_rest_pose
 from .utils.devices import _force_close_device_resources
 from .utils.errors import classify_outcome, format_exception, friendly_hint
@@ -167,7 +167,7 @@ class PowerTelemetry:
             self._sum_ma[key] = self._sum_ma.get(key, 0.0) + ma
             self._n[key] = self._n.get(key, 0) + 1
 
-    def summary(self, motor_power_percent: int) -> str | None:
+    def summary(self) -> str | None:
         """One INFO-ready line of per-motor peaks/means, or None if no samples."""
         if not self._n:
             return None
@@ -175,10 +175,7 @@ class PowerTelemetry:
             f"{motor} peak {self.peak_ma[motor]:.0f}mA / mean {self._sum_ma[motor] / self._n[motor]:.0f}mA"
             for motor in self.peak_ma
         ]
-        return (
-            f"power telemetry: {'; '.join(parts)} "
-            f"(motor power {motor_power_percent}%, Torque_Limit {torque_limit_from_percent(motor_power_percent)})"
-        )
+        return f"power telemetry: {'; '.join(parts)}"
 
 
 def hold_torque_release_grace(
@@ -309,9 +306,6 @@ class TeleoperateRequest(BaseModel):
     # Escape hatch for the arm-identity guard (see makerlab/arm_identity.py):
     # when true, start even if the connected arms don't match their calibrations.
     skip_identity_check: bool = False
-    # Follower torque as a percentage of full power (see makerlab/motor_power.py).
-    # Applied to follower motors only; clamped server-side to 10-100.
-    motor_power: int = 100
 
 
 def get_joint_positions_from_robot(robot, prefix: str = "", calibration=None) -> dict[str, float]:
@@ -534,10 +528,11 @@ def _connect_bimanual(request: TeleoperateRequest):
             arm.bus.write_calibration(arm.calibration)
         robot.configure()
         teleop_device.configure()
-        # Session motor power (RAM Torque_Limit) — followers only, never the
-        # human-held leader. After configure() so nothing overwrites it; a
-        # failed write degrades to full power and is surfaced as a warning.
-        identity_warnings += apply_motor_power(robot, request.motor_power, "follower arms")
+        # Stock session torque (RAM Torque_Limit re-seeded from EEPROM) —
+        # followers only, never the human-held leader. Clears any torque cap a
+        # previous auto-calibration left in RAM; a failed write degrades to
+        # the previous limit and is surfaced as a warning.
+        identity_warnings += reset_torque_limit(robot, "follower arms")
         # Clear any leftover Goal_Velocity speed cap a previous arm-driving
         # feature stamped in RAM (auto-cal fold/unfold=1000, rest-pose return=400);
         # followers only, never the human-held leader. See makerlab/motor_power.py.
@@ -656,10 +651,11 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
             logger.info("Configuring motors...")
             robot.configure()
             teleop_device.configure()
-            # Session motor power (RAM Torque_Limit) — follower only, never the
-            # human-held leader. After configure() so nothing overwrites it; a
-            # failed write degrades to full power and is surfaced as a warning.
-            identity_warnings += apply_motor_power(robot, request.motor_power, "follower arm")
+            # Stock session torque (RAM Torque_Limit re-seeded from EEPROM) —
+            # follower only, never the human-held leader. Clears any torque
+            # cap a previous auto-calibration left in RAM; a failed write
+            # degrades to the previous limit and is surfaced as a warning.
+            identity_warnings += reset_torque_limit(robot, "follower arm")
             # Clear any leftover Goal_Velocity speed cap a previous arm-driving
             # feature stamped in RAM (auto-cal fold/unfold=1000, rest-pose
             # return=400); follower only, never the human-held leader. See
@@ -757,7 +753,7 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
                 # session died on its own — a real failure, classified below.
                 loop_error = format_exception(e)
             finally:
-                telemetry_summary = telemetry.summary(request.motor_power)
+                telemetry_summary = telemetry.summary()
                 if telemetry_summary:
                     logger.info(telemetry_summary)
                 if stopped_normally and not _release_now.is_set():

@@ -30,8 +30,6 @@ import ManageCachesDialog from "@/components/landing/ManageCachesDialog";
 import AddModelFromHubDialog from "@/components/landing/AddModelFromHubDialog";
 import ImportModelFromDiskDialog from "@/components/landing/ImportModelFromDiskDialog";
 import {
-  SkillBadgePill,
-  classifySkill,
   formatCount,
   isMineSkill,
   skillTitle,
@@ -253,9 +251,6 @@ const LibrarySheet: React.FC<LibrarySheetProps> = ({ open, onOpenChange }) => {
                             <span className="truncate font-medium">
                               {skillTitle(m)}
                             </span>
-                            <SkillBadgePill
-                              badge={classifySkill(m, username)}
-                            />
                           </div>
                           <p className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground">
                             {[
@@ -274,10 +269,10 @@ const LibrarySheet: React.FC<LibrarySheetProps> = ({ open, onOpenChange }) => {
                         <Button
                           size="sm"
                           onClick={() => runSkill(m)}
-                          className="shrink-0 gap-1.5"
+                          className="shrink-0"
+                          aria-label={`Run ${skillTitle(m)}`}
                         >
                           <Play className="h-3.5 w-3.5" />
-                          Run
                         </Button>
                       </div>
                     ))
@@ -302,10 +297,10 @@ const LibrarySheet: React.FC<LibrarySheetProps> = ({ open, onOpenChange }) => {
                         className="flex items-center gap-2 rounded-md border border-border bg-card p-3 text-left transition-colors hover:border-ring"
                       >
                         <div className="min-w-0 flex-1">
-                          <span className="block truncate font-mono text-sm">
+                          <span className="block truncate font-medium">
                             {d.repo_id}
                           </span>
-                          <p className="mt-0.5 text-[11px] text-muted-foreground">
+                          <p className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground">
                             {d.source === "both"
                               ? "local + Hub"
                               : d.source === "hub"
@@ -344,35 +339,37 @@ const LibrarySheet: React.FC<LibrarySheetProps> = ({ open, onOpenChange }) => {
                   </Button>
                 </div>
               ) : (
-                <div className="flex gap-2">
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => setAddDatasetOpen(true)}
-                    className="flex-1 gap-1.5"
-                  >
-                    <CloudDownload className="h-3.5 w-3.5" />
-                    Add from Hub
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => setImportDatasetOpen(true)}
-                    className="flex-1 gap-1.5"
-                  >
-                    <FolderInput className="h-3.5 w-3.5" />
-                    Import from disk
-                  </Button>
+                <>
+                  <div className="flex gap-2">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => setAddDatasetOpen(true)}
+                      className="flex-1 gap-1.5"
+                    >
+                      <CloudDownload className="h-3.5 w-3.5" />
+                      Add from Hub
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => setImportDatasetOpen(true)}
+                      className="flex-1 gap-1.5"
+                    >
+                      <FolderInput className="h-3.5 w-3.5" />
+                      Import from disk
+                    </Button>
+                  </div>
                   <Button
                     variant="ghost"
                     size="sm"
                     onClick={() => setManageCachesOpen(true)}
-                    className="flex-1 gap-1.5"
+                    className="w-full gap-1.5"
                   >
                     <Archive className="h-3.5 w-3.5" />
                     Manage caches
                   </Button>
-                </div>
+                </>
               )}
               <Button
                 variant="outline"

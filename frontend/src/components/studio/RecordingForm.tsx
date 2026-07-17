@@ -13,7 +13,7 @@ import CameraConfiguration, {
   CameraConfig,
 } from "@/components/recording/CameraConfiguration";
 import { useHfAuth } from "@/contexts/HfAuthContext";
-import { RobotRecord } from "@/hooks/useRobots";
+import { RobotRecord, robotSetupGap } from "@/hooks/useRobots";
 import { validateDatasetName } from "@/lib/datasetName";
 
 interface RecordingFormProps {
@@ -93,8 +93,8 @@ const RecordingForm: React.FC<RecordingFormProps> = ({
           <div className="flex gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-700 dark:text-amber-200">
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
             <span>
-              <strong>{robot.name}</strong> is missing a calibration. Configure
-              it before recording.
+              <strong>{robot.name}</strong> {robotSetupGap(robot)}. Open Robot
+              settings before recording.
             </span>
           </div>
         ) : (

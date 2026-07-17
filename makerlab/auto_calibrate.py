@@ -35,6 +35,7 @@ from pydantic import BaseModel
 
 from lerobot.motors.feetech import FeetechMotorsBus
 
+from .motor_power import torque_limit_from_percent
 from .torque import force_disable_bus_torque
 from .utils.config import (
     CALIBRATION_BASE_PATH_ROBOTS,
@@ -71,6 +72,10 @@ class AutoCalibrationRequest(BaseModel):
     config_file: str
     robot_name: str | None = None
     arm: str = "left"  # "left" (also single) or "right"
+    # Calibration drive torque, as a percentage of full power (the robot's
+    # torque slider; clamped server-side to 10-100). Passed to the vendored
+    # script as --torque-limit (percent × 10). None = the script's default.
+    motor_power: int | None = None
 
 
 class AutoCalibrationBatchArm(BaseModel):
@@ -87,6 +92,9 @@ class AutoCalibrationBatchRequest(BaseModel):
     arms: list[AutoCalibrationBatchArm]
     robot_name: str | None = None
     overwrite: bool = False
+    # Batch-level calibration drive torque (percent, 10-100), applied to every
+    # arm in the batch. None = the vendored script's default.
+    motor_power: int | None = None
 
 
 @dataclass
@@ -220,6 +228,10 @@ class _AutoCalArmRunner:
                 "--robot-type",
                 robot_type,
             ]
+            if request.motor_power is not None:
+                # The robot's torque slider drives the calibration torque:
+                # percent (clamped 10-100) → raw Torque_Limit register units.
+                command += ["--torque-limit", str(torque_limit_from_percent(request.motor_power))]
 
             self._logs.clear()
             self._request = request
@@ -569,6 +581,7 @@ class AutoCalibrationBatchManager:
                     config_file=arm.config_file,
                     robot_name=request.robot_name,
                     arm=arm.arm,
+                    motor_power=request.motor_power,
                 )
                 result = runner.start(req)
                 # Give the runner its identity even if the launch failed, so the

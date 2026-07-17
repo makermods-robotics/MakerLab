@@ -877,6 +877,37 @@ def test_batch_name_taken_bypassed_by_overwrite(monkeypatch: pytest.MonkeyPatch)
     _join_batch(mgr)
 
 
+def test_batch_threads_motor_power_into_torque_limit_arg(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The robot's torque slider (percent) reaches the vendored script as
+    --torque-limit percent×10, on every arm; the flag is absent when the
+    request carries no motor_power (the script's default applies)."""
+    _no_name_taken(monkeypatch)
+    argvs: list[list[str]] = []
+
+    def _popen(*a, **k):
+        argvs.append(a[0])
+        return _ExitProc(0, _port_of(a))
+
+    monkeypatch.setattr(auto_calibrate.subprocess, "Popen", _popen)
+
+    mgr = auto_calibrate.AutoCalibrationBatchManager()
+    arms = [_arm(port="/dev/a", name="arm_a"), _arm(device_type="teleop", port="/dev/b", name="arm_b")]
+    result = mgr.start(auto_calibrate.AutoCalibrationBatchRequest(arms=arms, motor_power=25))
+    assert result["success"] is True
+    _join_batch(mgr)
+    for argv in argvs:
+        assert argv[argv.index("--torque-limit") + 1] == "250"
+
+    argvs.clear()
+    mgr2 = auto_calibrate.AutoCalibrationBatchManager()
+    result2 = mgr2.start(
+        auto_calibrate.AutoCalibrationBatchRequest(arms=[_arm(port="/dev/c", name="arm_c")])
+    )
+    assert result2["success"] is True
+    _join_batch(mgr2)
+    assert "--torque-limit" not in argvs[0]
+
+
 def test_batch_launches_concurrently_and_all_complete(monkeypatch: pytest.MonkeyPatch) -> None:
     """Three arms launch simultaneously, each on its own port, and all complete
     — no robot_name so no filesystem write-back is needed."""

@@ -21,8 +21,7 @@ import {
 } from "@/lib/jobsApi";
 import { JobCheckpoint, listJobCheckpoints } from "@/lib/checkpointsApi";
 import CheckpointDropdown from "@/components/jobs/CheckpointDropdown";
-import InferenceModal from "@/components/landing/InferenceModal";
-import { useRobots } from "@/hooks/useRobots";
+import { useStudio } from "@/contexts/StudioContext";
 
 const POLL_INTERVAL_MS = 1000;
 const MAX_LOG_LINES = 5000;
@@ -76,14 +75,13 @@ const TrainingJobDialog: React.FC<{
   const { baseUrl, fetchWithHeaders } = useApi();
   const { toast } = useToast();
 
-  const { selectedRecord } = useRobots();
+  const { openStudio } = useStudio();
   const [job, setJob] = useState<JobRecord | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const logContainerRef = useRef<HTMLDivElement>(null);
   const [checkpoints, setCheckpoints] = useState<JobCheckpoint[]>([]);
   const [selectedStep, setSelectedStep] = useState<number | null>(null);
-  const [inferenceModalOpen, setInferenceModalOpen] = useState(false);
 
   // Seed logs from the persistent on-disk file once on mount, so closing and
   // reopening the dialog (or coming in fresh on a finished/interrupted job)
@@ -365,7 +363,19 @@ const TrainingJobDialog: React.FC<{
                     onChange={setSelectedStep}
                   />
                   <Button
-                    onClick={() => setInferenceModalOpen(true)}
+                    onClick={() => {
+                      // Land on the Deploy panel with this job + checkpoint
+                      // prefilled (DeployPanel consumes the prefill) instead
+                      // of stacking the legacy InferenceModal over the dialog.
+                      openStudio("deploy", {
+                        deploy: {
+                          source: "job",
+                          id: jobId,
+                          step: selectedStep ?? undefined,
+                        },
+                      });
+                      onExit();
+                    }}
                     disabled={selectedStep == null}
                     size="sm"
                   >
@@ -375,13 +385,6 @@ const TrainingJobDialog: React.FC<{
                 </>
               )}
             </div>
-            <InferenceModal
-              open={inferenceModalOpen}
-              onOpenChange={setInferenceModalOpen}
-              robot={selectedRecord}
-              jobId={jobId}
-              initialStep={selectedStep}
-            />
             <TrainingLogs logs={logs} logContainerRef={logContainerRef} />
           </div>
         )}

@@ -29,7 +29,7 @@ import { useApi } from "@/contexts/ApiContext";
 import { useToast } from "@/hooks/use-toast";
 import { useStudio } from "@/contexts/StudioContext";
 import { useInferenceSession } from "@/contexts/InferenceSessionContext";
-import { useRobots } from "@/hooks/useRobots";
+import { useRobots, robotSetupGap } from "@/hooks/useRobots";
 import { useInferenceLaunch } from "@/hooks/useInferenceLaunch";
 import {
   JobCheckpoint,
@@ -252,6 +252,9 @@ const DeployPanel: React.FC = () => {
     let cancelled = false;
     (async () => {
       setResolving(true);
+      // "Run on robot" means the user is heading for Start — surface the
+      // settings block (robot, checkpoint, cameras) even if they collapsed it.
+      setSettingsOpen(true);
       try {
         if (deployPrefill.source === "job") {
           const job = await getJob(baseUrl, fetchWithHeaders, deployPrefill.id);
@@ -480,6 +483,8 @@ const DeployPanel: React.FC = () => {
     (m) => liveCameraByKey(cameraBindings[m.requestKey]) != null,
   );
 
+  const inferenceActive = status?.inference_active === true;
+
   const canStart =
     !!robot &&
     robot.is_clean &&
@@ -487,9 +492,8 @@ const DeployPanel: React.FC = () => {
     selectedRef != null &&
     !!policyConfig &&
     allCamerasBound &&
-    !submitting;
-
-  const inferenceActive = status?.inference_active === true;
+    !submitting &&
+    !inferenceActive;
 
   const handleStart = async () => {
     if (
@@ -540,7 +544,6 @@ const DeployPanel: React.FC = () => {
         task,
         cameras: cameraDict,
         duration_s: durationS,
-        motor_power: robot.motor_power ?? 100,
         mode: robot.mode,
         right_follower_port: robot.right_follower_port,
         right_follower_config: robot.right_follower_config,
@@ -550,6 +553,17 @@ const DeployPanel: React.FC = () => {
       // The run surfaces as the InferenceSessionDialog over this panel —
       // closing it lands back here (the studio stays open underneath).
       openInferenceSession();
+      // The POST claims the inference slot synchronously, so a status fetch
+      // issued now reflects THIS run — hand the released-previews / disabled-
+      // Start duty from `submitting` to `inferenceActive` (kept fresh by the
+      // poll). Unlike the modal this panel never unmounts, so `submitting`
+      // must be cleared here or Start stays stuck on "Starting…" forever.
+      try {
+        setStatus(await getInferenceStatus(baseUrl, fetchWithHeaders));
+      } catch {
+        // The 2s poll catches up on its next tick.
+      }
+      setSubmitting(false);
     } catch (e) {
       toast({
         title: "Couldn't start inference",
@@ -604,7 +618,7 @@ const DeployPanel: React.FC = () => {
             {selectedSkillLabel ? (
               <span className="truncate">{selectedSkillLabel}</span>
             ) : (
-              <SelectValue placeholder="— pick a skill —" />
+              <SelectValue placeholder="Pick a policy" />
             )}
           </SelectTrigger>
           <SelectContent>
@@ -667,8 +681,8 @@ const DeployPanel: React.FC = () => {
               <Alert className="border-warn/40 text-warn [&>svg]:text-warn">
                 <AlertTriangle className="h-4 w-4" />
                 <AlertDescription>
-                  <strong>{robot.name}</strong> is missing a calibration. Configure
-                  it before running inference.
+                  <strong>{robot.name}</strong> {robotSetupGap(robot)}. Open
+                  Robot settings before running inference.
                 </AlertDescription>
               </Alert>
             ) : (
@@ -827,7 +841,7 @@ const DeployPanel: React.FC = () => {
                         </Select>
                         <CameraThumbnail
                           deviceId={selectedCamera?.deviceId ?? ""}
-                          paused={submitting}
+                          paused={submitting || inferenceActive}
                         />
                       </div>
                     );

@@ -18,6 +18,7 @@ import {
   classifySkill,
   formatCount,
   skillNamespace,
+  skillThumbnail,
   skillTitle,
 } from "@/components/launchpad/SkillCard";
 
@@ -128,10 +129,18 @@ const SkillDetailDialog: React.FC<SkillDetailDialogProps> = ({
         </DialogHeader>
 
         <div className="grid gap-5 sm:grid-cols-[1.2fr_1fr]">
-          <div
-            className="media-slot aspect-[4/3] w-full"
-            data-label="rollout preview"
-          />
+          {skillThumbnail(model) ? (
+            <img
+              src={skillThumbnail(model)}
+              alt={`${skillTitle(model)} rollout preview`}
+              className="aspect-[4/3] w-full rounded-md object-cover"
+            />
+          ) : (
+            <div
+              className="media-slot aspect-[4/3] w-full"
+              data-label="rollout preview"
+            />
+          )}
           <div className="flex flex-col">
             <div className="mb-2 flex flex-wrap items-center gap-1.5">
               <SkillBadgePill badge={badge} />
