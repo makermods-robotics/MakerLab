@@ -11,20 +11,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Follower session torque cap ("max torque limit"): bound the servos' output
-torque for a session.
+"""Follower "motor power": scale the servos' output torque for a session.
 
-A per-robot raw value (0-1000) lets the follower run gentler — softer
+A per-robot percentage (10-100) lets the follower run gentler — softer
 collisions, weaker grip, less violent pose snaps — by writing the Feetech
 STS3215's ``Torque_Limit`` register on every motor after the arm is
-connected and configured. The value is written RAW (no scaling): it IS the
-register value.
+connected and configured.
 
 Register facts (pinned lerobot, lerobot/motors/feetech/tables.py):
 
 - ``Torque_Limit`` (address 48, 2 bytes) sits in the SRAM section of
   ``STS_SMS_SERIES_CONTROL_TABLE``. It scales output torque 0-1000
-  (0.1% units) and, being RAM, RESETS TO FULL ON POWER
+  (0.1% units, so percent × 10) and, being RAM, RESETS TO FULL ON POWER
   CYCLE — exactly the safety semantics we want: a gentle setting can never
   outlive the arm's power.
 - ``Max_Torque_Limit`` (address 16, 2 bytes) is the persistent EEPROM twin;
@@ -44,12 +42,13 @@ import logging
 from lerobot.motors import Motor, MotorNormMode
 from lerobot.motors.feetech import FeetechMotorsBus
 
-from .utils.config import clamp_max_torque_limit
+from .utils.config import clamp_motor_power
 
 logger = logging.getLogger(__name__)
 
-# RAM register scaled 0-1000 (0.1% units) = the raw output-torque cap (see docstring).
+# RAM register scaled 0-1000 = 0-100% of max torque (see module docstring).
 _TORQUE_LIMIT_REGISTER = "Torque_Limit"
+_TORQUE_LIMIT_PER_PERCENT = 10
 
 # "Goal_Velocity" (address 46, 2 bytes, RAM section of the STS3215 control
 # table) is the profile-speed CAP in position mode: 0 means "uncapped, run at
@@ -67,16 +66,21 @@ _TORQUE_LIMIT_REGISTER = "Torque_Limit"
 # teleop/record/inference session (bench-confirmed: all six follower motors
 # read Goal_Velocity=1000 after an auto-cal day; teleop tracked sluggishly
 # until it was cleared to 0). We clear it to 0 at every session start, right
-# where apply_torque_limit runs, so a stale cap can't outlive the power-up.
+# where apply_motor_power runs, so a stale cap can't outlive the power-up.
 _GOAL_VELOCITY_REGISTER = "Goal_Velocity"
 
 # "Present_Voltage" (address 62, 1 byte, read-only in the STS3215 table) is the
 # measured servo-bus supply voltage in 0.1 V units. It is a REAL reading shown
-# alongside the torque slider — it is NOT what the Torque_Limit cap
-# controls (that's an output-torque bound), so the two are labelled separately.
+# alongside the power slider — it is NOT what the Torque_Limit percentage
+# controls (that's a torque fraction), so the two are labelled separately.
 _PRESENT_VOLTAGE_REGISTER = "Present_Voltage"
 _PRESENT_VOLTAGE_SCALE = 0.1
 _VOLTAGE_TIMEOUT_S = 10.0
+
+
+def torque_limit_from_percent(percent: object) -> int:
+    """Register value for a motor-power percentage (clamped to 10-100)."""
+    return clamp_motor_power(percent) * _TORQUE_LIMIT_PER_PERCENT
 
 
 def _device_buses(device) -> list:
@@ -98,17 +102,43 @@ def _device_buses(device) -> list:
     return [target.bus for target in targets if getattr(target, "bus", None) is not None]
 
 
-def apply_torque_limit(device, value: object, label: str = "follower arm") -> list[str]:
-    """Write the session torque limit (raw register value) to every motor of a
-    FOLLOWER device.
+def _for_each_motor(device, action, on_fail_message, on_success_message=None) -> list[str]:
+    """Apply ``action`` to every motor of every bus on ``device``, tolerating
+    per-motor failures.
 
-    ``value`` is the RAW ``Torque_Limit`` register value (0-1000), clamped to
-    that range; anything non-numeric falls back to the DEFAULT. No percent
-    scaling — the value is written verbatim.
+    For each bus: run ``action(bus, motor)`` on each motor, collecting
+    "<motor>: <exc>" for the ones that raise. When any failed, build a warning
+    via ``on_fail_message(port, failed)``, log it at WARNING, and add it to the
+    returned list; otherwise (and only when supplied) log
+    ``on_success_message(port)`` at INFO. ``port`` is the bus's ``.port`` or
+    "unknown port". Never raises — this is the shared, failure-tolerant
+    scaffold behind apply_motor_power / clear_goal_velocity. Returns the
+    accumulated warning messages (empty when every motor succeeded).
+    """
+    warnings: list[str] = []
+    for bus in _device_buses(device):
+        failed: list[str] = []
+        for motor in getattr(bus, "motors", None) or {}:
+            try:
+                action(bus, motor)
+            except Exception as e:
+                failed.append(f"{motor}: {e}")
+        port = getattr(bus, "port", None) or "unknown port"
+        if failed:
+            message = on_fail_message(port, failed)
+            logger.warning(message)
+            warnings.append(message)
+        elif on_success_message is not None:
+            logger.info(on_success_message(port))
+    return warnings
+
+
+def apply_motor_power(device, percent: object, label: str = "follower arm") -> list[str]:
+    """Write the session torque limit to every motor of a FOLLOWER device.
 
     Call after the device is connected and configured (lerobot's configure()
     would not overwrite it, but ordering it last keeps that true by
-    construction). Always writes — even at 1000 — so a gentler previous
+    construction). Always writes — even at 100% — so a gentler previous
     session can't linger when the arm was never power-cycled.
 
     Never raises: a failed write is logged as a warning and the motor is left
@@ -116,33 +146,28 @@ def apply_torque_limit(device, value: object, label: str = "follower arm") -> li
     but safe outcome that must not abort the session start. Returns the
     warning messages so callers can surface them to the user.
     """
-    value = clamp_max_torque_limit(value)
-    warnings: list[str] = []
-    for bus in _device_buses(device):
-        failed: list[str] = []
-        for motor in getattr(bus, "motors", None) or {}:
-            try:
-                bus.write(_TORQUE_LIMIT_REGISTER, motor, value, normalize=False, num_retry=2)
-            except Exception as e:
-                failed.append(f"{motor}: {e}")
-        port = getattr(bus, "port", None) or "unknown port"
-        if failed:
-            message = (
-                f"Could not set the torque limit to {value} on {port} "
-                f"({label}; failed motors — {'; '.join(failed)}). "
-                "Those motors run at their previous limit (full power after a power-up) for this session."
-            )
-            logger.warning(message)
-            warnings.append(message)
-        else:
-            logger.info(f"Torque limit set to {value} (Torque_Limit={value}) on {port} ({label})")
-    return warnings
+    percent = clamp_motor_power(percent)
+    value = percent * _TORQUE_LIMIT_PER_PERCENT
+
+    def _fail(port, failed):
+        return (
+            f"Could not set motor power to {percent}% on {port} "
+            f"({label}; failed motors — {'; '.join(failed)}). "
+            "Those motors run at their previous limit (full power after a power-up) for this session."
+        )
+
+    return _for_each_motor(
+        device,
+        lambda bus, motor: bus.write(_TORQUE_LIMIT_REGISTER, motor, value, normalize=False, num_retry=2),
+        _fail,
+        lambda port: f"Motor power set to {percent}% (Torque_Limit={value}) on {port} ({label})",
+    )
 
 
 def clear_goal_velocity(device, label: str = "follower arm") -> list[str]:
     """Reset the RAM speed cap (Goal_Velocity=0) on every motor of a FOLLOWER device.
 
-    Call at session start, alongside apply_torque_limit (same post-configure
+    Call at session start, alongside apply_motor_power (same post-configure
     point, same buses). A previous arm-driving feature — auto-calibration's
     fold/unfold at 1000, the rest-pose return at 400 — leaves a nonzero
     Goal_Velocity stamped in RAM that this session would otherwise inherit,
@@ -152,31 +177,25 @@ def clear_goal_velocity(device, label: str = "follower arm") -> list[str]:
     NEVER call this on the leader: in teleop the leader is human-held with
     torque disabled, so its motion registers are read-only and irrelevant.
 
-    Never raises: mirrors apply_torque_limit's failure tolerance — a failed
+    Never raises: mirrors apply_motor_power's failure tolerance — a failed
     write is logged as a warning and the motor keeps whatever cap it had (a
     degraded but safe outcome that must not abort the session start). Returns
     the warning messages so callers can surface them.
     """
-    warnings: list[str] = []
-    for bus in _device_buses(device):
-        failed: list[str] = []
-        for motor in getattr(bus, "motors", None) or {}:
-            try:
-                bus.write(_GOAL_VELOCITY_REGISTER, motor, 0, normalize=False, num_retry=2)
-            except Exception as e:
-                failed.append(f"{motor}: {e}")
-        port = getattr(bus, "port", None) or "unknown port"
-        if failed:
-            message = (
-                f"Could not clear the speed cap (Goal_Velocity) on {port} "
-                f"({label}; failed motors — {'; '.join(failed)}). "
-                "Those motors keep any leftover speed cap from a previous session for this run."
-            )
-            logger.warning(message)
-            warnings.append(message)
-        else:
-            logger.info(f"Speed cap cleared (Goal_Velocity=0) on {port} ({label})")
-    return warnings
+
+    def _fail(port, failed):
+        return (
+            f"Could not clear the speed cap (Goal_Velocity) on {port} "
+            f"({label}; failed motors — {'; '.join(failed)}). "
+            "Those motors keep any leftover speed cap from a previous session for this run."
+        )
+
+    return _for_each_motor(
+        device,
+        lambda bus, motor: bus.write(_GOAL_VELOCITY_REGISTER, motor, 0, normalize=False, num_retry=2),
+        _fail,
+        lambda port: f"Speed cap cleared (Goal_Velocity=0) on {port} ({label})",
+    )
 
 
 def voltage_from_raw(raw: object) -> float:

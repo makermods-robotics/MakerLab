@@ -41,7 +41,6 @@ import time
 from collections.abc import Callable
 
 import draccus
-
 from lerobot.motors import MotorCalibration
 from lerobot.utils.constants import HF_LEROBOT_CALIBRATION
 
@@ -51,6 +50,7 @@ from .calibration_defaults import (
     CALIBRATE_FIRST,
     CALIBRATE_REST,
     DEFAULT_ACCELERATION,
+    FULL_TURN,
     DEFAULT_D_COEFFICIENT,
     DEFAULT_I_COEFFICIENT,
     DEFAULT_MAX_TORQUE,
@@ -61,7 +61,6 @@ from .calibration_defaults import (
     DEFAULT_UNFOLD_ANGLE,
     DEFAULT_UNFOLD_TIMEOUT,
     DEFAULT_VELOCITY_LIMIT,
-    FULL_TURN,
     HOMING_OFFSET_MAX_MAG,
     MOTOR_NAMES,
     POSITION_TOLERANCE,
@@ -339,66 +338,47 @@ def parse_args() -> argparse.Namespace:
         description="Feetech servo auto-calibration (with unfold): full flow in one command."
     )
     parser.add_argument(
-        "--port",
-        type=str,
-        required=True,
+        "--port", type=str, required=True,
         help="Serial port path, e.g. COM3 or /dev/ttyUSB0",
     )
     parser.add_argument(
-        "--motor",
-        type=str,
-        choices=MOTOR_NAMES,
-        default=None,
+        "--motor", type=str, choices=MOTOR_NAMES, default=None,
         help="Test only this servo (skip unfold); if not specified, test all 6 servos in order",
     )
 
     cal = parser.add_argument_group("Calibration parameters")
     cal.add_argument(
-        "--velocity-limit",
-        type=int,
-        default=DEFAULT_VELOCITY_LIMIT,
+        "--velocity-limit", type=int, default=DEFAULT_VELOCITY_LIMIT,
         help=f"Calibration limit-probing speed (constant-speed mode Goal_Velocity), default {DEFAULT_VELOCITY_LIMIT}",
     )
     cal.add_argument(
-        "--timeout",
-        type=float,
-        default=DEFAULT_TIMEOUT,
+        "--timeout", type=float, default=DEFAULT_TIMEOUT,
         help=f"Calibration single-direction limit wait timeout (seconds), default {DEFAULT_TIMEOUT}",
     )
     unfold = parser.add_argument_group("Unfold parameters")
     unfold.add_argument(
-        "--unfold-only",
-        action="store_true",
+        "--unfold-only", action="store_true",
         help="Run only the arm unfold (Stage 0 init + Stage 2 unfold), no calibration; for debugging unfold logic",
     )
     unfold.add_argument(
-        "--unfold-angle",
-        type=float,
-        default=DEFAULT_UNFOLD_ANGLE,
+        "--unfold-angle", type=float, default=DEFAULT_UNFOLD_ANGLE,
         help=f"Unfold angle (degrees); set to 0 to skip unfold. Default {DEFAULT_UNFOLD_ANGLE}",
     )
     unfold.add_argument(
-        "--unfold-timeout",
-        type=float,
-        default=DEFAULT_UNFOLD_TIMEOUT,
+        "--unfold-timeout", type=float, default=DEFAULT_UNFOLD_TIMEOUT,
         help=f"Per-motion timeout for unfold (seconds), default {DEFAULT_UNFOLD_TIMEOUT}",
     )
     out = parser.add_argument_group("Output (same path and format as manual calibration)")
     out.add_argument(
-        "--save",
-        action="store_true",
+        "--save", action="store_true",
         help="Write calibration data to servo EEPROM and save to the same local path as manual calibration (draccus format)",
     )
     out.add_argument(
-        "--robot-id",
-        type=str,
-        default="default",
+        "--robot-id", type=str, default="default",
         help="Robot id used in the saved filename; path is .../calibration/robots/<robot_type>/<robot_id>.json. Must match config.id used when starting the arm.",
     )
     out.add_argument(
-        "--robot-type",
-        type=str,
-        default="so_follower",
+        "--robot-type", type=str, default="so_follower",
         choices=["so_follower", "so_leader"],
         help="Robot type for calibration file path: 'so_follower' (default) or 'so_leader'",
     )
@@ -408,7 +388,6 @@ def parse_args() -> argparse.Namespace:
 
 # ====================== Unfold-related ======================
 
-
 def _unfold_joints(
     bus: FeetechMotorsBus,
     unfold_angle: float,
@@ -417,7 +396,7 @@ def _unfold_joints(
 ) -> None:
     """Unfold joints 2-4 to avoid mechanical interference during calibration.
     If unfold_directions is provided, record each joint's unfold direction."""
-    print(f"\n{'=' * 20} Stage 2: Unfold joints 2-4 ({unfold_angle}°) {'=' * 20}")
+    print(f"\n{'='*20} Stage 2: Unfold joints 2-4 ({unfold_angle}°) {'='*20}")
     for motor in UNFOLD_ORDER:
         direction, _ = bus.unfold_single_joint(motor, unfold_angle, unfold_timeout)
         if unfold_directions is not None and direction is not None:
@@ -453,7 +432,7 @@ def _fold_arm(
     default_order = ["shoulder_lift", "elbow_flex", "wrist_flex", "gripper"]
     fold_order = default_order if not motors else motors
     title = "Fold/Unfold arm" if unfold_per_motor else (("Unfold" if unfold else "Fold") + " arm")
-    print(f"\n{'=' * 20} {title} (simultaneous) {'=' * 20}")
+    print(f"\n{'='*20} {title} (simultaneous) {'='*20}")
     values: dict[str, tuple[int, int, int]] = {}
 
     for motor in fold_order:
@@ -531,13 +510,9 @@ def _move_arm_by_angle(
     move_order = default_order if not motors else motors
     angle_steps = int(angle_deg / 360.0 * FULL_TURN)
     direction_label = "fold" if fold else "unfold"
-    print(f"\n{'=' * 20} Relative {direction_label} {angle_deg:.1f}° from current pos {'=' * 20}")
+    print(f"\n{'='*20} Relative {direction_label} {angle_deg:.1f}° from current pos {'='*20}")
     for motor in move_order:
-        if (
-            all_mins is not None
-            and all_maxes is not None
-            and (motor not in all_mins or motor not in all_maxes)
-        ):
+        if all_mins is not None and all_maxes is not None and (motor not in all_mins or motor not in all_maxes):
             continue
         try:
             present = bus.read("Present_Position", motor, normalize=False)
@@ -554,12 +529,8 @@ def _move_arm_by_angle(
             target = max(all_mins[motor], min(all_maxes[motor], target))
         print(f"  {motor_label(motor)} {direction_label} {angle_deg:.1f}°: pos {present} -> {target}")
         ok = bus.write_pos_ex_and_wait(
-            motor,
-            target,
-            DEFAULT_POS_SPEED,
-            DEFAULT_ACCELERATION,
-            timeout_s=DEFAULT_UNFOLD_TIMEOUT,
-            poll_interval_s=0.05,
+            motor, target, DEFAULT_POS_SPEED, DEFAULT_ACCELERATION,
+            timeout_s=DEFAULT_UNFOLD_TIMEOUT, poll_interval_s=0.05,
         )
         if not ok:
             print(f"  Warning: {motor_label(motor)} motion timeout, holding current position")
@@ -616,17 +587,13 @@ def _calibrate_motors(
     result: dict[str, tuple[int, int, int]] = {}
     for m in motor_names:
         rmin, rmax, mid_raw, _raw_min_meas, _raw_max_meas, homing_offset = raw_results[m]
-        print(
-            f"  {motor_label(m)}: post-offset range_min={rmin}, range_max={rmax}, mid={mid_raw}, Homing_Offset register={homing_offset}"
-        )
+        print(f"  {motor_label(m)}: post-offset range_min={rmin}, range_max={rmax}, mid={mid_raw}, Homing_Offset register={homing_offset}")
         time.sleep(0.05)
         try:
             ho_before = bus.read("Homing_Offset", m, normalize=False)
             min_before = bus.read("Min_Position_Limit", m, normalize=False)
             max_before = bus.read("Max_Position_Limit", m, normalize=False)
-            print(
-                f"  {motor_label(m)} pre-write: Min_Position_Limit={min_before}, Max_Position_Limit={max_before}, Homing_Offset={ho_before}"
-            )
+            print(f"  {motor_label(m)} pre-write: Min_Position_Limit={min_before}, Max_Position_Limit={max_before}, Homing_Offset={ho_before}")
         except COMM_ERR:
             print(f"  {motor_label(m)} pre-write: register read failed")
         bus.safe_write("Homing_Offset", m, homing_offset, normalize=False)
@@ -636,14 +603,14 @@ def _calibrate_motors(
             ho_after = bus.read("Homing_Offset", m, normalize=False)
             min_after = bus.read("Min_Position_Limit", m, normalize=False)
             max_after = bus.read("Max_Position_Limit", m, normalize=False)
-            print(
-                f"  {motor_label(m)} post-write: Min_Position_Limit={min_after}, Max_Position_Limit={max_after}, Homing_Offset={ho_after}"
-            )
+            print(f"  {motor_label(m)} post-write: Min_Position_Limit={min_after}, Max_Position_Limit={max_after}, Homing_Offset={ho_after}")
         except COMM_ERR:
             print(f"  {motor_label(m)} post-write: register read failed")
         time.sleep(0.1)
         do_2_3_together = (
-            unfold_directions is not None and "shoulder_lift" in motor_names and "elbow_flex" in motor_names
+            unfold_directions is not None
+            and "shoulder_lift" in motor_names
+            and "elbow_flex" in motor_names
         )
         if m == "wrist_roll":
             pass
@@ -659,13 +626,12 @@ def _calibrate_motors(
 
 # ====================== Connect and init (shared) ======================
 
-
 def _connect_and_clear(port: str) -> FeetechMotorsBus:
     """Create the bus, clear residual Overload, then connect for real. Raises on failure."""
     bus = FeetechMotorsBus(port=port, motors=SO_FOLLOWER_MOTORS.copy())
     bus.connect(handshake=False)
     print("Clearing residual servo state...")
-    all_zero = dict.fromkeys(MOTOR_NAMES, 0)
+    all_zero = {m: 0 for m in MOTOR_NAMES}
     for _ in range(3):
         try:
             bus.sync_write("Goal_Velocity", all_zero)
@@ -749,7 +715,7 @@ INIT_CHECKS = [
 def _run_init(bus: FeetechMotorsBus, *, interactive: bool = True) -> None:
     """Stage 0: Lock=1, PID, limits, Homing_Offset, enable torque. On parameter anomaly,
     if interactive, wait for Enter."""
-    print(f"\n{'=' * 20} Stage 0: Initialization {'=' * 20}")
+    print(f"\n{'='*20} Stage 0: Initialization {'='*20}")
     for m in MOTOR_NAMES:
         print(f"Configuring servo: {motor_label(m)}")
         try:
@@ -771,9 +737,7 @@ def _run_init(bus: FeetechMotorsBus, *, interactive: bool = True) -> None:
             time.sleep(0.05)
             limits = bus.read_position_limits(m)
             if limits != (0, 4095):
-                print(
-                    f"  [Warning] Position_Limits setting failed on {m}: set value=(0, 4095), read value={limits}"
-                )
+                print(f"  [Warning] Position_Limits setting failed on {m}: set value=(0, 4095), read value={limits}")
                 param_set_ok = False
             time.sleep(0.2)
             # Finally enable torque
@@ -789,9 +753,7 @@ def _run_init(bus: FeetechMotorsBus, *, interactive: bool = True) -> None:
             param_set_ok = False
         if not param_set_ok and interactive:
             try:
-                input(
-                    "  [Warning] Parameter setting/verification has anomalies; check wiring and power, press Enter to force-continue..."
-                )
+                input("  [Warning] Parameter setting/verification has anomalies; check wiring and power, press Enter to force-continue...")
             except Exception:
                 pass
     print(
@@ -868,37 +830,25 @@ def run_full_calibration(
             "shoulder_lift": all_unfold_directions.get("shoulder_lift") != "reverse",
             "elbow_flex": all_unfold_directions.get("elbow_flex") != "reverse",
         }
-        print(f"\n{'=' * 20} Calibrating servos 2 and 3 (multi-servo, opposite of lift direction) {'=' * 20}")
+        print(f"\n{'='*20} Calibrating servos 2 and 3 (multi-servo, opposite of lift direction) {'='*20}")
         results_2_3 = _calibrate_motors(
-            bus,
-            ["shoulder_lift", "elbow_flex"],
+            bus, ["shoulder_lift", "elbow_flex"],
             velocity_limit=velocity_limit,
             timeout_s=timeout_s,
             ccw_first=ccw_first_2_3,
             unfold_directions=all_unfold_directions,
             reference_positions=all_reference_positions,
         )
-        _apply_calibration_results(
-            results_2_3, all_mins, all_maxes, all_mids, ["shoulder_lift", "elbow_flex"]
-        )
+        _apply_calibration_results(results_2_3, all_mins, all_maxes, all_mids, ["shoulder_lift", "elbow_flex"])
         _fold_arm(bus, all_mins, all_maxes, all_unfold_directions, motors=["shoulder_lift", "elbow_flex"])
 
         time.sleep(0.1)
         # Stage 3: Calibrate the remaining servos 4, 5, 6 (multi-servo simultaneous, with arm lift to avoid obstruction)
-        print(f"\n{'=' * 20} Stage 3: Calibrate servos 4-6 (multi-servo simultaneous) {'=' * 20}")
-        _move_arm_by_angle(
-            bus,
-            all_unfold_directions,
-            80,
-            fold=False,
-            motors=["elbow_flex"],
-            all_mins=all_mins,
-            all_maxes=all_maxes,
-        )
+        print(f"\n{'='*20} Stage 3: Calibrate servos 4-6 (multi-servo simultaneous) {'='*20}")
+        _move_arm_by_angle(bus, all_unfold_directions, 80, fold=False, motors=["elbow_flex"], all_mins=all_mins, all_maxes=all_maxes)
         CALIBRATE_REST_REMAINING = ["wrist_roll", "gripper", "wrist_flex"]
         results_rest = _calibrate_motors(
-            bus,
-            CALIBRATE_REST_REMAINING,
+            bus, CALIBRATE_REST_REMAINING,
             velocity_limit=velocity_limit,
             timeout_s=timeout_s,
             reference_positions=all_reference_positions,
@@ -906,25 +856,18 @@ def run_full_calibration(
         _apply_calibration_results(results_rest, all_mins, all_maxes, all_mids, CALIBRATE_REST_REMAINING)
         time.sleep(0.1)
         # Fold servo 3, fully unfold servo 4 (executed together in one call)
-        _fold_arm(
-            bus,
-            all_mins,
-            all_maxes,
-            all_unfold_directions,
-            motors=["elbow_flex", "wrist_flex", "gripper"],
-            unfold_per_motor={"elbow_flex": False, "wrist_flex": True, "gripper": False},
-        )
+        _fold_arm(bus, all_mins, all_maxes, all_unfold_directions,
+            motors=["elbow_flex", "wrist_flex","gripper"],
+            unfold_per_motor={"elbow_flex": False, "wrist_flex": True, "gripper": False})
         # Stage 4: Calibrate servo 1 shoulder_pan last
-        print(
-            f"\n{'=' * 20} Stage 4: Calibrate {motor_label('shoulder_pan')} (servo 1) and return to mid {'=' * 20}"
-        )
+        print(f"\n{'='*20} Stage 4: Calibrate {motor_label('shoulder_pan')} (servo 1) and return to mid {'='*20}")
         results_pan = _calibrate_motors(
             bus, ["shoulder_pan"], velocity_limit=velocity_limit, timeout_s=timeout_s
         )
         _apply_calibration_results(results_pan, all_mins, all_maxes, all_mids, ["shoulder_pan"])
         time.sleep(0.1)
         motors_calibrated = CALIBRATE_REST + CALIBRATE_FIRST
-        print(f"\n{'=' * 20} Calibration results {'=' * 20}")
+        print(f"\n{'='*20} Calibration results {'='*20}")
         for name in motors_calibrated:
             offset = all_mids[name] - STS_HALF_TURN_RAW
             print(
@@ -932,8 +875,9 @@ def run_full_calibration(
                 f"mid={all_mids[name]}, offset={offset}"
             )
 
+
         _fold_arm(bus, all_mins, all_maxes, all_unfold_directions)
-        # Before persistence: unlock EEPROM (Lock=0) and restore all servos to servo mode (Operating_Mode=0)
+           # Before persistence: unlock EEPROM (Lock=0) and restore all servos to servo mode (Operating_Mode=0)
         for name in bus.motors:
             bus.write("Lock", name, 0)
             time.sleep(0.01)
@@ -945,7 +889,7 @@ def run_full_calibration(
             print("\nCalibration complete.")
 
         if save:
-            print(f"\n{'=' * 20} Persistence (same scheme as manual calibration) {'=' * 20}")
+            print(f"\n{'='*20} Persistence (same scheme as manual calibration) {'='*20}")
             bus.safe_disable_all()
             cal = {}
             for name in motors_calibrated:
@@ -1018,7 +962,7 @@ def calibrate_single_motor(
 
     def body(bus: FeetechMotorsBus) -> None:
         _run_init(bus, interactive=interactive)
-        print(f"\n{'=' * 20} Calibrating {motor_label(motor_name)} {'=' * 20}")
+        print(f"\n{'='*20} Calibrating {motor_label(motor_name)} {'='*20}")
         _calibrate_motors(bus, [motor_name], velocity_limit=velocity_limit, timeout_s=timeout_s)
         time.sleep(0.1)
         if interactive:
@@ -1029,7 +973,6 @@ def calibrate_single_motor(
 
 
 # ====================== CLI entry ======================
-
 
 def _handle_sigterm(signum, frame) -> None:
     """MakerLab's Stop button terminates this subprocess with SIGTERM; raise

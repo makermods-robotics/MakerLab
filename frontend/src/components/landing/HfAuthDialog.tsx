@@ -47,16 +47,16 @@ const HfAuthDialog: React.FC<HfAuthDialogProps> = ({ open, onOpenChange }) => {
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle className="text-warn">
+          <DialogTitle className="text-amber-700 dark:text-amber-200">
             Hugging Face CLI not configured
           </DialogTitle>
-          <DialogDescription>
+          <DialogDescription className="text-muted-foreground">
             Uploads, training, and replay-from-Hub require a logged-in HF CLI.
             Run this in a terminal:
           </DialogDescription>
         </DialogHeader>
-        <pre className="bg-secondary p-3 rounded border border-border text-xs sm:text-sm overflow-x-auto flex items-center justify-between gap-2">
-          <code className="font-mono text-foreground">{auth.loginCommand}</code>
+        <pre className="bg-muted p-3 rounded border border-border text-xs sm:text-sm overflow-x-auto flex items-center justify-between gap-2">
+          <code className="text-ok">{auth.loginCommand}</code>
           <button
             type="button"
             onClick={handleCopy}
@@ -75,6 +75,7 @@ const HfAuthDialog: React.FC<HfAuthDialogProps> = ({ open, onOpenChange }) => {
           size="sm"
           onClick={handleRefetch}
           disabled={refetching}
+          className="border-amber-500/50 bg-transparent text-amber-700 dark:text-amber-200 hover:bg-amber-500/10"
         >
           <RefreshCw
             className={`w-4 h-4 mr-2 ${refetching ? "animate-spin" : ""}`}

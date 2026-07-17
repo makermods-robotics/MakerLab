@@ -90,13 +90,32 @@ const MergeDatasetsDialog: React.FC<Props> = ({
       return next;
     });
 
+  // A bare output name (no "/") inherits the sources' namespace when they all
+  // share one. Without this, typing "merged" created a namespace-less dataset
+  // at the cache root — inconsistent with every other dataset, and rename can
+  // never fix it (rename only touches the final path segment). Mixed-namespace
+  // sources make no single answer right, so a bare name then stays bare and
+  // the user can type the full id explicitly.
+  const sourceNamespaces = [...selected].map((id) =>
+    id.includes("/") ? id.split("/")[0] : null,
+  );
+  const commonNamespace =
+    sourceNamespaces.length > 0 &&
+    sourceNamespaces[0] !== null &&
+    sourceNamespaces.every((ns) => ns === sourceNamespaces[0])
+      ? sourceNamespaces[0]
+      : null;
   const trimmedOutput = output.trim();
-  const outputError = trimmedOutput ? validateDatasetRepoId(trimmedOutput) : null;
+  const effectiveOutput =
+    trimmedOutput && !trimmedOutput.includes("/") && commonNamespace
+      ? `${commonNamespace}/${trimmedOutput}`
+      : trimmedOutput;
+  const outputError = effectiveOutput ? validateDatasetRepoId(effectiveOutput) : null;
   const canMerge =
     selected.size >= 2 &&
-    trimmedOutput.length > 0 &&
+    effectiveOutput.length > 0 &&
     outputError === null &&
-    !selected.has(trimmedOutput) &&
+    !selected.has(effectiveOutput) &&
     status?.state !== "running";
 
   const handleMerge = async () => {
@@ -107,7 +126,7 @@ const MergeDatasetsDialog: React.FC<Props> = ({
         baseUrl,
         fetchWithHeaders,
         [...selected],
-        trimmedOutput,
+        effectiveOutput,
       );
       if (!res.started) {
         setStartError(res.message);
@@ -117,7 +136,7 @@ const MergeDatasetsDialog: React.FC<Props> = ({
       setStatus({
         state: "running",
         error: null,
-        output_repo_id: trimmedOutput,
+        output_repo_id: effectiveOutput,
         logs: [],
       });
     } catch (e) {
@@ -136,7 +155,7 @@ const MergeDatasetsDialog: React.FC<Props> = ({
           <DialogTitle className="flex items-center gap-2">
             <GitMerge className="w-5 h-5" /> Merge datasets
           </DialogTitle>
-          <DialogDescription>
+          <DialogDescription className="text-muted-foreground">
             Combine episodes from two or more datasets into a new one. Sources
             must share the same robot, fps, and cameras.
           </DialogDescription>
@@ -145,7 +164,9 @@ const MergeDatasetsDialog: React.FC<Props> = ({
         {state === "idle" ? (
           <div className="space-y-4">
             <div>
-              <Label>Sources ({selected.size} selected)</Label>
+              <Label className="text-foreground">
+                Sources ({selected.size} selected)
+              </Label>
               <div className="mt-1 max-h-56 overflow-auto rounded-md border border-border divide-y divide-border">
                 {datasets.length === 0 ? (
                   <p className="p-3 text-sm text-muted-foreground">
@@ -155,30 +176,39 @@ const MergeDatasetsDialog: React.FC<Props> = ({
                   datasets.map((d) => (
                     <label
                       key={d.repo_id}
-                      className="flex items-center gap-2 p-2 hover:bg-accent cursor-pointer text-sm"
+                      className="flex items-start gap-2 p-2 hover:bg-accent cursor-pointer text-sm"
                     >
                       <Checkbox
+                        className="shrink-0 mt-0.5"
                         checked={selected.has(d.repo_id)}
                         onCheckedChange={() => toggle(d.repo_id)}
                       />
-                      <span className="truncate">{d.repo_id}</span>
+                      <span className="min-w-0 break-all">{d.repo_id}</span>
                     </label>
                   ))
                 )}
               </div>
             </div>
             <div>
-              <Label htmlFor="merge-output">Output dataset name</Label>
+              <Label htmlFor="merge-output" className="text-foreground">
+                Output dataset name
+              </Label>
               <Input
                 id="merge-output"
                 value={output}
                 onChange={(e) => setOutput(e.target.value)}
                 placeholder="user/merged_dataset"
                 aria-invalid={outputError !== null}
-                className="mt-1 aria-[invalid=true]:border-destructive"
+                className="mt-1 aria-[invalid=true]:border-destructive/70"
               />
               {outputError && (
                 <p className="mt-1 text-xs text-destructive">{outputError}</p>
+              )}
+              {!outputError && effectiveOutput !== trimmedOutput && (
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Will be created as{" "}
+                  <code className="text-info">{effectiveOutput}</code>
+                </p>
               )}
             </div>
             {startError ? (
@@ -188,7 +218,7 @@ const MergeDatasetsDialog: React.FC<Props> = ({
               <Button
                 onClick={handleMerge}
                 disabled={!canMerge || starting}
-                variant="brand"
+                className=""
               >
                 {starting ? (
                   <>
@@ -210,13 +240,16 @@ const MergeDatasetsDialog: React.FC<Props> = ({
                 <>
                   <Loader2 className="w-4 h-4 animate-spin text-info" />
                   Merging into{" "}
-                  <code className="text-info">{status?.output_repo_id}</code>…
+                  <code className="text-info">{status?.output_repo_id}</code>
+                  …
                 </>
               ) : state === "done" ? (
                 <>
                   <CheckCircle2 className="w-4 h-4 text-ok" />
                   Created{" "}
-                  <code className="text-ok">{status?.output_repo_id}</code>
+                  <code className="text-ok">
+                    {status?.output_repo_id}
+                  </code>
                 </>
               ) : (
                 <>
@@ -226,7 +259,7 @@ const MergeDatasetsDialog: React.FC<Props> = ({
             </div>
             <div
               ref={logBoxRef}
-              className="max-h-56 overflow-auto rounded-md border border-border bg-secondary p-2 font-mono text-xs text-foreground whitespace-pre-wrap"
+              className="max-h-56 overflow-auto rounded-md border border-border bg-muted p-2 font-mono text-xs text-foreground whitespace-pre-wrap"
             >
               {(status?.logs ?? []).map((l, i) => (
                 <div key={i}>{l.message}</div>
@@ -236,7 +269,10 @@ const MergeDatasetsDialog: React.FC<Props> = ({
               <p className="text-sm text-destructive">{status.error}</p>
             ) : null}
             <div className="flex justify-end">
-              <Button variant="outline" onClick={() => onOpenChange(false)}>
+              <Button
+                variant="outline"
+                onClick={() => onOpenChange(false)}
+              >
                 {state === "done" ? "Done" : "Close"}
               </Button>
             </div>

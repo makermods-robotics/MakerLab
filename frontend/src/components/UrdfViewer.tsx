@@ -25,6 +25,27 @@ if (typeof window !== "undefined" && !customElements.get("urdf-viewer")) {
 }
 import * as THREE from "three";
 
+// three r163+ renders through WebGL2 only. On browsers without it (e.g.
+// Chromium on Jetson, where Tegra GPU acceleration is unavailable to the
+// sandboxed browser and SwiftShader may be disabled), the urdf-viewer
+// element throws while creating its context ("Error creating WebGL
+// context" → undefined scene → ".add of undefined"), which white-screens
+// the whole teleop page and its unmount auto-stops the running session.
+// Probe once and render a fallback instead of mounting the element.
+let webglSupportCache: boolean | null = null;
+function isWebglSupported(): boolean {
+  if (webglSupportCache === null) {
+    try {
+      webglSupportCache = !!document
+        .createElement("canvas")
+        .getContext("webgl2");
+    } catch {
+      webglSupportCache = false;
+    }
+  }
+  return webglSupportCache;
+}
+
 // Extend the interface for the URDF viewer element to include background property
 interface UrdfViewerElement extends HTMLElement {
   background?: string;
@@ -39,6 +60,7 @@ interface UrdfViewerProps {
 const UrdfViewer: React.FC<UrdfViewerProps> = ({ jointsKey = "joints" }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const [highlightedJoint, setHighlightedJoint] = useState<string | null>(null);
+  const webglOk = isWebglSupported();
   const { registerUrdfProcessor, alternativeUrdfModels, isDefaultModel } =
     useUrdf();
 
@@ -49,7 +71,9 @@ const UrdfViewer: React.FC<UrdfViewerProps> = ({ jointsKey = "joints" }) => {
   // Real-time joint updates via WebSocket
   const { isConnected: isWebSocketConnected } = useRealTimeJoints({
     viewerRef,
-    enabled: isDefaultModel, // Only enable WebSocket for default model
+    // Only enable WebSocket for default model; without WebGL there is no
+    // viewer to drive, so skip the connection too.
+    enabled: isDefaultModel && webglOk,
     jointsKey,
   });
 
@@ -133,7 +157,7 @@ const UrdfViewer: React.FC<UrdfViewerProps> = ({ jointsKey = "joints" }) => {
 
   // Main effect to create and setup the viewer only once
   useEffect(() => {
-    if (!containerRef.current) return;
+    if (!webglOk || !containerRef.current) return;
 
     // Create and configure the URDF viewer element
     const viewer = createUrdfViewer(containerRef.current, true);
@@ -261,6 +285,7 @@ const UrdfViewer: React.FC<UrdfViewerProps> = ({ jointsKey = "joints" }) => {
       viewer.removeEventListener("urdf-processed", onModelProcessed);
     };
   }, [
+    webglOk,
     isDefaultModel,
     customUrdfPath,
     urlModifierFunc,
@@ -268,17 +293,38 @@ const UrdfViewer: React.FC<UrdfViewerProps> = ({ jointsKey = "joints" }) => {
     alternativeUrdfModels,
   ]);
 
+  if (!webglOk) {
+    return (
+      <div
+        className={cn(
+          "w-full h-full relative flex items-center justify-center",
+          "bg-gradient-to-br from-gray-900 to-gray-800"
+        )}
+      >
+        <div className="text-center px-6 max-w-sm">
+          <p className="text-gray-300 font-medium mb-1">3D viewer unavailable</p>
+          <p className="text-gray-500 text-sm">
+            This browser can't create a WebGL context (no GPU acceleration),
+            so the robot model preview is disabled. Teleoperation itself keeps
+            working.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div
       className={cn(
-        "relative h-full w-full bg-card transition-all duration-300 ease-in-out"
+        "w-full h-full transition-all duration-300 ease-in-out relative",
+        "bg-gradient-to-br from-gray-900 to-gray-800"
       )}
     >
       <div ref={containerRef} className="w-full h-full" />
 
       {/* Joint highlight indicator */}
       {highlightedJoint && (
-        <div className="absolute bottom-4 right-4 z-10 rounded-md border border-border bg-card/90 px-3 py-2 font-mono text-sm text-foreground">
+        <div className="absolute bottom-4 right-4 bg-black/70 text-white px-3 py-2 rounded-md text-sm font-mono z-10">
           Joint: {highlightedJoint}
         </div>
       )}
@@ -289,8 +335,8 @@ const UrdfViewer: React.FC<UrdfViewerProps> = ({ jointsKey = "joints" }) => {
           <div
             className={`flex items-center gap-2 px-3 py-2 rounded-md text-sm font-mono ${
               isWebSocketConnected
-                ? "bg-ok/15 text-ok"
-                : "bg-destructive/15 text-destructive"
+                ? "bg-ok/20 text-ok"
+                : "bg-destructive/20 text-destructive"
             }`}
           >
             <div
@@ -298,7 +344,7 @@ const UrdfViewer: React.FC<UrdfViewerProps> = ({ jointsKey = "joints" }) => {
                 isWebSocketConnected ? "bg-ok" : "bg-destructive"
               }`}
             />
-            {isWebSocketConnected ? "Live robot data" : "Disconnected"}
+            {isWebSocketConnected ? "Live Robot Data" : "Disconnected"}
           </div>
         </div>
       )}

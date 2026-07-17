@@ -18,8 +18,7 @@ import {
 } from "@/components/ui/collapsible";
 import { useToast } from "@/hooks/use-toast";
 import { useAvailableCameras } from "@/hooks/useAvailableCameras";
-import BackendCameraStream from "@/components/BackendCameraStream";
-import { isCameraConnected } from "@/lib/cameraResolve";
+import { useCameraStream } from "@/hooks/useCameraStream";
 
 // Sentinels distinguish "leave unset" (auto-detect / platform default) from an
 // explicit choice. Radix Select disallows an empty-string value, so we map these
@@ -44,10 +43,6 @@ export interface CameraConfig {
   type: string;
   camera_index?: number; // cv2 index — what the recorder opens
   device_id: string; // Browser deviceId matched to the cv2 index by AVFoundation localizedName
-  // Stable OS device identity (AVFoundation uniqueID). The authoritative link
-  // to the physical camera: cv2 indices shift on replug and device names can
-  // collide (two "USB Camera"s), but this survives both.
-  unique_id?: string;
   width: number;
   height: number;
   fps?: number;
@@ -91,24 +86,16 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
     : undefined;
 
   // cv2's AVFoundation order is uniqueID-sorted, so plugging/unplugging a
-  // device between sessions shifts indices. Refresh each seeded camera's
-  // camera_index by unique_id (exact physical identity) when the record has
-  // one, falling back to the browser device_id for older records — otherwise
-  // the recorder opens the wrong physical device and the dropdown's "already
-  // added" check guards a stale index. device_id alone is a coin flip when
-  // two cameras share a name (twin "USB Camera"s), which is why unique_id
-  // wins when present.
+  // device between sessions shifts indices. The browser device_id stays
+  // stable per-origin, so use it to refresh each seeded camera's
+  // camera_index — otherwise the recorder opens the wrong physical device
+  // and the dropdown's "already added" check guards a stale index.
   useEffect(() => {
     if (availableCameras.length === 0 || cameras.length === 0) return;
     let changed = false;
     const refreshed = cameras.map((cam) => {
-      const match =
-        (cam.unique_id
-          ? availableCameras.find((m) => m.uniqueId === cam.unique_id)
-          : undefined) ??
-        (cam.device_id
-          ? availableCameras.find((m) => m.deviceId === cam.device_id)
-          : undefined);
+      if (!cam.device_id) return cam;
+      const match = availableCameras.find((m) => m.deviceId === cam.device_id);
       if (match && match.index !== cam.camera_index) {
         changed = true;
         return { ...cam, camera_index: match.index };
@@ -152,7 +139,6 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
     const isDuplicate = cameras.some(
       (cam) =>
         cam.camera_index === selectedCamera.index ||
-        (selectedCamera.uniqueId && cam.unique_id === selectedCamera.uniqueId) ||
         (selectedCamera.deviceId && cam.device_id === selectedCamera.deviceId),
     );
     if (isDuplicate) {
@@ -170,7 +156,6 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
       type: "opencv",
       camera_index: selectedCamera.index,
       device_id: selectedCamera.deviceId,
-      unique_id: selectedCamera.uniqueId,
       width: 640,
       height: 480,
       fps: 30,
@@ -204,11 +189,9 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
   };
 
   // When the recording session is starting, the parent calls
-  // releaseStreamsRef.current() to pause every preview so their MJPEG streams
-  // drop (the server releases its shared captures) and cv2.VideoCapture can
-  // grab the cameras exclusively. Flipping streamsPaused also disables
-  // useAvailableCameras above (which still probes via
-  // getUserMedia/enumerateDevices) — see its comment.
+  // releaseStreamsRef.current() to make every CameraPreview drop its browser
+  // stream so cv2.VideoCapture can grab the camera exclusively. Flipping
+  // streamsPaused also disables useAvailableCameras above (see its comment).
   const releaseAllCameraStreams = useCallback(() => {
     setStreamsPaused(true);
   }, []);
@@ -223,23 +206,25 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
   return (
     <div className="space-y-4">
       <h3 className="text-lg font-semibold text-foreground border-b border-border pb-2">
-        Camera configuration
+        Camera Configuration
       </h3>
 
       {/* Add Camera Section */}
-      <div className="rounded-lg border border-border bg-secondary p-4 space-y-4">
-        <h4 className="text-md font-medium text-muted-foreground">Add camera</h4>
+      <div className="bg-muted/50 rounded-lg p-4 space-y-4">
+        <h4 className="text-md font-medium text-foreground">Add Camera</h4>
 
         <div className="space-y-2">
           <div className="flex items-center justify-between">
-            <Label>Available cameras</Label>
+            <Label className="text-sm font-medium text-muted-foreground">
+              Available Cameras
+            </Label>
             <Button
               type="button"
               variant="ghost"
               size="icon"
               onClick={() => refreshCameras()}
               disabled={isLoadingCameras}
-              className="h-6 w-6"
+              className="h-6 w-6 text-muted-foreground hover:text-foreground"
               title="Rescan for cameras (e.g. after plugging in a new USB camera)"
               aria-label="Rescan for cameras"
             >
@@ -253,25 +238,25 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
             onValueChange={setSelectedCameraIndex}
             disabled={isLoadingCameras}
           >
-            <SelectTrigger>
+            <SelectTrigger className="bg-background border-border text-foreground">
               <SelectValue
                 placeholder={
                   isLoadingCameras ? "Loading cameras..." : "Select camera"
                 }
               />
             </SelectTrigger>
-            <SelectContent>
+            <SelectContent className="bg-popover border-border">
               {availableCameras.map((camera) => {
                 const alreadyAdded = cameras.some(
                   (cam) =>
                     cam.camera_index === camera.index ||
-                    (camera.uniqueId && cam.unique_id === camera.uniqueId) ||
                     (camera.deviceId && cam.device_id === camera.deviceId),
                 );
                 return (
                   <SelectItem
                     key={camera.index}
                     value={camera.index.toString()}
+                    className="text-foreground"
                     disabled={!camera.available || alreadyAdded}
                   >
                     <div className="flex flex-col">
@@ -292,35 +277,33 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
             confirmation happens alongside it. */}
         {selectedCamera && (
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div className="rounded-lg border border-border bg-card overflow-hidden">
+            <div className="bg-card rounded-lg border border-border overflow-hidden">
               <CameraStreamBox
-                cameraIndex={selectedCamera.index}
-                uniqueId={selectedCamera.uniqueId}
+                deviceId={selectedCamera.deviceId}
                 paused={streamsPaused}
               />
-              <div className="border-t border-border px-2 py-1.5">
-                <span className="text-[11px] text-muted-foreground truncate">
-                  Recorder feed — cv2 index {selectedCamera.index}
-                </span>
-              </div>
             </div>
 
             <div className="flex flex-col justify-center gap-4">
               <div className="space-y-2">
-                <Label>Camera name</Label>
+                <Label className="text-sm font-medium text-muted-foreground">
+                  Camera Name
+                </Label>
                 <Input
                   value={cameraName}
                   onChange={(e) => setCameraName(e.target.value)}
                   placeholder="e.g., workspace_cam"
+                  className="bg-background border-border text-foreground"
                 />
               </div>
 
               <Button
                 onClick={addCamera}
+                className="bg-primary text-primary-foreground hover:bg-primary/90"
                 disabled={!selectedCameraIndex || !cameraName.trim()}
               >
                 <Plus className="w-4 h-4 mr-2" />
-                Add camera
+                Add Camera
               </Button>
             </div>
           </div>
@@ -330,8 +313,8 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
       {/* Configured Cameras */}
       {cameras.length > 0 && (
         <div className="space-y-4">
-          <h4 className="text-md font-medium text-muted-foreground">
-            Configured cameras ({cameras.length})
+          <h4 className="text-md font-medium text-foreground">
+            Configured Cameras ({cameras.length})
           </h4>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-2 gap-4">
@@ -339,7 +322,6 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
               <CameraPreview
                 key={camera.id}
                 camera={camera}
-                connected={isCameraConnected(camera, availableCameras)}
                 paused={streamsPaused}
                 onRemove={() => removeCamera(camera.id)}
                 onUpdate={(updates) => updateCamera(camera.id, updates)}
@@ -360,40 +342,43 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
 };
 
 interface CameraStreamBoxProps {
+  deviceId: string;
   paused: boolean;
-  /** cv2 index to stream; undefined renders the disconnected state. */
-  cameraIndex?: number;
-  /** Device identity — lets the server re-anchor the index before opening. */
-  uniqueId?: string;
 }
 
-/** Recorder-truth preview used both before adding a camera and in configured
- * cards: streams the server's cv2 camera at this index, so the tile shows
- * exactly the device recording and Collect will open. A browser getUserMedia
- * preview can show a different physical device when two cameras share a
- * localizedName (twin "USB Camera"s make the deviceId↔index match a coin
- * flip). Pausing unmounts the stream so cv2 can claim the camera exclusively. */
+/** Live preview for a camera. Used both for the pre-add preview (as soon as
+ * a camera is picked in the dropdown) and for each configured camera's card.
+ * A camera with a browser deviceId match streams via getUserMedia (the hook
+ * stops the stream on deviceId change and on unmount); a camera without a
+ * browser match shows the "No browser match" placeholder. Pausing (recording
+ * start / modal close) drops the getUserMedia stream so cv2 can grab the
+ * device. */
 const CameraStreamBox: React.FC<CameraStreamBoxProps> = ({
+  deviceId,
   paused,
-  cameraIndex,
-  uniqueId,
 }) => {
-  const showVideo = !paused && cameraIndex !== undefined;
+  const { videoRef, hasError: streamError } = useCameraStream(deviceId, paused);
+
+  const showVideo = !paused && deviceId && !streamError;
   return (
-    <div className="aspect-[4/3] bg-secondary relative">
+    <div className="aspect-[4/3] bg-muted relative">
       {showVideo ? (
-        <BackendCameraStream
-          cameraIndex={cameraIndex}
-          uniqueId={uniqueId}
+        <video
+          ref={videoRef}
+          autoPlay
+          muted
+          playsInline
           className="w-full h-full object-cover"
         />
       ) : (
         <div className="w-full h-full flex flex-col items-center justify-center">
           <VideoOff className="w-8 h-8 text-muted-foreground mb-2" />
-          <span className="text-muted-foreground text-sm px-2 text-center">
+          <span className="text-muted-foreground text-sm">
             {paused
               ? "Preview paused"
-              : "Camera disconnected — reconnect it or rescan"}
+              : deviceId
+              ? "Preview failed"
+              : "No browser match"}
           </span>
         </div>
       )}
@@ -403,9 +388,6 @@ const CameraStreamBox: React.FC<CameraStreamBoxProps> = ({
 
 interface CameraPreviewProps {
   camera: CameraConfig;
-  /** False when the camera's unique_id is verifiably absent from the current
-   * enumeration — the tile must show "disconnected", never a wrong device. */
-  connected: boolean;
   paused: boolean;
   onRemove: () => void;
   onUpdate: (updates: Partial<CameraConfig>) => void;
@@ -413,7 +395,6 @@ interface CameraPreviewProps {
 
 const CameraPreview: React.FC<CameraPreviewProps> = ({
   camera,
-  connected,
   paused,
   onRemove,
   onUpdate,
@@ -421,8 +402,7 @@ const CameraPreview: React.FC<CameraPreviewProps> = ({
   return (
     <div className="bg-card rounded-lg border border-border overflow-hidden">
       <CameraStreamBox
-        cameraIndex={connected ? camera.camera_index : undefined}
-        uniqueId={camera.unique_id}
+        deviceId={camera.device_id}
         paused={paused}
       />
 
@@ -434,7 +414,7 @@ const CameraPreview: React.FC<CameraPreviewProps> = ({
             onClick={onRemove}
             size="sm"
             variant="ghost"
-            className="text-destructive hover:text-destructive p-1"
+            className="text-destructive hover:text-destructive hover:bg-destructive/10 p-1"
             aria-label="Remove camera"
           >
             <Trash2 className="w-4 h-4" />
@@ -456,7 +436,7 @@ const CameraPreview: React.FC<CameraPreviewProps> = ({
                     onChange={(v) => {
                       if (v !== undefined) onUpdate({ width: v });
                     }}
-                    className="text-xs h-6 px-2 w-16"
+                    className="bg-background border-border text-foreground text-xs h-6 px-2 w-16"
                     min="320"
                     max="1920"
                   />
@@ -466,7 +446,7 @@ const CameraPreview: React.FC<CameraPreviewProps> = ({
                     onChange={(v) => {
                       if (v !== undefined) onUpdate({ height: v });
                     }}
-                    className="text-xs h-6 px-2 w-16"
+                    className="bg-background border-border text-foreground text-xs h-6 px-2 w-16"
                     min="240"
                     max="1080"
                   />
@@ -479,7 +459,7 @@ const CameraPreview: React.FC<CameraPreviewProps> = ({
                   onChange={(v) => {
                     if (v !== undefined) onUpdate({ fps: v });
                   }}
-                  className="text-xs h-6 px-2 w-16"
+                  className="bg-background border-border text-foreground text-xs h-6 px-2 w-16"
                   min="10"
                   max="60"
                 />
@@ -492,15 +472,22 @@ const CameraPreview: React.FC<CameraPreviewProps> = ({
                     onUpdate({ fourcc: v === FOURCC_AUTO ? undefined : v })
                   }
                 >
-                  <SelectTrigger className="text-xs h-6 px-2 w-28">
+                  <SelectTrigger className="bg-background border-border text-foreground text-xs h-6 px-2 w-28">
                     <SelectValue />
                   </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value={FOURCC_AUTO} className="text-xs">
+                  <SelectContent className="bg-popover border-border">
+                    <SelectItem
+                      value={FOURCC_AUTO}
+                      className="text-foreground text-xs"
+                    >
                       Auto
                     </SelectItem>
                     {FOURCC_OPTIONS.map((code) => (
-                      <SelectItem key={code} value={code} className="text-xs">
+                      <SelectItem
+                        key={code}
+                        value={code}
+                        className="text-foreground text-xs"
+                      >
                         {code}
                       </SelectItem>
                     ))}
@@ -515,15 +502,22 @@ const CameraPreview: React.FC<CameraPreviewProps> = ({
                     onUpdate({ backend: v === BACKEND_DEFAULT ? undefined : v })
                   }
                 >
-                  <SelectTrigger className="text-xs h-6 px-2 w-28">
+                  <SelectTrigger className="bg-background border-border text-foreground text-xs h-6 px-2 w-28">
                     <SelectValue />
                   </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value={BACKEND_DEFAULT} className="text-xs">
+                  <SelectContent className="bg-popover border-border">
+                    <SelectItem
+                      value={BACKEND_DEFAULT}
+                      className="text-foreground text-xs"
+                    >
                       Default
                     </SelectItem>
                     {BACKEND_OPTIONS.map((name) => (
-                      <SelectItem key={name} value={name} className="text-xs">
+                      <SelectItem
+                        key={name}
+                        value={name}
+                        className="text-foreground text-xs"
+                      >
                         {name}
                       </SelectItem>
                     ))}
@@ -534,7 +528,7 @@ const CameraPreview: React.FC<CameraPreviewProps> = ({
                 Overriding the backend can reorder camera indices on macOS.
               </p>
             </div>
-            <div className="font-mono text-xs text-muted-foreground">
+            <div className="text-xs text-muted-foreground">
               Type: {camera.type} | Device:{" "}
               {camera.device_id?.substring(0, 10)}...
             </div>

@@ -62,12 +62,12 @@ const ImportModelModal: React.FC<Props> = ({ open, onOpenChange, onImported }) =
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-[520px] p-8">
+      <DialogContent className="bg-background border-border sm:max-w-[520px] p-8">
         <DialogHeader>
-          <DialogTitle className="text-center text-xl">
+          <DialogTitle className="text-foreground text-center text-2xl font-bold">
             Import a model
           </DialogTitle>
-          <DialogDescription className="text-center">
+          <DialogDescription className="text-muted-foreground text-center">
             Point at a local directory or a Hugging Face repo. It appears as a
             job you can run inference on.
           </DialogDescription>
@@ -75,26 +75,32 @@ const ImportModelModal: React.FC<Props> = ({ open, onOpenChange, onImported }) =
 
         <div className="space-y-4 py-4">
           <div className="space-y-2">
-            <Label htmlFor="source">Local path or Hugging Face repo id</Label>
+            <Label htmlFor="source" className="text-sm font-medium text-muted-foreground">
+              Local path or Hugging Face repo id
+            </Label>
             <Input
               id="source"
               value={source}
               onChange={(e) => setSource(e.target.value)}
               placeholder="/path/to/pretrained_model  or  user/my-policy"
+              className="bg-background border-input"
             />
           </div>
           <div className="space-y-2">
-            <Label htmlFor="name">Display name (optional)</Label>
+            <Label htmlFor="name" className="text-sm font-medium text-muted-foreground">
+              Display name (optional)
+            </Label>
             <Input
               id="name"
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder="My imported policy"
+              className="bg-background border-input"
             />
           </div>
 
           {error ? (
-            <Alert className="bg-destructive/10 border-destructive/50 text-destructive">
+            <Alert className="bg-destructive/10 border-destructive/40 text-destructive">
               <AlertTriangle className="h-4 w-4" />
               <AlertDescription>{error}</AlertDescription>
             </Alert>
@@ -104,8 +110,7 @@ const ImportModelModal: React.FC<Props> = ({ open, onOpenChange, onImported }) =
             <Button
               onClick={handleSubmit}
               disabled={!source.trim() || submitting}
-              variant="brand"
-              className="px-8"
+              className="bg-primary hover:bg-primary/90 text-primary-foreground px-8 disabled:opacity-40"
             >
               {submitting ? (
                 <Loader2 className="w-4 h-4 mr-2 animate-spin" />
@@ -117,7 +122,7 @@ const ImportModelModal: React.FC<Props> = ({ open, onOpenChange, onImported }) =
             <Button
               onClick={() => onOpenChange(false)}
               variant="outline"
-              className="px-8"
+              className="border-border px-8 text-muted-foreground bg-background hover:bg-muted"
             >
               Cancel
             </Button>

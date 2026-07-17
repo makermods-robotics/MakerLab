@@ -1,11 +1,17 @@
 import React from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Badge, BadgeDot } from "@/components/ui/badge";
+import MetaRows from "@/components/library/MetaRows";
 import { HubJob, isHubJobActive } from "@/lib/jobsApi";
 import {
   ExternalLink,
+  AlertTriangle,
+  CheckCircle2,
+  Loader2,
   Trash2,
+  XCircle,
+  Clock,
+  HelpCircle,
 } from "lucide-react";
 
 interface Props {
@@ -29,62 +35,57 @@ function relativeTime(iso: string | null): string {
 
 interface StagePresentation {
   label: string;
-  variant: "default" | "ok" | "warn" | "destructive" | "outline";
-  mark?: string;
-  pulse?: boolean;
+  color: string;
+  Icon: React.ComponentType<{ className?: string }>;
+  spin?: boolean;
 }
 
 const stagePresentation: Record<string, StagePresentation> = {
-  RUNNING: { label: "running", variant: "default", pulse: true },
-  QUEUED: { label: "queued", variant: "warn" },
-  SCHEDULING: { label: "scheduling", variant: "warn" },
-  COMPLETED: { label: "done", variant: "ok", mark: "✓" },
-  FAILED: { label: "failed", variant: "destructive", mark: "✕" },
+  RUNNING: { label: "Running", color: "text-ok", Icon: Loader2, spin: true },
+  QUEUED: { label: "Queued", color: "text-warn", Icon: Clock },
+  SCHEDULING: { label: "Scheduling", color: "text-warn", Icon: Clock },
+  COMPLETED: { label: "Done", color: "text-muted-foreground", Icon: CheckCircle2 },
+  FAILED: { label: "Failed", color: "text-destructive", Icon: XCircle },
   // HF API uses "CANCELED" (single L); accept both spellings.
-  CANCELED: { label: "cancelled", variant: "warn" },
-  CANCELLED: { label: "cancelled", variant: "warn" },
+  CANCELED: { label: "Cancelled", color: "text-warn", Icon: AlertTriangle },
+  CANCELLED: { label: "Cancelled", color: "text-warn", Icon: AlertTriangle },
 };
 
 const HubJobCard: React.FC<Props> = ({ job, onDismiss }) => {
   const stage = job.status?.stage?.toUpperCase() ?? "";
   const present: StagePresentation = stagePresentation[stage] ?? {
-    label: stage || "unknown",
-    variant: "outline",
+    label: stage || "Unknown",
+    color: "text-muted-foreground",
+    Icon: HelpCircle,
   };
+  const Icon = present.Icon;
   const title =
     job.docker_image ?? job.space_id ?? `Job ${job.id.slice(0, 12)}…`;
 
+  // Unified metadata rows (same format as the dataset/job/model cards).
+  const metaRows: Array<[string, string]> = [
+    ["Flavor", job.flavor ?? "—"],
+    ["Created", relativeTime(job.created_at)],
+  ];
+  if (job.owner) metaRows.push(["Owner", job.owner]);
+
   return (
     <Card
-      variant="flat"
       onClick={() => window.open(job.url, "_blank", "noopener,noreferrer")}
-      className="rounded-xl bg-card cursor-pointer hover:border-input transition-colors"
+      className="bg-card border-border rounded-md cursor-pointer hover:border-ring/50 hover:bg-muted/40 transition-colors h-full"
     >
-      <CardContent className="p-4">
-        <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0">
-            <div
-              className="truncate text-[15px] font-semibold text-foreground"
-              title={title}
-            >
-              {title}
-            </div>
-            <div className="truncate font-mono text-[11px] text-muted-foreground">
-              {job.flavor ?? "—"} · {relativeTime(job.created_at)}
-              {job.owner ? ` · ${job.owner}` : ""}
-            </div>
+      <CardContent className="flex h-full flex-col gap-2.5 p-3">
+        <div className="flex items-start justify-between gap-2">
+          <div className={`flex items-center gap-1.5 text-xs font-semibold ${present.color}`}>
+            <Icon className={`w-3.5 h-3.5 ${present.spin ? "animate-spin" : ""}`} />
+            {present.label}
           </div>
-          <div className="flex shrink-0 items-start gap-2">
-            <Badge variant={present.variant}>
-              {present.pulse ? <BadgeDot pulse /> : null}
-              {present.label}
-              {present.mark ? ` ${present.mark}` : ""}
-            </Badge>
+          <div className="flex items-center gap-0.5">
             <Button
               variant="ghost"
               size="icon"
               asChild
-              className="h-7 w-7"
+              className="h-7 w-7 text-muted-foreground hover:text-foreground"
               aria-label="View on Hub"
             >
               <a
@@ -109,7 +110,7 @@ const HubJobCard: React.FC<Props> = ({ job, onDismiss }) => {
                   )
                     onDismiss(job.id);
                 }}
-                className="h-7 w-7 hover:text-destructive"
+                className="h-7 w-7 text-muted-foreground hover:text-destructive"
                 aria-label="Remove job from list"
                 title="Remove from list"
               >
@@ -118,11 +119,14 @@ const HubJobCard: React.FC<Props> = ({ job, onDismiss }) => {
             ) : null}
           </div>
         </div>
+        <div>
+          <div className="text-foreground font-semibold truncate" title={title}>
+            {title}
+          </div>
+        </div>
+        <MetaRows rows={metaRows} />
         {job.status?.message ? (
-          <div
-            className="mt-3 truncate font-mono text-[11px] text-muted-foreground"
-            title={job.status.message}
-          >
+          <div className="text-xs text-muted-foreground truncate" title={job.status.message}>
             {job.status.message}
           </div>
         ) : null}

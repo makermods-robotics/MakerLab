@@ -177,7 +177,9 @@ def _parse_duration(s: str) -> float | None:
     return None
 
 
-def parse_metrics_into(line: str, metrics: TrainingMetrics, resume_total: int | None = None) -> None:
+def parse_metrics_into(
+    line: str, metrics: TrainingMetrics, resume_total: int | None = None
+) -> None:
     """Update `metrics` in-place from one stdout line.
 
     Two complementary sources:
@@ -233,7 +235,9 @@ def _resume_total_steps(config: TrainingRequest) -> int | None:
     return config.steps if config.resume else None
 
 
-def _read_log_metrics(path: Path, resume_total: int | None) -> builtins.list[MetricsHistoryPoint]:
+def _read_log_metrics(
+    path: Path, resume_total: int | None
+) -> builtins.list[MetricsHistoryPoint]:
     """Parse one job's log.jsonl into (step, loss, lr, grad_norm) points.
 
     Feed every line through ONE accumulator rather than a fresh one per line.
@@ -521,7 +525,9 @@ class TailingJobRunner:
                             log_line = LogLine.model_validate_json(raw.strip())
                         except Exception:
                             continue
-                        parse_metrics_into(log_line.message, self._metrics, self._resume_total)
+                        parse_metrics_into(
+                            log_line.message, self._metrics, self._resume_total
+                        )
                         if self._wandb_run_url is None:
                             url = extract_wandb_run_url(log_line.message)
                             if url is not None:
@@ -643,7 +649,8 @@ def _resolve_resume_config_path(source: JobRecord, step: int | None) -> str:
     """
     if source.runner != "local":
         raise ValueError(
-            "Only local training runs can be resumed — lerobot doesn't support resuming from the Hub."
+            "Only local training runs can be resumed — lerobot doesn't support "
+            "resuming from the Hub."
         )
     checkpoints = _list_local_checkpoints(source.output_dir)
     if not checkpoints:
@@ -660,7 +667,8 @@ def _resolve_resume_config_path(source: JobRecord, step: int | None) -> str:
     training_state = pretrained_dir.parent / "training_state"
     if not train_config.is_file():
         raise ValueError(
-            f"Checkpoint at step {chosen.step} is missing {_TRAIN_CONFIG_NAME}, so it can't be resumed."
+            f"Checkpoint at step {chosen.step} is missing {_TRAIN_CONFIG_NAME}, "
+            "so it can't be resumed."
         )
     if not training_state.is_dir():
         raise ValueError(
@@ -703,7 +711,9 @@ def _resolve_finetune_pretrained_path(source: JobRecord, step: int | None) -> st
         checkpoints = _list_hub_checkpoints(shared_hf_api(), source.hf_repo_id)
 
     if not checkpoints:
-        raise ValueError(f"Source {source.id!r} has no usable checkpoint to fine-tune from.")
+        raise ValueError(
+            f"Source {source.id!r} has no usable checkpoint to fine-tune from."
+        )
     if step is None:
         chosen = checkpoints[-1]  # step-sorted; take the latest
     else:
@@ -1137,7 +1147,9 @@ class JobRegistry:
             if config.finetune_from_job_id:
                 source = self._records.get(config.finetune_from_job_id)
                 if source is None:
-                    raise ValueError(f"Fine-tune source {config.finetune_from_job_id!r} not found.")
+                    raise ValueError(
+                        f"Fine-tune source {config.finetune_from_job_id!r} not found."
+                    )
                 config.policy_pretrained_path = _resolve_finetune_pretrained_path(
                     source, config.finetune_from_step
                 )
@@ -1150,7 +1162,9 @@ class JobRegistry:
                 if config.resume_from_job_id:
                     source = self._records.get(config.resume_from_job_id)
                     if source is None:
-                        raise ValueError(f"Resume source {config.resume_from_job_id!r} not found.")
+                        raise ValueError(
+                            f"Resume source {config.resume_from_job_id!r} not found."
+                        )
                     if source.runner == "hf_cloud":
                         # An HF Job is immutable once ended: resuming a cloud run
                         # launches a NEW cloud job that continues from the parent's
@@ -1164,7 +1178,9 @@ class JobRegistry:
                         config.resume_from_hub_repo = repo_id
                         config.resume_from_hub_step = step_dir
                     else:
-                        config.config_path = _resolve_resume_config_path(source, config.resume_from_step)
+                        config.config_path = _resolve_resume_config_path(
+                            source, config.resume_from_step
+                        )
                 elif not config.config_path:
                     raise ValueError(
                         "Resume is on but no source checkpoint was selected. Use "
@@ -1669,7 +1685,8 @@ class JobRegistry:
                         removed = True
                     else:
                         logger.info(
-                            "Duplicate imported model %s: leaving %s in place (contains more than job.json).",
+                            "Duplicate imported model %s: leaving %s in place "
+                            "(contains more than job.json).",
                             dup.id,
                             dup_dir,
                         )

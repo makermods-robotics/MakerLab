@@ -32,9 +32,7 @@ _WIGGLE_REPEATS = 3
 _WIGGLE_TIMEOUT_S = 15.0
 
 
-def plan_wiggle(
-    current: int, min_limit: int, max_limit: int, offset: int = _WIGGLE_OFFSET
-) -> tuple[int, int, int]:
+def plan_wiggle(current: int, min_limit: int, max_limit: int, offset: int = _WIGGLE_OFFSET) -> tuple[int, int, int]:
     """Plan a (high, low, rest) jog that stays inside the servo's programmed limits.
 
     Any prior calibration writes Min/Max_Position_Limit into the servo EEPROM and the

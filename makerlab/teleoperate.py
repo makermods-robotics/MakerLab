@@ -12,30 +12,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import contextlib
 import logging
 import math
 import threading
 import time
-from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel
 
-from lerobot.robots.bi_so_follower import BiSOFollower, BiSOFollowerConfig
-from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
-from lerobot.teleoperators.bi_so_leader import BiSOLeader, BiSOLeaderConfig
-from lerobot.teleoperators.so_leader import SO101Leader, SO101LeaderConfig
+from lerobot.robots.bi_so_follower import BiSOFollower
+from lerobot.robots.so_follower import SO101Follower
+from lerobot.teleoperators.bi_so_leader import BiSOLeader
+from lerobot.teleoperators.so_leader import SO101Leader
 
 from .arm_identity import verify_devices
-from .camera_preview import camera_preview_manager
-from .motor_power import apply_torque_limit, clear_goal_velocity
+from .motor_power import apply_motor_power, clear_goal_velocity, torque_limit_from_percent
 from .rest_pose import capture_rest_pose, return_to_rest_pose
-from .utils.config import (
-    bimanual_base_id,
-    setup_calibration_files,
-    stage_bimanual_calibrations,
-)
 from .utils.devices import _force_close_device_resources
+from .utils.errors import classify_outcome, format_exception, friendly_hint
+from .utils.robot_factory import build_bimanual_configs, build_single_configs
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +86,18 @@ current_teleop = None
 # may be left energized (rigid). Cleared on start; surfaced in the stop response
 # and the /teleoperation-status payload so the frontend can warn the user.
 last_cleanup_error: str | None = None
+# Terminal error taxonomy of the most recent session (the in-process twin of
+# rollout's exited payload; complements last_cleanup_error, which stays the
+# raw "torque may still be enabled" safety text). `last_session_outcome` is
+# "ok" | "ran_with_warning" | "failed" (None before any session ends);
+# `last_session_error` is the error behind it — the caught loop exception
+# formatted as "Type: message" (the worker's catch site holds the actual
+# exception object; no log forensics), or the cleanup problem text when only
+# teardown tripped. Classified by catch site: a mid-loop exception is a failed
+# session; a user-requested stop whose cleanup complained (e.g. a gripper
+# overload on torque disable) ran fine — a warning. Cleared on start.
+last_session_outcome: str | None = None
+last_session_error: str | None = None
 # Guards the start path; the worker owns disconnect so stop() does not race.
 _state_lock = threading.Lock()
 
@@ -159,7 +167,7 @@ class PowerTelemetry:
             self._sum_ma[key] = self._sum_ma.get(key, 0.0) + ma
             self._n[key] = self._n.get(key, 0) + 1
 
-    def summary(self, max_torque_limit: int) -> str | None:
+    def summary(self, motor_power_percent: int) -> str | None:
         """One INFO-ready line of per-motor peaks/means, or None if no samples."""
         if not self._n:
             return None
@@ -169,7 +177,7 @@ class PowerTelemetry:
         ]
         return (
             f"power telemetry: {'; '.join(parts)} "
-            f"(Torque_Limit {max_torque_limit})"
+            f"(motor power {motor_power_percent}%, Torque_Limit {torque_limit_from_percent(motor_power_percent)})"
         )
 
 
@@ -301,10 +309,9 @@ class TeleoperateRequest(BaseModel):
     # Escape hatch for the arm-identity guard (see makerlab/arm_identity.py):
     # when true, start even if the connected arms don't match their calibrations.
     skip_identity_check: bool = False
-    # Follower session torque cap: raw Feetech Torque_Limit register value
-    # (see makerlab/motor_power.py). Applied to follower motors only; clamped
-    # server-side to [0, 1000]. Default 400 (auto-cal itself still moves at a gentler 380).
-    max_torque_limit: int = 400
+    # Follower torque as a percentage of full power (see makerlab/motor_power.py).
+    # Applied to follower motors only; clamped server-side to 10-100.
+    motor_power: int = 100
 
 
 def get_joint_positions_from_robot(robot, prefix: str = "", calibration=None) -> dict[str, float]:
@@ -410,6 +417,19 @@ def force_disable_torque(device, label: str = "device") -> list[str]:
     """
     problems: list[str] = []
     for bus in _device_buses(device):
+        # The Dynamixel SDK port handler can be left flagged "in use" after a
+        # failed read/write in the control loop. LeRobot's normal
+        # bus.disconnect() clears this before disabling torque; mirror that here
+        # because this belt-and-braces path deliberately bypasses disconnect()
+        # to disable motors one by one.
+        port_handler = getattr(bus, "port_handler", None)
+        if port_handler is not None:
+            try:
+                port_handler.clearPort()
+            except Exception:
+                pass
+            with contextlib.suppress(Exception):
+                port_handler.is_using = False
         failed: list[str] = []
         for motor in getattr(bus, "motors", None) or {}:
             try:
@@ -446,8 +466,8 @@ def _safe_disconnect(device, label: str = "device") -> str | None:
             "TORQUE MAY STILL BE ENABLED — the arm can stay rigid; unplug its power to release it."
         )
         logger.error(message)
-        # Last resort (upstream): force-close the serial port(s) and cameras so a
-        # failed disconnect can't leave the port handle open until process exit.
+        # Last resort (upstream): force-close the serial port(s) so a failed
+        # disconnect can't leave the port handle open until process exit.
         # Buses live on sub-arms for bimanual BiSO devices, so hit those too.
         for target in (device, getattr(device, "left_arm", None), getattr(device, "right_arm", None)):
             if target is not None:
@@ -469,31 +489,10 @@ def _connect_bimanual(request: TeleoperateRequest):
     error if any library file is missing (before connect() drops into
     interactive recalibration, which would hang this thread).
     """
-    base = bimanual_base_id(request.robot_name)
-    leader_staging, follower_staging, _ = stage_bimanual_calibrations(
-        base,
-        request.leader_config,
-        request.right_leader_config,
-        request.follower_config,
-        request.right_follower_config,
-    )
+    robot_config, teleop_config = build_bimanual_configs(request)
 
-    robot = BiSOFollower(
-        BiSOFollowerConfig(
-            id=base,
-            calibration_dir=Path(follower_staging),
-            left_arm_config=SO101FollowerConfig(port=request.follower_port),
-            right_arm_config=SO101FollowerConfig(port=request.right_follower_port),
-        )
-    )
-    teleop_device = BiSOLeader(
-        BiSOLeaderConfig(
-            id=base,
-            calibration_dir=Path(leader_staging),
-            left_arm_config=SO101LeaderConfig(port=request.leader_port),
-            right_arm_config=SO101LeaderConfig(port=request.right_leader_port),
-        )
-    )
+    robot = BiSOFollower(robot_config)
+    teleop_device = BiSOLeader(teleop_config)
 
     try:
         # Connect each of the four buses, naming the one that fails.
@@ -528,17 +527,17 @@ def _connect_bimanual(request: TeleoperateRequest):
         )
 
         # Each sub-arm auto-loaded its calibration in __init__ (id=<base>_side);
-        # register it on the bus, then cameras + configure both sides.
+        # register it on the bus, then configure both sides. Teleop opens no
+        # cameras: it consumes no frames (only motor positions drive the URDF
+        # viewer), so lerobot gets no cameras and the browser handles any display.
         for arm in (robot.left_arm, robot.right_arm, teleop_device.left_arm, teleop_device.right_arm):
             arm.bus.write_calibration(arm.calibration)
-        for cam in robot.cameras.values():
-            cam.connect()
         robot.configure()
         teleop_device.configure()
-        # Session torque cap (RAM Torque_Limit) — followers only, never the
+        # Session motor power (RAM Torque_Limit) — followers only, never the
         # human-held leader. After configure() so nothing overwrites it; a
         # failed write degrades to full power and is surfaced as a warning.
-        identity_warnings += apply_torque_limit(robot, request.max_torque_limit, "follower arms")
+        identity_warnings += apply_motor_power(robot, request.motor_power, "follower arms")
         # Clear any leftover Goal_Velocity speed cap a previous arm-driving
         # feature stamped in RAM (auto-cal fold/unfold=1000, rest-pose return=400);
         # followers only, never the human-held leader. See makerlab/motor_power.py.
@@ -560,7 +559,7 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
     success. Only the teleoperation loop runs in the background thread.
     """
     global teleoperation_active, teleoperation_thread, current_robot, current_teleop, last_cleanup_error
-    global releasing
+    global releasing, last_session_outcome, last_session_error
 
     from . import record as _record, rollout as _rollout
 
@@ -591,17 +590,14 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
         # restarts (regression-tested in tests/test_teleoperate.py).
         teleoperation_active = True
         last_cleanup_error = None
+        last_session_outcome = None
+        last_session_error = None
         releasing = False
         _release_now.clear()
 
     robot = None
     teleop_device = None
     try:
-        # Backend camera previews (GET /camera-preview/{index}) may hold cv2
-        # devices this session's robot cameras need — teleoperation always
-        # wins, so force-release them before any robot/camera construction.
-        camera_preview_manager.stop_all()
-
         logger.info(
             f"Starting teleoperation with leader port: {request.leader_port}, follower port: {request.follower_port}"
         )
@@ -609,21 +605,8 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
         if request.mode == "bimanual":
             robot, teleop_device, identity_warnings = _connect_bimanual(request)
         else:
-            # Setup calibration files
-            leader_config_name, follower_config_name = setup_calibration_files(
-                request.leader_config, request.follower_config
-            )
-
-            # Create robot and teleop configs
-            robot_config = SO101FollowerConfig(
-                port=request.follower_port,
-                id=follower_config_name,
-            )
-
-            teleop_config = SO101LeaderConfig(
-                port=request.leader_port,
-                id=leader_config_name,
-            )
+            # Create robot and teleop configs (stages calibration files).
+            robot_config, teleop_config = build_single_configs(request)
 
             # Connect synchronously. If either device fails to connect, clean up the
             # other (so its serial port is released) and report the error — do NOT
@@ -667,16 +650,16 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
             robot.bus.write_calibration(robot.calibration)
             teleop_device.bus.write_calibration(teleop_device.calibration)
 
-            # Connect cameras and configure motors
-            logger.info("Connecting cameras and configuring motors...")
-            for cam in robot.cameras.values():
-                cam.connect()
+            # Configure motors. Teleop opens no cameras: it consumes no frames
+            # (only motor positions drive the URDF viewer), so lerobot gets no
+            # cameras and the browser handles any camera display.
+            logger.info("Configuring motors...")
             robot.configure()
             teleop_device.configure()
-            # Session torque cap (RAM Torque_Limit) — follower only, never the
+            # Session motor power (RAM Torque_Limit) — follower only, never the
             # human-held leader. After configure() so nothing overwrites it; a
             # failed write degrades to full power and is surfaced as a warning.
-            identity_warnings += apply_torque_limit(robot, request.max_torque_limit, "follower arm")
+            identity_warnings += apply_motor_power(robot, request.motor_power, "follower arm")
             # Clear any leftover Goal_Velocity speed cap a previous arm-driving
             # feature stamped in RAM (auto-cal fold/unfold=1000, rest-pose
             # return=400); follower only, never the human-held leader. See
@@ -713,9 +696,11 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
 
         def teleoperation_worker():
             global teleoperation_active, current_robot, current_teleop, last_cleanup_error, releasing
+            global last_session_outcome, last_session_error
 
             logger.info("Starting teleoperation loop...")
             stopped_normally = False
+            loop_error: str | None = None
             try:
                 last_broadcast_time = 0
                 last_current_sample_time = 0.0
@@ -766,8 +751,13 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
                 stopped_normally = True
             except Exception as e:
                 logger.error(f"Error during teleoperation loop: {e}")
+                # In-process error taxonomy: this catch site holds the actual
+                # exception object, so format it straight into the status
+                # payload (no log forensics). A mid-loop exception means the
+                # session died on its own — a real failure, classified below.
+                loop_error = format_exception(e)
             finally:
-                telemetry_summary = telemetry.summary(request.max_torque_limit)
+                telemetry_summary = telemetry.summary(request.motor_power)
                 if telemetry_summary:
                     logger.info(telemetry_summary)
                 if stopped_normally and not _release_now.is_set():
@@ -790,6 +780,13 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
                     if error:
                         problems.append(error)
                 last_cleanup_error = " ".join(problems) if problems else None
+                # Catch-site classification: the loop exception (if any) is the
+                # session's error and means "failed" — the loop was cut short.
+                # A user-requested stop (stopped_normally) whose cleanup alone
+                # complained ran fine: "ran_with_warning" with the cleanup text
+                # as the error. A clean stop is "ok".
+                last_session_error = loop_error or last_cleanup_error
+                last_session_outcome = classify_outcome(stopped_normally, last_session_error)
                 logger.info("Teleoperation stopped")
                 teleoperation_active = False
                 releasing = False
@@ -921,20 +918,14 @@ def handle_teleoperation_status() -> dict[str, Any]:
         # Non-None when the last session's cleanup could not release an arm
         # (torque may still be enabled); cleared when a new session starts.
         "last_cleanup_error": last_cleanup_error,
+        # Terminal error taxonomy of the most recent session (in-process twin
+        # of rollout's exited payload): `outcome` classifies it (ok |
+        # ran_with_warning | failed, None before any session ends), `error` is
+        # the text behind it, `hint` a plain-language headline. A mid-loop
+        # death is "failed"; a user stop whose cleanup alone complained is
+        # "ran_with_warning" — the frontend styles it amber, not red.
+        "outcome": last_session_outcome,
+        "error": last_session_error,
+        "hint": friendly_hint(last_session_error),
         "message": message,
     }
-
-
-def handle_get_joint_positions() -> dict[str, Any]:
-    """Handle get current robot joint positions request"""
-    global current_robot
-
-    if not teleoperation_active or current_robot is None:
-        return {"success": False, "message": "No active teleoperation session"}
-
-    try:
-        joint_positions = get_joint_positions_from_robot(current_robot)
-        return {"success": True, "joint_positions": joint_positions, "timestamp": time.time()}
-    except Exception as e:
-        logger.error(f"Error getting joint positions: {e}")
-        return {"success": False, "message": f"Failed to get joint positions: {str(e)}"}

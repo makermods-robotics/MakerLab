@@ -18,7 +18,6 @@ import os
 import platform
 import re
 import shutil
-import time
 from pathlib import Path
 from typing import Literal
 
@@ -36,11 +35,6 @@ FOLLOWER_CONFIG_PATH = os.path.join(CALIBRATION_BASE_PATH_ROBOTS, "so_follower")
 PORT_CONFIG_PATH = os.path.expanduser("~/.cache/huggingface/lerobot/ports")
 LEADER_PORT_FILE = os.path.join(PORT_CONFIG_PATH, "leader_port.txt")
 FOLLOWER_PORT_FILE = os.path.join(PORT_CONFIG_PATH, "follower_port.txt")
-
-# Define configuration storage path
-CONFIG_STORAGE_PATH = os.path.expanduser("~/.cache/huggingface/lerobot/saved_configs")
-LEADER_CONFIG_FILE = os.path.join(CONFIG_STORAGE_PATH, "leader_config.txt")
-FOLLOWER_CONFIG_FILE = os.path.join(CONFIG_STORAGE_PATH, "follower_config.txt")
 
 # Robot config records (per-robot JSON metadata)
 ROBOTS_PATH = os.path.expanduser("~/.cache/huggingface/lerobot/robots")
@@ -66,16 +60,49 @@ DEFAULT_BIMANUAL_BASE = "bimanual"
 # — so hiding a dead run from the untracked list must be persisted locally.
 DISMISSED_HUB_JOBS_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/dismissed_hub_jobs.json")
 
+# Hub dataset repo ids the user typed straight into the picker and chose to keep
+# ("Use org/name"). They aren't in the user's own namespace listing and have no
+# local copy, so they'd vanish after selection unless we persist them here and
+# fold them back into the merged /datasets listing.
+SAVED_CUSTOM_DATASETS_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/saved_custom_datasets.json")
+
+# Hub MODEL repo ids the user pinned via the "Add model" chooser — the models
+# mirror of SAVED_CUSTOM_DATASETS_FILE (same rationale: a foreign-namespace repo
+# with no local copy vanishes from the /models listing unless persisted here).
+SAVED_CUSTOM_MODELS_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/saved_custom_models.json")
+
+# Hub dataset/model repo ids the user removed from their pickers ("hidden").
+# Hiding NEVER touches the Hub repo — it only filters the merged listing, so a
+# repo the user's own namespace listing keeps returning stays gone until they
+# re-add it (re-pinning auto-unhides). Persisted like the dismissed hub jobs
+# (JSON list on disk, a set in memory).
+SAVED_HIDDEN_DATASETS_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/hidden_datasets.json")
+SAVED_HIDDEN_MODELS_FILE = os.path.expanduser("~/.cache/huggingface/lerobot/hidden_models.json")
+
 # Tag stamped on every dataset pushed to the Hub from MakerLab, so we can later
 # query the Hub for MakerLab-produced datasets and compute usage metrics.
 MAKERLAB_TAG = "MakerLab"
 
+# Tags injected onto EVERY dataset (and, where the trainer supports it, every
+# policy) pushed to the Hub from MakerLab. These are the org/product tags used to
+# discover MakerMods / OpenBooth artifacts on the Hub. MAKERLAB_TAG is kept too so
+# existing MakerLab usage queries keep working. This list is the single source of
+# truth — add to it here rather than sprinkling literals at push sites.
+REQUIRED_HUB_TAGS = ["makermods", "openbooth", MAKERLAB_TAG]
+
 
 def with_makerlab_tag(tags: list[str] | None) -> list[str]:
-    """Return `tags` with MAKERLAB_TAG appended (deduped, order preserved)."""
+    """Return `tags` with the REQUIRED_HUB_TAGS appended (deduped, order preserved).
+
+    Despite the historical name, this appends every tag in REQUIRED_HUB_TAGS
+    (currently "makermods", "openbooth", and MAKERLAB_TAG), so every Hub push made
+    through this funnel carries the org/product tags. Caller-supplied tags come
+    first and are never duplicated.
+    """
     out = list(tags or [])
-    if MAKERLAB_TAG not in out:
-        out.append(MAKERLAB_TAG)
+    for tag in REQUIRED_HUB_TAGS:
+        if tag not in out:
+            out.append(tag)
     return out
 
 
@@ -95,15 +122,6 @@ def _port_file_for(robot_type: RobotSide) -> str:
         return LEADER_PORT_FILE
     if robot_type == "follower":
         return FOLLOWER_PORT_FILE
-    raise ValueError(f"robot_type must be 'leader' or 'follower', got {robot_type!r}")
-
-
-def _config_file_for(robot_type: RobotSide) -> str:
-    rt = robot_type.lower() if isinstance(robot_type, str) else robot_type
-    if rt == "leader":
-        return LEADER_CONFIG_FILE
-    if rt == "follower":
-        return FOLLOWER_CONFIG_FILE
     raise ValueError(f"robot_type must be 'leader' or 'follower', got {robot_type!r}")
 
 
@@ -225,77 +243,6 @@ def find_available_ports():
     return sorted(ports)
 
 
-def find_robot_port(robot_type="robot"):
-    """
-    Find the port for a robot by detecting the difference when disconnecting/reconnecting
-
-    Args:
-        robot_type (str): Type of robot ("leader" or "follower" or generic "robot")
-
-    Returns:
-        str: The detected port
-    """
-    logger.info(f"Finding port for {robot_type}")
-
-    # Get initial ports
-    ports_before = find_available_ports()
-    logger.info(f"Ports before disconnecting: {ports_before}")
-
-    # This function returns the port detection logic, but the actual user interaction
-    # should be handled by the frontend
-    return {"ports_before": ports_before, "robot_type": robot_type}
-
-
-def detect_port_after_disconnect(ports_before, timeout_s: float = 15.0, poll_interval_s: float = 0.3):
-    """
-    Wait for the user to unplug the robot and detect which port disappeared.
-
-    Polls the available ports until exactly one entry from ``ports_before`` vanishes,
-    or until ``timeout_s`` elapses. Polling avoids racing the user — they may need
-    several seconds to physically pull the USB cable.
-
-    Args:
-        ports_before (list): List of ports before disconnection
-        timeout_s (float): Maximum seconds to wait for a port to disappear
-        poll_interval_s (float): Seconds between checks
-
-    Returns:
-        str: The detected port
-
-    Raises:
-        OSError: If the timeout elapses with no change, or more than one port disappears.
-    """
-    before_set = set(ports_before)
-    deadline = time.monotonic() + timeout_s
-    last_diff: list = []
-
-    while time.monotonic() < deadline:
-        ports_after = find_available_ports()
-        ports_diff = list(before_set - set(ports_after))
-        last_diff = ports_diff
-
-        if len(ports_diff) == 1:
-            port = ports_diff[0]
-            logger.info(f"Detected port: {port}")
-            return port
-        if len(ports_diff) > 1:
-            raise OSError(f"Could not detect the port. More than one port disappeared: {ports_diff}.")
-
-        time.sleep(poll_interval_s)
-
-    logger.info(f"Timed out waiting for unplug. Final diff: {last_diff}")
-    raise OSError(
-        "Timed out waiting for the robot to be unplugged. Please try again and unplug the USB cable when prompted."
-    )
-
-
-def save_robot_port(robot_type: RobotSide, port: str) -> None:
-    """Persist the robot port for `robot_type` ('leader' or 'follower')."""
-    port_file = _port_file_for(robot_type)
-    _atomic_write_text(port_file, port)
-    logger.info(f"Saved {robot_type} port: {port}")
-
-
 def get_saved_robot_port(robot_type: RobotSide) -> str | None:
     """Return the saved port for `robot_type`, or None if no file exists."""
     port_file = _port_file_for(robot_type)
@@ -318,55 +265,6 @@ def get_default_robot_port(robot_type: RobotSide) -> str:
     return "/dev/ttyUSB0"
 
 
-def save_robot_config(robot_type: RobotSide, config_name: str) -> bool:
-    try:
-        config_file_path = _config_file_for(robot_type)
-    except ValueError as e:
-        logger.error(str(e))
-        return False
-    try:
-        _atomic_write_text(config_file_path, config_name.strip())
-    except Exception as e:
-        logger.error(f"Error saving {robot_type} configuration: {e}")
-        return False
-    logger.info(f"Saved {robot_type} configuration: {config_name}")
-    return True
-
-
-def get_saved_robot_config(robot_type: RobotSide) -> str | None:
-    try:
-        config_file_path = _config_file_for(robot_type)
-    except ValueError as e:
-        logger.error(str(e))
-        return None
-    if not os.path.exists(config_file_path):
-        logger.info(f"No saved {robot_type} configuration found")
-        return None
-    try:
-        with open(config_file_path) as f:
-            config_name = f.read().strip()
-    except OSError as e:
-        logger.error(f"Error reading saved {robot_type} configuration: {e}")
-        return None
-    if not config_name:
-        return None
-    logger.info(f"Found saved {robot_type} configuration: {config_name}")
-    return config_name
-
-
-def get_default_robot_config(robot_type: str, available_configs: list):
-    """Get the default configuration for a robot, checking saved configs first"""
-    saved_config = get_saved_robot_config(robot_type)
-    if saved_config and saved_config in available_configs:
-        return saved_config
-
-    # Return first available config as fallback
-    if available_configs:
-        return available_configs[0]
-
-    return None
-
-
 # ---------------------------------------------------------------------------
 # Robot record helpers
 # ---------------------------------------------------------------------------
@@ -387,30 +285,27 @@ _BIMANUAL_CONFIG_FIELDS = (
 _ROBOT_STRING_FIELDS = _SINGLE_CONFIG_FIELDS + _BIMANUAL_CONFIG_FIELDS
 _ROBOT_LIST_FIELDS = ("cameras",)
 
-# Follower session torque cap, written RAW to the Feetech RAM Torque_Limit
-# register (see makerlab/motor_power.py) — 0 = no torque, 1000 = full torque.
-# Default 400: a gentler cap than stock so collisions and pose snaps are softer
-# out of the box. (Auto-calibration itself still moves at a gentler 380 — its own
-# DEFAULT_TORQUE_LIMIT self-motion safety cap — which is unrelated to this default.)
-MAX_TORQUE_LIMIT_MIN = 0
-MAX_TORQUE_LIMIT_MAX = 1000
-DEFAULT_MAX_TORQUE_LIMIT = 400
-
-# Legacy records stored motor_power as a percentage (10-100); the RAM register is
-# scaled in 0.1% units, so the equivalent raw value is percent × 10.
-_LEGACY_MOTOR_POWER_TO_RAW = 10
+# Follower motor power, as a percentage of full torque (see makerlab/motor_power.py
+# for how it's written to the servos). Bounded below because under ~10% the arm
+# can't reliably hold its own weight; 100 = full/stock torque. Default = the
+# auto-calibration torque level (feetech_autocal DEFAULT_TORQUE_LIMIT 380 ÷
+# _TORQUE_LIMIT_PER_PERCENT 10 = 38%), so a fresh robot operates at the same
+# conservative torque autocal uses rather than at full power.
+MOTOR_POWER_MIN = 10
+MOTOR_POWER_MAX = 100
+DEFAULT_MOTOR_POWER = 38
 
 
-def clamp_max_torque_limit(value: object) -> int:
-    """Coerce a max_torque_limit value to a safe integer in [0, 1000].
+def clamp_motor_power(value: object) -> int:
+    """Coerce a motor_power value to a safe integer percent in [10, 100].
 
-    Anything non-numeric (including bool, a subclass of int) falls back to the
-    DEFAULT rather than raising, so a corrupted record can never block a session
-    start.
+    Anything non-numeric (including bool, a subclass of int) falls back to
+    DEFAULT_MOTOR_POWER rather than raising, so a corrupted record can never
+    block a session start.
     """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return DEFAULT_MAX_TORQUE_LIMIT
-    return max(MAX_TORQUE_LIMIT_MIN, min(MAX_TORQUE_LIMIT_MAX, int(value)))
+        return DEFAULT_MOTOR_POWER
+    return max(MOTOR_POWER_MIN, min(MOTOR_POWER_MAX, int(value)))
 
 
 # Config-name fields whose stored value may carry a ".json" extension to strip.
@@ -433,7 +328,7 @@ def is_valid_robot_name(name: str) -> bool:
 
 
 def _empty_record(name: str) -> dict:
-    record: dict = {"name": name, "mode": _DEFAULT_MODE, "max_torque_limit": DEFAULT_MAX_TORQUE_LIMIT}
+    record: dict = {"name": name, "mode": _DEFAULT_MODE, "motor_power": DEFAULT_MOTOR_POWER}
     for field in _ROBOT_STRING_FIELDS:
         record[field] = ""
     for field in _ROBOT_LIST_FIELDS:
@@ -466,17 +361,10 @@ def get_robot_record(name: str) -> dict | None:
     # Guard against an unknown mode on disk.
     if record.get("mode") not in _VALID_MODES:
         record["mode"] = _DEFAULT_MODE
-    # Legacy records carry motor_power (a 10-100 percentage) but no
-    # max_torque_limit. Migrate on read — max_torque_limit = clamp(percent × 10)
-    # — so the new field is seeded from the old cap. motor_power is not a field of
-    # _empty_record, so it never survives into the returned/API record.
-    if "max_torque_limit" not in data:
-        legacy = data.get("motor_power")
-        if isinstance(legacy, (int, float)) and not isinstance(legacy, bool):
-            record["max_torque_limit"] = legacy * _LEGACY_MOTOR_POWER_TO_RAW
-    # An out-of-range or corrupted value on disk (or a migrated one) is clamped so
-    # every consumer sees a safe [0, 1000] integer.
-    record["max_torque_limit"] = clamp_max_torque_limit(record.get("max_torque_limit"))
+    # Older records have no motor_power (→ full power via _empty_record); an
+    # out-of-range or corrupted value on disk is clamped so every consumer
+    # sees a safe 10-100 integer.
+    record["motor_power"] = clamp_motor_power(record.get("motor_power"))
     return record
 
 
@@ -522,11 +410,11 @@ def save_robot_record(name: str, data: dict, allow_create: bool = True) -> bool:
     for field in _ROBOT_LIST_FIELDS:
         if field in data and isinstance(data[field], list):
             record[field] = data[field]
-    # Same known-typed-fields-only merge as above: a numeric max_torque_limit is
+    # Same known-typed-fields-only merge as above: a numeric motor_power is
     # clamped to the safe range, anything else is ignored (keeps existing).
-    value = data.get("max_torque_limit")
+    value = data.get("motor_power")
     if isinstance(value, (int, float)) and not isinstance(value, bool):
-        record["max_torque_limit"] = clamp_max_torque_limit(value)
+        record["motor_power"] = clamp_motor_power(value)
     if data.get("mode") in _VALID_MODES:
         record["mode"] = data["mode"]
     record.setdefault("mode", _DEFAULT_MODE)
@@ -817,6 +705,227 @@ def prune_dismissed_hub_jobs(live_job_ids: set[str]) -> None:
     kept = dismissed & live_job_ids
     if kept != dismissed:
         _atomic_write_text(DISMISSED_HUB_JOBS_FILE, json.dumps(sorted(kept), indent=2))
+
+
+# ---------------------------------------------------------------------------
+# Pinned / hidden repo-id collections (datasets + models)
+# ---------------------------------------------------------------------------
+#
+# Four persisted JSON list-of-strings files share one shape: read-tolerant
+# (missing / corrupt / non-list -> empty), atomic writes, and get/add/remove.
+# They differ on only two axes, both captured by _JsonRepoCollection:
+#   * ordered pins ("saved custom" datasets/models) keep most-recently-added
+#     first — re-adding an id moves it to the front — and get() returns a list.
+#   * hidden sets ("hidden" datasets/models) are order-free: add() is idempotent
+#     (writes only on a genuinely new id), persists sorted, and get() returns a
+#     set.
+# The public get_/add_/remove_ functions below stay individually named, thin
+# delegators — their names and signatures are imported across
+# datasets.py / models.py / server.py, so they must not change.
+
+
+class _JsonRepoCollection:
+    """One persisted JSON list-of-repo-id file, exposing get/add/remove.
+
+    ``path_of`` is invoked on every access rather than captured once, so a caller
+    (or a test) monkeypatching the module-level ``*_FILE`` constant is honored.
+    ``ordered`` selects list-vs-set semantics (see the block comment above). A
+    missing / corrupt / non-list file degrades to empty — this persistence is
+    cosmetic and must never raise — and every write goes through
+    ``_atomic_write_text``.
+    """
+
+    def __init__(self, path_of, *, ordered: bool, add_log: str, remove_log: str, read_error: str):
+        self._path_of = path_of
+        self._ordered = ordered
+        self._add_log = add_log
+        self._remove_log = remove_log
+        self._read_error = read_error
+
+    def _clean(self, data) -> list[str]:
+        """Deduplicate to non-blank strings, preserving first-seen order."""
+        seen: set[str] = set()
+        out: list[str] = []
+        for r in data:
+            if isinstance(r, str) and r.strip() and r not in seen:
+                seen.add(r)
+                out.append(r)
+        return out
+
+    def get(self):
+        """The stored ids as a list (ordered) or set (hidden). Empty on a
+        missing / corrupt / non-list file."""
+        path = self._path_of()
+        if not os.path.exists(path):
+            data: object = []
+        else:
+            try:
+                with open(path) as f:
+                    data = json.load(f)
+            except (json.JSONDecodeError, OSError) as e:
+                logger.error(f"Failed to read {self._read_error}: {e}")
+                data = []
+            if not isinstance(data, list):
+                data = []
+        cleaned = self._clean(data)
+        return cleaned if self._ordered else set(cleaned)
+
+    def _write(self, collection) -> None:
+        payload = collection if self._ordered else sorted(collection)
+        _atomic_write_text(self._path_of(), json.dumps(payload, indent=2))
+
+    def add(self, repo_id: str) -> bool:
+        """Persist ``repo_id``. False for a blank id, True otherwise. Ordered:
+        moves an existing id to the front and always rewrites. Hidden: idempotent
+        — a genuinely new id is added and written, a re-add is a no-op success."""
+        repo_id = (repo_id or "").strip()
+        if not repo_id:
+            return False
+        if self._ordered:
+            saved = [r for r in self.get() if r != repo_id]
+            saved.insert(0, repo_id)
+            self._write(saved)
+            logger.info(f"{self._add_log} {repo_id}")
+        else:
+            current = self.get()
+            if repo_id not in current:
+                current.add(repo_id)
+                self._write(current)
+                logger.info(f"{self._add_log} {repo_id}")
+        return True
+
+    def remove(self, repo_id: str) -> bool:
+        """Drop ``repo_id``. True if it was present, False if it wasn't."""
+        repo_id = (repo_id or "").strip()
+        current = self.get()
+        if repo_id not in current:
+            return False
+        if self._ordered:
+            self._write([r for r in current if r != repo_id])
+        else:
+            self._write(current - {repo_id})
+        logger.info(f"{self._remove_log} {repo_id}")
+        return True
+
+
+# The *_FILE constants are read through a lambda (not captured) so monkeypatching
+# them in tests reaches the collection — see _JsonRepoCollection.path_of.
+_SAVED_CUSTOM_DATASETS = _JsonRepoCollection(
+    lambda: SAVED_CUSTOM_DATASETS_FILE,
+    ordered=True,
+    add_log="Saved custom dataset",
+    remove_log="Removed saved custom dataset",
+    read_error="saved custom datasets",
+)
+_SAVED_CUSTOM_MODELS = _JsonRepoCollection(
+    lambda: SAVED_CUSTOM_MODELS_FILE,
+    ordered=True,
+    add_log="Saved custom model",
+    remove_log="Removed saved custom model",
+    read_error="saved custom models",
+)
+_HIDDEN_DATASETS = _JsonRepoCollection(
+    lambda: SAVED_HIDDEN_DATASETS_FILE,
+    ordered=False,
+    add_log="Hid dataset",
+    remove_log="Unhid dataset",
+    read_error="hidden datasets",
+)
+_HIDDEN_MODELS = _JsonRepoCollection(
+    lambda: SAVED_HIDDEN_MODELS_FILE,
+    ordered=False,
+    add_log="Hid model",
+    remove_log="Unhid model",
+    read_error="hidden models",
+)
+
+
+def get_saved_custom_datasets() -> list[str]:
+    """Return the Hub dataset repo ids the user pinned by typing them into the
+    picker, most-recently-used first.
+
+    A missing or corrupted file yields the empty list — pinning is cosmetic, so
+    it must never block the dataset listing. Order is preserved (unlike the
+    dismissed-jobs set) so the picker can show the freshest picks first.
+    """
+    return _SAVED_CUSTOM_DATASETS.get()
+
+
+def add_saved_custom_dataset(repo_id: str) -> bool:
+    """Pin a typed Hub dataset repo id so it persists in the picker. Returns
+    False for a blank id.
+
+    Idempotent; re-saving an already-pinned id moves it to the front (so the
+    listing shows most-recently-used first).
+    """
+    return _SAVED_CUSTOM_DATASETS.add(repo_id)
+
+
+def remove_saved_custom_dataset(repo_id: str) -> bool:
+    """Unpin a saved custom dataset. Returns True if it was present, False if it
+    wasn't pinned in the first place."""
+    return _SAVED_CUSTOM_DATASETS.remove(repo_id)
+
+
+def get_saved_custom_models() -> list[str]:
+    """The Hub MODEL repo ids the user pinned via the "Add model" chooser,
+    most-recently-used first. Mirrors get_saved_custom_datasets: a missing or
+    corrupted file yields the empty list — pinning is cosmetic, so it must never
+    block the /models listing."""
+    return _SAVED_CUSTOM_MODELS.get()
+
+
+def add_saved_custom_model(repo_id: str) -> bool:
+    """Pin a Hub model repo id so it persists in the /models listing. Returns
+    False for a blank id. Idempotent; re-saving an already-pinned id moves it to
+    the front (most-recently-used first). Mirrors add_saved_custom_dataset."""
+    return _SAVED_CUSTOM_MODELS.add(repo_id)
+
+
+def remove_saved_custom_model(repo_id: str) -> bool:
+    """Unpin a saved custom model. Returns True if it was present, False if it
+    wasn't pinned in the first place. Mirrors remove_saved_custom_dataset."""
+    return _SAVED_CUSTOM_MODELS.remove(repo_id)
+
+
+def get_hidden_datasets() -> set[str]:
+    """The Hub dataset repo ids the user removed from their picker ("hidden").
+
+    A missing or corrupted file yields the empty set — hiding is cosmetic, so it
+    must never block the dataset listing. Mirrors get_dismissed_hub_jobs."""
+    return _HIDDEN_DATASETS.get()
+
+
+def add_hidden_dataset(repo_id: str) -> bool:
+    """Hide a Hub dataset repo id from the picker listing. Returns False for a
+    blank id. Idempotent — re-hiding an already-hidden id is a no-op success.
+    NEVER touches the Hub repo or any local copy."""
+    return _HIDDEN_DATASETS.add(repo_id)
+
+
+def remove_hidden_dataset(repo_id: str) -> bool:
+    """Unhide a dataset. Returns True if it was hidden, False if it wasn't.
+    Also called by the pin route so re-adding a hidden repo makes it visible
+    again (the auto-unhide)."""
+    return _HIDDEN_DATASETS.remove(repo_id)
+
+
+def get_hidden_models() -> set[str]:
+    """The Hub model repo ids the user removed from their picker ("hidden").
+    Mirrors get_hidden_datasets — a missing/corrupted file yields the empty set."""
+    return _HIDDEN_MODELS.get()
+
+
+def add_hidden_model(repo_id: str) -> bool:
+    """Hide a Hub model repo id from the picker listing. Idempotent; returns
+    False for a blank id. NEVER touches the Hub repo or any local copy."""
+    return _HIDDEN_MODELS.add(repo_id)
+
+
+def remove_hidden_model(repo_id: str) -> bool:
+    """Unhide a model. Returns True if it was hidden, False if it wasn't. Also
+    called by the pin route so re-adding a hidden repo makes it visible again."""
+    return _HIDDEN_MODELS.remove(repo_id)
 
 
 # ---------------------------------------------------------------------------

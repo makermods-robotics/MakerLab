@@ -104,10 +104,10 @@ const CreateRobotDialog: React.FC<CreateRobotDialogProps> = ({
         }
       }}
     >
-      <DialogContent className="sm:max-w-md">
+      <DialogContent className="bg-popover border-border sm:max-w-md">
         <DialogHeader>
           <DialogTitle>Create a new robot</DialogTitle>
-          <DialogDescription>
+          <DialogDescription className="text-muted-foreground">
             Choose a name and arm layout. The layout is fixed once created — a
             bimanual rig is a separate robot.
           </DialogDescription>
@@ -120,7 +120,9 @@ const CreateRobotDialog: React.FC<CreateRobotDialogProps> = ({
           className="space-y-4"
         >
           <div>
-            <Label htmlFor="new-robot-name">Name</Label>
+            <Label htmlFor="new-robot-name" className="text-foreground">
+              Name
+            </Label>
             <Input
               id="new-robot-name"
               autoFocus
@@ -137,7 +139,7 @@ const CreateRobotDialog: React.FC<CreateRobotDialogProps> = ({
             )}
           </div>
           <div>
-            <Label>Arm layout</Label>
+            <Label className="text-foreground">Arm layout</Label>
             <div
               role="radiogroup"
               aria-label="Arm layout"
@@ -155,15 +157,15 @@ const CreateRobotDialog: React.FC<CreateRobotDialogProps> = ({
                     className={cn(
                       "rounded-md border px-3 py-2 text-left transition-colors",
                       selected
-                        ? "border-foreground bg-accent"
-                        : "border-border bg-secondary hover:border-input"
+                        ? "border-primary bg-accent"
+                        : "border-border bg-card hover:bg-accent"
                     )}
                   >
                     <div className="flex items-center justify-between">
                       <span className="text-sm font-medium text-foreground">
                         {opt.label}
                       </span>
-                      {selected && <Check className="h-4 w-4 text-foreground" />}
+                      {selected && <Check className="h-4 w-4 text-primary" />}
                     </div>
                     <p className="mt-0.5 text-xs text-muted-foreground">
                       {opt.description}
@@ -181,7 +183,7 @@ const CreateRobotDialog: React.FC<CreateRobotDialogProps> = ({
             >
               Cancel
             </Button>
-            <Button type="submit" disabled={!canConfirm} variant="brand">
+            <Button type="submit" disabled={!canConfirm}>
               {creating ? (
                 <>
                   <Loader2 className="w-4 h-4 mr-2 animate-spin" /> Creating…

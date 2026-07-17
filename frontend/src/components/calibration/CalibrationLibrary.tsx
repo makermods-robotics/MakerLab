@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { Pencil, Trash2 } from "lucide-react";
+import { Download, Pencil, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -19,6 +19,7 @@ import {
 } from "@/components/ui/dialog";
 import { useApi } from "@/contexts/ApiContext";
 import { useToast } from "@/hooks/use-toast";
+import ImportCalibrationButton from "./ImportCalibrationButton";
 
 interface ConfigEntry {
   name: string;
@@ -52,18 +53,27 @@ interface CalibrationLibraryProps {
   /** Called after a successful reassignment so the parent can refetch the robot. */
   onAssigned?: () => void | Promise<void>;
   /**
+   * Called after an operation that changes the FILE LIBRARY itself (rename /
+   * delete / import). Each arm row renders its own CalibrationLibrary with a
+   * private config list, so without this the SIBLING instances (e.g. the other
+   * same-side arm in bimanual mode) keep showing stale filenames — the parent
+   * should bump `reloadToken` here to refresh every instance.
+   */
+  onLibraryChanged?: () => void;
+  /**
    * Bump to force a re-fetch of the saved-config list — e.g. after a
-   * calibration completes and may have written a brand-new named file.
+   * calibration completes and may have written a brand-new named file, or a
+   * sibling instance renamed/deleted/imported one (see onLibraryChanged).
    */
   reloadToken?: number;
 }
 
 /**
  * Per-side calibration "library" as a dropdown: pick a saved config, then
- * Rename or Delete it. Delete acts on the selected config (not per dropdown
- * entry, which would clash with swap-on-select); deleting an in-use config
- * unassigns it server-side and the affected arm returns to "needs
- * calibration".
+ * Download, Rename, or Delete it, or Import a new one. Delete acts on the
+ * selected config (not per dropdown entry, which would clash with
+ * swap-on-select); deleting an in-use config unassigns it server-side and the
+ * affected arm returns to "needs calibration".
  */
 const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
   device,
@@ -73,6 +83,7 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
   excludeConfig,
   excludeConfigField,
   onAssigned,
+  onLibraryChanged,
   reloadToken,
 }) => {
   const { baseUrl, fetchWithHeaders } = useApi();
@@ -131,6 +142,36 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
     });
   }, [configs, assignedConfig]);
 
+  const download = useCallback(
+    async (name: string) => {
+      try {
+        const res = await fetchWithHeaders(
+          `${baseUrl}/calibration-configs/${device}/${encodeURIComponent(name)}/download`,
+        );
+        if (!res.ok) {
+          toast({ title: "Download failed", variant: "destructive" });
+          return;
+        }
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `${name}.json`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+      } catch (e) {
+        toast({
+          title: "Download failed",
+          description: String(e),
+          variant: "destructive",
+        });
+      }
+    },
+    [baseUrl, fetchWithHeaders, device, toast],
+  );
+
   const confirmDelete = useCallback(async () => {
     const name = pendingDelete;
     if (!name) return;
@@ -158,6 +199,8 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
           // Refetch the robot so the arm's status flips to uncalibrated.
           await onAssigned?.();
         }
+        // Refresh sibling arm rows' config lists (see onLibraryChanged doc).
+        onLibraryChanged?.();
       } else {
         toast({
           title: "Delete failed",
@@ -172,7 +215,7 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
         variant: "destructive",
       });
     }
-  }, [baseUrl, fetchWithHeaders, device, pendingDelete, toast, onAssigned]);
+  }, [baseUrl, fetchWithHeaders, device, pendingDelete, toast, onAssigned, onLibraryChanged]);
 
   const assignToRobot = useCallback(async () => {
     if (!selected || !robotName) return;
@@ -281,6 +324,9 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
         setSelected(data.name);
         // A robot referencing this config was repointed server-side; refetch it.
         await onAssigned?.();
+        // Sibling arm rows hold their own (now stale) config lists — tell the
+        // parent so it bumps reloadToken and every instance re-fetches.
+        onLibraryChanged?.();
       } else {
         // 409/400 keep the dialog open with the message for a retry.
         setRenameError(data.message || "Rename failed.");
@@ -299,6 +345,7 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
     toast,
     refresh,
     onAssigned,
+    onLibraryChanged,
   ]);
 
   const empty = configs.length === 0;
@@ -342,7 +389,7 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
                       </span>
                     )}
                     {usedByOtherArm && (
-                      <span className="text-[10px] uppercase tracking-wide text-warn border border-warn/40 rounded px-1">
+                      <span className="text-[10px] uppercase tracking-wide text-amber-600 dark:text-amber-400 border border-amber-500/40 rounded px-1">
                         other arm
                       </span>
                     )}
@@ -353,6 +400,17 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
           </SelectContent>
         </Select>
 
+        <Button
+          size="icon"
+          variant="ghost"
+          className="h-8 w-8 text-muted-foreground hover:text-foreground"
+          disabled={!selected}
+          onClick={() => selected && download(selected)}
+          aria-label="Download selected config"
+          title="Download"
+        >
+          <Download className="w-4 h-4" />
+        </Button>
         <Button
           size="icon"
           variant="ghost"
@@ -375,13 +433,22 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
         >
           <Trash2 className="w-4 h-4" />
         </Button>
+        <ImportCalibrationButton
+          device={device}
+          onImported={async (name) => {
+            await refresh();
+            setSelected(name);
+            // Refresh sibling arm rows' config lists (see onLibraryChanged doc).
+            onLibraryChanged?.();
+          }}
+        />
       </div>
 
       {canAssign && (
         <Button
           size="sm"
-          variant="secondary"
-          className="w-full h-7"
+          variant="outline"
+          className="w-full h-7 border-blue-500/50 text-blue-700 dark:text-blue-300 hover:bg-blue-500/10"
           disabled={assigning}
           onClick={assignToRobot}
         >
@@ -397,7 +464,7 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Rename config</DialogTitle>
-            <DialogDescription>
+            <DialogDescription className="text-muted-foreground">
               Renames the calibration file. Robots using it are updated
               automatically. Won't overwrite an existing name.
             </DialogDescription>
@@ -417,11 +484,12 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
             autoFocus
             placeholder="New name"
           />
-          {renameError && (
-            <p className="text-sm text-destructive">{renameError}</p>
-          )}
+          {renameError && <p className="text-sm text-destructive">{renameError}</p>}
           <DialogFooter className="flex gap-2 justify-end">
-            <Button variant="secondary" onClick={() => setRenameOpen(false)}>
+            <Button
+              variant="outline"
+              onClick={() => setRenameOpen(false)}
+            >
               Cancel
             </Button>
             <Button
@@ -445,17 +513,23 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Delete config "{pendingDelete}"?</DialogTitle>
-            <DialogDescription>
+            <DialogDescription className="text-muted-foreground">
               This permanently deletes the calibration file — you'd have to
               recalibrate the arm to recreate it. Any robot using it will need
               calibration before its next use.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter className="flex gap-2 justify-end">
-            <Button variant="secondary" onClick={() => setPendingDelete(null)}>
+            <Button
+              variant="outline"
+              onClick={() => setPendingDelete(null)}
+            >
               Cancel
             </Button>
-            <Button variant="destructive" onClick={confirmDelete}>
+            <Button
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={confirmDelete}
+            >
               Delete
             </Button>
           </DialogFooter>

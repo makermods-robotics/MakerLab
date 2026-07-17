@@ -1,0 +1,458 @@
+import React, { useMemo, useState } from "react";
+import * as DialogPrimitive from "@radix-ui/react-dialog";
+import {
+  Archive,
+  CloudDownload,
+  FolderInput,
+  GitMerge,
+  Play,
+  Plus,
+  X,
+} from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { useApi } from "@/contexts/ApiContext";
+import { useToast } from "@/hooks/use-toast";
+import { useStudio } from "@/contexts/StudioContext";
+import { useHfAuth } from "@/contexts/HfAuthContext";
+import { useModels } from "@/hooks/useModels";
+import { useDatasets } from "@/hooks/useDatasets";
+import { useSelectedDataset } from "@/hooks/useSelectedDataset";
+import { policyTypeDisplayName } from "@/components/training/types";
+import { ModelItem, downloadModel, saveCustomModel } from "@/lib/modelsApi";
+import {
+  DatasetItem,
+  downloadDataset,
+  saveCustomDataset,
+} from "@/lib/replayApi";
+import AddDatasetFromHubDialog from "@/components/landing/AddDatasetFromHubDialog";
+import ImportDatasetFromDiskDialog from "@/components/landing/ImportDatasetFromDiskDialog";
+import ManageCachesDialog from "@/components/landing/ManageCachesDialog";
+import AddModelFromHubDialog from "@/components/landing/AddModelFromHubDialog";
+import ImportModelFromDiskDialog from "@/components/landing/ImportModelFromDiskDialog";
+import {
+  SkillBadgePill,
+  classifySkill,
+  formatCount,
+  isMineSkill,
+  skillTitle,
+} from "@/components/launchpad/SkillCard";
+import MergeDatasetsDialog from "@/components/landing/MergeDatasetsDialog";
+import DatasetDetailDialog from "@/components/dialogs/DatasetDetailDialog";
+import SkillManageDialog from "@/components/dialogs/SkillManageDialog";
+
+export interface LibrarySheetProps {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}
+
+type Tab = "skills" | "datasets";
+
+const SegButton: React.FC<{
+  active: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}> = ({ active, onClick, children }) => (
+  <button
+    type="button"
+    onClick={onClick}
+    className={`flex-1 rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
+      active
+        ? "bg-background text-foreground shadow-1"
+        : "text-muted-foreground hover:text-foreground"
+    }`}
+  >
+    {children}
+  </button>
+);
+
+/**
+ * "My library" slide-over — a right-anchored sheet (Radix Dialog primitive) with
+ * My skills / My datasets tabs. Skill rows Run on the corner robot (→ Deploy,
+ * prefilled); dataset rows open the dataset detail dialog. Footer offers a new
+ * skill (→ studio Collect) and Merge datasets (the existing MergeDatasetsDialog,
+ * reused unmodified).
+ */
+const LibrarySheet: React.FC<LibrarySheetProps> = ({ open, onOpenChange }) => {
+  const { openStudio } = useStudio();
+  const { auth } = useHfAuth();
+  const { baseUrl, fetchWithHeaders } = useApi();
+  const { toast } = useToast();
+  const { setSelectedDataset } = useSelectedDataset();
+  const { models, loading: modelsLoading, refresh: refreshModels } =
+    useModels();
+  const { datasets, loading: datasetsLoading, refresh: refreshDatasets } =
+    useDatasets();
+  const [tab, setTab] = useState<Tab>("skills");
+  const [mergeOpen, setMergeOpen] = useState(false);
+  const [detailRepo, setDetailRepo] = useState<string | null>(null);
+  const [detailOpen, setDetailOpen] = useState(false);
+  const [manageSkill, setManageSkill] = useState<ModelItem | null>(null);
+  const [manageOpen, setManageOpen] = useState(false);
+  const [addDatasetOpen, setAddDatasetOpen] = useState(false);
+  const [importDatasetOpen, setImportDatasetOpen] = useState(false);
+  const [manageCachesOpen, setManageCachesOpen] = useState(false);
+  const [addModelOpen, setAddModelOpen] = useState(false);
+  const [importModelOpen, setImportModelOpen] = useState(false);
+
+  const username = auth.status === "authenticated" ? auth.username : null;
+
+  // "Add a dataset from Hugging Face": pin + select the typed Hub id, and
+  // optionally kick off a background download into the local cache. Ported
+  // from the old DatasetsPanel (handleAddFromHub / handleOpenCustom) — the
+  // pin is best-effort, selection still works if the save call fails.
+  const handleAddDatasetFromHub = async (repoId: string, download: boolean) => {
+    setSelectedDataset(repoId);
+    toast({ title: "Dataset saved", description: repoId });
+    try {
+      await saveCustomDataset(baseUrl, fetchWithHeaders, repoId);
+      refreshDatasets();
+    } catch {
+      // Non-fatal: the dataset is still selected for training this session.
+    }
+    if (!download) return;
+    try {
+      await downloadDataset(baseUrl, fetchWithHeaders, repoId);
+      toast({ title: "Download started", description: repoId });
+    } catch (e) {
+      toast({
+        title: "Couldn't start download",
+        description: e instanceof Error ? e.message : String(e),
+        variant: "destructive",
+      });
+    }
+  };
+
+  // "Import a dataset from disk": the dialog copied a local folder into the
+  // cache and returns the new repo id — select it and refresh the list.
+  const handleDatasetImported = (repoId: string) => {
+    setSelectedDataset(repoId);
+    refreshDatasets();
+    toast({ title: "Dataset imported", description: repoId });
+  };
+
+  // Models twins of the two handlers above (ported from ModelsPanel).
+  const handleAddModelFromHub = async (repoId: string, download: boolean) => {
+    toast({ title: "Model saved", description: repoId });
+    try {
+      await saveCustomModel(baseUrl, fetchWithHeaders, repoId);
+      refreshModels();
+    } catch {
+      // Non-fatal — the pin is best-effort.
+    }
+    if (!download) return;
+    try {
+      await downloadModel(baseUrl, fetchWithHeaders, repoId);
+      toast({ title: "Download started", description: repoId });
+    } catch (e) {
+      toast({
+        title: "Couldn't start download",
+        description: e instanceof Error ? e.message : String(e),
+        variant: "destructive",
+      });
+    }
+  };
+
+  const handleModelImported = (repoId: string) => {
+    refreshModels();
+    toast({ title: "Model imported", description: repoId });
+  };
+
+  const mySkills = useMemo(
+    () => models.filter((m) => isMineSkill(m, username)),
+    [models, username],
+  );
+
+  const myDatasets = useMemo(
+    () =>
+      datasets.filter((d) => {
+        if (d.source === "local" || d.source === "both") return true;
+        const ns = d.repo_id.includes("/") ? d.repo_id.split("/")[0] : null;
+        return !!ns && !!username && ns.toLowerCase() === username.toLowerCase();
+      }),
+    [datasets, username],
+  );
+
+  const runSkill = (model: ModelItem) => {
+    // Only a Hub-ONLY model goes through the repo-id lazy-import path; a model
+    // with a local copy (`local`/`both`) deploys through its existing job
+    // registry entry (the run id is its job id) — re-importing would duplicate
+    // the record and break offline runs.
+    if (model.source === "hub" && model.hf_repo_id) {
+      openStudio("deploy", { deploy: { source: "hub", id: model.hf_repo_id } });
+    } else {
+      openStudio("deploy", { deploy: { source: "job", id: model.id } });
+    }
+    onOpenChange(false);
+  };
+
+  const openDatasetDetail = (d: DatasetItem) => {
+    setDetailRepo(d.repo_id);
+    setDetailOpen(true);
+  };
+
+  return (
+    <>
+      <DialogPrimitive.Root open={open} onOpenChange={onOpenChange}>
+        <DialogPrimitive.Portal>
+          <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-foreground/20 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
+          <DialogPrimitive.Content className="fixed inset-y-0 right-0 z-50 flex w-full max-w-sm flex-col border-l border-border bg-background shadow-2 duration-300 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:slide-out-to-right data-[state=open]:slide-in-from-right">
+            <div className="flex items-center justify-between border-b border-border px-4 py-3">
+              <DialogPrimitive.Title className="font-display text-lg font-semibold tracking-tight">
+                My library
+              </DialogPrimitive.Title>
+              <DialogPrimitive.Close
+                aria-label="Close library"
+                className="rounded-sm p-1 text-muted-foreground opacity-70 transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring"
+              >
+                <X className="h-4 w-4" />
+              </DialogPrimitive.Close>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-4">
+              <div className="mb-4 flex gap-1 rounded-lg border border-border bg-muted p-1">
+                <SegButton
+                  active={tab === "skills"}
+                  onClick={() => setTab("skills")}
+                >
+                  My skills
+                </SegButton>
+                <SegButton
+                  active={tab === "datasets"}
+                  onClick={() => setTab("datasets")}
+                >
+                  My datasets
+                </SegButton>
+              </div>
+
+              {tab === "skills" ? (
+                <div className="flex flex-col gap-2">
+                  {modelsLoading ? (
+                    <p className="px-1 py-6 text-center text-sm text-muted-foreground">
+                      Loading skills…
+                    </p>
+                  ) : mySkills.length === 0 ? (
+                    <p className="px-1 py-6 text-center text-sm text-muted-foreground">
+                      No skills of yours yet — create one below.
+                    </p>
+                  ) : (
+                    mySkills.map((m) => (
+                      <div
+                        key={m.id}
+                        className="flex items-center gap-2 rounded-md border border-border bg-card p-3 transition-colors hover:border-ring"
+                      >
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setManageSkill(m);
+                            setManageOpen(true);
+                          }}
+                          className="min-w-0 flex-1 text-left"
+                          aria-label={`Manage ${skillTitle(m)}`}
+                        >
+                          <div className="flex items-center gap-2">
+                            <span className="truncate font-medium">
+                              {skillTitle(m)}
+                            </span>
+                            <SkillBadgePill
+                              badge={classifySkill(m, username)}
+                            />
+                          </div>
+                          <p className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground">
+                            {[
+                              m.policy_type
+                                ? policyTypeDisplayName(m.policy_type)
+                                : null,
+                              m.steps != null
+                                ? `${formatCount(m.steps)} steps`
+                                : null,
+                              m.private ? "private" : null,
+                            ]
+                              .filter(Boolean)
+                              .join(" · ") || m.source}
+                          </p>
+                        </button>
+                        <Button
+                          size="sm"
+                          onClick={() => runSkill(m)}
+                          className="shrink-0 gap-1.5"
+                        >
+                          <Play className="h-3.5 w-3.5" />
+                          Run
+                        </Button>
+                      </div>
+                    ))
+                  )}
+                </div>
+              ) : (
+                <div className="flex flex-col gap-2">
+                  {datasetsLoading ? (
+                    <p className="px-1 py-6 text-center text-sm text-muted-foreground">
+                      Loading datasets…
+                    </p>
+                  ) : myDatasets.length === 0 ? (
+                    <p className="px-1 py-6 text-center text-sm text-muted-foreground">
+                      No datasets of yours yet — record one to get started.
+                    </p>
+                  ) : (
+                    myDatasets.map((d) => (
+                      <button
+                        key={d.repo_id}
+                        type="button"
+                        onClick={() => openDatasetDetail(d)}
+                        className="flex items-center gap-2 rounded-md border border-border bg-card p-3 text-left transition-colors hover:border-ring"
+                      >
+                        <div className="min-w-0 flex-1">
+                          <span className="block truncate font-mono text-sm">
+                            {d.repo_id}
+                          </span>
+                          <p className="mt-0.5 text-[11px] text-muted-foreground">
+                            {d.source === "both"
+                              ? "local + Hub"
+                              : d.source === "hub"
+                                ? "on Hub"
+                                : "local only"}
+                            {d.private ? " · private" : ""}
+                          </p>
+                        </div>
+                      </button>
+                    ))
+                  )}
+                </div>
+              )}
+            </div>
+
+            <div className="flex flex-col gap-2 border-t border-border p-4">
+              {tab === "skills" ? (
+                <div className="flex gap-2">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setAddModelOpen(true)}
+                    className="flex-1 gap-1.5"
+                  >
+                    <CloudDownload className="h-3.5 w-3.5" />
+                    Add from Hub
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setImportModelOpen(true)}
+                    className="flex-1 gap-1.5"
+                  >
+                    <FolderInput className="h-3.5 w-3.5" />
+                    Import from disk
+                  </Button>
+                </div>
+              ) : (
+                <div className="flex gap-2">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setAddDatasetOpen(true)}
+                    className="flex-1 gap-1.5"
+                  >
+                    <CloudDownload className="h-3.5 w-3.5" />
+                    Add from Hub
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setImportDatasetOpen(true)}
+                    className="flex-1 gap-1.5"
+                  >
+                    <FolderInput className="h-3.5 w-3.5" />
+                    Import from disk
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setManageCachesOpen(true)}
+                    className="flex-1 gap-1.5"
+                  >
+                    <Archive className="h-3.5 w-3.5" />
+                    Manage caches
+                  </Button>
+                </div>
+              )}
+              <Button
+                variant="outline"
+                onClick={() => {
+                  openStudio("collect");
+                  onOpenChange(false);
+                }}
+                className="w-full gap-2"
+              >
+                <Plus className="h-4 w-4" />
+                New Skill
+              </Button>
+              <Button
+                variant="ghost"
+                onClick={() => setMergeOpen(true)}
+                className="w-full gap-2"
+              >
+                <GitMerge className="h-4 w-4" />
+                Merge datasets
+              </Button>
+            </div>
+          </DialogPrimitive.Content>
+        </DialogPrimitive.Portal>
+      </DialogPrimitive.Root>
+
+      <MergeDatasetsDialog
+        open={mergeOpen}
+        onOpenChange={setMergeOpen}
+        datasets={datasets}
+        onMerged={refreshDatasets}
+      />
+
+      <DatasetDetailDialog
+        repoId={detailRepo}
+        open={detailOpen}
+        onOpenChange={setDetailOpen}
+        // The sheet sits above the studio overlay — close it when a dataset
+        // action opens a studio panel, or the panel appears "behind" it.
+        onStudioAction={() => onOpenChange(false)}
+      />
+
+      <SkillManageDialog
+        model={manageSkill}
+        open={manageOpen}
+        onOpenChange={setManageOpen}
+        onChanged={refreshModels}
+        onRun={(m) => {
+          setManageOpen(false);
+          runSkill(m);
+        }}
+      />
+
+      <AddDatasetFromHubDialog
+        open={addDatasetOpen}
+        onOpenChange={setAddDatasetOpen}
+        onAdd={handleAddDatasetFromHub}
+      />
+      <ImportDatasetFromDiskDialog
+        open={importDatasetOpen}
+        onOpenChange={setImportDatasetOpen}
+        onImported={handleDatasetImported}
+      />
+      <ManageCachesDialog
+        open={manageCachesOpen}
+        onOpenChange={setManageCachesOpen}
+        datasets={datasets}
+        onCleared={refreshDatasets}
+      />
+      <AddModelFromHubDialog
+        open={addModelOpen}
+        onOpenChange={setAddModelOpen}
+        onAdd={handleAddModelFromHub}
+      />
+      <ImportModelFromDiskDialog
+        open={importModelOpen}
+        onOpenChange={setImportModelOpen}
+        onImported={handleModelImported}
+      />
+    </>
+  );
+};
+
+export default LibrarySheet;

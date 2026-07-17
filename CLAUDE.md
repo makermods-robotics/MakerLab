@@ -64,6 +64,10 @@ All under `~/.cache/huggingface/lerobot/` (managed in [utils/config.py](makerlab
 
 [setup_calibration_files](makerlab/utils/config.py#L30-L74) copies user-selected configs from `LEADER_CONFIG_PATH` / `FOLLOWER_CONFIG_PATH` into LeRobot's expected locations under `~/.cache/huggingface/lerobot/calibration/`. Recording, teleoperation, and replay all call this before starting. New features that drive a robot must do the same.
 
+## UI verification scope
+
+MakerLab's UI is checked in **light mode only** — there is no dark-mode requirement. It is a desktop tool driven from a laptop next to the robot arms; **skip mobile/responsive-breakpoint checks** (the phone-camera flow uses the phone as a camera source, not as a UI client).
+
 ## Hardware target
 
 Hardcoded for **SO-101 leader/follower arms** (`so101_leader`, `so101_follower`). Adding another robot type requires touching every feature module's config construction (search for `SO101LeaderConfig` / `SO101FollowerConfig`).

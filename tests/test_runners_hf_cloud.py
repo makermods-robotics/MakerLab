@@ -362,3 +362,30 @@ def test_wrapper_source_inlines_the_tested_install_plan() -> None:
     assert "__INSTALL_PLAN_SOURCE__" not in WRAPPER_SOURCE  # placeholder replaced
     assert 'shutil.which("uv")' in WRAPPER_SOURCE
     assert "no uv, pip, or ensurepip" in WRAPPER_SOURCE  # clear terminal message
+
+
+# ---------------------------------------------------------------------------
+# Job-timeout precedence: request value wins (normalised to seconds), else the
+# HF_JOB_TIMEOUT fallback constant.
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_job_timeout_falls_back_to_constant_when_unset() -> None:
+    from makerlab.runners.hf_cloud import HF_JOB_TIMEOUT, resolve_job_timeout
+    from makerlab.train import TrainingRequest
+
+    config = TrainingRequest(dataset_repo_id="x")
+    assert config.hf_job_timeout is None
+    assert resolve_job_timeout(config) == HF_JOB_TIMEOUT  # "2h" string passthrough
+
+
+def test_resolve_job_timeout_uses_request_value_normalised_to_seconds() -> None:
+    """An explicit request value wins over the constant and is converted to an
+    int of seconds — run_job's own str parser only handles a single unit, so
+    compound forms like "3h30m" must be pre-resolved here."""
+    from makerlab.runners.hf_cloud import resolve_job_timeout
+    from makerlab.train import TrainingRequest
+
+    assert resolve_job_timeout(TrainingRequest(dataset_repo_id="x", hf_job_timeout="45m")) == 2700
+    assert resolve_job_timeout(TrainingRequest(dataset_repo_id="x", hf_job_timeout="3h30m")) == 12600
+    assert resolve_job_timeout(TrainingRequest(dataset_repo_id="x", hf_job_timeout="2h")) == 7200

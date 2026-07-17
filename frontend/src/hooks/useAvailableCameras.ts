@@ -6,9 +6,6 @@ export interface AvailableCamera {
   name: string;
   deviceId: string;
   available: boolean;
-  /** Stable OS-level device identity (AVFoundation uniqueID on macOS).
-   * Unlike the cv2 index, it survives replugs and identically-named devices. */
-  uniqueId?: string;
 }
 
 const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
@@ -16,10 +13,6 @@ const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
 interface UseAvailableCamerasOptions {
   /** When false, do nothing. Use to gate on modal open. */
   enabled?: boolean;
-  /** When false, skip browser device matching entirely (no getUserMedia
-   * permission probe, deviceId stays ""). For callers that only need the
-   * backend enumeration — cv2 indices + uniqueIds — like the Collect page. */
-  matchBrowser?: boolean;
 }
 
 /**
@@ -30,7 +23,6 @@ interface UseAvailableCamerasOptions {
  */
 export function useAvailableCameras({
   enabled = true,
-  matchBrowser = true,
 }: UseAvailableCamerasOptions = {}) {
   const { baseUrl, fetchWithHeaders } = useApi();
   const [cameras, setCameras] = useState<AvailableCamera[]>([]);
@@ -58,7 +50,7 @@ export function useAvailableCameras({
       // still list and recording works, there are just no live previews.
       let browserDevices: { deviceId: string; label: string }[] = [];
       const md = navigator.mediaDevices;
-      if (md && matchBrowser) {
+      if (md) {
         let devices = await md.enumerateDevices();
         const hasLabels = devices.some((d) => d.kind === "videoinput" && d.label);
         // Only open a real stream if labels are still hidden (permission not yet
@@ -89,7 +81,6 @@ export function useAvailableCameras({
         index: number;
         name?: string;
         available: boolean;
-        unique_id?: string;
       }[] = data.cameras ?? [];
 
       // Browser's MediaDeviceInfo.label starts with AVFoundation's localizedName
@@ -114,7 +105,6 @@ export function useAvailableCameras({
           name: label,
           deviceId: match?.deviceId ?? "",
           available: cam.available,
-          uniqueId: cam.unique_id,
         };
       });
       setCameras(merged);
@@ -128,7 +118,7 @@ export function useAvailableCameras({
       setIsLoading(false);
       refreshingRef.current = false;
     }
-  }, [baseUrl, fetchWithHeaders, matchBrowser]);
+  }, [baseUrl, fetchWithHeaders]);
 
   useEffect(() => {
     if (!enabled) return;

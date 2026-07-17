@@ -11,9 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for makerlab.motor_power — the raw-value torque-limit apply path
-(mirrors the FakeRobot/FakeBus patterns in tests/mocks.py), and the one-shot
-supply-voltage read (hardware mocked, like tests/test_wiggle.py)."""
+"""Tests for makerlab.motor_power — percent→register mapping, the mocked-bus
+apply path (mirrors the FakeRobot/FakeBus patterns in tests/mocks.py), and
+the one-shot supply-voltage read (hardware mocked, like tests/test_wiggle.py)."""
 
 from __future__ import annotations
 
@@ -51,87 +51,85 @@ class _FakeBimanual:
         self.right_arm = _FakeArm(right)
 
 
-def test_apply_torque_limit_writes_raw_ram_register_to_every_motor() -> None:
-    from makerlab.motor_power import apply_torque_limit
+def test_torque_limit_from_percent_scales_and_clamps() -> None:
+    from makerlab.motor_power import torque_limit_from_percent
+
+    assert torque_limit_from_percent(100) == 1000
+    assert torque_limit_from_percent(55) == 550
+    assert torque_limit_from_percent(10) == 100
+    # Clamped inputs: below range, above range, junk.
+    assert torque_limit_from_percent(5) == 100
+    assert torque_limit_from_percent(1000) == 1000
+    # Junk/missing (None) falls back to DEFAULT_MOTOR_POWER (38 = the auto-cal
+    # torque level, not full power) → 380. This is a fixed constant in
+    # utils.config, not a persisted/per-machine read.
+    assert torque_limit_from_percent(None) == 380
+
+
+def test_apply_motor_power_writes_ram_register_to_every_motor() -> None:
+    from makerlab.motor_power import apply_motor_power
 
     bus = _FakeBus(["shoulder_pan", "elbow_flex", "gripper"])
-    warnings = apply_torque_limit(_FakeArm(bus), 400)
+    warnings = apply_motor_power(_FakeArm(bus), 40)
 
     assert warnings == []
     assert len(bus.writes) == 3
     for data_name, _motor, value, normalize, num_retry in bus.writes:
         # RAM register only — never the EEPROM "Max_Torque_Limit".
         assert data_name == "Torque_Limit"
-        # Raw value written verbatim — no percent×10 scaling.
         assert value == 400
         assert normalize is False
         assert num_retry > 0
 
 
-def test_apply_torque_limit_clamps_to_register_bounds() -> None:
-    """Values are clamped to [0, 1000] (the register range); junk falls back to
-    the default 400 — a corrupted setting can never block a session start."""
-    from makerlab.motor_power import apply_torque_limit
+def test_apply_motor_power_writes_even_at_full_power() -> None:
+    """100% still writes 1000: restores full power when a gentler previous
+    session set the RAM register and the arm was never power-cycled."""
+    from makerlab.motor_power import apply_motor_power
 
     bus = _FakeBus(["gripper"])
-    apply_torque_limit(_FakeArm(bus), 5000)
-    assert bus.writes[-1] == ("Torque_Limit", "gripper", 1000, False, 2)
-
-    apply_torque_limit(_FakeArm(bus), -10)
-    assert bus.writes[-1] == ("Torque_Limit", "gripper", 0, False, 2)
-
-    apply_torque_limit(_FakeArm(bus), None)
-    assert bus.writes[-1] == ("Torque_Limit", "gripper", 400, False, 2)
-
-
-def test_apply_torque_limit_writes_even_at_full_power() -> None:
-    """1000 still writes: restores full power when a gentler previous session set
-    the RAM register and the arm was never power-cycled."""
-    from makerlab.motor_power import apply_torque_limit
-
-    bus = _FakeBus(["gripper"])
-    apply_torque_limit(_FakeArm(bus), 1000)
+    apply_motor_power(_FakeArm(bus), 100)
     assert bus.writes == [("Torque_Limit", "gripper", 1000, False, 2)]
 
 
-def test_apply_torque_limit_failure_warns_but_does_not_abort() -> None:
+def test_apply_motor_power_failure_warns_but_does_not_abort() -> None:
     """One bad motor must not stop the others, and the failure surfaces as a
     warning message (degraded to previous/full power) — never an exception."""
-    from makerlab.motor_power import apply_torque_limit
+    from makerlab.motor_power import apply_motor_power
 
     bus = _FakeBus(["shoulder_pan", "elbow_flex", "gripper"], fail=("elbow_flex",))
-    warnings = apply_torque_limit(_FakeArm(bus), 500)
+    warnings = apply_motor_power(_FakeArm(bus), 50)
 
     written = [w[1] for w in bus.writes]
     assert written == ["shoulder_pan", "gripper"]
     assert len(warnings) == 1
     assert "elbow_flex" in warnings[0]
-    assert "500" in warnings[0]
+    assert "50%" in warnings[0]
     assert "/dev/fake" in warnings[0]
 
 
-def test_apply_torque_limit_covers_both_bimanual_arms() -> None:
-    from makerlab.motor_power import apply_torque_limit
+def test_apply_motor_power_covers_both_bimanual_arms() -> None:
+    from makerlab.motor_power import apply_motor_power
 
     left = _FakeBus(["gripper"], port="/dev/left")
     right = _FakeBus(["gripper"], port="/dev/right")
-    warnings = apply_torque_limit(_FakeBimanual(left, right), 300)
+    warnings = apply_motor_power(_FakeBimanual(left, right), 30)
 
     assert warnings == []
     assert left.writes == [("Torque_Limit", "gripper", 300, False, 2)]
     assert right.writes == [("Torque_Limit", "gripper", 300, False, 2)]
 
 
-def test_apply_torque_limit_handles_none_device() -> None:
-    from makerlab.motor_power import apply_torque_limit
+def test_apply_motor_power_handles_none_device() -> None:
+    from makerlab.motor_power import apply_motor_power
 
-    assert apply_torque_limit(None, 500) == []
+    assert apply_motor_power(None, 50) == []
 
 
 # ---------------------------------------------------------------------------
 # clear_goal_velocity: reset the RAM speed cap (Goal_Velocity=0) at session
 # start so a leftover cap (auto-cal fold/unfold=1000, rest-pose return=400)
-# can't throttle the next session. Mirrors apply_torque_limit's shape.
+# can't throttle the next session. Mirrors apply_motor_power's shape.
 # ---------------------------------------------------------------------------
 
 
@@ -186,7 +184,7 @@ def test_clear_goal_velocity_handles_none_device() -> None:
     assert clear_goal_velocity(None) == []
 
 
-def test_request_models_default_max_torque_limit() -> None:
+def test_request_models_default_to_full_power() -> None:
     from makerlab.record import RecordingRequest
     from makerlab.rollout import InferenceRequest
     from makerlab.teleoperate import TeleoperateRequest
@@ -203,9 +201,9 @@ def test_request_models_default_max_torque_limit() -> None:
         single_task="task",
     )
     inference = InferenceRequest(follower_port="/dev/f", follower_config="F", policy_ref="/tmp/x")
-    assert teleop.max_torque_limit == 400
-    assert record.max_torque_limit == 400
-    assert inference.max_torque_limit == 400
+    assert teleop.motor_power == 100
+    assert record.motor_power == 100
+    assert inference.motor_power == 100
 
 
 def test_voltage_from_raw_scales_tenths_of_a_volt() -> None:

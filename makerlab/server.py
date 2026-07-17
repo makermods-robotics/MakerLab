@@ -13,8 +13,9 @@
 # limitations under the License.
 
 import asyncio
+import concurrent.futures
 import contextlib
-import glob
+import ctypes
 import io
 import json
 import logging
@@ -29,9 +30,10 @@ import zipfile
 from pathlib import Path
 from typing import Any, Literal
 
+import httpx
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from huggingface_hub.errors import HfHubHTTPError
 from pydantic import BaseModel
@@ -42,17 +44,22 @@ from starlette.types import Scope
 
 from lerobot.policies.factory import make_policy_config
 
-# Module object (not a from-import) for the camera-preview mutex check: record
-# REBINDS its recording_active global, so only live attribute access sees the
-# current value — a from-import would freeze the startup value.
-from . import datasets as dataset_browser, record as record_state
-from .models import list_all_models
+# Module objects (not from-imports) so live attribute access always sees the
+# current value (e.g. globals a feature module rebinds at runtime need attribute
+# lookup at call time, not a bound name frozen at import).
+from . import (
+    datasets as dataset_browser,
+    models as model_browser,
+)
 
 # Import our custom calibration functionality
-from .auto_calibrate import AutoCalibrationRequest, auto_calibration_manager
+from .auto_calibrate import (
+    AutoCalibrationBatchRequest,
+    AutoCalibrationRequest,
+    auto_calibration_batch_manager,
+    auto_calibration_manager,
+)
 from .calibrate import CalibrationRequest, calibration_manager
-from .camera_identity import resolve_cv2_index
-from .camera_preview import CameraOpenError, camera_preview_manager
 from .identify import identify_arm_by_motion
 from .jobs import (
     DatasetNotOnHubError,
@@ -73,6 +80,7 @@ from .record import (
     UploadRequest,
     handle_delete_dataset,
     handle_exit_early,
+    handle_recording_log,
     handle_recording_status,
     handle_rerecord_episode,
     handle_start_recording,
@@ -82,6 +90,7 @@ from .record import (
 )
 from .rollout import (
     InferenceRequest,
+    handle_inference_log,
     handle_inference_status,
     handle_start_inference,
     handle_stop_inference,
@@ -90,7 +99,6 @@ from .rollout import (
 # Import our custom teleoperation functionality
 from .teleoperate import (
     TeleoperateRequest,
-    handle_get_joint_positions,
     handle_start_teleoperation,
     handle_stop_teleoperation,
     handle_teleoperation_status,
@@ -99,17 +107,19 @@ from .teleoperate import (
 # Training is now job-based; see app/jobs.py.
 from .train import TrainingRequest
 from .update import handle_run_update, handle_update_check
-from .utils import config
 from .utils.config import (
     FOLLOWER_CONFIG_PATH,
     LEADER_CONFIG_PATH,
     add_dismissed_hub_job,
+    add_hidden_dataset,
+    add_hidden_model,
+    add_saved_custom_dataset,
+    add_saved_custom_model,
+    calibration_dir_for_device,
     clear_config_references,
     config_slot_conflict,
     delete_robot_record,
-    detect_port_after_disconnect,
     find_available_ports,
-    find_robot_port,
     get_default_robot_port,
     get_dismissed_hub_jobs,
     get_robot_record,
@@ -119,10 +129,13 @@ from .utils.config import (
     list_robot_records,
     port_slot_conflict,
     prune_dismissed_hub_jobs,
+    remove_hidden_dataset,
+    remove_hidden_model,
+    remove_saved_custom_dataset,
+    remove_saved_custom_model,
     rename_calibration_config,
     rename_robot_record,
     save_imported_calibration,
-    save_robot_port,
     save_robot_record,
 )
 from .utils.hf_auth import (
@@ -133,7 +146,6 @@ from .utils.hf_auth import (
     shared_hf_api,
 )
 from .utils.system import (
-    handle_get_cuda_status,
     handle_get_policy_extra,
     handle_get_training_extra,
     handle_get_wandb_extra,
@@ -143,6 +155,7 @@ from .utils.system import (
     handle_install_training_extra_status,
     handle_install_wandb_extra,
     handle_install_wandb_extra_status,
+    open_folder_in_file_browser,
     warn_if_cuda_mismatch,
 )
 from .wiggle import wiggle_gripper
@@ -158,10 +171,10 @@ logger = logging.getLogger(__name__)
 # subpaths like /jobs/{id}/logs), and error responses still log.
 _QUIET_STATUS_POLL_PATHS = {
     "/auto-calibration-status",
+    "/auto-calibration-batch-status",
     "/calibration-status",
     "/teleoperation-status",
     "/recording-status",
-    "/joint-positions",
     "/jobs",
 }
 
@@ -398,22 +411,6 @@ job_registry.set_on_change(manager.notify_jobs_changed)
 job_registry.set_on_progress(manager.notify_job_progress)
 
 
-@app.get("/get-configs")
-def get_configs():
-    # Get all available calibration configs as STEMS (no .json) — the canonical
-    # user-facing name. The .json is only the on-disk filename.
-    leader_configs = [
-        os.path.splitext(os.path.basename(f))[0]
-        for f in glob.glob(os.path.join(LEADER_CONFIG_PATH, "*.json"))
-    ]
-    follower_configs = [
-        os.path.splitext(os.path.basename(f))[0]
-        for f in glob.glob(os.path.join(FOLLOWER_CONFIG_PATH, "*.json"))
-    ]
-
-    return {"leader_configs": leader_configs, "follower_configs": follower_configs}
-
-
 # Frontend policy_type -> lerobot registry name. In this lerobot pin the names
 # match 1:1 (pi0_fast registers as "pi0_fast", not the older "pi0fast").
 # reward_classifier is NOT a policy in this pin: it registers under the
@@ -521,12 +518,6 @@ def teleoperation_status():
     return handle_teleoperation_status()
 
 
-@app.get("/joint-positions")
-def get_joint_positions():
-    """Get current robot joint positions"""
-    return handle_get_joint_positions()
-
-
 @app.post("/start-inference")
 def start_inference(request: InferenceRequest):
     result = handle_start_inference(request)
@@ -552,6 +543,15 @@ def stop_inference():
 @app.get("/inference-status")
 def inference_status():
     return handle_inference_status()
+
+
+@app.get("/inference-log")
+def inference_log():
+    """Tail of the active/most-recent rollout's log file (read-only, bounded).
+
+    Returns {logs, log_path}; empty logs (not an error) when no run has produced
+    output yet, so the frontend can poll unconditionally."""
+    return handle_inference_log()
 
 
 @app.get("/health")
@@ -590,26 +590,18 @@ def datasets_list():
 
 @app.get("/datasets/info")
 def datasets_info(repo_id: str):
-    """Detail card for one locally-cached dataset (episodes, cameras, tasks,
-    size on disk). repo_id is a query param because repo ids contain '/'."""
+    """Detail card for one dataset. Local cache first (full detail: episodes,
+    cameras, tasks, size on disk — ``source: "local"``); a dataset with no
+    local copy falls back to a Hub summary read from its meta/info.json
+    (episodes/frames/fps/robot/cameras, no tasks/size — ``source: "hub"``).
+    404 only when NEITHER resolves (offline / unknown repo). repo_id is a query
+    param because repo ids contain '/'."""
     info = dataset_browser.get_local_dataset_info(repo_id)
+    if info is None:
+        info = dataset_browser.get_hub_dataset_info(repo_id)
     if info is None:
         raise HTTPException(status_code=404, detail=f"Dataset '{repo_id}' not found in the local cache")
     return info
-
-
-@app.get("/models")
-async def get_models():
-    """The user's Hub model repos plus local models (training runs, imported
-    dirs), each tagged with `source`, sorted newest-added first.
-
-    Local models are listed even when signed out — they live on this machine
-    and don't need the Hub (list_user_models degrades to empty on its own)."""
-    return {
-        "status": "success",
-        "authenticated": cached_whoami() is not None,
-        "models": list_all_models(job_registry.list(limit=200)),
-    }
 
 
 @app.get("/datasets/hub-status")
@@ -621,6 +613,50 @@ def datasets_hub_status(repo_id: str):
     — see get_hub_status. repo_id is a query param because repo ids contain '/'.
     """
     return dataset_browser.get_hub_status(repo_id)
+
+
+@app.get("/datasets/hub-settings")
+def datasets_hub_settings(repo_id: str):
+    """Current Hub-side visibility + tags for a dataset, for pre-filling the
+    post-upload editor. Returns ``{repo_id, private, tags}``. 400 offline;
+    403/502 on a Hub failure. repo_id is a query param (repo ids contain '/')."""
+    try:
+        return dataset_browser.get_hub_settings(repo_id)
+    except dataset_browser.DatasetHubEditError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.message) from exc
+
+
+class DatasetVisibilityBody(BaseModel):
+    repo_id: str
+    private: bool
+
+
+@app.post("/datasets/visibility")
+def datasets_visibility(body: DatasetVisibilityBody):
+    """Flip a Hub dataset's visibility (public <-> private). MUTATES the live
+    repo. 400 offline; 403 when the token can't write the namespace; 502 on any
+    other Hub failure. Invalidates the cached hub-status so the card re-reads."""
+    try:
+        return dataset_browser.set_dataset_visibility(body.repo_id, body.private)
+    except dataset_browser.DatasetHubEditError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.message) from exc
+
+
+class DatasetTagsBody(BaseModel):
+    repo_id: str
+    tags: list[str]
+
+
+@app.post("/datasets/tags")
+def datasets_tags(body: DatasetTagsBody):
+    """Replace a Hub dataset card's ``tags:`` metadata. User tags run through
+    with_makerlab_tag first, so the required org tags are never dropped. MUTATES
+    the live card. 400 offline; 403 no write permission; 502 other Hub failure.
+    Returns the final tag list actually written."""
+    try:
+        return dataset_browser.set_dataset_tags(body.repo_id, body.tags)
+    except dataset_browser.DatasetHubEditError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.message) from exc
 
 
 class DatasetRenameBody(BaseModel):
@@ -643,6 +679,118 @@ def datasets_rename(body: DatasetRenameBody):
     return {"success": True, "repo_id": new_repo_id}
 
 
+class CustomDatasetRequest(BaseModel):
+    repo_id: str
+
+
+# A Hub dataset id is namespace/name; allow word chars, dot, and dash in each.
+_CUSTOM_REPO_RE = re.compile(r"^[\w.-]+/[\w.-]+$")
+
+
+@app.post("/datasets/custom")
+def datasets_save_custom(request: CustomDatasetRequest):
+    """Pin a typed Hub dataset repo id so it persists in the picker listing.
+
+    Called when the user selects "Use org/name" for a dataset that isn't in
+    their own namespace and has no local copy. Idempotent. Invalidates the
+    listing cache so the pinned dataset appears immediately.
+    """
+    repo_id = request.repo_id.strip()
+    if not _CUSTOM_REPO_RE.match(repo_id):
+        raise HTTPException(status_code=400, detail="Enter a Hub dataset id as namespace/name.")
+    add_saved_custom_dataset(repo_id)
+    # AUTO-UNHIDE: re-adding a repo the user previously removed from the list
+    # must make it visible again — otherwise the pin lands behind the hidden
+    # filter and the "added" dataset never appears.
+    remove_hidden_dataset(repo_id)
+    dataset_browser.invalidate_dataset_listing_cache()
+    return {"success": True, "repo_id": repo_id}
+
+
+@app.delete("/datasets/custom")
+def datasets_remove_custom(request: CustomDatasetRequest):
+    """Unpin a saved custom dataset (does NOT touch the Hub or any local copy)."""
+    repo_id = request.repo_id.strip()
+    removed = remove_saved_custom_dataset(repo_id)
+    dataset_browser.invalidate_dataset_listing_cache()
+    return {"success": removed, "repo_id": repo_id}
+
+
+@app.post("/datasets/hide")
+def datasets_hide(request: CustomDatasetRequest):
+    """Hide a Hub dataset from the picker listing ("remove from list").
+
+    NEVER deletes or mutates the Hub repo — it's a persistent local filter for
+    hub rows the user's own namespace listing keeps returning (a pinned row is
+    unpinned instead; a local copy is deleted instead). Re-pinning via
+    POST /datasets/custom auto-unhides. Invalidates the listing cache only (the
+    hub-status cache is untouched — the repo's Hub state didn't change)."""
+    repo_id = request.repo_id.strip()
+    if not _CUSTOM_REPO_RE.match(repo_id):
+        raise HTTPException(status_code=400, detail="Enter a Hub dataset id as namespace/name.")
+    add_hidden_dataset(repo_id)
+    dataset_browser.invalidate_dataset_listing_cache()
+    dataset_browser.invalidate_hub_dataset_info(repo_id)
+    return {"success": True, "repo_id": repo_id}
+
+
+@app.delete("/datasets/hide")
+def datasets_unhide(request: CustomDatasetRequest):
+    """Unhide a dataset so it reappears in the listing (does NOT touch the Hub)."""
+    repo_id = request.repo_id.strip()
+    removed = remove_hidden_dataset(repo_id)
+    dataset_browser.invalidate_dataset_listing_cache()
+    return {"success": removed, "repo_id": repo_id}
+
+
+class DatasetDownloadRequest(BaseModel):
+    repo_id: str
+
+
+@app.post("/datasets/download")
+def datasets_download(request: DatasetDownloadRequest):
+    """Download a Hub dataset into the local cache in the background.
+
+    Returns immediately with {started, repo_id, message}; poll
+    /datasets/download-status for progress. The dataset lands in the flat cache
+    layout so the listing source flips to "both" on completion. 400 for a
+    malformed repo id; 409 when a download is already running."""
+    repo_id = request.repo_id.strip()
+    if not _CUSTOM_REPO_RE.match(repo_id):
+        raise HTTPException(status_code=400, detail="Enter a Hub dataset id as namespace/name.")
+    result = dataset_browser.download_manager.start(repo_id)
+    if not result.get("started"):
+        raise HTTPException(status_code=409, detail=result.get("message", "Download could not be started"))
+    return result
+
+
+@app.get("/datasets/download-status")
+def datasets_download_status():
+    """Current download state (idle | running | done | error) + repo_id, message,
+    and error once failed. Polled by the info card so a download survives
+    navigation."""
+    return dataset_browser.download_manager.get_status()
+
+
+class DatasetImportRequest(BaseModel):
+    path: str
+    name: str | None = None
+
+
+@app.post("/datasets/import")
+def datasets_import(request: DatasetImportRequest):
+    """Import a LeRobot dataset folder already on the server machine by COPYING
+    it into the local cache (the user's source folder is left intact).
+
+    Validates the folder is a LeRobot dataset with episodes and the target name.
+    400 invalid source/name; 404 no such folder; 409 target already exists.
+    Copy is synchronous — the request blocks until it completes."""
+    try:
+        return dataset_browser.import_local_dataset(request.path, request.name)
+    except dataset_browser.DatasetImportError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.message) from exc
+
+
 @app.post("/datasets/merge")
 def datasets_merge(request: MergeRequest):
     """Aggregate 2+ datasets into a new local dataset in the background."""
@@ -653,12 +801,6 @@ def datasets_merge(request: MergeRequest):
 def datasets_merge_status():
     """Current merge state + drained log lines (idle | running | done | error)."""
     return handle_merge_status()
-
-
-@app.get("/ws-test")
-def websocket_test():
-    """Test endpoint to verify WebSocket support"""
-    return {"websocket_endpoint": "/ws/joint-data", "status": "available"}
 
 
 @app.websocket("/ws/joint-data")
@@ -700,15 +842,29 @@ def start_recording(request: RecordingRequest):
 
 
 @app.post("/stop-recording")
-def stop_recording():
-    """Stop the current recording session"""
-    return handle_stop_recording()
+def stop_recording(discard: bool = False):
+    """End the current recording session.
+
+    ``discard`` is a query parameter (not a body) so the browser's page-leave
+    safety net can POST it via a keepalive/beacon "simple request" during unload
+    without tripping a CORS preflight. ``discard=false`` keeps every saved
+    episode (Done); ``discard=true`` throws the recording away (Quit / an
+    unintentional page exit) — see handle_stop_recording."""
+    return handle_stop_recording(discard=discard)
 
 
 @app.get("/recording-status")
 def recording_status():
     """Get the current recording status"""
     return handle_recording_status()
+
+
+@app.get("/recording-log")
+def recording_log():
+    """Tail of the current/most-recent recording session's log (read-only,
+    bounded ring buffer). Returns {logs}; empty (not an error) before a session
+    has captured anything, so the frontend can poll unconditionally."""
+    return handle_recording_log()
 
 
 @app.post("/recording-exit-early")
@@ -746,6 +902,171 @@ def upload_status():
 def delete_dataset(request: DatasetInfoRequest):
     """Remove a recorded dataset directory from local disk."""
     return handle_delete_dataset(request)
+
+
+# ============================================================================
+# MODEL ENDPOINTS
+# ============================================================================
+# A datasets-style browser for trained policies. Local models are the final
+# checkpoint of each completed local training run (read from the job registry);
+# Hub models are the user's LeRobot policy repos. See makerlab/models.py.
+
+
+@app.get("/models")
+def models_list():
+    """List trained models available to the user — local runs + Hub repos.
+
+    Each entry carries a `source` field: "local", "hub", or "both" (a local run
+    that was also pushed to the Hub). Mirrors GET /datasets."""
+    return model_browser.list_all_models()
+
+
+@app.get("/models/info")
+def models_info(id: str):
+    """Detail card for one model: policy type, base dataset, steps, size, and the
+    local path (local) or Hub repo (hub). `id` is a local run id or a Hub repo id
+    (a query param because repo ids contain '/'). 404 when neither resolves."""
+    info = model_browser.get_model_info(id)
+    if info is None:
+        raise HTTPException(status_code=404, detail=f"Model '{id}' not found")
+    return info
+
+
+class ModelUploadBody(BaseModel):
+    id: str
+    repo_id: str | None = None
+
+
+@app.post("/models/upload")
+def models_upload(body: ModelUploadBody):
+    """Push a local run's final checkpoint to the Hub as a PUBLIC, MakerLab-tagged
+    model repo. MUTATES the Hub (creates/updates the repo). 400 offline; 403 when
+    the token can't write the namespace; 404 when the local model has no saved
+    checkpoint; 502 on any other Hub failure. Returns {repo_id, url, tags}."""
+    try:
+        return model_browser.upload_local_model(body.id, body.repo_id)
+    except model_browser.ModelError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.message) from exc
+
+
+class ModelDeleteBody(BaseModel):
+    id: str
+
+
+@app.post("/models/delete")
+def models_delete(body: ModelDeleteBody):
+    """Delete a local model — its training run's output dir (strictly sandboxed
+    under outputs/train/). Never touches the Hub. 400 unsafe/non-local; 404
+    unknown; 409 when the run is still training; 502 on a delete failure."""
+    try:
+        return model_browser.delete_local_model(body.id)
+    except model_browser.ModelError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.message) from exc
+
+
+class CustomModelRequest(BaseModel):
+    repo_id: str
+
+
+@app.post("/models/custom")
+def models_save_custom(request: CustomModelRequest):
+    """Pin a Hub model repo id so it persists in the /models listing.
+
+    The models mirror of POST /datasets/custom (same repo-id shape, same
+    idempotence). Invalidates the model listing cache so the pin appears
+    immediately."""
+    repo_id = request.repo_id.strip()
+    if not _CUSTOM_REPO_RE.match(repo_id):
+        raise HTTPException(status_code=400, detail="Enter a Hub model id as namespace/name.")
+    add_saved_custom_model(repo_id)
+    # AUTO-UNHIDE: mirrors POST /datasets/custom — re-adding a hidden repo must
+    # make it visible again.
+    remove_hidden_model(repo_id)
+    model_browser.invalidate_model_listing_cache()
+    return {"success": True, "repo_id": repo_id}
+
+
+@app.delete("/models/custom")
+def models_remove_custom(request: CustomModelRequest):
+    """Unpin a saved custom model (does NOT touch the Hub or any local copy)."""
+    repo_id = request.repo_id.strip()
+    removed = remove_saved_custom_model(repo_id)
+    model_browser.invalidate_model_listing_cache()
+    return {"success": removed, "repo_id": repo_id}
+
+
+@app.post("/models/hide")
+def models_hide(request: CustomModelRequest):
+    """Hide a Hub model from the picker listing ("remove from list").
+
+    NEVER deletes or mutates the Hub repo — a persistent local filter, the
+    models mirror of POST /datasets/hide. Re-pinning via POST /models/custom
+    auto-unhides. Invalidates the listing cache only."""
+    repo_id = request.repo_id.strip()
+    if not _CUSTOM_REPO_RE.match(repo_id):
+        raise HTTPException(status_code=400, detail="Enter a Hub model id as namespace/name.")
+    add_hidden_model(repo_id)
+    model_browser.invalidate_model_listing_cache()
+    model_browser.invalidate_model_hub_info(repo_id)
+    return {"success": True, "repo_id": repo_id}
+
+
+@app.delete("/models/hide")
+def models_unhide(request: CustomModelRequest):
+    """Unhide a model so it reappears in the listing (does NOT touch the Hub)."""
+    repo_id = request.repo_id.strip()
+    removed = remove_hidden_model(repo_id)
+    model_browser.invalidate_model_listing_cache()
+    return {"success": removed, "repo_id": repo_id}
+
+
+class ModelDownloadRequest(BaseModel):
+    repo_id: str
+
+
+@app.post("/models/download")
+def models_download(request: ModelDownloadRequest):
+    """Download a Hub model checkpoint into the local models dir in the
+    background. Returns immediately with {started, repo_id, message}; poll
+    /models/download-status for progress. On completion the listing source flips
+    to "both" and inference can run on it offline. 400 for a malformed repo id;
+    409 when a download is already running (shared one-at-a-time budget with the
+    dataset downloader — each manager runs its own single download)."""
+    repo_id = request.repo_id.strip()
+    if not _CUSTOM_REPO_RE.match(repo_id):
+        raise HTTPException(status_code=400, detail="Enter a Hub model id as namespace/name.")
+    result = model_browser.model_download_manager.start(repo_id)
+    if not result.get("started"):
+        raise HTTPException(status_code=409, detail=result.get("message", "Download could not be started"))
+    return result
+
+
+@app.get("/models/download-status")
+def models_download_status():
+    """Current model-download state (idle | running | done | error) + repo_id,
+    message, and error once failed. Polled by the model info card so a download
+    survives navigation. Mirrors /datasets/download-status."""
+    return model_browser.model_download_manager.get_status()
+
+
+class ModelImportRequest(BaseModel):
+    path: str
+    name: str | None = None
+
+
+@app.post("/models/import")
+def models_import(request: ModelImportRequest):
+    """Import a policy checkpoint folder already on the server machine by
+    COPYING it into the local models dir (the source folder is left intact).
+
+    Validates the folder is a checkpoint (config.json or checkpoints tree) and
+    the target name. 400 invalid source/name; 404 no such folder; 409 target
+    already exists. Copy is synchronous — the request blocks until it completes.
+    Mirrors POST /datasets/import."""
+    try:
+        return model_browser.import_local_model(request.path, request.name)
+    except model_browser.ModelError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.message) from exc
 
 
 # ============================================================================
@@ -791,6 +1112,37 @@ async def create_training_job(req: Request):
                 f"step ({cfg.resume_from_step}) to continue training."
             ),
         )
+    # Local preflight (belt-and-braces), the mirror of the cloud
+    # DatasetNotOnHubError guard: a LOCAL run with no --dataset.root makes
+    # lerobot auto-download the dataset from the Hub at start. When the Hub is
+    # offline (HF_HUB_OFFLINE) that download can't happen — it hangs or dies
+    # with a raw traceback — so reject up front with an actionable message
+    # instead of starting a doomed job. Purely offline flag + local filesystem
+    # check; no network call (no repo_exists/whoami). A RESUME run inherits its
+    # dataset via config_path and doesn't re-download, but dataset_repo_id is a
+    # required field so we can't distinguish resume by its absence; the guard is
+    # a no-op on resume anyway because the resumed dataset is by definition
+    # already local (it was trained on locally before), so is_dataset_available_
+    # locally returns True and nothing is blocked.
+    runner = body.target.runner if body.target is not None else "local"
+    if runner == "local" and cfg.dataset_repo_id and hf_hub_offline():
+        from .datasets import is_dataset_available_locally
+
+        if not is_dataset_available_locally(cfg.dataset_repo_id):
+            # 400 (matching this endpoint's other preflight rejections — the
+            # resume-steps guard above and the ValueError->400 below), NOT 409:
+            # startTrainingJob (jobsApi.ts) rewrites EVERY 409 into "Another
+            # training is already running", which would mask this message. 400
+            # lets FastAPI's `detail` reach the toast verbatim.
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Dataset '{cfg.dataset_repo_id}' isn't available locally and the "
+                    "Hub is offline (HF_HUB_OFFLINE) — it can't be downloaded for a "
+                    "local run. Start MakerLab without --offline (or with Hub access) to "
+                    "fetch it, or record/obtain the dataset locally first."
+                ),
+            )
     try:
         record = job_registry.start(body.config, body.target)
     except JobAlreadyRunningError as exc:
@@ -856,6 +1208,108 @@ def _hub_job_stage(ji) -> str:
     return (ji.status.stage or "").upper() if ji.status else ""
 
 
+# Errors a per-author Hub model listing may raise that must degrade to "empty for
+# this author" instead of 500ing /jobs/hub. httpx.HTTPError is the base of
+# ConnectError / TimeoutException / TransportError — what a GFW-killed TLS
+# connection raises — plus HfHubHTTPError for HTTP-status failures and OSError for
+# lower-level socket failures.
+_HUB_MODEL_LISTING_ERRORS = (HfHubHTTPError, httpx.HTTPError, OSError)
+
+# Bounded per-author fan-out for the model listing. Small cap (a handful of
+# authors). The timeout is the OVERALL fan-out budget — the single deadline the
+# whole batch must finish within (authors run concurrently, so overall ≈
+# per-author). It is the ONLY timeout in the stack: the shared HfApi httpx
+# client is built with timeout=None, so a blackholed connection would otherwise
+# stall /jobs/hub until the OS TCP layer gives up. 5s lets a merely-slow Hub
+# succeed while a hung author is abandoned fast.
+_HUB_MODEL_FANOUT_MAX_WORKERS = 8
+_HUB_MODEL_FANOUT_TIMEOUT_S = 5.0
+
+# Short-TTL cache for the /jobs/hub response. Startup + navigation re-hit this in
+# quick succession; caching avoids re-fanning-out to the (slow/flaky) Hub each
+# time. TTL uses time.monotonic() (app runtime, immune to wall-clock jumps).
+_HUB_JOBS_CACHE_TTL_S = 45.0
+_hub_jobs_cache_lock = threading.Lock()
+_hub_jobs_cache: dict[str, Any] | None = None  # {"at": monotonic, "value": {...}}
+
+
+def invalidate_hub_jobs_cache() -> None:
+    """Drop the cached /jobs/hub response so the next call re-fetches. Called
+    after a Hub model delete so the removal reflects immediately."""
+    global _hub_jobs_cache
+    with _hub_jobs_cache_lock:
+        _hub_jobs_cache = None
+
+
+def _list_author_models(api, author: str) -> list:
+    """All makerlab-relevant model repos for one author, as a materialized list.
+
+    Collapses what used to be TWO calls per author (a `filter="lerobot"` call plus
+    an unfiltered fallback) into ONE unfiltered `list_models(author=...)` call,
+    filtering client-side. A repo qualifies if EITHER:
+
+      * it carries the `lerobot` library tag (what push_to_hub stamps), OR
+      * its name matches the makerlab run-repo pattern (the "_<timestamp>" suffix) —
+        this pulls in the empty repos a crashed cloud run pre-creates but never
+        tags, which the untracked-cleanup path exists to delete.
+
+    This is the same union the old two-pass code produced, at half the calls.
+    The generator is materialized here (inside the fan-out worker) so the network
+    I/O happens under the per-author timeout budget.
+    """
+    out = []
+    for m in api.list_models(author=author, limit=200, expand=["lastModified", "private", "tags"]):
+        tags = getattr(m, "tags", None) or []
+        name = m.id.split("/", 1)[-1]
+        if "lerobot" in tags or _RUN_REPO_RE.search(name):
+            out.append(m)
+    return out
+
+
+def _fan_out_model_authors(authors: list[str], call) -> list:
+    """Run `call(author)` for each author concurrently, gathering the results —
+    the /jobs/hub twin of datasets._fan_out_hub_authors (kept separate for its
+    own error tuple + log wording). Per-author failures are logged and
+    swallowed; the whole batch runs under ONE overall deadline
+    (_HUB_MODEL_FANOUT_TIMEOUT_S) so a hung connection (the underlying httpx
+    client has timeout=None) can't stall the endpoint. Returns the successful
+    authors' results in author order."""
+    if not authors:
+        return []
+
+    results: list = [None] * len(authors)
+    max_workers = min(_HUB_MODEL_FANOUT_MAX_WORKERS, len(authors))
+    # Deliberately NOT `with ThreadPoolExecutor(...)`: the context-manager exit
+    # JOINS the workers, so a hung author would stall us at the `with` exit even
+    # after the as_completed deadline fired. shutdown(wait=False,
+    # cancel_futures=True) cancels queued-not-started work; an already-running
+    # hung thread is left to die with its socket — a bounded leak (the OS TCP
+    # timeout eventually reaps it), which beats blocking the endpoint on it.
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+    future_to_idx = {pool.submit(call, author): i for i, author in enumerate(authors)}
+    try:
+        for future in concurrent.futures.as_completed(future_to_idx, timeout=_HUB_MODEL_FANOUT_TIMEOUT_S):
+            idx = future_to_idx[future]
+            author = authors[idx]
+            try:
+                results[idx] = future.result()
+            except _HUB_MODEL_LISTING_ERRORS as exc:
+                logger.warning("list_models(%s) failed: %s", author, exc)
+            except Exception as exc:  # noqa: BLE001 - listings are best-effort; never 500
+                logger.warning("list_models(%s) failed unexpectedly: %s", author, exc)
+    except concurrent.futures.TimeoutError:
+        unfinished = [authors[i] for f, i in future_to_idx.items() if not f.done()]
+        logger.warning(
+            "Hub model fan-out exceeded %ss; giving up on authors: %s",
+            _HUB_MODEL_FANOUT_TIMEOUT_S,
+            ", ".join(unfinished) or "(none)",
+        )
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+
+    return [r for r in results if r is not None]
+
+
 @app.get("/jobs/hub")
 def list_hub_jobs():
     """List the user's HF Cloud compute Jobs and their uploaded LeRobot model
@@ -867,8 +1321,17 @@ def list_hub_jobs():
     Declared before `/jobs/{job_id}` so FastAPI's first-match routing doesn't
     treat "hub" as a job id.
     """
+    global _hub_jobs_cache
+
+    now = time.monotonic()
+    with _hub_jobs_cache_lock:
+        if _hub_jobs_cache is not None and (now - _hub_jobs_cache["at"]) < _HUB_JOBS_CACHE_TTL_S:
+            return _hub_jobs_cache["value"]
+
     info = cached_whoami()
     if info is None:
+        # Not cached: unauthenticated is cheap to recompute and self-heals the
+        # moment a token appears.
         return {"authenticated": False, "jobs": [], "models": []}
     api = shared_hf_api()
 
@@ -924,38 +1387,20 @@ def list_hub_jobs():
             }
         )
 
-    for author in authors:
-        # Two passes, unioned + deduped by _add():
-        #
-        # 1. The `lerobot` library tag — lowercase, which is what LeRobot's
-        #    push_to_hub actually stamps (the old `filter="LeRobot"` was both the
-        #    wrong case AND excluded any repo without a tag, so it returned
-        #    NOTHING here — hiding even a successfully-pushed run).
-        # 2. An UNFILTERED author listing restricted to makerlab run-repo names
-        #    (the "_<timestamp>" suffix). This is what pulls in the empty repos
-        #    a crashed cloud run pre-creates but never populates (no commit, no
-        #    tags) — the orphans the untracked-cleanup path exists to delete.
-        #    Restricting to the run-repo naming keeps a user's unrelated personal
-        #    models out of the list; those are theirs, not makerlab's to surface.
-        #
-        # expand=["lastModified", ...] is requested because the default listing
-        # returns last_modified=None, which would collapse the sort key.
-        try:
-            for m in api.list_models(
-                author=author, filter="lerobot", limit=200, expand=["lastModified", "private"]
-            ):
-                _add(m)
-        except Exception as exc:
-            logger.warning("list_models(%s, tag=lerobot) failed: %s", author, exc)
-        try:
-            for m in api.list_models(author=author, limit=200, expand=["lastModified", "private"]):
-                if _RUN_REPO_RE.search(m.id.split("/", 1)[-1]):
-                    _add(m)
-        except Exception as exc:
-            logger.warning("list_models(%s, unfiltered) failed: %s", author, exc)
+    # Fan out the per-author model listing concurrently (bounded pool, one
+    # OVERALL deadline — see _fan_out_model_authors). Each author is ONE
+    # unfiltered list_models call, filtered client-side by _list_author_models
+    # (union of the `lerobot` tag and the makerlab run-repo naming). Each author's
+    # call is guarded so a GFW-killed connection / hung socket / slow author
+    # degrades to "no models from that author" instead of sinking the batch or
+    # stalling the endpoint. Results are deduped by _add() in author order,
+    # preserving the original merge semantics.
+    for author_models in _fan_out_model_authors(authors, lambda author: _list_author_models(api, author)):
+        for m in author_models or []:
+            _add(m)
     models.sort(key=lambda m: m["last_modified"] or "", reverse=True)
 
-    return {
+    response = {
         "authenticated": True,
         "jobs_permission": jobs_permission,
         "jobs": [
@@ -973,6 +1418,10 @@ def list_hub_jobs():
         ],
         "models": models,
     }
+
+    with _hub_jobs_cache_lock:
+        _hub_jobs_cache = {"at": time.monotonic(), "value": response}
+    return response
 
 
 @app.delete("/jobs/hub/models/{repo_id:path}")
@@ -992,8 +1441,9 @@ def delete_hub_model(repo_id: str):
     - Auth/permission failures (401/403) surface the friendly "token needs
       write access" message.
 
-    The `/jobs/hub` listing is not cached backend-side — it re-queries the Hub
-    on every call — so the frontend just needs to re-fetch after this returns.
+    The `/jobs/hub` listing is cached backend-side for a short TTL; this delete
+    invalidates that cache (see invalidate_hub_jobs_cache) so the removed repo
+    disappears immediately when the frontend re-fetches.
     """
     info = cached_whoami()
     username = info.get("name") if info else None
@@ -1033,6 +1483,9 @@ def delete_hub_model(repo_id: str):
         logger.warning("delete_repo(%s) failed: %s", repo_id, exc)
         raise HTTPException(status_code=502, detail=f"Hub delete failed: {exc}") from exc
 
+    # The listing changed — drop the cached /jobs/hub response so the removed
+    # repo doesn't linger until the TTL expires.
+    invalidate_hub_jobs_cache()
     return {"status": "success", "repo_id": repo_id}
 
 
@@ -1276,12 +1729,6 @@ def get_runners_hardware():
 # ============================================================================
 
 
-@app.get("/system/cuda-status")
-def get_cuda_status():
-    """Report whether an NVIDIA GPU is present but PyTorch is CPU-only (issue #30)."""
-    return handle_get_cuda_status()
-
-
 @app.get("/system/training-extra")
 def get_training_extra():
     """Return whether the LeRobot training extra (accelerate) is importable."""
@@ -1400,6 +1847,28 @@ def stop_auto_calibration():
 def auto_calibration_status():
     """Current auto-calibration state + streamed log lines."""
     return auto_calibration_manager.get_status()
+
+
+@app.post("/start-auto-calibration-batch")
+def start_auto_calibration_batch(request: AutoCalibrationBatchRequest):
+    """Auto-calibrate a user-selected subset of arms CONCURRENTLY. Each arm runs
+    its own subprocess on its own serial port with an independent outcome
+    (partial success). Validated up front (1-4 arms, distinct ports, distinct
+    same-side names, name-taken pre-check) before any hardware is touched."""
+    return auto_calibration_batch_manager.start(request)
+
+
+@app.post("/stop-auto-calibration-batch")
+def stop_auto_calibration_batch():
+    """Stop ALL running arms of a batch auto-calibration, releasing each arm's
+    torque independently."""
+    return auto_calibration_batch_manager.stop()
+
+
+@app.get("/auto-calibration-batch-status")
+def auto_calibration_batch_status():
+    """Per-arm status + logs and overall counts for a batch auto-calibration."""
+    return auto_calibration_batch_manager.get_status()
 
 
 @app.get("/calibration-configs/{device_type}")
@@ -1604,6 +2073,34 @@ def rename_calibration_config_endpoint(device_type: str, config_name: str, body:
     return JSONResponse(status_code=status_code, content={"success": False, "message": message})
 
 
+class OpenCalibrationFolderRequest(BaseModel):
+    device_type: str  # "teleop" (leader) or "robot" (follower)
+
+
+@app.post("/open-calibration-folder")
+def open_calibration_folder(request: OpenCalibrationFolderRequest):
+    """Open a side's calibration folder in the OS file browser (Finder/Explorer/
+    xdg-open). LOCAL, non-network action — spawns a GUI on the host machine only.
+    The dir is created if missing so a fresh install opens an empty folder rather
+    than failing. An unknown device_type is rejected with 400.
+    """
+    path = calibration_dir_for_device(request.device_type)
+    if path is None:
+        return JSONResponse(
+            status_code=400,
+            content={"opened": False, "message": "device_type must be 'teleop' or 'robot'"},
+        )
+    try:
+        open_folder_in_file_browser(path)
+    except Exception as e:
+        logger.error(f"Failed to open calibration folder {path}: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"opened": False, "message": f"Could not open folder: {e}", "path": path},
+        )
+    return {"opened": True, "path": path}
+
+
 # ============================================================================
 # PORT DETECTION ENDPOINTS
 # ============================================================================
@@ -1760,18 +2257,56 @@ def _v4l2_camera_name(index: int) -> str | None:
         return None
 
 
-def _linux_cameras() -> list[dict[str, Any]]:
-    """Enumerate Linux cameras, naming each from sysfs (no extra deps)."""
-    import cv2
+# struct v4l2_capability from <linux/videodev2.h>, and the QUERYCAP ioctl
+# request code (_IOR('V', 0, struct v4l2_capability), 104 bytes).
+_VIDIOC_QUERYCAP = 0x80685600
+_V4L2_CAP_VIDEO_CAPTURE = 0x00000001
 
+
+class _V4l2Capability(ctypes.Structure):
+    _fields_ = [
+        ("driver", ctypes.c_char * 16),
+        ("card", ctypes.c_char * 32),
+        ("bus_info", ctypes.c_char * 32),
+        ("version", ctypes.c_uint32),
+        ("capabilities", ctypes.c_uint32),
+        ("device_caps", ctypes.c_uint32),
+        ("reserved", ctypes.c_uint32 * 3),
+    ]
+
+
+def _linux_cameras() -> list[dict[str, Any]]:
+    """Enumerate Linux capture devices via VIDIOC_QUERYCAP, without opening them.
+
+    The previous cv2.VideoCapture probe claimed each device's format on open,
+    which fails EBUSY while browser previews hold the cameras — V4L2 is
+    single-streamer, so cameras vanished from the list whenever previews were
+    live. QUERYCAP is a metadata query: it answers on busy devices (the Linux
+    equivalent of the macOS AVFoundation name enumeration, which never opens
+    devices either) and its device_caps distinguishes real capture nodes from
+    the UVC metadata nodes (/dev/video1/3/5...) that cv2 could only rule out
+    by failing to open them, one warning line each.
+    """
+    libc = ctypes.CDLL(None, use_errno=True)
     cameras: list[dict[str, Any]] = []
     for i in range(10):
-        cap = cv2.VideoCapture(i, cv2.CAP_V4L2)
-        opened = cap.isOpened()
-        cap.release()
-        if not opened:
+        try:
+            fd = os.open(f"/dev/video{i}", os.O_RDWR | os.O_NONBLOCK)
+        except OSError:
             continue
-        cameras.append({"index": i, "name": _v4l2_camera_name(i) or f"Camera {i}", "available": True})
+        try:
+            cap = _V4l2Capability()
+            if libc.ioctl(fd, ctypes.c_ulong(_VIDIOC_QUERYCAP), ctypes.byref(cap)) != 0:
+                continue
+            # device_caps is per-node (capabilities is the union across the
+            # whole device, so metadata nodes advertise VIDEO_CAPTURE there).
+            caps = cap.device_caps or cap.capabilities
+            if not caps & _V4L2_CAP_VIDEO_CAPTURE:
+                continue
+            name = cap.card.decode(errors="replace").strip() or _v4l2_camera_name(i) or f"Camera {i}"
+            cameras.append({"index": i, "name": name, "available": True})
+        finally:
+            os.close(fd)
     return cameras
 
 
@@ -1784,7 +2319,8 @@ def get_available_cameras():
     the browser's ``MediaDeviceInfo.label`` for the live preview:
       - macOS: AVFoundation ``localizedName`` (via a PyObjC subprocess);
       - Windows: DirectShow FriendlyName (via pygrabber; recording pinned DSHOW);
-      - Linux: the v4l2 device name from sysfs.
+      - Linux: the VIDIOC_QUERYCAP card name (sysfs fallback); QUERYCAP works
+        on busy devices, so live previews never hide cameras from the list.
     Without real names the frontend can't match a camera and shows "No browser
     match" with an empty device_id (issues #12, #16).
     """
@@ -1814,89 +2350,7 @@ def get_available_cameras():
         return {"status": "error", "message": str(e), "cameras": []}
 
 
-@app.get("/camera-preview/{index}")
-def camera_preview_stream(index: int, unique_id: str | None = None):
-    """MJPEG preview stream of a camera attached to the *server* machine.
-
-    Fallback for headless deployments (e.g. a Jetson on the LAN): the browser's
-    getUserMedia can't see the server's cameras, so the preview tiles render
-    ``<img src="/camera-preview/{index}">`` instead. The capture is shared and
-    refcounted per index (see makerlab/camera_preview.py); recording force-releases
-    every preview on its start path.
-
-    ``unique_id`` (AVFoundation uniqueID, from /available-cameras) re-anchors
-    the index to the physical device before opening: cv2 resolves indices
-    against this process's startup device snapshot, which diverges from the
-    fresh-subprocess enumeration after a replug — without the re-anchor the
-    stream can silently show a different camera (see makerlab/camera_identity.py).
-
-    Returns 409 while recording is active (it owns the cv2 devices) and 503 when
-    the camera can't be opened. Teleoperation drives the serial bus and opens no
-    cv2 cameras, so a preview during teleop does not contend — it is allowed.
-    """
-    if record_state.recording_active:
-        raise HTTPException(
-            status_code=409,
-            detail="Recording is active — the cameras are in use. Stop recording to preview them.",
-        )
-    resolved = resolve_cv2_index(unique_id, index)
-    if resolved is None:
-        raise HTTPException(
-            status_code=503,
-            detail="Camera not visible to the server — it was plugged in after makerlab "
-            "started. Restart makerlab to use it.",
-        )
-    try:
-        stream = camera_preview_manager.open_stream(resolved)
-    except CameraOpenError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    return StreamingResponse(stream, media_type="multipart/x-mixed-replace; boundary=frame")
-
-
 RobotSideLiteral = Literal["leader", "follower"]
-
-
-class PortDetectionBody(BaseModel):
-    robot_type: RobotSideLiteral = "follower"
-
-
-class PortDisconnectBody(BaseModel):
-    ports_before: list[str]
-
-
-class SaveRobotPortBody(BaseModel):
-    robot_type: RobotSideLiteral
-    port: str
-
-
-class SaveRobotConfigBody(BaseModel):
-    robot_type: RobotSideLiteral
-    config_name: str
-
-
-@app.post("/start-port-detection")
-def start_port_detection(body: PortDetectionBody):
-    """Snapshot available ports so the follow-up /detect-port-after-disconnect
-    call can diff them."""
-    result = find_robot_port(body.robot_type)
-    return {"status": "success", "data": result}
-
-
-@app.post("/detect-port-after-disconnect")
-def detect_port_after_disconnect_endpoint(body: PortDisconnectBody):
-    """Block up to 15s waiting for one port from `ports_before` to disappear."""
-    try:
-        detected_port = detect_port_after_disconnect(body.ports_before)
-    except OSError as exc:
-        raise HTTPException(status_code=408, detail=str(exc)) from exc
-    return {"status": "success", "port": detected_port}
-
-
-@app.post("/save-robot-port")
-def save_robot_port_endpoint(body: SaveRobotPortBody):
-    """Save a robot port for future use"""
-    save_robot_port(body.robot_type, body.port)
-    return {"status": "success", "message": f"Port {body.port} saved for {body.robot_type}"}
 
 
 @app.get("/robot-port/{robot_type}")
@@ -1905,23 +2359,6 @@ def get_robot_port(robot_type: RobotSideLiteral):
     saved_port = get_saved_robot_port(robot_type)
     default_port = get_default_robot_port(robot_type)
     return {"status": "success", "saved_port": saved_port, "default_port": default_port}
-
-
-@app.post("/save-robot-config")
-def save_robot_config_endpoint(body: SaveRobotConfigBody):
-    """Save a robot configuration for future use"""
-    if not config.save_robot_config(body.robot_type, body.config_name):
-        raise HTTPException(status_code=500, detail="Failed to save configuration")
-    return {"status": "success", "message": f"Configuration saved for {body.robot_type}"}
-
-
-@app.get("/robot-config/{robot_type}")
-def get_robot_config(robot_type: RobotSideLiteral, available_configs: str = ""):
-    """Get the saved configuration for a robot type"""
-    available_configs_list = [c.strip() for c in available_configs.split(",") if c.strip()]
-    saved_config = config.get_saved_robot_config(robot_type)
-    default_config = config.get_default_robot_config(robot_type, available_configs_list)
-    return {"status": "success", "saved_config": saved_config, "default_config": default_config}
 
 
 # ============================================================================

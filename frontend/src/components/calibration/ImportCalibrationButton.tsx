@@ -123,7 +123,7 @@ const ImportCalibrationButton: React.FC<ImportCalibrationButtonProps> = ({
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Import {sideLabel} calibration</DialogTitle>
-            <DialogDescription>
+            <DialogDescription className="text-muted-foreground">
               Saves the uploaded calibration as a new {sideLabel} config. Won't
               overwrite an existing name — pick a different one if it's taken.
             </DialogDescription>
@@ -142,14 +142,19 @@ const ImportCalibrationButton: React.FC<ImportCalibrationButtonProps> = ({
             }}
             autoFocus
             placeholder="Config name"
-            className="font-mono"
           />
           {error && <p className="text-sm text-destructive">{error}</p>}
           <DialogFooter className="flex gap-2 justify-end">
-            <Button variant="secondary" onClick={() => setOpen(false)}>
+            <Button
+              variant="outline"
+              onClick={() => setOpen(false)}
+            >
               Cancel
             </Button>
-            <Button disabled={busy || !name.trim()} onClick={submit}>
+            <Button
+              disabled={busy || !name.trim()}
+              onClick={submit}
+            >
               {busy ? "Importing…" : "Import"}
             </Button>
           </DialogFooter>

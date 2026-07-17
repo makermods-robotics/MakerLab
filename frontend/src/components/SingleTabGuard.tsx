@@ -1,7 +1,5 @@
 import { useCallback, useEffect, useRef, useState, ReactNode } from "react";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
-import { Card, CardContent } from "@/components/ui/card";
 
 type Peer = { id: string; openedAt: number; lastSeen: number };
 
@@ -123,23 +121,20 @@ const SingleTabGuard = ({ children }: { children: ReactNode }) => {
       {children}
       {!isPrimary && (
         <div
-          className="fixed inset-0 z-[9999] flex items-center justify-center bg-foreground/80 p-4"
+          className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/80 backdrop-blur-sm"
           role="dialog"
           aria-modal="true"
         >
-          <Card className="w-full max-w-md">
-            <CardContent className="space-y-4 p-6 text-center">
-              <Badge variant="stencil">[ single tab ]</Badge>
-              <h2 className="font-display text-xl font-bold tracking-tight">
-                MakerLab is already open in another tab
-              </h2>
-              <p className="text-sm text-muted-foreground">
-                Only one tab can control the robot at a time. Switch back to the
-                original tab, or take over here; the other tab will lock.
-              </p>
-              <Button onClick={takeOver}>use this tab</Button>
-            </CardContent>
-          </Card>
+          <div className="mx-4 max-w-md space-y-4 rounded-lg border bg-background p-6 text-center shadow-lg">
+            <h2 className="text-lg font-semibold">
+              MakerLab is already open in another tab
+            </h2>
+            <p className="text-sm text-muted-foreground">
+              Only one tab can control the robot at a time. Switch back to the
+              original tab, or take over here — the other tab will lock.
+            </p>
+            <Button onClick={takeOver}>Use this tab</Button>
+          </div>
         </div>
       )}
     </>

@@ -135,6 +135,15 @@
     @apply text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground;
   }
 
+  /* hide native scrollbars on tracks that have their own nav (skill slider) */
+  .no-scrollbar {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+
   /* "picture goes here" slot — dashed rounded muted panel with a pill label */
   .media-slot {
     @apply relative grid place-items-center overflow-hidden rounded-lg border border-dashed border-border bg-muted;

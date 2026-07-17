@@ -42,20 +42,6 @@ def test_teleoperate_request_defaults_to_single_arm() -> None:
     assert req.right_follower_config == ""
 
 
-def test_handle_teleoperation_status_returns_dict() -> None:
-    from makerlab.teleoperate import handle_teleoperation_status
-
-    result = handle_teleoperation_status()
-    assert isinstance(result, dict)
-
-
-def test_handle_get_joint_positions_returns_dict_when_idle() -> None:
-    from makerlab.teleoperate import handle_get_joint_positions
-
-    result = handle_get_joint_positions()
-    assert isinstance(result, dict)
-
-
 def test_get_joint_positions_from_robot_uses_provided_object() -> None:
     from makerlab.teleoperate import get_joint_positions_from_robot
     from tests.mocks import FakeRobot
@@ -77,7 +63,10 @@ def test_start_teleoperation_reports_connection_failure(
     import makerlab.teleoperate as teleop
 
     monkeypatch.setattr(teleop, "teleoperation_active", False)
-    monkeypatch.setattr(teleop, "setup_calibration_files", lambda leader, follower: ("leader", "follower"))
+    monkeypatch.setattr(
+        "makerlab.utils.robot_factory.setup_calibration_files",
+        lambda leader, follower: ("leader", "follower"),
+    )
 
     class _Bus:
         def connect(self) -> None:
@@ -120,7 +109,10 @@ def test_start_teleoperation_disconnects_follower_when_leader_fails(
     import makerlab.teleoperate as teleop
 
     monkeypatch.setattr(teleop, "teleoperation_active", False)
-    monkeypatch.setattr(teleop, "setup_calibration_files", lambda leader, follower: ("leader", "follower"))
+    monkeypatch.setattr(
+        "makerlab.utils.robot_factory.setup_calibration_files",
+        lambda leader, follower: ("leader", "follower"),
+    )
 
     class _OkBus:
         def connect(self) -> None:
@@ -168,6 +160,68 @@ def test_start_teleoperation_disconnects_follower_when_leader_fails(
     assert teleop.teleoperation_active is False
 
 
+# ---------------------------------------------------------------------------
+# Teleop opens no cameras: it consumes no frames (only motor positions drive the
+# URDF viewer). The follower config it builds therefore carries an empty camera
+# set in BOTH paths; any camera display is handled by the browser. Recording,
+# which DOES consume frames, is unchanged.
+# ---------------------------------------------------------------------------
+
+
+def test_teleop_single_config_carries_no_cameras(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The single-arm follower config teleop builds has no cameras — lerobot
+    opens none, so any camera display is handled by the browser."""
+    monkeypatch.setattr(
+        "makerlab.utils.robot_factory.setup_calibration_files",
+        lambda leader, follower: ("leader", "follower"),
+    )
+    from makerlab.teleoperate import TeleoperateRequest
+    from makerlab.utils.robot_factory import build_single_configs
+
+    request = TeleoperateRequest(
+        leader_port="/dev/l",
+        follower_port="/dev/f",
+        leader_config="L",
+        follower_config="F",
+    )
+    robot_config, _ = build_single_configs(request)
+
+    assert robot_config.cameras == {}
+
+
+def test_teleop_bimanual_config_carries_no_cameras(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bimanual left-follower config teleop builds has no cameras either —
+    the same no-frames-no-cameras rule applies to both arms."""
+    monkeypatch.setattr("makerlab.utils.robot_factory.bimanual_base_id", lambda name: "base")
+    monkeypatch.setattr(
+        "makerlab.utils.robot_factory.stage_bimanual_calibrations",
+        lambda *args: ("leader_staging", "follower_staging", "base"),
+    )
+    from makerlab.teleoperate import TeleoperateRequest
+    from makerlab.utils.robot_factory import build_bimanual_configs
+
+    request = TeleoperateRequest(
+        leader_port="/dev/l",
+        follower_port="/dev/f",
+        leader_config="L",
+        follower_config="F",
+        mode="bimanual",
+        right_leader_port="/dev/rl",
+        right_follower_port="/dev/rf",
+        right_leader_config="RL",
+        right_follower_config="RF",
+    )
+    robot_config, _ = build_bimanual_configs(request)
+
+    # Cameras (when present) would be wired onto the LEFT follower arm.
+    assert robot_config.left_arm_config.cameras == {}
+    assert robot_config.right_arm_config.cameras == {}
+
+
 class _FakeBus:
     """Motor bus double for the explicit torque-disable cleanup step."""
 
@@ -181,6 +235,15 @@ class _FakeBus:
         if motor in self.failing:
             raise ConnectionError(f"no response from {motor}")
         self.disabled.append((motor, num_retry))
+
+
+class _FakePortHandler:
+    def __init__(self) -> None:
+        self.is_using = True
+        self.clear_calls = 0
+
+    def clearPort(self) -> None:
+        self.clear_calls += 1
 
 
 class _FakeArm:
@@ -198,6 +261,24 @@ def test_force_disable_torque_disables_every_motor() -> None:
     # Every motor is disabled individually, with retries.
     assert [motor for motor, _ in bus.disabled] == list(bus.motors)
     assert all(num_retry == 5 for _, num_retry in bus.disabled)
+
+
+def test_force_disable_torque_clears_busy_port_before_writing() -> None:
+    """After a camera/control-loop failure the SDK port handler can still be
+    marked in-use; clear that latch before direct torque writes or every motor
+    reports '[TxRxResult] Port is in use!'."""
+    from makerlab.teleoperate import force_disable_torque
+
+    bus = _FakeBus()
+    port_handler = _FakePortHandler()
+    bus.port_handler = port_handler  # type: ignore[attr-defined]
+
+    problems = force_disable_torque(_FakeArm(bus), "follower arm")
+
+    assert problems == []
+    assert port_handler.clear_calls == 1
+    assert port_handler.is_using is False
+    assert [motor for motor, _ in bus.disabled] == list(bus.motors)
 
 
 def test_force_disable_torque_reports_failed_motor_and_port() -> None:
@@ -880,7 +961,10 @@ def test_start_clears_stale_release_state_from_previous_double_stop(
     monkeypatch.setattr(teleop, "teleoperation_thread", None)
     monkeypatch.setattr(teleop, "_release_now", stale)
     monkeypatch.setattr(teleop, "releasing", True)
-    monkeypatch.setattr(teleop, "setup_calibration_files", lambda leader, follower: ("leader", "follower"))
+    monkeypatch.setattr(
+        "makerlab.utils.robot_factory.setup_calibration_files",
+        lambda leader, follower: ("leader", "follower"),
+    )
 
     class _Bus:
         def connect(self) -> None:
@@ -933,7 +1017,7 @@ class _CurrentBus:
 
 def test_power_telemetry_tracks_peak_and_mean() -> None:
     """Peaks/means in mA (6.5 mA per register LSB) give the objective A/B for
-    the torque cap; the summary names the Torque_Limit that was active."""
+    the motor-power cap; the summary names the Torque_Limit that was active."""
     import makerlab.teleoperate as teleop
 
     telemetry = teleop.PowerTelemetry()
@@ -943,11 +1027,11 @@ def test_power_telemetry_tracks_peak_and_mean() -> None:
 
     assert telemetry.peak_ma["shoulder_pan"] == 100 * 6.5
     assert telemetry.latest_ma["shoulder_pan"] == 40 * 6.5
-    summary = telemetry.summary(300)
+    summary = telemetry.summary(30)
     assert summary is not None
     assert summary.startswith("power telemetry:")
     assert f"shoulder_pan peak {100 * 6.5:.0f}mA / mean {70 * 6.5:.0f}mA" in summary
-    assert "Torque_Limit 300" in summary
+    assert "motor power 30%, Torque_Limit 300" in summary
 
 
 def test_power_telemetry_prefixes_bimanual_and_survives_bus_errors() -> None:
@@ -964,3 +1048,76 @@ def test_power_telemetry_summary_none_without_samples() -> None:
     import makerlab.teleoperate as teleop
 
     assert teleop.PowerTelemetry().summary(100) is None
+
+
+# ---------------------------------------------------------------------------
+# Session error taxonomy — outcome / error / hint in the status payload (the
+# in-process twin of rollout's exited payload; the pure classifier itself is
+# covered in tests/test_record.py). A mid-loop death is "failed"; a user stop
+# whose cleanup alone complained is "ran_with_warning"; a clean stop is "ok".
+# ---------------------------------------------------------------------------
+
+
+def test_teleoperation_status_carries_failed_outcome_with_hint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A session that died mid-loop surfaces outcome/error/hint through the
+    status payload, with the hint mapped from the error text."""
+    import makerlab.teleoperate as teleop
+
+    monkeypatch.setattr(teleop, "teleoperation_active", False)
+    monkeypatch.setattr(teleop, "releasing", False)
+    monkeypatch.setattr(teleop, "last_session_outcome", "failed")
+    monkeypatch.setattr(
+        teleop,
+        "last_session_error",
+        "DeviceNotConnectedError: could not connect to the follower arm",
+    )
+
+    status = teleop.handle_teleoperation_status()
+
+    assert status["outcome"] == "failed"
+    assert "could not connect" in status["error"]
+    assert "plugged in" in status["hint"]
+
+
+def test_teleoperation_status_carries_cleanup_warning_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A user stop whose cleanup tripped (gripper overload on torque disable)
+    is ran_with_warning — the session itself ran fine."""
+    import makerlab.teleoperate as teleop
+
+    cleanup_text = "TORQUE MAY STILL BE ENABLED on COM_FOLLOWER (follower arm; gripper: Overload)."
+    monkeypatch.setattr(teleop, "teleoperation_active", False)
+    monkeypatch.setattr(teleop, "releasing", False)
+    monkeypatch.setattr(teleop, "last_cleanup_error", cleanup_text)
+    monkeypatch.setattr(teleop, "last_session_outcome", "ran_with_warning")
+    monkeypatch.setattr(teleop, "last_session_error", cleanup_text)
+
+    status = teleop.handle_teleoperation_status()
+
+    assert status["outcome"] == "ran_with_warning"
+    assert "TORQUE MAY STILL BE ENABLED" in status["error"]
+    assert "motor overloaded" in status["hint"].lower()
+    # The existing raw safety field is not regressed by the new taxonomy.
+    assert status["last_cleanup_error"] == cleanup_text
+
+
+def test_teleoperation_status_outcome_none_before_any_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Before any session ends (and after a start clears the fields) the
+    taxonomy keys are present but null — the frontend treats that as no-op."""
+    import makerlab.teleoperate as teleop
+
+    monkeypatch.setattr(teleop, "teleoperation_active", False)
+    monkeypatch.setattr(teleop, "releasing", False)
+    monkeypatch.setattr(teleop, "last_session_outcome", None)
+    monkeypatch.setattr(teleop, "last_session_error", None)
+
+    status = teleop.handle_teleoperation_status()
+
+    assert status["outcome"] is None
+    assert status["error"] is None
+    assert status["hint"] is None

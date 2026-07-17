@@ -1,8 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { StatNumber } from "@/components/ui/stat-number";
+import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { TrainingStatus } from "../types";
-import { CheckCircle, Activity } from "lucide-react";
+import { Activity, Clock, Gauge, TrendingDown } from "lucide-react";
 import { useApi } from "@/contexts/ApiContext";
 import { getJobMetricsHistory } from "@/lib/jobsApi";
 import {
@@ -136,6 +135,9 @@ const MonitoringStats: React.FC<MonitoringStatsProps> = ({
   // "Training starting…" instead of a misleading 0/0 0% reading.
   const isStarting =
     trainingStatus.training_active && trainingStatus.total_steps === 0;
+  const stepLabel = isStarting
+    ? "Training starting…"
+    : `${trainingStatus.current_step.toLocaleString()} / ${trainingStatus.total_steps.toLocaleString()}`;
   const etaLabel =
     trainingStatus.eta_seconds != null
       ? formatTime(trainingStatus.eta_seconds)
@@ -143,56 +145,54 @@ const MonitoringStats: React.FC<MonitoringStatsProps> = ({
 
   return (
     <div className="space-y-6">
-      <Card>
-        <CardContent className="p-6">
-          <div className="flex flex-wrap items-end justify-between gap-6">
-            <StatNumber
-              label="step"
-              value={
-                isStarting
-                  ? "starting…"
-                  : trainingStatus.current_step.toLocaleString()
-              }
-              sublabel={
-                isStarting
-                  ? "training starting"
-                  : `of ${trainingStatus.total_steps.toLocaleString()} steps`
-              }
-              accent
-            />
-            <StatNumber label="eta" value={etaLabel} />
+      <Card className="bg-card border-border rounded-md">
+        <CardContent className="p-5">
+          <div className="mb-3 flex items-baseline justify-between gap-3">
+            <div>
+              <h3 className="eyebrow flex items-center gap-1.5">
+                <Activity className="h-3.5 w-3.5" /> Progress
+              </h3>
+              <div className="mt-1 text-base font-semibold tabular-nums text-foreground">
+                {stepLabel}
+              </div>
+            </div>
+            <div className="flex items-center gap-1.5 text-sm text-muted-foreground">
+              <Clock className="h-3.5 w-3.5" />
+              <span>
+                ETA{" "}
+                <span className="font-semibold tabular-nums text-foreground">
+                  {etaLabel}
+                </span>
+              </span>
+            </div>
           </div>
-          <div className="mt-4 h-1 w-full overflow-hidden rounded-sm bg-secondary">
+          {/* Same bar family as JobCard's in-library progress strip. */}
+          <div className="relative h-5 w-full overflow-hidden rounded-md bg-muted border border-border">
             <div
-              className="h-full bg-primary transition-[width] duration-500"
+              className="h-full bg-info transition-[width] duration-500"
               style={{ width: `${progress}%` }}
             />
+            <div className="absolute inset-0 flex items-center justify-center text-xs font-semibold text-white tabular-nums drop-shadow">
+              {isStarting ? "warming up…" : `${progress.toFixed(1)}%`}
+            </div>
           </div>
-          <p className="mt-2 font-mono text-[10px] tabular-nums text-muted-foreground">
-            {isStarting ? "warming up…" : `${progress.toFixed(1)}%`}
-          </p>
         </CardContent>
       </Card>
 
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-        <Card>
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <Card className="bg-card border-border rounded-md">
           <CardHeader className="pb-2">
-            <CardTitle className="flex items-center gap-3 text-base text-foreground">
-              <div className="flex h-8 w-8 items-center justify-center rounded-md bg-secondary text-muted-foreground">
-                <CheckCircle className="h-4 w-4" />
-              </div>
-              <span>
-                Loss{" "}
-                <span className="font-mono text-sm font-normal text-muted-foreground">
-                  ({trainingStatus.current_loss?.toFixed(4) ?? "—"})
-                </span>
-              </span>
-            </CardTitle>
+            <h3 className="eyebrow flex items-center gap-1.5">
+              <TrendingDown className="h-3.5 w-3.5" /> Loss
+            </h3>
+            <div className="text-base font-semibold tabular-nums text-foreground">
+              {trainingStatus.current_loss?.toFixed(4) ?? "—"}
+            </div>
           </CardHeader>
           <CardContent className="pt-0">
             <div className="h-48">
               {lossHistory.length === 0 ? (
-                <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+                <div className="flex h-full items-center justify-center text-muted-foreground text-sm">
                   Waiting for first metric tick…
                 </div>
               ) : (
@@ -206,28 +206,28 @@ const MonitoringStats: React.FC<MonitoringStatsProps> = ({
                       type="number"
                       scale="linear"
                       domain={["dataMin", "dataMax"]}
-                      tick={{ fill: "#94a3b8", fontSize: 11 }}
-                      stroke="#475569"
+                      tick={{ fill: "hsl(var(--muted-foreground))", fontSize: 11 }}
+                      stroke="hsl(var(--border))"
                     />
                     <YAxis
-                      tick={{ fill: "#94a3b8", fontSize: 11 }}
-                      stroke="#475569"
+                      tick={{ fill: "hsl(var(--muted-foreground))", fontSize: 11 }}
+                      stroke="hsl(var(--border))"
                       width={48}
                     />
                     <Tooltip
                       contentStyle={{
-                        background: "#1e293b",
-                        border: "1px solid #475569",
+                        background: "hsl(var(--popover))",
+                        border: "1px solid hsl(var(--border))",
                         borderRadius: 8,
                       }}
-                      labelStyle={{ color: "#cbd5e1" }}
-                      itemStyle={{ color: "#34d399" }}
+                      labelStyle={{ color: "hsl(var(--muted-foreground))" }}
+                      itemStyle={{ color: "hsl(var(--ok))" }}
                       formatter={(v: number) => v.toFixed(4)}
                     />
                     <Line
                       type="monotone"
                       dataKey="loss"
-                      stroke="#34d399"
+                      stroke="hsl(var(--ok))"
                       strokeWidth={2}
                       dot={false}
                       isAnimationActive={false}
@@ -239,24 +239,19 @@ const MonitoringStats: React.FC<MonitoringStatsProps> = ({
           </CardContent>
         </Card>
 
-        <Card>
+        <Card className="bg-card border-border rounded-md">
           <CardHeader className="pb-2">
-            <CardTitle className="flex items-center gap-3 text-base text-foreground">
-              <div className="flex h-8 w-8 items-center justify-center rounded-md bg-secondary text-muted-foreground">
-                <Activity className="h-4 w-4" />
-              </div>
-              <span>
-                Learning rate{" "}
-                <span className="font-mono text-sm font-normal text-muted-foreground">
-                  ({trainingStatus.current_lr?.toExponential(2) ?? "—"})
-                </span>
-              </span>
-            </CardTitle>
+            <h3 className="eyebrow flex items-center gap-1.5">
+              <Gauge className="h-3.5 w-3.5" /> Learning rate
+            </h3>
+            <div className="text-base font-semibold tabular-nums text-foreground">
+              {trainingStatus.current_lr?.toExponential(2) ?? "—"}
+            </div>
           </CardHeader>
           <CardContent className="pt-0">
             <div className="h-48">
               {lrHistory.length === 0 ? (
-                <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+                <div className="flex h-full items-center justify-center text-muted-foreground text-sm">
                   Waiting for first metric tick…
                 </div>
               ) : (
@@ -270,29 +265,29 @@ const MonitoringStats: React.FC<MonitoringStatsProps> = ({
                       type="number"
                       scale="linear"
                       domain={["dataMin", "dataMax"]}
-                      tick={{ fill: "#94a3b8", fontSize: 11 }}
-                      stroke="#475569"
+                      tick={{ fill: "hsl(var(--muted-foreground))", fontSize: 11 }}
+                      stroke="hsl(var(--border))"
                     />
                     <YAxis
-                      tick={{ fill: "#94a3b8", fontSize: 11 }}
-                      stroke="#475569"
+                      tick={{ fill: "hsl(var(--muted-foreground))", fontSize: 11 }}
+                      stroke="hsl(var(--border))"
                       width={48}
                       tickFormatter={(v: number) => v.toExponential(0)}
                     />
                     <Tooltip
                       contentStyle={{
-                        background: "#1e293b",
-                        border: "1px solid #475569",
+                        background: "hsl(var(--popover))",
+                        border: "1px solid hsl(var(--border))",
                         borderRadius: 8,
                       }}
-                      labelStyle={{ color: "#cbd5e1" }}
-                      itemStyle={{ color: "#fb923c" }}
+                      labelStyle={{ color: "hsl(var(--muted-foreground))" }}
+                      itemStyle={{ color: "hsl(var(--warn))" }}
                       formatter={(v: number) => v.toExponential(2)}
                     />
                     <Line
                       type="monotone"
                       dataKey="lr"
-                      stroke="#fb923c"
+                      stroke="hsl(var(--warn))"
                       strokeWidth={2}
                       dot={false}
                       isAnimationActive={false}
