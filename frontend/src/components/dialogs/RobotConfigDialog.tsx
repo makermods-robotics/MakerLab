@@ -41,8 +41,10 @@ import {
   XCircle,
   AlertCircle,
   AlertTriangle,
+  ChevronDown,
   Loader2,
   Play,
+  Plus,
   Square,
   Circle,
   Camera,
@@ -61,7 +63,12 @@ import CameraConfiguration, {
   CameraConfig,
 } from "@/components/recording/CameraConfiguration";
 import CalibrationLibrary from "@/components/calibration/CalibrationLibrary";
-import { PanelHeader } from "@/components/studio/panel/primitives";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
+import { PanelHeader, SLIDE } from "@/components/studio/panel/primitives";
 import { RobotRecord } from "@/hooks/useRobots";
 
 const DISCONTINUITY_ERROR_PREFIX = "Motor discontinuity detected";
@@ -238,6 +245,34 @@ const RobotConfigWindow = ({
   // Bumped when a calibration completes so the per-side CalibrationLibrary
   // dropdowns re-fetch and surface any newly-named file.
   const [calibReloadToken, setCalibReloadToken] = useState(0);
+
+  // Which calibration-file row has its "New calibration" panel expanded — the
+  // row's config field — or null when every panel is collapsed. Opening a
+  // row's panel also points deviceType/arm at that slot, so the whole
+  // calibration flow (port lookup, save name, start request) targets it.
+  const [newCalibFor, setNewCalibFor] = useState<string | null>(null);
+  // Keep the expanded panel attached to the slot the calibration flow actually
+  // targets: if device/arm changes while a panel is open (e.g. via the step-01
+  // selector), the panel follows to the matching calibration-file row.
+  useEffect(() => {
+    setNewCalibFor((prev) => (prev && prev !== configField ? configField : prev));
+  }, [configField]);
+
+  // Toggle a row's "New calibration" panel. Opening retargets the calibration
+  // flow at that row's slot; clicking the active row's + again collapses it.
+  const toggleNewCalibration = (
+    field: string,
+    device: "teleop" | "robot",
+    whichArm: "left" | "right",
+  ) => {
+    if (newCalibFor === field) {
+      setNewCalibFor(null);
+      return;
+    }
+    setDeviceType(device);
+    setArm(whichArm);
+    setNewCalibFor(field);
+  };
 
   // Ports already assigned to the OTHER arms of this robot — each physical arm
   // needs its own serial port, so these are greyed out in the dropdown. The
@@ -801,7 +836,13 @@ const RobotConfigWindow = ({
         );
         const data = await res.json();
         setBatchAutoCal(data);
-        if (data.active) setBatchAutoCalOpen(true);
+        if (data.active) {
+          setBatchAutoCalOpen(true);
+          // The batch panel lives inside a row's "New calibration" panel now —
+          // expand one (any row works; the batch is multi-arm) so the running
+          // batch is visible on reopen.
+          setNewCalibFor((prev) => prev ?? "leader_config");
+        }
       } catch {
         // ignore
       }
@@ -1121,24 +1162,16 @@ const RobotConfigWindow = ({
   }, [deviceType, arm, robot, portDraft]);
 
   // Refresh the robot record when a calibration completes so the checklist
-  // flips to ✓ for the side that was just saved, and advance Device Type to
-  // the next still-incomplete side (or stay on the current side if both done).
+  // flips to ✓ for the side that was just saved. (No auto-advance of Device
+  // Type anymore — the calibration flow is anchored to the calibration-file
+  // row whose "New calibration" panel is open, and switching device here
+  // would drag that panel to another row mid-look.)
   useEffect(() => {
     if (calibrationStatus.status !== "completed") return;
     // A completed calibration may have written a new named file — nudge the
     // per-side libraries to re-fetch their config lists so it shows up.
     setCalibReloadToken((t) => t + 1);
-    (async () => {
-      const r = await fetchRobot();
-      if (!r) return;
-      const nextDevice = !r.leader_config
-        ? "teleop"
-        : !r.follower_config
-          ? "robot"
-          : "teleop";
-      setDeviceType(nextDevice);
-      // Port re-syncs via the device/arm effect.
-    })();
+    fetchRobot();
   }, [calibrationStatus.status, fetchRobot]);
 
   // Stage the current side's port into the local draft (no network write). A
@@ -1335,6 +1368,495 @@ const RobotConfigWindow = ({
 
   const statusDisplay = getStatusDisplay();
 
+  // The expandable "New calibration" panel, rendered under whichever
+  // calibration-file row's + button is active. The controls and status form
+  // the main vertical on the left; the (large) demo video sits beside them so
+  // it doesn't push the controls down. The auto-calibration torque slider is
+  // tucked under an Advanced settings disclosure.
+  const newCalibrationPanel = (rowLabel: string) => (
+    <div className="ml-6 mt-2 space-y-3 rounded-md border border-border bg-muted/20 p-3">
+      <div className="flex items-center gap-2">
+        <span className="text-sm font-semibold text-foreground">
+          New calibration — {rowLabel}
+        </span>
+        <span className="ml-auto flex items-center gap-2 text-xs text-muted-foreground">
+          <span
+            aria-hidden
+            className={`inline-block h-2 w-2 rounded-full ${statusDisplay.color}`}
+          />
+          {statusDisplay.text}
+        </span>
+      </div>
+
+      <div className="grid grid-cols-[minmax(0,1fr)_220px] items-start gap-3">
+        {/* Main vertical: actions, batch picker, status, live data. */}
+        <div className="flex min-w-0 flex-col gap-3">
+          {calibrationStatus.calibration_active ? (
+            <Button
+              onClick={handleStopCalibration}
+              variant="destructive"
+              className="w-full"
+            >
+              <Square className="mr-2 h-4 w-4" />
+              Cancel calibration
+            </Button>
+          ) : batchAutoCal.active ? (
+            <Button
+              onClick={stopBatchAutoCalibration}
+              variant="destructive"
+              className="w-full"
+            >
+              <Square className="mr-2 h-4 w-4" />
+              Stop all auto-calibration
+            </Button>
+          ) : (
+            // Auto-calibrate is the default calibration mode: it's the
+            // primary action and opens the multi-arm picker below
+            // (single-arm robots see just their leader+follower slots
+            // there). Manual step-by-step calibration stays fully
+            // available as the secondary button.
+            <>
+              <Button
+                onClick={() => setBatchAutoCalOpen(true)}
+                className="w-full"
+                disabled={!robotName}
+              >
+                <Wand2 className="mr-2 h-4 w-4" />
+                Auto-calibrate
+              </Button>
+              <Button
+                onClick={() => handleStartCalibration()}
+                variant="outline"
+                disabled={!robotName || !deviceType || !portDetected}
+                className="w-full"
+              >
+                <Play className="mr-2 h-4 w-4" />
+                Calibrate manually
+              </Button>
+            </>
+          )}
+
+          {(batchAutoCalOpen || batchAutoCal.active) && (
+            <div className="space-y-3 rounded-md border border-border bg-muted/30 p-3">
+              <div className="flex items-center gap-2 text-sm font-medium text-foreground">
+                <Wand2 className="h-4 w-4" />
+                Multi-arm auto-calibration
+              </div>
+              {!batchAutoCal.active ? (
+                <>
+                  <p className="text-xs text-muted-foreground">
+                    Pick the arms to calibrate. Each runs its own hands-off
+                    calibration <strong>at the same time</strong> on its
+                    assigned port — one arm failing doesn't stop the
+                    others. Ports come from each arm's assignment above; an
+                    arm with no port yet can't be picked. Each arm replaces
+                    its own existing calibration; rename any of them
+                    afterward from the calibration list above.
+                  </p>
+                  <div className="space-y-2">
+                    {armSlots.map((slot) => {
+                      const selected = !!batchSelected[slot.key];
+                      const assignedPort = slotPort(slot);
+                      const hasPort = !!assignedPort;
+                      // Distinguish "never assigned" from "assigned but
+                      // not currently detected" so the hint is actionable.
+                      const savedButUndetected =
+                        !hasPort && !!slotSavedPort(slot);
+                      return (
+                        <label
+                          key={slot.key}
+                          className={`flex items-center gap-2 rounded-md border p-2 ${
+                            selected
+                              ? "border-ring bg-accent"
+                              : "border-border bg-background"
+                          } ${
+                            hasPort
+                              ? "cursor-pointer"
+                              : "cursor-not-allowed opacity-60"
+                          }`}
+                        >
+                          <Checkbox
+                            checked={selected}
+                            disabled={!hasPort}
+                            onCheckedChange={(checked) =>
+                              setBatchSelected((prev) => ({
+                                ...prev,
+                                [slot.key]: checked === true,
+                              }))
+                            }
+                          />
+                          <span className="text-sm text-foreground">
+                            {slot.label}
+                          </span>
+                          <span
+                            className={`ml-auto font-mono text-xs ${
+                              hasPort ? "text-muted-foreground" : "text-warn/80"
+                            }`}
+                          >
+                            {hasPort
+                              ? assignedPort
+                              : savedButUndetected
+                                ? "port not detected"
+                                : "no port — assign above"}
+                          </span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                  <div className="flex gap-2">
+                    <Button
+                      onClick={() => setBatchAutoCalPromptOpen(true)}
+                      disabled={selectedBatchSlots.length === 0}
+                      className="flex-1"
+                    >
+                      <Wand2 className="mr-2 h-4 w-4" />
+                      Auto-calibrate {selectedBatchSlots.length || 0} arm
+                      {selectedBatchSlots.length === 1 ? "" : "s"}
+                    </Button>
+                    <Button
+                      onClick={() => setBatchAutoCalOpen(false)}
+                      variant="outline"
+                      className="shrink-0"
+                    >
+                      Cancel
+                    </Button>
+                  </div>
+                </>
+              ) : (
+                <p className="text-xs text-muted-foreground">
+                  {batchAutoCal.completed + batchAutoCal.failed} of{" "}
+                  {batchAutoCal.total} done — the arms are moving. Keep the
+                  workspace clear.
+                </p>
+              )}
+
+              {/* Per-arm status rows (running + terminal), shown live. */}
+              {batchAutoCal.arms.length > 0 && (
+                <div className="space-y-1">
+                  {batchAutoCal.arms.map((a) => (
+                    <div
+                      key={`${a.device_type}:${a.port}`}
+                      className="flex items-center justify-between gap-2 rounded bg-muted px-2 py-1 text-xs"
+                    >
+                      <span className="truncate font-mono text-foreground">
+                        {a.name || a.port}
+                      </span>
+                      <span
+                        className={
+                          a.status === "completed"
+                            ? "text-ok"
+                            : a.status === "failed"
+                              ? "text-destructive"
+                              : a.status === "stopped"
+                                ? "text-warn"
+                                : "text-info"
+                        }
+                        title={a.error ?? undefined}
+                      >
+                        {a.status === "completed"
+                          ? "✓ done"
+                          : a.status === "failed"
+                            ? "✗ failed"
+                            : a.status === "stopped"
+                              ? "stopped"
+                              : "running…"}
+                      </span>
+                    </div>
+                  ))}
+                  {!batchAutoCal.active && batchAutoCal.total > 0 && (
+                    <p className="pt-1 text-xs text-muted-foreground">
+                      {batchAutoCal.completed} completed,{" "}
+                      {batchAutoCal.failed} failed/stopped.
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {batchAutoCal.logs.length > 0 && (
+                <div className="max-h-40 overflow-auto whitespace-pre-wrap rounded border border-border bg-muted p-2 font-mono text-xs text-foreground">
+                  {batchAutoCal.logs.slice(-120).map((line, i) => (
+                    <div key={i}>{line}</div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Manual calibration only: torque is off the whole session,
+              which surprises novices (the arm is deliberately floppy).
+              Auto-cal needs no standing warning — it ends gracefully
+              (fold on completion, freeze + return-to-start on Stop) and
+              the multi-arm pre-start confirmation dialog carries the
+              safety guidance. */}
+          {calibrationStatus.calibration_active && (
+            <Alert className="border-warn/40 bg-warn/10 text-warn">
+              <AlertTriangle className="h-4 w-4" />
+              <AlertDescription>
+                Motor torque is off — the arm won't hold its pose during
+                calibration, and stays limp after you cancel or finish.
+                Keep it low and supported so it can't drop onto the table
+                edge.
+              </AlertDescription>
+            </Alert>
+          )}
+
+          {calibrationStatus.status === "connecting" && (
+            <Alert className="border-warn/40 bg-warn/10 text-warn">
+              <AlertCircle className="h-4 w-4" />
+              <AlertDescription>
+                Connecting to the device. Please ensure it's connected.
+              </AlertDescription>
+            </Alert>
+          )}
+
+          {calibrationStatus.status === "recording" &&
+            calibrationStatus.recorded_ranges && (
+              <div className="space-y-3">
+                <div className="flex items-center gap-2">
+                  <Activity className="h-4 w-4 text-muted-foreground" />
+                  <span className="text-sm font-medium text-foreground">
+                    Live position data
+                  </span>
+                </div>
+                <div className="rounded-md border border-border bg-muted/30 p-4">
+                  <div className="space-y-3">
+                    {Object.entries(calibrationStatus.recorded_ranges).map(
+                      ([motor, range]) => {
+                        const totalRange = range.max - range.min;
+                        const currentOffset = range.current - range.min;
+                        const progressPercent =
+                          totalRange > 0
+                            ? (currentOffset / totalRange) * 100
+                            : 50;
+                        const rangeComplete = isMotorRangeComplete(
+                          calibrationStatus.device_type,
+                          motor,
+                          totalRange,
+                        );
+
+                        return (
+                          <div key={motor} className="space-y-2">
+                            <div className="flex items-center justify-between">
+                              <div className="flex items-center gap-2">
+                                <span className="text-sm font-medium text-foreground">
+                                  {motor}
+                                </span>
+                                {rangeComplete && (
+                                  <CheckCircle
+                                    className="h-4 w-4 text-ok"
+                                    aria-label="Range complete"
+                                  />
+                                )}
+                              </div>
+                              <span className="font-mono text-xs text-foreground">
+                                {range.current}
+                              </span>
+                            </div>
+                            <div className="relative">
+                              <div className="h-3 w-full rounded-full bg-secondary">
+                                <div
+                                  className="relative h-3 rounded-full bg-muted-foreground/20"
+                                  style={{ width: "100%" }}
+                                >
+                                  <div
+                                    className={`absolute top-0 h-3 w-1 rounded-full transition-all duration-100 ${
+                                      rangeComplete ? "bg-ok" : "bg-warn"
+                                    }`}
+                                    style={{
+                                      left: `${Math.max(
+                                        0,
+                                        Math.min(100, progressPercent),
+                                      )}%`,
+                                      transform: "translateX(-50%)",
+                                    }}
+                                  />
+                                </div>
+                              </div>
+                              <div className="mt-1 flex justify-between text-xs text-muted-foreground">
+                                <span>{range.min}</span>
+                                <span>{range.max}</span>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      },
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+
+          {calibrationStatus.status === "recording" &&
+            (() => {
+              const ranges = calibrationStatus.recorded_ranges ?? {};
+              const motors = Object.entries(ranges);
+              const allComplete =
+                motors.length > 0 &&
+                motors.every(([motor, range]) =>
+                  isMotorRangeComplete(
+                    calibrationStatus.device_type,
+                    motor,
+                    range.max - range.min,
+                  ),
+                );
+              return (
+                <div className="space-y-3">
+                  <Button
+                    onClick={handleCompleteStep}
+                    disabled={!calibrationStatus.calibration_active}
+                    className={`w-full text-primary-foreground ${
+                      allComplete
+                        ? "bg-ok hover:bg-ok/90"
+                        : "bg-warn hover:bg-warn/90"
+                    }`}
+                  >
+                    {allComplete ? (
+                      <CheckCircle className="mr-2 h-4 w-4" />
+                    ) : (
+                      <AlertCircle className="mr-2 h-4 w-4" />
+                    )}
+                    Save calibration
+                  </Button>
+                  <Alert className="border-info/40 bg-info/10 text-info">
+                    <Activity className="h-4 w-4" />
+                    <AlertDescription>
+                      <strong>Important:</strong> Move each joint through
+                      its full range — <strong>except the wrist roll</strong>
+                      : leave it near the middle. It rotates continuously
+                      and its range is set automatically. A check appears
+                      next to each joint once its range is wide enough.
+                    </AlertDescription>
+                  </Alert>
+                </div>
+              );
+            })()}
+
+          {calibrationStatus.status === "completed" && (
+            <Alert className="border-ok/40 bg-ok/10 text-ok">
+              <CheckCircle className="h-4 w-4" />
+              <AlertDescription>
+                Calibration completed successfully!
+              </AlertDescription>
+            </Alert>
+          )}
+
+          {calibrationStatus.status === "error" &&
+            calibrationStatus.error &&
+            (calibrationStatus.error.startsWith(
+              DISCONTINUITY_ERROR_PREFIX,
+            ) ? (
+              <Alert className="border-destructive/40 bg-destructive/10 text-destructive">
+                <XCircle className="h-4 w-4" />
+                <AlertDescription>
+                  <div className="mb-1 text-base font-semibold">
+                    Motor discontinuity detected
+                  </div>
+                  <div>
+                    Make sure to start the calibration with the robot in a
+                    middle position — all joints in the middle of their
+                    ranges. See the calibration demo beside for the correct
+                    starting pose.
+                  </div>
+                </AlertDescription>
+              </Alert>
+            ) : (
+              <Alert className="border-destructive/40 bg-destructive/10 text-destructive">
+                <XCircle className="h-4 w-4" />
+                <AlertDescription>
+                  <strong>Error:</strong> {calibrationStatus.error}
+                </AlertDescription>
+              </Alert>
+            ))}
+
+          {/* Auto-calibration drive torque lives under Advanced parameters
+              (the studio's collapsible pattern, as in RecordingForm): sent
+              with the auto-calibrate start (current slider position),
+              persisted on Save. Manual calibration and regular sessions
+              don't use it. */}
+          {robot && (
+            <Collapsible className="group space-y-3">
+              <CollapsibleTrigger className="flex w-full items-center justify-between border-b border-border pb-2 text-sm font-semibold text-foreground">
+                <span>Advanced parameters</span>
+                <ChevronDown className="h-4 w-4 transition-transform group-data-[state=open]:rotate-180" />
+              </CollapsibleTrigger>
+              <CollapsibleContent className={SLIDE}>
+                <div className="space-y-2">
+                  <Label htmlFor="motorPower" className="text-sm font-medium">
+                    Auto-calibration torque
+                  </Label>
+                  <div className="flex items-center gap-3">
+                    <input
+                      id="motorPower"
+                      type="range"
+                      min={TORQUE_LIMIT_MIN}
+                      max={TORQUE_LIMIT_MAX}
+                      step={TORQUE_LIMIT_PER_PERCENT}
+                      value={torqueLimitDraft}
+                      onChange={(e) => {
+                        // Slider is in raw Torque_Limit units; store as percent.
+                        setPowerDraft(
+                          Number(e.target.value) / TORQUE_LIMIT_PER_PERCENT,
+                        );
+                      }}
+                      list="motorTorqueTicks"
+                      className="h-1.5 flex-1 cursor-pointer accent-primary"
+                      aria-label="Auto-calibration torque (Torque_Limit register, 0-1000 scale)"
+                    />
+                    <datalist id="motorTorqueTicks">
+                      {/* The vendored script's stock torque, as a reference tick. */}
+                      <option value={DEFAULT_TORQUE_LIMIT_REF} />
+                    </datalist>
+                    <span className="w-12 shrink-0 text-right font-mono text-sm text-foreground">
+                      {torqueLimitDraft}
+                    </span>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    Torque the arm drives itself at during auto-calibration
+                    (raw servo <code>Torque_Limit</code>, 0–1000 scale; the
+                    tick marks the stock {DEFAULT_TORQUE_LIMIT_REF}). Lower =
+                    gentler unfold and limit-probing; below {TORQUE_LIMIT_MIN}{" "}
+                    the arm can't move its own weight. Teleoperation,
+                    recording, and skill runs always use LeRobot's standard
+                    torque — this slider doesn't affect them.
+                  </p>
+                </div>
+              </CollapsibleContent>
+            </Collapsible>
+          )}
+        </div>
+
+        {/* The demo is big, so it sits beside the main vertical instead of
+            pushing the controls down. */}
+        <div
+          ref={demoVideoRef}
+          className="space-y-2 self-start rounded-md border border-border bg-muted/30 p-3"
+        >
+          <h3 className="eyebrow">Calibration demo</h3>
+          <div className="overflow-hidden rounded-md bg-muted">
+            <video className="h-auto w-full" controls preload="auto" muted>
+              <source
+                src="https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/lerobot/calibrate_so101_2.mp4"
+                type="video/mp4"
+              />
+              <p className="py-4 text-center text-sm text-muted-foreground">
+                Your browser does not support the video tag.
+                <br />
+                <a
+                  href="https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/lerobot/calibrate_so101_2.mp4"
+                  className="underline"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  Click here to view the calibration video
+                </a>
+              </p>
+            </video>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+
   return (
     <Dialog
       open
@@ -1529,477 +2051,11 @@ const RobotConfigWindow = ({
             </div>
           </section>
 
-          {/* 02 · Calibrate */}
-          <section className="space-y-4 py-5">
-            <PanelHeader step="02" title="Calibrate">
-              <span className="ml-auto flex items-center gap-2 text-xs text-muted-foreground">
-                <span
-                  aria-hidden
-                  className={`inline-block h-2 w-2 rounded-full ${statusDisplay.color}`}
-                />
-                {statusDisplay.text}
-              </span>
-            </PanelHeader>
-
-            <div className="flex flex-col gap-3">
-              {calibrationStatus.calibration_active ? (
-                <Button
-                  onClick={handleStopCalibration}
-                  variant="destructive"
-                  className="w-full"
-                >
-                  <Square className="mr-2 h-4 w-4" />
-                  Cancel calibration
-                </Button>
-              ) : batchAutoCal.active ? (
-                <Button
-                  onClick={stopBatchAutoCalibration}
-                  variant="destructive"
-                  className="w-full"
-                >
-                  <Square className="mr-2 h-4 w-4" />
-                  Stop all auto-calibration
-                </Button>
-              ) : (
-                // Auto-calibrate is the default calibration mode: it's the
-                // primary action and opens the multi-arm picker below
-                // (single-arm robots see just their leader+follower slots
-                // there). Manual step-by-step calibration stays fully
-                // available as the secondary button.
-                <>
-                  <Button
-                    onClick={() => setBatchAutoCalOpen(true)}
-                    className="w-full"
-                    disabled={!robotName}
-                  >
-                    <Wand2 className="mr-2 h-4 w-4" />
-                    Auto-calibrate
-                  </Button>
-                  <Button
-                    onClick={() => handleStartCalibration()}
-                    variant="outline"
-                    disabled={!robotName || !deviceType || !portDetected}
-                    className="w-full"
-                  >
-                    <Play className="mr-2 h-4 w-4" />
-                    Calibrate manually
-                  </Button>
-                </>
-              )}
-
-              {/* Auto-calibration drive torque: sent with the auto-calibrate
-                  start (current slider position), persisted on Save. Manual
-                  calibration and regular sessions don't use it. */}
-              {robot && (
-                <div className="space-y-2 rounded-md border border-border bg-muted/30 p-3">
-                  <div className="flex items-center gap-3">
-                    <Label htmlFor="motorPower" className="shrink-0 text-sm">
-                      Auto-calibration torque
-                    </Label>
-                    <input
-                      id="motorPower"
-                      type="range"
-                      min={TORQUE_LIMIT_MIN}
-                      max={TORQUE_LIMIT_MAX}
-                      step={TORQUE_LIMIT_PER_PERCENT}
-                      value={torqueLimitDraft}
-                      onChange={(e) => {
-                        // Slider is in raw Torque_Limit units; store as percent.
-                        setPowerDraft(
-                          Number(e.target.value) / TORQUE_LIMIT_PER_PERCENT,
-                        );
-                      }}
-                      list="motorTorqueTicks"
-                      className="h-1.5 flex-1 cursor-pointer accent-primary"
-                      aria-label="Auto-calibration torque (Torque_Limit register, 0-1000 scale)"
-                    />
-                    <datalist id="motorTorqueTicks">
-                      {/* The vendored script's stock torque, as a reference tick. */}
-                      <option value={DEFAULT_TORQUE_LIMIT_REF} />
-                    </datalist>
-                    <span className="w-12 shrink-0 text-right font-mono text-sm text-foreground">
-                      {torqueLimitDraft}
-                    </span>
-                  </div>
-                  <p className="text-xs text-muted-foreground">
-                    Torque the arm drives itself at during auto-calibration
-                    (raw servo <code>Torque_Limit</code>, 0–1000 scale; the
-                    tick marks the stock {DEFAULT_TORQUE_LIMIT_REF}). Lower =
-                    gentler unfold and limit-probing; below {TORQUE_LIMIT_MIN}{" "}
-                    the arm can't move its own weight. Teleoperation,
-                    recording, and skill runs always use LeRobot's standard
-                    torque — this slider doesn't affect them.
-                  </p>
-                </div>
-              )}
-
-              {(batchAutoCalOpen || batchAutoCal.active) && (
-                <div className="space-y-3 rounded-md border border-border bg-muted/30 p-3">
-                  <div className="flex items-center gap-2 text-sm font-medium text-foreground">
-                    <Wand2 className="h-4 w-4" />
-                    Multi-arm auto-calibration
-                  </div>
-                  {!batchAutoCal.active ? (
-                    <>
-                      <p className="text-xs text-muted-foreground">
-                        Pick the arms to calibrate. Each runs its own hands-off
-                        calibration <strong>at the same time</strong> on its
-                        assigned port — one arm failing doesn't stop the
-                        others. Ports come from each arm's assignment above; an
-                        arm with no port yet can't be picked. Each arm replaces
-                        its own existing calibration; rename any of them
-                        afterward from the calibration list below.
-                      </p>
-                      <div className="space-y-2">
-                        {armSlots.map((slot) => {
-                          const selected = !!batchSelected[slot.key];
-                          const assignedPort = slotPort(slot);
-                          const hasPort = !!assignedPort;
-                          // Distinguish "never assigned" from "assigned but
-                          // not currently detected" so the hint is actionable.
-                          const savedButUndetected =
-                            !hasPort && !!slotSavedPort(slot);
-                          return (
-                            <label
-                              key={slot.key}
-                              className={`flex items-center gap-2 rounded-md border p-2 ${
-                                selected
-                                  ? "border-ring bg-accent"
-                                  : "border-border bg-background"
-                              } ${
-                                hasPort
-                                  ? "cursor-pointer"
-                                  : "cursor-not-allowed opacity-60"
-                              }`}
-                            >
-                              <Checkbox
-                                checked={selected}
-                                disabled={!hasPort}
-                                onCheckedChange={(checked) =>
-                                  setBatchSelected((prev) => ({
-                                    ...prev,
-                                    [slot.key]: checked === true,
-                                  }))
-                                }
-                              />
-                              <span className="text-sm text-foreground">
-                                {slot.label}
-                              </span>
-                              <span
-                                className={`ml-auto font-mono text-xs ${
-                                  hasPort ? "text-muted-foreground" : "text-warn/80"
-                                }`}
-                              >
-                                {hasPort
-                                  ? assignedPort
-                                  : savedButUndetected
-                                    ? "port not detected"
-                                    : "no port — assign above"}
-                              </span>
-                            </label>
-                          );
-                        })}
-                      </div>
-                      <div className="flex gap-2">
-                        <Button
-                          onClick={() => setBatchAutoCalPromptOpen(true)}
-                          disabled={selectedBatchSlots.length === 0}
-                          className="flex-1"
-                        >
-                          <Wand2 className="mr-2 h-4 w-4" />
-                          Auto-calibrate {selectedBatchSlots.length || 0} arm
-                          {selectedBatchSlots.length === 1 ? "" : "s"}
-                        </Button>
-                        <Button
-                          onClick={() => setBatchAutoCalOpen(false)}
-                          variant="outline"
-                          className="shrink-0"
-                        >
-                          Cancel
-                        </Button>
-                      </div>
-                    </>
-                  ) : (
-                    <p className="text-xs text-muted-foreground">
-                      {batchAutoCal.completed + batchAutoCal.failed} of{" "}
-                      {batchAutoCal.total} done — the arms are moving. Keep the
-                      workspace clear.
-                    </p>
-                  )}
-
-                  {/* Per-arm status rows (running + terminal), shown live. */}
-                  {batchAutoCal.arms.length > 0 && (
-                    <div className="space-y-1">
-                      {batchAutoCal.arms.map((a) => (
-                        <div
-                          key={`${a.device_type}:${a.port}`}
-                          className="flex items-center justify-between gap-2 rounded bg-muted px-2 py-1 text-xs"
-                        >
-                          <span className="truncate font-mono text-foreground">
-                            {a.name || a.port}
-                          </span>
-                          <span
-                            className={
-                              a.status === "completed"
-                                ? "text-ok"
-                                : a.status === "failed"
-                                  ? "text-destructive"
-                                  : a.status === "stopped"
-                                    ? "text-warn"
-                                    : "text-info"
-                            }
-                            title={a.error ?? undefined}
-                          >
-                            {a.status === "completed"
-                              ? "✓ done"
-                              : a.status === "failed"
-                                ? "✗ failed"
-                                : a.status === "stopped"
-                                  ? "stopped"
-                                  : "running…"}
-                          </span>
-                        </div>
-                      ))}
-                      {!batchAutoCal.active && batchAutoCal.total > 0 && (
-                        <p className="pt-1 text-xs text-muted-foreground">
-                          {batchAutoCal.completed} completed,{" "}
-                          {batchAutoCal.failed} failed/stopped.
-                        </p>
-                      )}
-                    </div>
-                  )}
-
-                  {batchAutoCal.logs.length > 0 && (
-                    <div className="max-h-40 overflow-auto whitespace-pre-wrap rounded border border-border bg-muted p-2 font-mono text-xs text-foreground">
-                      {batchAutoCal.logs.slice(-120).map((line, i) => (
-                        <div key={i}>{line}</div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* Manual calibration only: torque is off the whole session,
-                  which surprises novices (the arm is deliberately floppy).
-                  Auto-cal needs no standing warning — it ends gracefully
-                  (fold on completion, freeze + return-to-start on Stop) and
-                  the multi-arm pre-start confirmation dialog carries the
-                  safety guidance. */}
-              {calibrationStatus.calibration_active && (
-                <Alert className="border-warn/40 bg-warn/10 text-warn">
-                  <AlertTriangle className="h-4 w-4" />
-                  <AlertDescription>
-                    Motor torque is off — the arm won't hold its pose during
-                    calibration, and stays limp after you cancel or finish.
-                    Keep it low and supported so it can't drop onto the table
-                    edge.
-                  </AlertDescription>
-                </Alert>
-              )}
-
-              {calibrationStatus.status === "connecting" && (
-                <Alert className="border-warn/40 bg-warn/10 text-warn">
-                  <AlertCircle className="h-4 w-4" />
-                  <AlertDescription>
-                    Connecting to the device. Please ensure it's connected.
-                  </AlertDescription>
-                </Alert>
-              )}
-
-              {calibrationStatus.status === "recording" &&
-                calibrationStatus.recorded_ranges && (
-                  <div className="space-y-3">
-                    <div className="flex items-center gap-2">
-                      <Activity className="h-4 w-4 text-muted-foreground" />
-                      <span className="text-sm font-medium text-foreground">
-                        Live position data
-                      </span>
-                    </div>
-                    <div className="rounded-md border border-border bg-muted/30 p-4">
-                      <div className="space-y-3">
-                        {Object.entries(calibrationStatus.recorded_ranges).map(
-                          ([motor, range]) => {
-                            const totalRange = range.max - range.min;
-                            const currentOffset = range.current - range.min;
-                            const progressPercent =
-                              totalRange > 0
-                                ? (currentOffset / totalRange) * 100
-                                : 50;
-                            const rangeComplete = isMotorRangeComplete(
-                              calibrationStatus.device_type,
-                              motor,
-                              totalRange,
-                            );
-
-                            return (
-                              <div key={motor} className="space-y-2">
-                                <div className="flex items-center justify-between">
-                                  <div className="flex items-center gap-2">
-                                    <span className="text-sm font-medium text-foreground">
-                                      {motor}
-                                    </span>
-                                    {rangeComplete && (
-                                      <CheckCircle
-                                        className="h-4 w-4 text-ok"
-                                        aria-label="Range complete"
-                                      />
-                                    )}
-                                  </div>
-                                  <span className="font-mono text-xs text-foreground">
-                                    {range.current}
-                                  </span>
-                                </div>
-                                <div className="relative">
-                                  <div className="h-3 w-full rounded-full bg-secondary">
-                                    <div
-                                      className="relative h-3 rounded-full bg-muted-foreground/20"
-                                      style={{ width: "100%" }}
-                                    >
-                                      <div
-                                        className={`absolute top-0 h-3 w-1 rounded-full transition-all duration-100 ${
-                                          rangeComplete ? "bg-ok" : "bg-warn"
-                                        }`}
-                                        style={{
-                                          left: `${Math.max(
-                                            0,
-                                            Math.min(100, progressPercent),
-                                          )}%`,
-                                          transform: "translateX(-50%)",
-                                        }}
-                                      />
-                                    </div>
-                                  </div>
-                                  <div className="mt-1 flex justify-between text-xs text-muted-foreground">
-                                    <span>{range.min}</span>
-                                    <span>{range.max}</span>
-                                  </div>
-                                </div>
-                              </div>
-                            );
-                          },
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                )}
-
-              {calibrationStatus.status === "recording" &&
-                (() => {
-                  const ranges = calibrationStatus.recorded_ranges ?? {};
-                  const motors = Object.entries(ranges);
-                  const allComplete =
-                    motors.length > 0 &&
-                    motors.every(([motor, range]) =>
-                      isMotorRangeComplete(
-                        calibrationStatus.device_type,
-                        motor,
-                        range.max - range.min,
-                      ),
-                    );
-                  return (
-                    <div className="space-y-3">
-                      <Button
-                        onClick={handleCompleteStep}
-                        disabled={!calibrationStatus.calibration_active}
-                        className={`w-full text-primary-foreground ${
-                          allComplete
-                            ? "bg-ok hover:bg-ok/90"
-                            : "bg-warn hover:bg-warn/90"
-                        }`}
-                      >
-                        {allComplete ? (
-                          <CheckCircle className="mr-2 h-4 w-4" />
-                        ) : (
-                          <AlertCircle className="mr-2 h-4 w-4" />
-                        )}
-                        Save calibration
-                      </Button>
-                      <Alert className="border-info/40 bg-info/10 text-info">
-                        <Activity className="h-4 w-4" />
-                        <AlertDescription>
-                          <strong>Important:</strong> Move each joint through
-                          its full range —{" "}
-                          <strong>except the wrist roll</strong>: leave it near
-                          the middle. It rotates continuously and its range is
-                          set automatically. A check appears next to each joint
-                          once its range is wide enough.
-                        </AlertDescription>
-                      </Alert>
-                    </div>
-                  );
-                })()}
-
-              {calibrationStatus.status === "completed" && (
-                <Alert className="border-ok/40 bg-ok/10 text-ok">
-                  <CheckCircle className="h-4 w-4" />
-                  <AlertDescription>
-                    Calibration completed successfully!
-                  </AlertDescription>
-                </Alert>
-              )}
-
-              {calibrationStatus.status === "error" &&
-                calibrationStatus.error &&
-                (calibrationStatus.error.startsWith(
-                  DISCONTINUITY_ERROR_PREFIX,
-                ) ? (
-                  <Alert className="border-destructive/40 bg-destructive/10 text-destructive">
-                    <XCircle className="h-4 w-4" />
-                    <AlertDescription>
-                      <div className="mb-1 text-base font-semibold">
-                        Motor discontinuity detected
-                      </div>
-                      <div>
-                        Make sure to start the calibration with the robot in a
-                        middle position — all joints in the middle of their
-                        ranges. See the calibration demo below for the correct
-                        starting pose.
-                      </div>
-                    </AlertDescription>
-                  </Alert>
-                ) : (
-                  <Alert className="border-destructive/40 bg-destructive/10 text-destructive">
-                    <XCircle className="h-4 w-4" />
-                    <AlertDescription>
-                      <strong>Error:</strong> {calibrationStatus.error}
-                    </AlertDescription>
-                  </Alert>
-                ))}
-
-              <div
-                ref={demoVideoRef}
-                className="space-y-2 rounded-md border border-border bg-muted/30 p-3"
-              >
-                <h4 className="eyebrow">Calibration demo</h4>
-                <div className="overflow-hidden rounded-md bg-muted">
-                  <video className="h-auto w-full" controls preload="auto" muted>
-                    <source
-                      src="https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/lerobot/calibrate_so101_2.mp4"
-                      type="video/mp4"
-                    />
-                    <p className="py-4 text-center text-sm text-muted-foreground">
-                      Your browser does not support the video tag.
-                      <br />
-                      <a
-                        href="https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/lerobot/calibrate_so101_2.mp4"
-                        className="underline"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                      >
-                        Click here to view the calibration video
-                      </a>
-                    </p>
-                  </video>
-                </div>
-              </div>
-            </div>
-          </section>
-
-          {/* 03 · Calibration files */}
+          {/* 02 · Calibration files */}
           {robot && (
             <section className="space-y-3 py-5">
               <div className="flex items-center gap-2">
-                <PanelHeader step="03" title="Calibration files" />
+                <PanelHeader step="02" title="Calibration files" />
                 {/* One folder per device type — both same-side slots share a
                     single directory (so101_leader / so101_follower), so a
                     single leader + follower pair covers single AND bimanual
@@ -2087,6 +2143,14 @@ const RobotConfigWindow = ({
                 const excludeConfigField = isBimanual
                   ? counterpartField
                   : undefined;
+                // Which physical arm this row's slot drives, for retargeting
+                // the calibration flow when its + button is clicked.
+                const rowArm: "left" | "right" = row.cfgField.startsWith(
+                  "right_",
+                )
+                  ? "right"
+                  : "left";
+                const isNewCalibOpen = newCalibFor === row.cfgField;
                 return (
                   <div key={row.label}>
                     <div className="flex items-center gap-2 text-sm">
@@ -2101,29 +2165,59 @@ const RobotConfigWindow = ({
                         {row.label}
                       </span>
                     </div>
-                    <CalibrationLibrary
-                      device={row.device}
-                      assignedConfig={cfg}
-                      configField={row.cfgField}
-                      excludeConfig={excludeConfig}
-                      excludeConfigField={excludeConfigField}
-                      robotName={robotName}
-                      onAssigned={fetchRobot}
-                      onLibraryChanged={() =>
-                        setCalibReloadToken((t) => t + 1)
-                      }
-                      reloadToken={calibReloadToken}
-                    />
+                    <div className="flex items-start gap-2">
+                      <div className="min-w-0 flex-1">
+                        <CalibrationLibrary
+                          device={row.device}
+                          assignedConfig={cfg}
+                          configField={row.cfgField}
+                          excludeConfig={excludeConfig}
+                          excludeConfigField={excludeConfigField}
+                          robotName={robotName}
+                          onAssigned={fetchRobot}
+                          onLibraryChanged={() =>
+                            setCalibReloadToken((t) => t + 1)
+                          }
+                          reloadToken={calibReloadToken}
+                        />
+                      </div>
+                      {/* Expands the calibration flow (auto/manual, demo,
+                          advanced torque) right below this row, targeted at
+                          this arm slot. */}
+                      <Button
+                        type="button"
+                        variant={isNewCalibOpen ? "secondary" : "outline"}
+                        className="mt-1 shrink-0"
+                        onClick={() =>
+                          toggleNewCalibration(
+                            row.cfgField,
+                            row.device,
+                            rowArm,
+                          )
+                        }
+                        aria-expanded={isNewCalibOpen}
+                        title="Create a new calibration for this arm"
+                      >
+                        <Plus className="mr-1 h-4 w-4" />
+                        New calibration
+                      </Button>
+                    </div>
+                    {/* Slides open in place, like the studio's entry forms. */}
+                    <Collapsible open={isNewCalibOpen}>
+                      <CollapsibleContent className={SLIDE}>
+                        {newCalibrationPanel(row.label)}
+                      </CollapsibleContent>
+                    </Collapsible>
                   </div>
                 );
               })}
             </section>
           )}
 
-          {/* 04 · Cameras */}
+          {/* 03 · Cameras */}
           <section className="space-y-4 py-5">
             <div className="flex items-center gap-2">
-              <PanelHeader step="04" title="Attached cameras" />
+              <PanelHeader step="03" title="Attached cameras" />
               <div className="ml-auto flex items-center gap-2">
                 <Label
                   htmlFor="cameras-toggle"

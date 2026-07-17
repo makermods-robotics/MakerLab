@@ -111,12 +111,12 @@ const ImportCalibrationButton: React.FC<ImportCalibrationButtonProps> = ({
       <Button
         size="icon"
         variant="ghost"
-        className="h-7 w-7 text-muted-foreground hover:text-foreground"
+        className="shrink-0 text-muted-foreground hover:text-foreground"
         onClick={pickFile}
         aria-label={`Import ${sideLabel} calibration`}
         title={`Import ${sideLabel} calibration`}
       >
-        <Upload className="w-4 h-4" />
+        <Upload className="h-4 w-4" />
       </Button>
 
       <Dialog open={open} onOpenChange={setOpen}>
