@@ -17,19 +17,17 @@ default range, single-instruction position+speed+acceleration writes)."""
 
 import logging
 import time
-
 import scservo_sdk as scs
-
 from lerobot.motors.motors_bus import NameOrID
 
 from .calibration_defaults import (
     DEFAULT_ACCELERATION,
-    DEFAULT_POS_SPEED,
     DEFAULT_TIMEOUT,
+    DEFAULT_POS_SPEED,
     FULL_TURN,
-    HOMING_OFFSET_MAX_MAG,
     MID_POS,
     OVERLOAD_SETTLE_TIME,
+    POSITION_TOLERANCE,
     SAFE_IO_INTERVAL,
     SAFE_IO_RETRIES,
     SO_STS_DEFAULT_RANGES,
@@ -37,6 +35,7 @@ from .calibration_defaults import (
     STALL_VELOCITY_THRESHOLD,
     UNFOLD_OVERLOAD_SETTLE,
     UNFOLD_TOLERANCE_DEG,
+    HOMING_OFFSET_MAX_MAG,
     motor_label,
 )
 
@@ -108,7 +107,10 @@ class FeetechCalibrationMixin:
 
             # First: velocity near zero AND position stable AND Moving=0 (N consecutive samples)
             vel_ok = abs(vel) < velocity_threshold
-            pos_ok = prev_position is None or abs(pos - prev_position) < position_delta_threshold
+            pos_ok = (
+                prev_position is None
+                or abs(pos - prev_position) < position_delta_threshold
+            )
             moving_ok = moving == 0
             if vel_ok and pos_ok and moving_ok:
                 stable_count += 1
@@ -151,9 +153,9 @@ class FeetechCalibrationMixin:
         reasons: dict[str, str] = {}
         positions: dict[str, int] = {}
         # Per-servo state: previous-frame position, stable count, overload count
-        prev_pos: dict[str, int | None] = dict.fromkeys(motors)
-        stable_count: dict[str, int] = dict.fromkeys(motors, 0)
-        stall_count: dict[str, int] = dict.fromkeys(motors, 0)
+        prev_pos: dict[str, int | None] = {m: None for m in motors}
+        stable_count: dict[str, int] = {m: 0 for m in motors}
+        stall_count: dict[str, int] = {m: 0 for m in motors}
         t0 = time.monotonic()
 
         while still_running and (time.monotonic() - t0 < timeout_s):
@@ -173,7 +175,10 @@ class FeetechCalibrationMixin:
                     continue
 
                 vel_ok = abs(vel) < velocity_threshold
-                pos_ok = prev_pos[m] is None or abs(pos - prev_pos[m]) < position_delta_threshold
+                pos_ok = (
+                    prev_pos[m] is None
+                    or abs(pos - prev_pos[m]) < position_delta_threshold
+                )
                 moving_ok = moving == 0
                 if vel_ok and pos_ok and moving_ok:
                     stable_count[m] = stable_count.get(m, 0) + 1
@@ -193,9 +198,7 @@ class FeetechCalibrationMixin:
                 if status & 0x20:
                     stall_count[m] = stall_count.get(m, 0) + 1
                     if stall_count[m] >= stall_confirm_samples:
-                        reasons[m] = (
-                            f"stall confirmed ({stall_confirm_samples}x): Status=0x{status:02X}(BIT5 overload)"
-                        )
+                        reasons[m] = f"stall confirmed ({stall_confirm_samples}x): Status=0x{status:02X}(BIT5 overload)"
                         positions[m] = pos
                         self.write("Goal_Velocity", m, 0)
                         still_running.discard(m)
@@ -223,14 +226,12 @@ class FeetechCalibrationMixin:
 
         for m in motors:
             self._safe_stop_and_clear_overload(m)
-        #  self.disable_torque(m)
+          #  self.disable_torque(m)
         for m in motors:
             phase_raw = self.read("Phase", m, normalize=False)
             if phase_raw & 0x10:
                 self.write("Phase", m, phase_raw & ~0x10, normalize=False)
-                print(
-                    f"  [{motor_label(m)}] Phase(reg18): 0x{phase_raw:02X} -> 0x{phase_raw & ~0x10:02X} (BIT4=0 single-turn)"
-                )
+                print(f"  [{motor_label(m)}] Phase(reg18): 0x{phase_raw:02X} -> 0x{phase_raw & ~0x10:02X} (BIT4=0 single-turn)")
             else:
                 print(f"  [{motor_label(m)}] Phase(reg18): 0x{phase_raw:02X} (already single-turn)")
             self.write("Homing_Offset", m, 0, normalize=False)
@@ -255,7 +256,7 @@ class FeetechCalibrationMixin:
         """Issue one instruction to run the given servos, then poll for stall, stop, and clear overload.
         velocity may be the same speed (int) or per-servo speeds (dict).
         Returns (per-servo stop reason, per-servo stall position)."""
-        vel_dict = velocity if isinstance(velocity, dict) else dict.fromkeys(motors, velocity)
+        vel_dict = velocity if isinstance(velocity, dict) else {m: velocity for m in motors}
         self.sync_write(
             "Goal_Velocity",
             vel_dict,
@@ -264,7 +265,9 @@ class FeetechCalibrationMixin:
         time.sleep(initial_move_delay_s)
         if len(motors) == 1:
             m = motors[0]
-            reason = self._wait_for_stall(m, stall_confirm_samples, timeout_s, sample_interval_s)
+            reason = self._wait_for_stall(
+                m, stall_confirm_samples, timeout_s, sample_interval_s
+            )
             reasons = {m: reason}
             positions = {m: self._read_with_retry("Present_Position", m)}
         else:
@@ -358,7 +361,9 @@ class FeetechCalibrationMixin:
                 time.sleep(0.1)
         time.sleep(settle_s)
 
-    def _read_with_retry(self, data_name: str, motor: str, retries: int = 5, interval_s: float = 0.2) -> int:
+    def _read_with_retry(
+        self, data_name: str, motor: str, retries: int = 5, interval_s: float = 0.2
+    ) -> int:
         """Read with retries; used to read registers while recovering from Overload / comm exceptions."""
         for i in range(retries):
             try:
@@ -381,9 +386,7 @@ class FeetechCalibrationMixin:
         interval_s: float = SAFE_IO_INTERVAL,
     ) -> int:
         """Safe read with retries."""
-        return self._read_with_retry(
-            reg, self._get_motors_list(motor)[0], retries=retries, interval_s=interval_s
-        )
+        return self._read_with_retry(reg, self._get_motors_list(motor)[0], retries=retries, interval_s=interval_s)
 
     def safe_write(
         self,
@@ -604,7 +607,9 @@ class FeetechCalibrationMixin:
         print(f"  [{motor_label(motor)}] CCW stop reason: {ccw_reasons[motor]}")
         print(f"  [{motor_label(motor)}] CCW stall position: {pos_ccw_dict[motor]}")
 
-        return self._compute_mid_and_range_from_limits(motor, pos_cw_dict[motor], pos_ccw_dict[motor])
+        return self._compute_mid_and_range_from_limits(
+            motor, pos_cw_dict[motor], pos_ccw_dict[motor]
+        )
 
     def measure_ranges_of_motion_multi(
         self,
@@ -649,8 +654,12 @@ class FeetechCalibrationMixin:
         def _ccw_first(m: str) -> bool:
             return ccw_first.get(m, False) if isinstance(ccw_first, dict) else bool(ccw_first)
 
-        first_vel_dict = {m: (-velocity_limit if _ccw_first(m) else velocity_limit) for m in motors}
-        second_vel_dict = {m: (velocity_limit if _ccw_first(m) else -velocity_limit) for m in motors}
+        first_vel_dict = {
+            m: (-velocity_limit if _ccw_first(m) else velocity_limit) for m in motors
+        }
+        second_vel_dict = {
+            m: (velocity_limit if _ccw_first(m) else -velocity_limit) for m in motors
+        }
 
         first_reasons, first_pos = self._run_direction_until_stall(
             motors,
@@ -662,9 +671,7 @@ class FeetechCalibrationMixin:
         )
         for m in motors:
             label = "CCW" if first_vel_dict[m] < 0 else "CW"
-            print(
-                f"  [{motor_label(m)}] {label} stop reason: {first_reasons[m]}, stall position: {first_pos[m]}"
-            )
+            print(f"  [{motor_label(m)}] {label} stop reason: {first_reasons[m]}, stall position: {first_pos[m]}")
         for m in motors:
             self._clear_and_enable_torque(m)
         time.sleep(0.05)
@@ -678,18 +685,18 @@ class FeetechCalibrationMixin:
         )
         for m in motors:
             label = "CCW" if second_vel_dict[m] < 0 else "CW"
-            print(
-                f"  [{motor_label(m)}] {label} stop reason: {second_reasons[m]}, stall position: {second_pos[m]}"
-            )
+            print(f"  [{motor_label(m)}] {label} stop reason: {second_reasons[m]}, stall position: {second_pos[m]}")
         time.sleep(OVERLOAD_SETTLE_TIME)
 
         # Reconstruct pos_cw / pos_ccw per servo based on first/second direction
         # (CW = positive-velocity limit, CCW = negative-velocity limit)
         pos_cw_dict = {
-            m: (first_pos[m] if first_vel_dict[m] == velocity_limit else second_pos[m]) for m in motors
+            m: (first_pos[m] if first_vel_dict[m] == velocity_limit else second_pos[m])
+            for m in motors
         }
         pos_ccw_dict = {
-            m: (second_pos[m] if first_vel_dict[m] == velocity_limit else first_pos[m]) for m in motors
+            m: (second_pos[m] if first_vel_dict[m] == velocity_limit else first_pos[m])
+            for m in motors
         }
 
         result: dict[str, tuple[int, int, int, int, int, int]] = {}
@@ -713,7 +720,9 @@ class FeetechCalibrationMixin:
         """Write a raw byte sequence to the given register start address
         (used by write_pos_ex_and_wait, sync_write_pos_ex, etc.)."""
         for n_try in range(1 + num_retry):
-            comm, error = self.packet_handler.writeTxRx(self.port_handler, motor_id, addr, len(data), data)
+            comm, error = self.packet_handler.writeTxRx(
+                self.port_handler, motor_id, addr, len(data), data
+            )
             if self._is_comm_success(comm):
                 break
             logger.debug(
@@ -736,7 +745,10 @@ class FeetechCalibrationMixin:
     ) -> None:
         """Write Min_Position_Limit(9) + Max_Position_Limit(11) in one instruction (4 bytes total)."""
         id_ = self._get_motor_id(motor)
-        data = self._split_into_byte_chunks(rmin, 2) + self._split_into_byte_chunks(rmax, 2)
+        data = (
+            self._split_into_byte_chunks(rmin, 2)
+            + self._split_into_byte_chunks(rmax, 2)
+        )
         err_msg = f"write_position_limits(id={id_}, rmin={rmin}, rmax={rmax}) failed"
         self._write_raw_bytes(
             self._POS_LIMITS_START_ADDR,
@@ -820,7 +832,9 @@ class FeetechCalibrationMixin:
             time.sleep(0.3)
         except COMM_ERR:
             return False
-        result = self.wait_until_stopped(motor, timeout_s=timeout_s, poll_interval_s=poll_interval_s)
+        result = self.wait_until_stopped(
+            motor, timeout_s=timeout_s, poll_interval_s=poll_interval_s
+        )
         time.sleep(0.1)
         return result
 
@@ -836,6 +850,7 @@ class FeetechCalibrationMixin:
         values: motor_name -> (position, speed, acc). When all motors use the same (position, speed, acc),
         pass identical values for each key.
         """
+        
 
         for motor_name, (position, speed, acc) in values.items():
             id_ = self._get_motor_id(motor_name)
@@ -881,12 +896,8 @@ class FeetechCalibrationMixin:
         pos_now = self._read_with_retry("Present_Position", motor)
         print(f"    [{motor_label(motor)}] current pos={pos_now}, target pos={goal}")
         ok = self.write_pos_ex_and_wait(
-            motor,
-            goal,
-            DEFAULT_POS_SPEED,
-            DEFAULT_ACCELERATION,
-            timeout_s=timeout_s,
-            poll_interval_s=0.05,
+            motor, goal, DEFAULT_POS_SPEED, DEFAULT_ACCELERATION,
+            timeout_s=timeout_s, poll_interval_s=0.05,
         )
         print(f"    [{motor_label(motor)}] lift motion done: {ok}, evaluating position")
         time.sleep(0.3)
@@ -896,22 +907,16 @@ class FeetechCalibrationMixin:
             self._clear_overload_unfold(motor)
             pos = self._read_with_retry("Present_Position", motor)
             err_deg = abs(pos - goal) * 360.0 / FULL_TURN
-            print(
-                f"    [{motor_label(motor)}] stalled/abnormal stop: pos={pos} ({abs(pos - goal)} steps from target ≈ {err_deg:.1f}°)"
-            )
+            print(f"    [{motor_label(motor)}] stalled/abnormal stop: pos={pos} ({abs(pos - goal)} steps from target ≈ {err_deg:.1f}°)")
             return False, pos, "stalled (comm exception)"
         if not ok:
             self._clear_overload_unfold(motor)
             err_deg = abs(pos - goal) * 360.0 / FULL_TURN
-            print(
-                f"    [{motor_label(motor)}] timeout: pos={pos} ({abs(pos - goal)} steps from target ≈ {err_deg:.1f}°)"
-            )
+            print(f"    [{motor_label(motor)}] timeout: pos={pos} ({abs(pos - goal)} steps from target ≈ {err_deg:.1f}°)")
             return False, pos, "timeout"
         error_deg = abs(pos - goal) * 360.0 / FULL_TURN
         if error_deg <= tolerance_deg:
-            print(
-                f"    [{motor_label(motor)}] arrived: pos={pos} (error {abs(pos - goal)} steps ≈ {error_deg:.1f}°, within {tolerance_deg}°)"
-            )
+            print(f"    [{motor_label(motor)}] arrived: pos={pos} (error {abs(pos - goal)} steps ≈ {error_deg:.1f}°, within {tolerance_deg}°)")
             return True, pos, "arrived"
         try:
             status = self.read("Status", motor, normalize=False)
@@ -924,9 +929,7 @@ class FeetechCalibrationMixin:
                 f"{abs(pos - goal)} steps from target ≈ {error_deg:.1f}°)"
             )
             return False, pos, f"stalled (Status=0x{status:02X})"
-        print(
-            f"    [{motor_label(motor)}] not arrived: pos={pos} ({abs(pos - goal)} steps from target ≈ {error_deg:.1f}°, exceeds {tolerance_deg}°)"
-        )
+        print(f"    [{motor_label(motor)}] not arrived: pos={pos} ({abs(pos - goal)} steps from target ≈ {error_deg:.1f}°, exceeds {tolerance_deg}°)")
         return False, pos, "not arrived"
 
     def _clear_overload_unfold(self, motor: str) -> None:
@@ -972,32 +975,32 @@ class FeetechCalibrationMixin:
         time.sleep(0.3)
         # Try the forward direction
         # print(f"    [{motor_label(motor)}] trying forward...")
-        reached, pos_after, reason = self._unfold_move_and_wait(motor, MID_POS + target_steps, move_timeout)
+        reached, pos_after, reason = self._unfold_move_and_wait(
+            motor, MID_POS + target_steps, move_timeout
+        )
         if reached:
             print(f"    [{motor_label(motor)}] forward succeeded")
             return "forward", target_steps
 
         moved_fwd = abs(pos_after - MID_POS)
-        # print(f"    [{motor_label(motor)}] forward failed ({reason}), moved {moved_fwd} steps")
+        #print(f"    [{motor_label(motor)}] forward failed ({reason}), moved {moved_fwd} steps")
 
         # Return to midpoint (after stall, _clear_overload_unfold already re-enabled torque,
         # so write the midpoint with waiting)
         self.write_pos_ex_and_wait(
-            motor,
-            MID_POS,
-            DEFAULT_POS_SPEED,
-            DEFAULT_ACCELERATION,
-            timeout_s=5.0,
-            poll_interval_s=0.05,
+            motor, MID_POS, DEFAULT_POS_SPEED, DEFAULT_ACCELERATION,
+            timeout_s=5.0, poll_interval_s=0.05,
         )
 
         # Try the reverse direction
-        # print(f"    [{motor_label(motor)}] trying reverse...")
-        reached, pos_after, reason = self._unfold_move_and_wait(motor, MID_POS - target_steps, move_timeout)
+        #print(f"    [{motor_label(motor)}] trying reverse...")
+        reached, pos_after, reason = self._unfold_move_and_wait(
+            motor, MID_POS - target_steps, move_timeout
+        )
         if reached:
             print(f"    [{motor_label(motor)}] reverse succeeded")
             return "reverse", target_steps
         moved_rev = abs(MID_POS - pos_after)
-        # print(f"    [{motor_label(motor)}] reverse also failed ({reason}), moved {moved_rev} steps, holding position")
+        #print(f"    [{motor_label(motor)}] reverse also failed ({reason}), moved {moved_rev} steps, holding position")
         print(f"    [{motor_label(motor)}] unfold failed, holding current position")
         return None, 0

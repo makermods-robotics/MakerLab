@@ -1,7 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import {
   Dialog,
   DialogContent,
@@ -11,6 +10,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import MetaRows from "@/components/library/MetaRows";
 import { HubModel, deleteHubModel } from "@/lib/jobsApi";
 import { ApiError } from "@/lib/apiClient";
 import { useApi } from "@/contexts/ApiContext";
@@ -21,6 +21,7 @@ import {
   Play,
   Sparkles,
   Trash2,
+  Upload,
 } from "lucide-react";
 
 interface Props {
@@ -37,7 +38,6 @@ interface Props {
     repoId: string,
     action: "inference" | "finetune",
   ) => void | Promise<void>;
-  selectedRobotName?: string | null;
 }
 
 function relativeTime(iso: string | null): string {
@@ -106,20 +106,18 @@ const DeleteHubModelDialog: React.FC<{
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
+      <DialogContent className="bg-background border-border">
         <DialogHeader>
-          <DialogTitle className="text-destructive">
-            Delete model repo
-          </DialogTitle>
-          <DialogDescription>
+          <DialogTitle className="text-destructive">Delete model repo</DialogTitle>
+          <DialogDescription className="text-muted-foreground">
             This permanently deletes the model repository and its files from the
             Hugging Face Hub. This cannot be undone.
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-2">
-          <p className="text-sm text-foreground">
+          <p className="text-sm text-muted-foreground">
             Type{" "}
-            <code className="rounded bg-secondary px-1 py-0.5 font-mono text-xs text-destructive">
+            <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs text-destructive">
               {repoId}
             </code>{" "}
             to confirm.
@@ -140,16 +138,20 @@ const DeleteHubModelDialog: React.FC<{
             autoComplete="off"
             spellCheck={false}
             placeholder={repoId}
-            className="font-mono"
+            className="bg-background border-input font-mono"
           />
         </div>
         {error && <p className="text-sm text-destructive">{error}</p>}
         <DialogFooter className="flex gap-2 justify-end">
-          <Button variant="outline" onClick={() => onOpenChange(false)}>
+          <Button
+            variant="outline"
+            className="border-border bg-transparent text-muted-foreground hover:bg-muted hover:text-foreground"
+            onClick={() => onOpenChange(false)}
+          >
             Cancel
           </Button>
           <Button
-            variant="destructive"
+            className="bg-destructive hover:bg-destructive/90 text-destructive-foreground"
             disabled={!confirmed || deleting}
             onClick={doDelete}
           >
@@ -161,16 +163,10 @@ const DeleteHubModelDialog: React.FC<{
   );
 };
 
-const HubModelCard: React.FC<Props> = ({
-  model,
-  onDeleted,
-  onAction,
-  selectedRobotName,
-}) => {
+const HubModelCard: React.FC<Props> = ({ model, onDeleted, onAction }) => {
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [acting, setActing] = useState<"inference" | "finetune" | null>(null);
   const url = `https://huggingface.co/${model.repo_id}`;
-  const robotLabel = selectedRobotName ?? "robot";
   const shortName = model.repo_id.includes("/")
     ? model.repo_id.split("/").slice(1).join("/")
     : model.repo_id;
@@ -191,94 +187,90 @@ const HubModelCard: React.FC<Props> = ({
 
   return (
     <Card
-      variant="flat"
       onClick={() => window.open(url, "_blank", "noopener,noreferrer")}
-      className="rounded-xl bg-card cursor-pointer hover:border-input transition-colors"
+      className="@container bg-card border-border rounded-md cursor-pointer hover:border-ring/50 hover:bg-muted/40 transition-colors h-full"
     >
-      <CardContent className="p-4">
-        <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0">
-            <div
-              className="flex items-center gap-1.5 truncate text-[15px] font-semibold text-foreground"
-              title={model.repo_id}
-            >
-              {model.private ? (
-                <Lock className="w-3.5 h-3.5 shrink-0 text-muted-foreground" />
-              ) : null}
-              <span className="truncate">{shortName}</span>
-            </div>
-            <div
-              className="truncate font-mono text-[11px] text-muted-foreground"
-              title={`${model.repo_id} · updated ${relativeTime(
-                model.last_modified,
-              )}`}
-            >
-              {model.repo_id}
-            </div>
+      <CardContent className="flex h-full flex-col gap-2.5 p-3">
+        <div className="flex items-start justify-between gap-2">
+          <div className="flex items-center gap-1.5 text-xs font-semibold text-info">
+            <Upload className="w-3.5 h-3.5" />
+            Uploaded
           </div>
-          <div className="flex shrink-0 items-start gap-2">
-            <Badge variant="outline">Uploaded</Badge>
-            <div className="flex items-center gap-0.5">
-              <Button
-                variant="ghost"
-                size="icon"
-                asChild
-                className="h-7 w-7"
-                aria-label="View on Hub"
+          <div className="flex items-center gap-0.5">
+            <Button
+              variant="ghost"
+              size="icon"
+              asChild
+              className="h-7 w-7 text-muted-foreground hover:text-foreground"
+              aria-label="View on Hub"
+            >
+              <a
+                href={url}
+                target="_blank"
+                rel="noopener noreferrer"
+                onClick={(e) => e.stopPropagation()}
               >
-                <a
-                  href={url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  onClick={(e) => e.stopPropagation()}
-                >
-                  <ExternalLink className="w-3.5 h-3.5" />
-                </a>
-              </Button>
-              <Button
-                variant="ghost"
-                size="icon"
-                className="h-7 w-7 hover:text-destructive"
-                aria-label="Delete model repo"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setConfirmOpen(true);
-                }}
-              >
-                <Trash2 className="w-3.5 h-3.5" />
-              </Button>
-            </div>
+                <ExternalLink className="w-3.5 h-3.5" />
+              </a>
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7 text-muted-foreground hover:text-destructive"
+              aria-label="Delete model repo"
+              onClick={(e) => {
+                e.stopPropagation();
+                setConfirmOpen(true);
+              }}
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+            </Button>
           </div>
         </div>
-        <div
-          className="media-slot mt-3 h-[110px] min-h-[110px] rounded-md"
-          data-label="rollout preview"
-        />
+        <div>
+          <div
+            className="text-foreground font-semibold truncate flex items-center gap-1.5"
+            title={model.repo_id}
+          >
+            {model.private ? (
+              <Lock className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+            ) : null}
+            <span className="truncate">{shortName}</span>
+          </div>
+          <div className="text-xs text-muted-foreground truncate" title={model.repo_id}>
+            {model.repo_id}
+          </div>
+        </div>
+        <MetaRows rows={[["Updated", relativeTime(model.last_modified)]]} />
         {/* Same primary actions as an imported model card. Clicking either
             lazily auto-imports the repo (in the parent) and then runs the
             action — so a model trained on another machine is a first-class
             citizen here. */}
         {onAction ? (
-          <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+          <div className="mt-auto flex items-center gap-1.5 pt-1">
             <Button
+              size="sm"
               onClick={(e) => runAction(e, "inference")}
               disabled={acting !== null}
-              className="h-9 px-3"
+              className="h-8 gap-1 bg-primary hover:bg-primary/90 text-primary-foreground"
               aria-label="Run inference with this model"
               title="Run inference"
             >
-              <Play className="w-4 h-4" /> Run on {robotLabel}
+              <Play className="w-3.5 h-3.5" /> Run
             </Button>
             <Button
               size="sm"
-              variant="ghost"
+              variant="outline"
               onClick={(e) => runAction(e, "finetune")}
               disabled={acting !== null}
-              className="h-8 gap-1"
+              className="h-8 shrink-0 gap-1 border-primary/40 text-primary hover:bg-primary/10"
               aria-label="Fine-tune a new run from this model's weights"
               title="Fine-tune a new run from this model's weights"
             >
-              <Sparkles className="w-3.5 h-3.5" /> Fine-tune
+              <Sparkles className="w-3.5 h-3.5" />
+              {/* Label only when the card fits the whole row on one line;
+                  the tooltip covers the narrow case. */}
+              <span className="hidden @[13rem]:inline">Fine-tune</span>
             </Button>
           </div>
         ) : null}

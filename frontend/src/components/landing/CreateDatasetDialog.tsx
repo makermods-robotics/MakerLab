@@ -12,6 +12,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { validateDatasetName } from "@/lib/datasetName";
+import { useHfAuth } from "@/contexts/HfAuthContext";
 
 interface CreateDatasetDialogProps {
   open: boolean;
@@ -38,6 +39,12 @@ const CreateDatasetDialog: React.FC<CreateDatasetDialogProps> = ({
 }) => {
   const [name, setName] = useState("");
 
+  // The namespace (`<hf_username>/`) is prepended downstream at record start,
+  // so surface it here as a live hint. Only meaningful when the user hasn't
+  // typed their own "namespace/name" and we know who they are.
+  const { auth } = useHfAuth();
+  const username = auth.status === "authenticated" ? auth.username : null;
+
   React.useEffect(() => {
     if (open) setName("");
   }, [open]);
@@ -56,6 +63,13 @@ const CreateDatasetDialog: React.FC<CreateDatasetDialogProps> = ({
   const nameError = trimmed === "" ? null : validateDatasetName(trimmed);
   const canCreate = trimmed !== "" && nameError === null && !matchesExisting;
 
+  // Live preview of the resulting repo id. Only shown when we know the
+  // namespace and the user hasn't already typed their own "namespace/name"
+  // (a "/" means they're supplying the namespace themselves — don't double
+  // it up). Falls back to the placeholder while the field is empty.
+  const showNamespaceHint = username !== null && !trimmed.includes("/");
+  const previewName = trimmed === "" ? "my_dataset" : trimmed;
+
   const handleConfirm = () => {
     if (!canCreate) return;
     onCreateNew(trimmed);
@@ -67,7 +81,7 @@ const CreateDatasetDialog: React.FC<CreateDatasetDialogProps> = ({
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>Create a new dataset</DialogTitle>
-          <DialogDescription>
+          <DialogDescription className="text-muted-foreground">
             Name the dataset you're about to record. You'll set the task and
             episode count in the next step.
           </DialogDescription>
@@ -80,7 +94,9 @@ const CreateDatasetDialog: React.FC<CreateDatasetDialogProps> = ({
           className="space-y-4"
         >
           <div>
-            <Label htmlFor="new-dataset-name">Name</Label>
+            <Label htmlFor="new-dataset-name" className="text-muted-foreground">
+              Name
+            </Label>
             <Input
               id="new-dataset-name"
               autoFocus
@@ -90,15 +106,22 @@ const CreateDatasetDialog: React.FC<CreateDatasetDialogProps> = ({
               }
               placeholder="my_dataset"
               aria-invalid={nameError !== null || matchesExisting}
-              className="mt-1 aria-[invalid=true]:border-destructive"
+              className="mt-1 aria-[invalid=true]:border-destructive/70"
             />
             {matchesExisting ? (
               <p className="mt-1 text-xs text-destructive">
                 A dataset with this name already exists.
               </p>
+            ) : nameError ? (
+              <p className="mt-1 text-xs text-destructive">{nameError}</p>
             ) : (
-              nameError && (
-                <p className="mt-1 text-xs text-destructive">{nameError}</p>
+              showNamespaceHint && (
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Creates{" "}
+                  <span className="font-mono text-foreground">
+                    {username}/{previewName}
+                  </span>
+                </p>
               )
             )}
           </div>
@@ -107,10 +130,15 @@ const CreateDatasetDialog: React.FC<CreateDatasetDialogProps> = ({
               type="button"
               variant="outline"
               onClick={() => onOpenChange(false)}
+              className=""
             >
               Cancel
             </Button>
-            <Button type="submit" disabled={!canCreate} variant="brand">
+            <Button
+              type="submit"
+              disabled={!canCreate}
+              className=""
+            >
               <Plus className="w-4 h-4 mr-2" /> Create
             </Button>
           </DialogFooter>

@@ -11,7 +11,14 @@ import { useApi } from "./ApiContext";
 
 export type HfAuthState =
   | { status: "loading" }
-  | { status: "authenticated"; username: string; orgs: string[] }
+  | {
+      status: "authenticated";
+      username: string;
+      orgs: string[];
+      // Namespaces the user can push a new dataset to: own account + write-role
+      // orgs. Used to gate per-dataset "Upload to Hub" buttons.
+      writableNamespaces: string[];
+    }
   | { status: "unauthenticated"; loginCommand: string };
 
 interface HfAuthValue {
@@ -37,6 +44,9 @@ export const HfAuthProvider: React.FC<{ children: ReactNode }> = ({
           status: "authenticated",
           username: data.username,
           orgs: data.orgs ?? [],
+          // Default to [] for backward-compat with an older backend that
+          // predates the writable_namespaces field.
+          writableNamespaces: data.writable_namespaces ?? [],
         });
       } else {
         setAuth({

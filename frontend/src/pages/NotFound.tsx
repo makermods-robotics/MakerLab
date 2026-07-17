@@ -1,8 +1,5 @@
 import { useLocation } from "react-router-dom";
 import { useEffect } from "react";
-import { AppShell } from "@/components/shell/AppShell";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 
 const NotFound = () => {
   const location = useLocation();
@@ -15,19 +12,15 @@ const NotFound = () => {
   }, [location.pathname]);
 
   return (
-    <AppShell showAuthChip={false}>
-      <div className="flex min-h-[calc(100vh-7rem)] items-center justify-center">
-        <div className="flex flex-col items-center gap-5 text-center">
-          <Badge variant="stencil">[ 404 ]</Badge>
-          <h1 className="font-display text-4xl font-bold tracking-tight">
-            page not found
-          </h1>
-          <Button variant="ghost" asChild>
-            <a href="/">← back to the workshop</a>
-          </Button>
-        </div>
+    <div className="min-h-screen flex items-center justify-center bg-background">
+      <div className="text-center">
+        <h1 className="text-4xl font-bold mb-4">404</h1>
+        <p className="text-xl text-muted-foreground mb-4">Oops! Page not found</p>
+        <a href="/" className="text-info hover:text-info/80 underline">
+          Return to Home
+        </a>
       </div>
-    </AppShell>
+    </div>
   );
 };
 

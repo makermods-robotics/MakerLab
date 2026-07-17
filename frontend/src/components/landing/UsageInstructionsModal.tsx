@@ -46,16 +46,16 @@ const UsageInstructionsModal: React.FC<UsageInstructionsModalProps> = ({
       onOpenChange={dismissible ? onOpenChange : () => undefined}
     >
       <DialogContent
-        className="sm:max-w-xl"
+        className="text-muted-foreground sm:max-w-xl"
         hideClose={!dismissible}
         onEscapeKeyDown={blockClose}
         onPointerDownOutside={blockClose}
         onInteractOutside={blockClose}
       >
         <DialogHeader className="text-center sm:text-center min-w-0">
-          <DialogTitle className="flex items-center justify-center gap-2 text-xl">
+          <DialogTitle className="text-foreground flex items-center justify-center gap-2 text-xl">
             <Terminal className="w-6 h-6" />
-            Get started with MakerLab
+            Get Started with MakerLab
           </DialogTitle>
           <DialogDescription>
             MakerLab runs on your machine. Click the command to copy it, then paste
@@ -67,12 +67,12 @@ const UsageInstructionsModal: React.FC<UsageInstructionsModalProps> = ({
             type="button"
             onClick={handleCopy}
             aria-label="Copy command to clipboard"
-            className="group relative w-full bg-secondary hover:bg-accent rounded-lg border border-border hover:border-input text-left transition-colors cursor-pointer"
+            className="group relative w-full bg-muted hover:bg-muted/80 rounded-lg border border-border hover:border-foreground/20 text-left transition-colors cursor-pointer"
           >
             <pre className="p-4 pr-12 text-xs sm:text-sm overflow-x-auto whitespace-pre-wrap break-all">
-              <code className="font-mono text-foreground">{ONE_LINER}</code>
+              <code className="text-ok">{ONE_LINER}</code>
             </pre>
-            <span className="absolute right-2 top-2 flex items-center gap-1 px-2 py-1 rounded text-xs text-muted-foreground group-hover:text-foreground bg-card/80">
+            <span className="absolute right-2 top-2 flex items-center gap-1 px-2 py-1 rounded text-xs text-muted-foreground group-hover:text-foreground bg-background/80">
               {copied ? (
                 <>
                   <Check className="w-3.5 h-3.5 text-ok" />
@@ -89,7 +89,10 @@ const UsageInstructionsModal: React.FC<UsageInstructionsModalProps> = ({
           <p className="text-muted-foreground text-sm text-center">
             After running, your browser will open the local MakerLab app.
           </p>
-          <Button asChild variant="brand" className="w-full">
+          <Button
+            asChild
+            className="w-full"
+          >
             <a href={LOCAL_URL} target="_blank" rel="noopener noreferrer">
               <ExternalLink className="w-4 h-4 mr-2" />
               Open MakerLab

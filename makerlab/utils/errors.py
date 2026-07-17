@@ -1,0 +1,127 @@
+# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Source-agnostic error-text helpers shared by the robot-driving features.
+
+Turns a raw error string into a plain-language, actionable hint, and knows
+which errors mean "the run actually worked, only shutdown/cleanup complained".
+
+Deliberately free of any rollout/recording/teleop specifics: the input is just
+text, so every feature can reuse it regardless of where the text came from.
+Rollout mines it out of a failed subprocess's log tail (see rollout.py);
+recording/teleop run in-process and will pass the message of a caught exception
+(`str(exc)`) instead — same functions, different source.
+"""
+
+from __future__ import annotations
+
+# Errors that mean the policy/robot actually ran and only shutdown/cleanup
+# tripped — e.g. disabling torque on a gripper still holding an object.
+# Connection-loss errors are deliberately excluded: a mid-run disconnect is a
+# real failure, not a noisy-cleanup warning.
+CLEANUP_MARKERS: tuple[str, ...] = ("overload", "torque_enable")
+
+
+def is_cleanup_error(error_text: str | None) -> bool:
+    """True when the error text matches a known shutdown/cleanup-only failure
+    (see CLEANUP_MARKERS). Case-insensitive; None/empty text is False.
+
+    Callers use this to decide whether a non-zero/raised failure that happened
+    *after* the run got going is a real failure or just noisy teardown."""
+    if not error_text:
+        return False
+    low = error_text.lower()
+    return any(marker in low for marker in CLEANUP_MARKERS)
+
+
+def format_exception(exc: BaseException, limit: int = 500) -> str:
+    """Format a caught exception as a short "Type: message" line for a status
+    payload, truncated to `limit` characters.
+
+    The in-process features (recording, teleoperation) hold the actual
+    exception object at their catch sites, so — unlike rollout's subprocess
+    log forensics — the error text comes straight from here."""
+    text = f"{type(exc).__name__}: {exc}".strip()
+    if len(text) > limit:
+        text = text[:limit].rstrip() + "…"
+    return text
+
+
+def classify_outcome(work_completed: bool, error_text: str | None) -> str:
+    """ok | ran_with_warning | failed, for an IN-PROCESS session's catch site.
+
+    `work_completed` is the caller's phase flag: True when the session's real
+    work was already done when the error was raised (episodes saved for
+    recording; the teleop loop ran and the user requested the stop) — then a
+    raised/reported error means only teardown/cleanup tripped (e.g. disabling
+    torque on a gripper still holding an object), which is a warning, not a
+    failed session. An error before/at any other phase (setup, mid-episode,
+    mid-loop) is a real failure. No error means the session was fine.
+
+    The catch-site structure is the classifier — deliberately NOT the
+    CLEANUP_MARKERS text match (that's rollout's fallback, which only knows a
+    subprocess's log tail, not where the failure was raised)."""
+    if not error_text:
+        return "ok"
+    return "ran_with_warning" if work_completed else "failed"
+
+
+def friendly_hint(error_text: str | None) -> str | None:
+    """A plain-language, actionable headline for the common SO-101 failures,
+    or None when the text doesn't match a known pattern.
+
+    Pure text → hint: pass a subprocess log-tail snippet or the message of a
+    caught exception — nothing here is coupled to how the text was obtained."""
+    if not error_text:
+        return None
+    low = error_text.lower()
+    if "overload" in low or "torque_enable" in low:
+        return (
+            "A motor overloaded — usually the gripper holding an object too hard. Release the object / "
+            "open the gripper and power-cycle the arm before trying again."
+        )
+    if "missing motor ids" in low or "motor check failed" in low:
+        return (
+            "A follower motor isn't responding (often the gripper, id 6). If a skill was holding an object "
+            "it likely overloaded — remove it, power-cycle the arm, then try teleoperation first."
+        )
+    # Hub model-download failures (snapshot_download, before the arm is ever
+    # touched). Keyed on hub-specific tokens so a network/404/disk error while
+    # fetching a checkpoint isn't mistaken for an arm-connection problem below.
+    if "no space left" in low or "disk quota exceeded" in low:
+        return "Ran out of disk space downloading the model — free up space in the Hugging Face cache and try again."
+    if (
+        "repository not found" in low
+        or "repositorynotfound" in low
+        or "gatedrepo" in low
+        or "gated repo" in low
+        or ("404" in low and ("huggingface" in low or "hf.co" in low or "repo" in low))
+    ):
+        return "Couldn't find the model on the Hub — check the repo id, and that you have access if it's private or gated."
+    if ("huggingface.co" in low or "hf.co" in low or "max retries" in low or "connectionerror" in low) and (
+        "connect" in low or "reach" in low or "retries" in low or "timed out" in low or "timeout" in low
+    ):
+        return "Couldn't download the model — check your internet connection, then confirm the repo id."
+    if "could not connect" in low or "failed to connect" in low or "not connected" in low:
+        return "Couldn't connect to the arm — make sure it's plugged in, powered on, and on the right port."
+    if "frame is too old" in low or "no frame" in low or "frame timeout" in low:
+        return (
+            "A camera can't keep up — frames are arriving too slowly. Lower its resolution/FPS, "
+            "set FOURCC=MJPG, and close other heavy apps, then try again."
+        )
+    if "failed to set capture_" in low or "actual_width" in low or "actual_height" in low:
+        return "A camera doesn't support the configured resolution — open camera settings and click Auto."
+    if "permission" in low and ("port" in low or "com" in low):
+        return "Couldn't open the serial port — close anything else using it, or run `makerlab --stop`."
+    return None

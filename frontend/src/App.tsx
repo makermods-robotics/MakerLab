@@ -4,25 +4,16 @@ import { ThemeProvider } from "@/contexts/ThemeContext";
 import { UrdfProvider } from "@/contexts/UrdfContext";
 import { DragAndDropProvider } from "@/contexts/DragAndDropContext";
 import { Toaster } from "@/components/ui/toaster";
-import Landing from "@/pages/Landing";
-import Home from "@/pages/Home";
-import Collect from "@/pages/Collect";
-import TrainDeploy from "@/pages/TrainDeploy";
-import Market from "@/pages/Market";
-import StageLayout from "@/components/shell/StageLayout";
+import { StudioProvider } from "@/contexts/StudioContext";
+import { InferenceSessionProvider } from "@/contexts/InferenceSessionContext";
+import Launchpad from "@/pages/Launchpad";
 import Teleoperation from "@/pages/Teleoperation";
-import Calibration from "@/pages/Calibration";
-import Recording from "@/pages/Recording";
 import Training from "@/pages/Training";
-import Inference from "@/pages/Inference";
-import EditDataset from "@/pages/EditDataset";
-import Upload from "@/pages/Upload";
-
 import NotFound from "@/pages/NotFound";
 import SingleTabGuard from "@/components/SingleTabGuard";
 import TeleopStopNotice from "@/components/TeleopStopNotice";
 import UpdateNotice from "@/components/UpdateNotice";
-import RobotSettingsDialog from "@/components/robot/RobotSettingsDialog";
+import MockHubBanner from "@/components/MockHubBanner";
 import { TooltipProvider } from "@radix-ui/react-tooltip";
 import { ApiProvider } from "./contexts/ApiContext";
 import { HfAuthProvider } from "./contexts/HfAuthContext";
@@ -39,30 +30,34 @@ function App() {
               <UrdfProvider>
                 <DragAndDropProvider>
                   <BrowserRouter>
-                    <SingleTabGuard>
-                      <TeleopStopNotice />
-                      <UpdateNotice />
-                      <RobotSettingsDialog />
-                      <Routes>
-                        <Route path="/" element={<Home />} />
-                        <Route element={<StageLayout />}>
-                          <Route path="/collect" element={<Collect />} />
-                          <Route path="/training" element={<TrainDeploy />} />
-                          <Route path="/market" element={<Market />} />
-                        </Route>
-                        <Route path="/legacy" element={<Landing />} />
-                        <Route path="/teleoperation" element={<Teleoperation />} />
-                        <Route path="/recording" element={<Recording />} />
-                        <Route path="/upload" element={<Upload />} />
-                        <Route path="/training/:jobId" element={<Training />} />
-                        <Route path="/inference" element={<Inference />} />
-                        <Route path="/calibration" element={<Calibration />} />
-                        <Route path="/edit-dataset" element={<EditDataset />} />
+                    <StudioProvider>
+                     <InferenceSessionProvider>
+                      <SingleTabGuard>
+                        <TeleopStopNotice />
+                        <UpdateNotice />
+                        <MockHubBanner />
+                        <Routes>
+                          <Route path="/" element={<Launchpad />} />
+                          <Route path="/teleoperation" element={<Teleoperation />} />
+                          {/* /training (no id) hosts the shared configurator
+                              for JobCard's Continue / Resume / Fine-tune
+                              navigations; /training/:jobId is the monitor. */}
+                          <Route path="/training" element={<Training />} />
+                          <Route path="/training/:jobId" element={<Training />} />
+                          {/* /inference is no longer a route — it's the
+                              InferenceSessionDialog window, hosted by
+                              InferenceSessionProvider and opened by the launch
+                              flows (Deploy panel + InferenceModal). */}
+                          {/* Robot settings is no longer a route — it's the
+                              RobotConfigDialog window, opened from the robot
+                              corner (Launchpad + studio headers). */}
 
-                        <Route path="*" element={<NotFound />} />
-                      </Routes>
-                    </SingleTabGuard>
-                    <Toaster />
+                          <Route path="*" element={<NotFound />} />
+                        </Routes>
+                      </SingleTabGuard>
+                     </InferenceSessionProvider>
+                      <Toaster />
+                    </StudioProvider>
                   </BrowserRouter>
                 </DragAndDropProvider>
               </UrdfProvider>

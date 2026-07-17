@@ -1,49 +1,29 @@
-// Sonner-compatible shim over the app's single (Radix) toast system.
-// Keeps the sonner call-site API (toast.info/success/error/loading/dismiss)
-// while rendering through the <Toaster /> mounted in App.tsx.
-import { toast as radixToast } from "@/hooks/use-toast"
+import { useTheme } from "next-themes"
+import { Toaster as Sonner, toast } from "sonner"
 
-type SonnerOptions = {
-  description?: string
-  duration?: number
+type ToasterProps = React.ComponentProps<typeof Sonner>
+
+const Toaster = ({ ...props }: ToasterProps) => {
+  const { theme = "system" } = useTheme()
+
+  return (
+    <Sonner
+      theme={theme as ToasterProps["theme"]}
+      className="toaster group"
+      toastOptions={{
+        classNames: {
+          toast:
+            "group toast group-[.toaster]:bg-background group-[.toaster]:text-foreground group-[.toaster]:border-border group-[.toaster]:shadow-lg",
+          description: "group-[.toast]:text-muted-foreground",
+          actionButton:
+            "group-[.toast]:bg-primary group-[.toast]:text-primary-foreground",
+          cancelButton:
+            "group-[.toast]:bg-muted group-[.toast]:text-muted-foreground",
+        },
+      }}
+      {...props}
+    />
+  )
 }
 
-const dismissers = new Map<string, () => void>()
-
-function show(
-  title: string,
-  options?: SonnerOptions,
-  variant?: "default" | "destructive"
-): string {
-  const t = radixToast({
-    title,
-    description: options?.description,
-    duration: options?.duration,
-    variant,
-  })
-  dismissers.set(t.id, t.dismiss)
-  return t.id
-}
-
-const toast = Object.assign(
-  (title: string, options?: SonnerOptions) => show(title, options),
-  {
-    info: (title: string, options?: SonnerOptions) => show(title, options),
-    success: (title: string, options?: SonnerOptions) => show(title, options),
-    warning: (title: string, options?: SonnerOptions) => show(title, options),
-    loading: (title: string, options?: SonnerOptions) => show(title, options),
-    error: (title: string, options?: SonnerOptions) =>
-      show(title, options, "destructive"),
-    dismiss: (id?: string) => {
-      if (id === undefined) {
-        dismissers.forEach((dismiss) => dismiss())
-        dismissers.clear()
-        return
-      }
-      dismissers.get(id)?.()
-      dismissers.delete(id)
-    },
-  }
-)
-
-export { toast }
+export { Toaster, toast }

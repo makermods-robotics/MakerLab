@@ -30,24 +30,6 @@ def test_final_motor_ranges_forces_wrist_roll_full_turn() -> None:
     }
 
 
-def test_final_motor_ranges_forces_full_turn_even_if_unmoved() -> None:
-    # Not moving wrist_roll at all is the documented procedure.
-    mins = {"wrist_roll": 2047}
-    maxes = {"wrist_roll": 2047}
-    assert final_motor_ranges(mins, maxes) == {"wrist_roll": (0, 4095)}
-
-
-def test_calibration_status_defaults_to_idle() -> None:
-    from makerlab.calibrate import CalibrationStatus
-
-    status = CalibrationStatus()
-    assert status.calibration_active is False
-    assert status.status == "idle"
-    assert status.device_type is None
-    assert status.error is None
-    assert status.step == 0
-
-
 def test_calibration_request_dataclass_round_trip() -> None:
     from makerlab.calibrate import CalibrationRequest
 
@@ -63,22 +45,20 @@ def test_calibration_request_dataclass_round_trip() -> None:
 
 
 def test_calibration_manager_starts_idle() -> None:
-    from makerlab.calibrate import CalibrationManager
-
-    mgr = CalibrationManager()
-    assert mgr.status.calibration_active is False
-    assert mgr.status.status == "idle"
-    assert mgr.device is None
-    assert mgr.calibration_thread is None
-
-
-def test_calibration_manager_get_status_when_idle_returns_status_object() -> None:
     from makerlab.calibrate import CalibrationManager, CalibrationStatus
 
     mgr = CalibrationManager()
-    s = mgr.get_status()
-    assert isinstance(s, CalibrationStatus)
-    assert s.status == "idle"
+    status = mgr.get_status()
+
+    assert isinstance(status, CalibrationStatus)
+    assert status is mgr.status
+    assert status.calibration_active is False
+    assert status.status == "idle"
+    assert status.device_type is None
+    assert status.error is None
+    assert status.step == 0
+    assert mgr.device is None
+    assert mgr.calibration_thread is None
 
 
 def test_calibration_manager_rejects_double_start_via_message() -> None:

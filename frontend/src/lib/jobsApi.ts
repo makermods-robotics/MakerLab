@@ -63,6 +63,10 @@ export interface TrainingRequest {
   use_policy_training_preset: boolean;
   // Optional target for runner dispatch; omitted ⇒ local.
   target?: { runner: "local" | "hf_cloud"; flavor?: string };
+  // HF Cloud only: optional override for the HF Jobs timeout, as a duration
+  // string ("2h", "45m", "3h30m"). Omitted ⇒ backend falls back to its
+  // default. The backend validates the format and ignores it for local runs.
+  hf_job_timeout?: string;
 }
 
 export interface JobRecord {

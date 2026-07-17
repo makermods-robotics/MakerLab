@@ -111,19 +111,19 @@ const ImportCalibrationButton: React.FC<ImportCalibrationButtonProps> = ({
       <Button
         size="icon"
         variant="ghost"
-        className="h-7 w-7 text-muted-foreground hover:text-foreground"
+        className="shrink-0 text-muted-foreground hover:text-foreground"
         onClick={pickFile}
         aria-label={`Import ${sideLabel} calibration`}
         title={`Import ${sideLabel} calibration`}
       >
-        <Upload className="w-4 h-4" />
+        <Upload className="h-4 w-4" />
       </Button>
 
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Import {sideLabel} calibration</DialogTitle>
-            <DialogDescription>
+            <DialogDescription className="text-muted-foreground">
               Saves the uploaded calibration as a new {sideLabel} config. Won't
               overwrite an existing name — pick a different one if it's taken.
             </DialogDescription>
@@ -142,14 +142,19 @@ const ImportCalibrationButton: React.FC<ImportCalibrationButtonProps> = ({
             }}
             autoFocus
             placeholder="Config name"
-            className="font-mono"
           />
           {error && <p className="text-sm text-destructive">{error}</p>}
           <DialogFooter className="flex gap-2 justify-end">
-            <Button variant="secondary" onClick={() => setOpen(false)}>
+            <Button
+              variant="outline"
+              onClick={() => setOpen(false)}
+            >
               Cancel
             </Button>
-            <Button disabled={busy || !name.trim()} onClick={submit}>
+            <Button
+              disabled={busy || !name.trim()}
+              onClick={submit}
+            >
               {busy ? "Importing…" : "Import"}
             </Button>
           </DialogFooter>

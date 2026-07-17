@@ -1,4 +1,5 @@
-import React, { createContext, useContext, ReactNode, useState, useCallback, useMemo } from "react";
+import React, { createContext, useContext, ReactNode, useState, useCallback, useEffect, useMemo, useRef } from "react";
+import { mockHubResponse } from "@/lib/mockHub";
 
 interface ApiContextType {
   baseUrl: string;
@@ -19,19 +20,9 @@ const defaultBaseUrl = (): string =>
 
 const httpToWs = (url: string): string => url.replace(/^http(s?):/, "ws$1:");
 
-// Loopback origins are a local `makerlab` / `makerlab --dev` run talking to its
-// own backend on this machine.
-const isLoopbackHost = (host: string): boolean =>
-  host === "localhost" ||
-  host === "127.0.0.1" ||
-  host === "0.0.0.0" ||
-  host === "::1" ||
-  host === "[::1]";
-
 const resolveInitialBaseUrl = (): string => {
   if (typeof window === "undefined") return DEFAULT_LOCALHOST;
 
-  // An explicit ?api=<url> always wins and is remembered for later bare loads.
   const fromQuery = new URLSearchParams(window.location.search).get("api");
   if (fromQuery) {
     try {
@@ -44,27 +35,55 @@ const resolveInitialBaseUrl = (): string => {
     }
   }
 
-  const fallback = defaultBaseUrl();
-
-  // A plain localhost run must always talk to its own backend. Reading a
-  // persisted override here let a stray `makerlab.apiBaseUrl` (e.g. left over
-  // from an earlier ?api= visit, or from a since-moved backend) silently point
-  // the UI at a different — often empty or unreachable — API, which then
-  // rendered as a confusing "no robots" state indistinguishable from success.
-  // So on loopback origins we ignore the stored value; the override only
-  // applies to remote deployments where the page origin isn't the API.
-  if (isLoopbackHost(window.location.hostname)) return fallback;
-
-  return window.localStorage.getItem(STORAGE_KEY) || fallback;
+  return window.localStorage.getItem(STORAGE_KEY) || defaultBaseUrl();
 };
 
 export const ApiProvider: React.FC<{ children: ReactNode }> = ({
   children,
 }) => {
-  const [baseUrl] = useState<string>(resolveInitialBaseUrl);
+  const [baseUrl, setBaseUrl] = useState<string>(resolveInitialBaseUrl);
   const wsBaseUrl = httpToWs(baseUrl);
 
+  // Self-heal a stale saved override. A `?api=` visit persists its URL to
+  // localStorage forever — if that server is gone (temporary HTTPS/phone-cam
+  // setup, a dead port), every request "Failed to fetch" with no way back
+  // from the UI. Probe the override once on startup; if it's unreachable,
+  // drop it and fall back to the default so plain http://localhost:8080/
+  // always recovers on reload. An HTTP error status still counts as
+  // reachable — only a network-level failure (or a 4s timeout) falls back.
+  const probedRef = useRef(false);
+  useEffect(() => {
+    if (probedRef.current) return;
+    probedRef.current = true;
+    const fallback = defaultBaseUrl();
+    if (baseUrl === fallback) return;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 4000);
+    fetch(`${baseUrl}/hf-auth-status`, { signal: controller.signal })
+      .catch(() => {
+        console.warn(
+          `Saved API address ${baseUrl} is unreachable — falling back to ${fallback}.`,
+        );
+        try {
+          window.localStorage.removeItem(STORAGE_KEY);
+        } catch {
+          // storage unavailable — the in-memory fallback still applies
+        }
+        setBaseUrl(fallback);
+      })
+      .finally(() => clearTimeout(timer));
+    return () => {
+      clearTimeout(timer);
+    };
+  }, [baseUrl]);
+
   const fetchWithHeaders = useCallback(async (url: string, options: RequestInit = {}): Promise<Response> => {
+    // Dev-only Hub mock (?mockHub=1): serves canned jobs/models/auth so UI
+    // work can continue through a huggingface.co outage. No-op in prod builds.
+    if (import.meta.env.DEV) {
+      const mocked = mockHubResponse(url, options);
+      if (mocked) return mocked;
+    }
     return fetch(url, {
       ...options,
       headers: {

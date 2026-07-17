@@ -1,21 +1,18 @@
 import { useCallback, useEffect, useState } from "react";
 import { useApi } from "@/contexts/ApiContext";
-import { listModels, UserModel } from "@/lib/modelsApi";
+import { ModelItem, getModels } from "@/lib/modelsApi";
 
-/** The user's Hugging Face model repos (cloud-trained and uploaded alike). */
+/** The merged /models listing (local runs + Hub repos), with a manual `refresh`
+ * so a mutation (upload/delete) can re-pull immediately. Mirrors useDatasets. */
 export const useModels = () => {
   const { baseUrl, fetchWithHeaders } = useApi();
-  const [models, setModels] = useState<UserModel[]>([]);
-  const [authenticated, setAuthenticated] = useState(true);
+  const [models, setModels] = useState<ModelItem[]>([]);
   const [loading, setLoading] = useState(true);
 
   const refresh = useCallback(() => {
     setLoading(true);
-    listModels(baseUrl, fetchWithHeaders)
-      .then((res) => {
-        setModels(res.models);
-        setAuthenticated(res.authenticated);
-      })
+    getModels(baseUrl, fetchWithHeaders)
+      .then(setModels)
       .catch(() => setModels([]))
       .finally(() => setLoading(false));
   }, [baseUrl, fetchWithHeaders]);
@@ -24,5 +21,5 @@ export const useModels = () => {
     refresh();
   }, [refresh]);
 
-  return { models, authenticated, loading, refresh };
+  return { models, loading, refresh };
 };

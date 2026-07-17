@@ -41,21 +41,21 @@ const HfAuthBanner: React.FC = () => {
   };
 
   return (
-    <div className="bg-warn/10 border border-warn/50 rounded-lg p-4 mb-6">
+    <div className="border border-amber-500/40 bg-amber-500/10 rounded-lg p-4 mb-6">
       <div className="flex items-start gap-3">
-        <AlertCircle className="w-5 h-5 text-warn flex-shrink-0 mt-0.5" />
+        <AlertCircle className="w-5 h-5 text-amber-600 dark:text-amber-400 flex-shrink-0 mt-0.5" />
         <div className="flex-1 space-y-3">
           <div>
-            <p className="text-sm text-foreground font-medium">
+            <p className="text-sm text-amber-800 dark:text-amber-100 font-medium">
               Hugging Face access required for cloud training
             </p>
-            <p className="text-xs text-muted-foreground mt-1">
+            <p className="text-xs text-amber-700/90 dark:text-amber-200/80 mt-1">
               Create a token at{" "}
               <a
                 href="https://huggingface.co/settings/tokens"
                 target="_blank"
                 rel="noreferrer"
-                className="underline hover:text-foreground inline-flex items-center gap-1"
+                className="underline hover:text-amber-900 dark:hover:text-amber-50 inline-flex items-center gap-1"
               >
                 huggingface.co/settings/tokens
                 <ExternalLink className="w-3 h-3" />
@@ -76,10 +76,15 @@ const HfAuthBanner: React.FC = () => {
               placeholder="hf_..."
               value={token}
               onChange={(e) => setToken(e.target.value)}
+              className=""
               disabled={submitting}
               autoComplete="off"
             />
-            <Button type="submit" disabled={submitting || !token.trim()}>
+            <Button
+              type="submit"
+              disabled={submitting || !token.trim()}
+              className=""
+            >
               {submitting ? (
                 <>
                   <Loader2 className="w-4 h-4 mr-2 animate-spin" />
@@ -90,7 +95,9 @@ const HfAuthBanner: React.FC = () => {
               )}
             </Button>
           </form>
-          {error && <p className="text-xs text-destructive">{error}</p>}
+          {error && (
+            <p className="text-xs text-destructive">{error}</p>
+          )}
         </div>
       </div>
     </div>

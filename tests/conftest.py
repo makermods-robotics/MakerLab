@@ -53,9 +53,8 @@ def tmp_lerobot_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     leader_cfg_dir = cache / "configs" / "so_leader"
     follower_cfg_dir = cache / "configs" / "so_follower"
     port_dir = cache / "ports"
-    saved_dir = cache / "saved_configs"
     robots_dir = cache / "robots"
-    for d in (teleop_dir, robot_dir, leader_cfg_dir, follower_cfg_dir, port_dir, saved_dir, robots_dir):
+    for d in (teleop_dir, robot_dir, leader_cfg_dir, follower_cfg_dir, port_dir, robots_dir):
         d.mkdir(parents=True, exist_ok=True)
 
     monkeypatch.setattr(cfg, "CALIBRATION_BASE_PATH_TELEOP", str(teleop_dir))
@@ -68,15 +67,62 @@ def tmp_lerobot_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(cfg, "PORT_CONFIG_PATH", str(port_dir))
     monkeypatch.setattr(cfg, "LEADER_PORT_FILE", str(port_dir / "leader_port.txt"))
     monkeypatch.setattr(cfg, "FOLLOWER_PORT_FILE", str(port_dir / "follower_port.txt"))
-    monkeypatch.setattr(cfg, "CONFIG_STORAGE_PATH", str(saved_dir))
-    monkeypatch.setattr(cfg, "LEADER_CONFIG_FILE", str(saved_dir / "leader_config.txt"))
-    monkeypatch.setattr(cfg, "FOLLOWER_CONFIG_FILE", str(saved_dir / "follower_config.txt"))
     monkeypatch.setattr(cfg, "DISMISSED_HUB_JOBS_FILE", str(cache / "dismissed_hub_jobs.json"))
     # BiSO staging root — without this, any bimanual staging test writes into the
     # developer's real ~/.cache dir.
     monkeypatch.setattr(cfg, "MAKERLAB_BISO_STAGING_PATH", str(cache / "makerlab_biso"))
 
     return cache
+
+
+def _reset_module_caches() -> None:
+    """Drop every process-lived, module-global cache/singleton state that could
+    leak Hub answers (or a real-machine cache read) from one test into the next.
+
+    Covers the short-TTL listing caches (/datasets, /models, /jobs/hub), the
+    per-repo Hub-status / Hub-info memo dicts, and the two download-manager
+    singletons' public state. The listing caches expose whole-cache invalidation
+    functions; the per-repo memo dicts (keyed by repo_id, no whole-clear helper)
+    are cleared directly under their locks — the same access pattern the dataset
+    tests already use via their local _clear_hub_status_cache helper."""
+    import makerlab.datasets as _ds
+    import makerlab.models as _models
+    import makerlab.server as _srv
+
+    _ds.invalidate_dataset_listing_cache()
+    _models.invalidate_model_listing_cache()
+    _srv.invalidate_hub_jobs_cache()
+
+    with _ds._HUB_STATUS_LOCK:
+        _ds._HUB_STATUS_CACHE.clear()
+    with _ds._HUB_DATASET_INFO_LOCK:
+        _ds._HUB_DATASET_INFO_CACHE.clear()
+    with _models._MODEL_HUB_INFO_LOCK:
+        _models._MODEL_HUB_INFO_CACHE.clear()
+
+    # Reset both download-manager singletons to their idle shape so a test that
+    # drove one (or hit a /download endpoint) can't leave "running"/"done"/"error"
+    # visible to the next test's status poll. (No thread is torn down here: tests
+    # join or mock their downloads; the singleton is only ever left dirty by state
+    # writes, not live threads.)
+    for _mgr in (_ds.download_manager, _models.model_download_manager):
+        with _mgr._lock:
+            _mgr.state = "idle"
+            _mgr.repo_id = None
+            _mgr.message = None
+            _mgr.error = None
+
+
+@pytest.fixture(autouse=True)
+def _reset_hub_listing_caches() -> Iterator[None]:
+    """Clear all process-lived Hub caches + download-manager singleton state
+    before AND after each test so cached results (or a real-machine cache read)
+    from one test never leak into the next. These caches/singletons are
+    module-global and process-lived, so without this a test that populates one
+    would make a later test see stale data instead of its own mocked response."""
+    _reset_module_caches()
+    yield
+    _reset_module_caches()
 
 
 @pytest.fixture

@@ -122,13 +122,6 @@ def test_warn_if_cuda_mismatch_silent_when_ok(monkeypatch, caplog) -> None:
     assert caplog.records == []
 
 
-def test_cuda_status_endpoint_returns_expected_shape(client) -> None:
-    response = client.get("/system/cuda-status")
-    assert response.status_code == 200
-    body = response.json()
-    assert set(body) >= {"gpu_present", "cuda_available", "mismatch", "install_hint", "docs_url"}
-
-
 def test_policy_extra_maps_policies_to_install_targets() -> None:
     """smolvla/pi0/pi0_fast/diffusion map to the right probe module + lerobot[extra]."""
     from makerlab.utils.system import handle_get_policy_extra

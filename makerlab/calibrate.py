@@ -69,7 +69,9 @@ FULL_TURN_MOTORS = frozenset({"wrist_roll"})
 FULL_TURN_RANGE = (0, 4095)
 
 
-def final_motor_ranges(mins: dict[str, int], maxes: dict[str, int]) -> dict[str, tuple[int, int]]:
+def final_motor_ranges(
+    mins: dict[str, int], maxes: dict[str, int]
+) -> dict[str, tuple[int, int]]:
     """Recorded (min, max) per motor, with full-turn joints forced to 0-4095."""
     return {
         motor: (FULL_TURN_RANGE if motor in FULL_TURN_MOTORS else (mins[motor], maxes[motor]))
@@ -139,9 +141,7 @@ class CalibrationRequest:
     config_file: str
     robot_name: str | None = None  # When set, write port + config back into the robot record on success
     overwrite: bool = False  # Must be explicitly true to replace an existing config file of the same name
-    arm: Literal["left", "right"] = (
-        "left"  # Which arm of a bimanual robot; "left" is also the single-arm pair
-    )
+    arm: Literal["left", "right"] = "left"  # Which arm of a bimanual robot; "left" is also the single-arm pair
 
 
 class CalibrationManager:
@@ -241,9 +241,7 @@ class CalibrationManager:
             # name. Lets the frontend warn before any data is clobbered.
             config_dir = calibration_dir_for_device(request.device_type)
             if config_dir is not None and not request.overwrite:
-                stem = (
-                    request.config_file[:-5] if request.config_file.endswith(".json") else request.config_file
-                )
+                stem = request.config_file[:-5] if request.config_file.endswith(".json") else request.config_file
                 if os.path.exists(os.path.join(config_dir, f"{stem}.json")):
                     return {
                         "success": False,
@@ -637,9 +635,7 @@ class CalibrationManager:
             # user-facing name and the id lerobot uses; the extension is only the
             # on-disk filename. (Records used to store "<name>.json"; reads now
             # normalize old ones, so this stays consistent.)
-            config_stem = (
-                request.config_file[:-5] if request.config_file.endswith(".json") else request.config_file
-            )
+            config_stem = request.config_file[:-5] if request.config_file.endswith(".json") else request.config_file
             # Pick the record fields for this side AND arm. For a bimanual robot
             # the right arm writes the right_* fields; "left" is also the single
             # robot's only pair.

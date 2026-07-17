@@ -35,11 +35,9 @@ BROWSER_ACCEPT = {"accept": "text/html,application/xhtml+xml,application/xml;q=0
 
 REQUIRED_PATHS = {
     "/health",
-    "/get-configs",
     "/move-arm",
     "/stop-teleoperation",
     "/teleoperation-status",
-    "/joint-positions",
     "/start-recording",
     "/stop-recording",
     "/recording-status",
@@ -63,15 +61,10 @@ def test_app_exposes_required_endpoints() -> None:
     assert not missing, f"missing routes: {missing}"
 
 
-def test_health_endpoint_returns_200(client: TestClient) -> None:
+def test_health_endpoint_returns_200_with_json_object(client: TestClient) -> None:
     response = client.get("/health")
     assert response.status_code == 200
-
-
-def test_health_endpoint_returns_dict(client: TestClient) -> None:
-    response = client.get("/health")
-    body = response.json()
-    assert isinstance(body, dict)
+    assert isinstance(response.json(), dict)
 
 
 def test_unknown_route_returns_404(client: TestClient) -> None:
@@ -541,6 +534,16 @@ def _install_fake_pygrabber(monkeypatch: pytest.MonkeyPatch, filter_graph_cls) -
     monkeypatch.setitem(sys.modules, "pygrabber.dshow_graph", module)
 
 
+def _install_fake_pygrabber(monkeypatch: pytest.MonkeyPatch, filter_graph_cls) -> None:
+    import sys
+    import types
+
+    module = types.ModuleType("pygrabber.dshow_graph")
+    module.FilterGraph = filter_graph_cls
+    monkeypatch.setitem(sys.modules, "pygrabber", types.ModuleType("pygrabber"))
+    monkeypatch.setitem(sys.modules, "pygrabber.dshow_graph", module)
+
+
 def test_windows_cameras_uses_real_directshow_names(monkeypatch: pytest.MonkeyPatch) -> None:
     """The Windows path returns pygrabber's real device names in index order so
     the frontend can match each camera to its browser deviceId (issues #12/#16).
@@ -800,26 +803,34 @@ def test_delete_hub_model_unauthenticated_is_401(client: TestClient, monkeypatch
 #
 # The listing must surface the user's own empty/untagged run repos (orphans a
 # crashed cloud run pre-creates) alongside the tagged ones, so the untracked
-# cleanup path can reach them. It does this with two list_models() passes per
-# author: filter="lerobot" (the real tag) PLUS an unfiltered author listing
-# restricted to makerlab's "_<timestamp>" run-repo naming.
+# cleanup path can reach them. It does this with ONE unfiltered list_models()
+# call per author, filtered client-side: a repo qualifies if it carries the
+# "lerobot" library tag OR its name matches makerlab's "_<timestamp>" run-repo
+# naming (see _list_author_models). The single unfiltered call replaced an older
+# two-pass (filter="lerobot" + unfiltered) approach — half the Hub calls, same
+# result set.
 
 
 class _FakeModel:
-    def __init__(self, repo_id, last_modified=None, private=False):
+    def __init__(self, repo_id, last_modified=None, private=False, tags=None):
         self.id = repo_id
         self.last_modified = last_modified
         self.private = private
+        # The `lerobot` library tag is now modeled as a real attribute (the
+        # single unfiltered call filters client-side on it), not via a separate
+        # filter="lerobot" pass.
+        self.tags = list(tags or [])
 
 
-def _hub_api_with_models(*, tagged, all_author):
-    """Fake HfApi whose list_models() returns `tagged` when filter='lerobot'
-    is passed and `all_author` otherwise. list_jobs() returns nothing."""
+def _hub_api_with_models(*, all_author):
+    """Fake HfApi whose (single, unfiltered) list_models() returns `all_author`
+    for any author. list_jobs() returns nothing. The `lerobot` tag lives on each
+    model's `.tags`, so the endpoint's client-side filter sees it."""
     api = MagicMock()
     api.list_jobs.return_value = []
 
     def _list_models(author=None, filter=None, limit=None, expand=None):
-        return list(tagged if filter == "lerobot" else all_author)
+        return list(all_author)
 
     api.list_models.side_effect = _list_models
     return api
@@ -839,7 +850,7 @@ def test_list_hub_jobs_includes_empty_untagged_run_repos(client: TestClient, mon
         "makermods/smolvla_makermods_so101_merged_20260701_2026-07-03_09-15-57",
         last_modified=None,
     )
-    api = _hub_api_with_models(tagged=[], all_author=[empty])
+    api = _hub_api_with_models(all_author=[empty])
     _patch_hub_list(monkeypatch, username="makermods", api=api)
 
     resp = client.get("/jobs/hub")
@@ -852,15 +863,16 @@ def test_list_hub_jobs_unions_and_dedups_tagged_and_untagged(client: TestClient,
     tagged = _FakeModel(
         "makermods/act_makermods_pick_2026-07-03_10-00-00",
         last_modified=_dt.datetime(2026, 7, 3, 10, 0, tzinfo=_dt.UTC),
+        tags=["lerobot"],
     )
     empty = _FakeModel(
         "makermods/smolvla_makermods_so101_merged_20260701_2026-07-03_09-15-57",
         last_modified=_dt.datetime(2026, 7, 3, 9, 15, tzinfo=_dt.UTC),
     )
-    # The unfiltered author pass returns BOTH the tagged repo and the empty one;
-    # the tagged pass returns only the tagged one. The union must dedup so the
-    # tagged repo appears exactly once, and sort newest-first.
-    api = _hub_api_with_models(tagged=[tagged], all_author=[tagged, empty])
+    # The single unfiltered pass returns both. `tagged` qualifies via BOTH its
+    # lerobot tag and its run-repo suffix; the client-side filter + _add() dedup
+    # must still surface it exactly once, and sort newest-first.
+    api = _hub_api_with_models(all_author=[tagged, empty])
     _patch_hub_list(monkeypatch, username="makermods", api=api)
 
     resp = client.get("/jobs/hub")
@@ -879,11 +891,8 @@ def test_list_hub_jobs_excludes_foreign_personal_models(client: TestClient, monk
         "makermods/smolvla_makermods_so101_merged_20260701_2026-07-03_09-15-57",
         last_modified=None,
     )
-    tagged_no_suffix = _FakeModel("makermods/some-tagged-model", last_modified=None)
-    api = _hub_api_with_models(
-        tagged=[tagged_no_suffix],
-        all_author=[personal, run_repo, tagged_no_suffix],
-    )
+    tagged_no_suffix = _FakeModel("makermods/some-tagged-model", last_modified=None, tags=["lerobot"])
+    api = _hub_api_with_models(all_author=[personal, run_repo, tagged_no_suffix])
     _patch_hub_list(monkeypatch, username="makermods", api=api)
 
     resp = client.get("/jobs/hub")

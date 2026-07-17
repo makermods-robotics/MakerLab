@@ -1,0 +1,630 @@
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import { useLocation, useNavigate } from "react-router-dom";
+import { useToast } from "@/hooks/use-toast";
+import { useApi } from "@/contexts/ApiContext";
+import { useHfAuth } from "@/contexts/HfAuthContext";
+import { useStudio } from "@/contexts/StudioContext";
+
+import { TrainingConfig } from "@/components/training/types";
+import ConfigurationTab from "@/components/training/ConfigurationTab";
+import TrainingExtraGate from "@/components/training/TrainingExtraGate";
+import PolicyExtraDialog from "@/components/training/PolicyExtraDialog";
+import HfAuthBanner from "@/components/landing/HfAuthBanner";
+import LocalDatasetCloudNotice from "@/components/training/config/LocalDatasetCloudNotice";
+
+import { Button } from "@/components/ui/button";
+import {
+  Tooltip,
+  TooltipTrigger,
+  TooltipContent,
+} from "@/components/ui/tooltip";
+import { Loader2, Play } from "lucide-react";
+
+import {
+  TrainingRequest,
+  listJobs,
+  startTrainingJob,
+  listRunnerHardware,
+  RunnerFlavor,
+} from "@/lib/jobsApi";
+import { useDatasets } from "@/hooks/useDatasets";
+import { useDatasetUpload } from "@/hooks/useDatasetUpload";
+import { getDatasetInfo } from "@/lib/replayApi";
+
+// Passed by the "Continue" button on a completed local job, or the "Resume"
+// button on a cloud run that ended before its step target.
+export type ResumeSeed = {
+  jobId: string;
+  step: number | null; // null ⇒ resume from the latest checkpoint
+  name: string;
+  datasetRepoId: string;
+  policyType: string;
+  sourceSteps: number; // the source run's configured total, for a sane prefill
+  logFreq?: number; // the source run's log cadence, to preserve on resume
+  saveFreq?: number; // the source run's checkpoint cadence, to preserve on resume
+  // Cloud resume: the parent run's runner + flavor. A local Continue omits
+  // these (runner defaults to "local"). When "hf_cloud", the launched run
+  // targets the same flavor and continues into the parent's Hub output repo.
+  runner?: "local" | "hf_cloud";
+  flavor?: string;
+};
+
+// Passed by the "Fine-tune" button on an imported model. A fine-tune is a
+// FRESH run (fresh optimizer, step 0) whose weights are initialized from the
+// source checkpoint — distinct from resume.
+export type FinetuneSeed = {
+  jobId: string;
+  step: number | null; // null ⇒ latest checkpoint of the source
+  name: string;
+  policyType: string;
+};
+
+interface TrainingConfiguratorProps {
+  /** Controlled policy type (chosen upstream — the panel policy grid or the
+   * home-page/router state). EssentialsCard's dropdown edits it back through
+   * onPolicyTypeChange. */
+  policyType: string;
+  onPolicyTypeChange: (policyType: string) => void;
+  /** Controlled training dataset. Empty string ⇒ Start stays disabled. */
+  datasetRepoId: string;
+  /** A "Continue"/"Resume" seed — inherits the source run's target + cadence. */
+  resumeSeed?: ResumeSeed | null;
+  /** A "Fine-tune" seed — fresh run initialized from a source checkpoint. */
+  finetuneSeed?: FinetuneSeed | null;
+  /** Fired with the new job id right before navigating to its monitor (e.g. so
+   * the studio overlay can close). Navigation to /training/:jobId still runs. */
+  onStarted?: (jobId: string) => void;
+  /** Where the Start button renders. Omitted (undefined) ⇒ inline at the foot
+   * of the form (the /training route). An element ⇒ portaled there — the
+   * studio Train panel passes its pinned actions slot above the jobs library.
+   * null ⇒ the slot isn't mounted yet; render nothing (avoids a one-frame
+   * inline flash before the ref callback fires). */
+  actionsContainer?: HTMLElement | null;
+}
+
+function configToRequest(c: TrainingConfig): TrainingRequest {
+  // The backend's TrainingRequest has more optional fields; the form covers
+  // the user-meaningful subset.
+  return {
+    target: c.target,
+    dataset_repo_id: c.dataset_repo_id,
+    policy_type: c.policy_type,
+    job_name: c.job_name,
+    steps: c.steps,
+    batch_size: c.batch_size,
+    seed: c.seed,
+    num_workers: c.num_workers,
+    log_freq: c.log_freq,
+    save_freq: c.save_freq,
+    save_checkpoint: c.save_checkpoint,
+    resume: c.resume,
+    resume_from_job_id: c.resume_from_job_id,
+    resume_from_step: c.resume_from_step,
+    finetune_from_job_id: c.finetune_from_job_id,
+    finetune_from_step: c.finetune_from_step,
+    wandb_enable: c.wandb_enable,
+    wandb_project: c.wandb_project,
+    wandb_entity: c.wandb_entity,
+    wandb_notes: c.wandb_notes,
+    wandb_mode: c.wandb_mode,
+    wandb_disable_artifact: c.wandb_disable_artifact,
+    policy_device: c.policy_device,
+    policy_use_amp: c.policy_use_amp,
+    optimizer_type: c.optimizer_type,
+    optimizer_lr: c.optimizer_lr,
+    optimizer_weight_decay: c.optimizer_weight_decay,
+    optimizer_grad_clip_norm: c.optimizer_grad_clip_norm,
+    use_policy_training_preset: c.use_policy_training_preset,
+    // Cloud-only; the backend validates the format and ignores it for local.
+    // Send only a non-blank value so a stray "" doesn't reach the validator.
+    hf_job_timeout:
+      c.target.runner === "hf_cloud" && c.hf_job_timeout?.trim()
+        ? c.hf_job_timeout.trim()
+        : undefined,
+  };
+}
+
+/**
+ * The training configuration form — extracted verbatim from Training.tsx's
+ * ConfigurationMode so the behavior (resume/fine-tune seeding, cloud
+ * upload-first, single-local-run lock, auth/flavor gating, policy-extra install
+ * gate) lives in exactly one place. Rendered by the transitional /training route
+ * AND by the studio Train panel.
+ *
+ * `policy_type` and `dataset_repo_id` are controlled by the caller (which owns
+ * the policy picker + dataset selection); everything else is internal form
+ * state seeded once from resume/fine-tune. Callers that change the resume /
+ * fine-tune seed must remount this component (change its React key) — a
+ * different seed is a fundamentally different run.
+ */
+const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
+  policyType,
+  onPolicyTypeChange,
+  datasetRepoId: controlledDatasetRepoId,
+  resumeSeed = null,
+  finetuneSeed = null,
+  onStarted,
+  actionsContainer,
+}) => {
+  const { baseUrl, fetchWithHeaders } = useApi();
+  const { auth } = useHfAuth();
+  const { toast } = useToast();
+  const navigate = useNavigate();
+  const location = useLocation();
+  const { openJobMonitor } = useStudio();
+
+  const [trainingConfig, setTrainingConfig] = useState<TrainingConfig>({
+    // A cloud resume inherits the parent run's target so the continuation runs
+    // on the same flavor and pushes into the same Hub repo; everything else
+    // defaults to a fresh local run.
+    target:
+      resumeSeed?.runner === "hf_cloud"
+        ? { runner: "hf_cloud", flavor: resumeSeed.flavor }
+        : { runner: "local" },
+    // Controlled fields — overlaid from props below; placeholders here.
+    dataset_repo_id: "",
+    policy_type: "act",
+    job_name: "",
+    // On resume, everything but steps is inherited from the checkpoint's
+    // train_config.json; prefill steps above the source's total so the
+    // continuation actually trains further. Fine-tune is a fresh run, so it
+    // uses the normal fresh default.
+    steps: resumeSeed ? resumeSeed.sourceSteps * 2 : 10000,
+    batch_size: 8,
+    seed: 1000,
+    num_workers: 4,
+    log_freq: resumeSeed?.logFreq ?? 50,
+    save_freq: resumeSeed?.saveFreq ?? 1000,
+    save_checkpoint: true,
+    // Fine-tune is NOT a resume — it's a fresh run whose weights are seeded from
+    // the source checkpoint. resume stays false; the backend resolves
+    // finetune_from_* into --policy.pretrained_path.
+    resume: !!resumeSeed,
+    resume_from_job_id: resumeSeed?.jobId,
+    resume_from_step: resumeSeed?.step ?? undefined,
+    finetune_from_job_id: finetuneSeed?.jobId,
+    finetune_from_step: finetuneSeed?.step ?? undefined,
+    wandb_enable: false,
+    wandb_mode: "online",
+    wandb_disable_artifact: false,
+    policy_device: "auto",
+    policy_use_amp: false,
+    optimizer_type: "adam",
+    use_policy_training_preset: true,
+  });
+
+  // The config the form actually reads: internal state overlaid with the
+  // controlled policy type + dataset. Keeps EssentialsCard's frozen dataset
+  // display and policy dropdown bound to the caller's selection.
+  const config: TrainingConfig = useMemo(
+    () => ({
+      ...trainingConfig,
+      policy_type: policyType,
+      dataset_repo_id: controlledDatasetRepoId,
+    }),
+    [trainingConfig, policyType, controlledDatasetRepoId],
+  );
+
+  const [trainingExtraAvailable, setTrainingExtraAvailable] = useState<
+    boolean | null
+  >(null);
+  const [trainingExtraInstallHint, setTrainingExtraInstallHint] =
+    useState<string>("pip install accelerate");
+  const [localJobRunning, setLocalJobRunning] = useState<boolean>(false);
+  const [isStarting, setIsStarting] = useState(false);
+  const [policyExtra, setPolicyExtra] = useState<{
+    policyType: string;
+    packageName: string;
+    installTarget: string;
+    installHint: string;
+  } | null>(null);
+  const [authenticated, setAuthenticated] = useState<boolean>(false);
+  const [flavors, setFlavors] = useState<RunnerFlavor[]>([]);
+  const [hardwareLoading, setHardwareLoading] = useState(true);
+  // HF_HUB_OFFLINE on the backend: Hub writes (incl. dataset upload) disabled.
+  const [offline, setOffline] = useState<boolean>(false);
+
+  useEffect(() => {
+    fetchWithHeaders(`${baseUrl}/system/training-extra`)
+      .then((r) => r.json())
+      .then((data: { available: boolean; install_hint: string }) => {
+        setTrainingExtraAvailable(data.available);
+        setTrainingExtraInstallHint(data.install_hint);
+      })
+      .catch(() => setTrainingExtraAvailable(true));
+  }, [baseUrl, fetchWithHeaders]);
+
+  useEffect(() => {
+    // Only the local lock matters for the Start button; cloud jobs can stack.
+    // Pull a generous slice so a running local isn't masked by newer cloud
+    // jobs in the started_at-desc ordering.
+    listJobs(baseUrl, fetchWithHeaders, 200)
+      .then((j) =>
+        setLocalJobRunning(
+          j.some((r) => r.runner === "local" && r.state === "running"),
+        ),
+      )
+      .catch(() => setLocalJobRunning(false));
+  }, [baseUrl, fetchWithHeaders]);
+
+  useEffect(() => {
+    // Re-fetches when auth status flips (e.g. user pastes a token in
+    // HfAuthBanner) so flavors unlock without a page reload.
+    setHardwareLoading(true);
+    listRunnerHardware(baseUrl, fetchWithHeaders)
+      .then((data) => {
+        setAuthenticated(data.authenticated);
+        setFlavors(data.flavors);
+        setOffline(!!data.offline);
+      })
+      .catch(() => {
+        setAuthenticated(false);
+        setFlavors([]);
+        setOffline(false);
+      })
+      .finally(() => setHardwareLoading(false));
+  }, [baseUrl, fetchWithHeaders, auth.status]);
+
+  const updateConfig = <T extends keyof TrainingConfig>(
+    key: T,
+    value: TrainingConfig[T],
+  ) => {
+    // policy_type is controlled by the caller; route edits (EssentialsCard's
+    // dropdown) back up. dataset_repo_id is controlled + display-only, but
+    // guard it too so a stray write can't desync.
+    if (key === "policy_type") {
+      onPolicyTypeChange(value as string);
+      return;
+    }
+    if (key === "dataset_repo_id") return;
+    setTrainingConfig((prev) => ({ ...prev, [key]: value }));
+  };
+
+  // Cloud training runs from the Hub, so a dataset that only exists in this
+  // machine's local cache must be uploaded first. We read the chosen dataset's
+  // `source` from the /datasets listing (already carries it) and, for a
+  // local-only + cloud combo, chain an upload before the job launches.
+  const { datasets } = useDatasets();
+  const datasetRepoId = config.dataset_repo_id.trim();
+  const isCloud = config.target.runner === "hf_cloud";
+  const selectedDatasetItem = datasets.find((d) => d.repo_id === datasetRepoId);
+  // Only "local" needs uploading; "both"/"hub" already exist on the Hub, and an
+  // unknown item (listing not yet loaded / dataset typed by hand) is left alone
+  // — the backend preflight is the belt-and-braces catch for that case.
+  const datasetLocalOnly = selectedDatasetItem?.source === "local";
+  const needsUpload = isCloud && datasetLocalOnly;
+
+  // Approximate on-disk size for the notice (cheap detail endpoint; local only).
+  const [datasetSizeBytes, setDatasetSizeBytes] = useState<number | null>(null);
+  useEffect(() => {
+    if (!needsUpload || !datasetRepoId) {
+      setDatasetSizeBytes(null);
+      return;
+    }
+    let cancelled = false;
+    getDatasetInfo(baseUrl, fetchWithHeaders, datasetRepoId)
+      .then((info) => {
+        if (!cancelled) setDatasetSizeBytes(info.size_bytes ?? null);
+      })
+      .catch(() => {
+        if (!cancelled) setDatasetSizeBytes(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [needsUpload, datasetRepoId, baseUrl, fetchWithHeaders]);
+
+  const [uploadError, setUploadError] = useState<string | null>(null);
+
+  // The actual job launch, factored out so it can run either directly (dataset
+  // already on the Hub) or as the upload's success continuation.
+  const launchJob = useCallback(async () => {
+    setIsStarting(true);
+    try {
+      const job = await startTrainingJob(
+        baseUrl,
+        fetchWithHeaders,
+        configToRequest(config),
+      );
+      toast({ title: "Training Started", description: job.name });
+      onStarted?.(job.id);
+      // The monitor is a dialog over the studio's Train panel, not a route.
+      // openJobMonitor opens the studio; off-Launchpad callers (the
+      // transitional /training route) must also land on "/" to see it.
+      openJobMonitor(job.id);
+      if (location.pathname !== "/") navigate("/");
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      toast({ title: "Error", description: msg, variant: "destructive" });
+      // If the failure was the 409 case, refresh our running-job knowledge.
+      listJobs(baseUrl, fetchWithHeaders, 200)
+        .then((j) =>
+          setLocalJobRunning(
+            j.some((r) => r.runner === "local" && r.state === "running"),
+          ),
+        )
+        .catch(() => {});
+    } finally {
+      setIsStarting(false);
+    }
+  }, [
+    baseUrl,
+    fetchWithHeaders,
+    config,
+    toast,
+    navigate,
+    location.pathname,
+    openJobMonitor,
+    onStarted,
+  ]);
+
+  // Latest launchJob without re-subscribing the upload hook every render.
+  const launchJobRef = useRef(launchJob);
+  launchJobRef.current = launchJob;
+
+  const { uploading, start: startUpload } = useDatasetUpload({
+    repoId: datasetRepoId,
+    onDone: () => {
+      // Upload finished: launch the cloud job exactly as a Hub dataset would.
+      setUploadError(null);
+      launchJobRef.current();
+    },
+    onError: (message) => {
+      // Upload failed: stop cleanly, surface the error, launch nothing (no
+      // orphan output repo — the job was never submitted).
+      setUploadError(message);
+      setIsStarting(false);
+      toast({
+        title: "Upload failed",
+        description: message,
+        variant: "destructive",
+      });
+    },
+  });
+
+  const handleStart = async () => {
+    if (!datasetRepoId) {
+      toast({
+        title: "Error",
+        description: "Dataset repository ID is required",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    // Pre-flight: smolvla/pi0/diffusion need an optional package installed
+    // locally. Catch it here with a one-click installer instead of a buried
+    // ImportError after the job has already started. Cloud jobs run in their
+    // own environment, so the local package is irrelevant — skip the check.
+    if (config.target.runner === "local") {
+      try {
+        const r = await fetchWithHeaders(
+          `${baseUrl}/system/policy-extra/${config.policy_type}`,
+        );
+        if (r.ok) {
+          const extra = await r.json();
+          if (extra.needs_extra && !extra.available) {
+            setPolicyExtra({
+              policyType: config.policy_type,
+              packageName: extra.package,
+              installTarget: extra.install_target,
+              installHint: extra.install_hint,
+            });
+            return;
+          }
+        }
+      } catch {
+        // Check failed (offline / older backend) — fall through and let the
+        // job report any problem itself.
+      }
+    }
+
+    // Cloud run on a local-only dataset: upload first, then launch on success.
+    // The Start button is disabled while `uploading`, so we never reach here
+    // with an in-flight upload for this repo (the hook re-attaches on mount and
+    // will fire onDone/onError for one already running). On success the hook
+    // seeds a running status and its poll fires onDone → launchJob; a refusal
+    // (409 / dataset busy) is a hard stop surfaced in the notice.
+    if (needsUpload) {
+      setUploadError(null);
+      setIsStarting(true);
+      const err = await startUpload([], false /* public: MakerLab uploads are public by default */);
+      if (err) {
+        setUploadError(err);
+        setIsStarting(false);
+        toast({
+          title: "Upload failed",
+          description: err,
+          variant: "destructive",
+        });
+      }
+      return;
+    }
+
+    await launchJob();
+  };
+
+  if (trainingExtraAvailable === null) {
+    return (
+      <div className="flex items-center justify-center py-24 text-muted-foreground">
+        <Loader2 className="w-6 h-6 animate-spin mr-3" />
+        Checking training environment…
+      </div>
+    );
+  }
+
+  if (trainingExtraAvailable === false) {
+    return <TrainingExtraGate installHint={trainingExtraInstallHint} />;
+  }
+
+  const targetRequiresAuth = config.target.runner === "hf_cloud";
+  const targetMissingFlavor =
+    config.target.runner === "hf_cloud" && !config.target.flavor;
+  const localBlocked = config.target.runner === "local" && localJobRunning;
+  // When resuming, total steps must be strictly above the checkpoint's step:
+  // equal trains nothing and lerobot requires --steps above the resumed step.
+  const resumeStepError =
+    resumeSeed != null &&
+    resumeSeed.step != null &&
+    config.steps <= resumeSeed.step
+      ? `Total steps must be greater than the checkpoint's step (${resumeSeed.step.toLocaleString()}).`
+      : null;
+  // A local-only dataset on a cloud run is uploadable — unless the backend is
+  // in offline mode, in which case uploads are impossible and Start is a hard
+  // block. (needsUpload is already gated on isCloud.)
+  const uploadBlockedOffline = needsUpload && offline;
+  const startDisabled =
+    isStarting ||
+    uploading ||
+    !datasetRepoId ||
+    localBlocked ||
+    (targetRequiresAuth && !authenticated) ||
+    targetMissingFlavor ||
+    uploadBlockedOffline ||
+    resumeStepError != null;
+  const startTooltip = localBlocked
+    ? "Another local training is already running"
+    : targetRequiresAuth && !authenticated
+      ? "Log in to Hugging Face to use cloud compute"
+      : targetMissingFlavor
+        ? "Select a hardware flavor"
+        : uploadBlockedOffline
+          ? "Offline mode is on — the dataset can't be uploaded to the Hub"
+          : undefined;
+
+  return (
+    <div className="w-full">
+      <HfAuthBanner />
+      {resumeSeed ? (
+        <div className="mb-4 rounded-lg border border-primary/40 bg-primary/5 p-4 text-sm text-foreground">
+          <div className="font-semibold">
+            Continuing “{resumeSeed.name}”
+            {resumeSeed.step != null
+              ? ` from step ${resumeSeed.step.toLocaleString()}`
+              : " from its latest checkpoint"}
+          </div>
+          <p className="mt-1 text-muted-foreground">
+            The dataset, policy, batch size, and optimizer are inherited from the
+            checkpoint — only <span className="font-medium">Steps</span> applies
+            here. Set it above the resumed step to train further (prefilled to{" "}
+            {config.steps.toLocaleString()}).
+          </p>
+        </div>
+      ) : null}
+      {finetuneSeed ? (
+        <div className="mb-4 rounded-lg border border-border bg-muted/50 p-4 text-sm text-foreground">
+          <div className="font-semibold">
+            Fine-tuning from “{finetuneSeed.name}”
+            {finetuneSeed.step != null
+              ? ` (step ${finetuneSeed.step.toLocaleString()})`
+              : " (latest checkpoint)"}
+          </div>
+          <p className="mt-1 text-muted-foreground">
+            This starts a <span className="font-medium">fresh run</span> (new
+            optimizer, from step 0) with the policy weights initialized from that
+            model. Pick a <span className="font-medium">dataset</span> to train
+            on and set your training parameters as usual.
+          </p>
+        </div>
+      ) : null}
+      <ConfigurationTab
+        config={config}
+        updateConfig={updateConfig}
+        authenticated={authenticated}
+        flavors={flavors}
+        hardwareLoading={hardwareLoading}
+        policyLocked={finetuneSeed != null || resumeSeed != null}
+      />
+      {needsUpload ? (
+        <div className="mt-6">
+          <LocalDatasetCloudNotice
+            repoId={datasetRepoId}
+            sizeBytes={datasetSizeBytes}
+            offline={offline}
+            uploading={uploading}
+            errorMessage={uploadError}
+          />
+        </div>
+      ) : null}
+      {(() => {
+        const actionsBlock = (
+          <div
+            className={
+              actionsContainer !== undefined
+                ? "flex flex-col gap-2"
+                : "mt-6 flex flex-col gap-2"
+            }
+          >
+        {resumeStepError ? (
+          <p className="text-sm text-destructive">{resumeStepError}</p>
+        ) : null}
+        {(() => {
+          const startButton = (
+            <Button
+              onClick={handleStart}
+              disabled={startDisabled}
+              className="w-full gap-2"
+            >
+              {uploading ? (
+                <>
+                  <Loader2 className="w-5 h-5 mr-2 animate-spin" /> Uploading…
+                </>
+              ) : isStarting ? (
+                <>
+                  <Loader2 className="w-5 h-5 mr-2 animate-spin" /> Starting…
+                </>
+              ) : (
+                <>
+                  <Play className="w-5 h-5 mr-2" />{" "}
+                  {resumeSeed
+                    ? "Continue Training"
+                    : finetuneSeed
+                      ? "Start Fine-tuning"
+                      : needsUpload
+                        ? "Upload & start training"
+                        : "Start Training"}
+                </>
+              )}
+            </Button>
+          );
+          // Native `title` doesn't fire reliably on disabled buttons across
+          // browsers — and since Radix's tooltip relies on pointer events
+          // that a disabled button swallows, wrap in a span so the trigger
+          // still receives hover/focus.
+          if (!startTooltip) return startButton;
+          return (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <span tabIndex={0} className="block w-full">
+                  {startButton}
+                </span>
+              </TooltipTrigger>
+              <TooltipContent>{startTooltip}</TooltipContent>
+            </Tooltip>
+          );
+        })()}
+          </div>
+        );
+        // undefined ⇒ inline (the /training route). An element ⇒ portal into
+        // the studio panel's pinned slot. null ⇒ slot not mounted yet.
+        if (actionsContainer === undefined) return actionsBlock;
+        if (actionsContainer === null) return null;
+        return createPortal(actionsBlock, actionsContainer);
+      })()}
+
+      {policyExtra && (
+        <PolicyExtraDialog
+          open={!!policyExtra}
+          onOpenChange={(o) => !o && setPolicyExtra(null)}
+          policyType={policyExtra.policyType}
+          packageName={policyExtra.packageName}
+          installTarget={policyExtra.installTarget}
+          installHint={policyExtra.installHint}
+        />
+      )}
+    </div>
+  );
+};
+
+export default TrainingConfigurator;

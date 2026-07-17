@@ -35,9 +35,11 @@ from pydantic import BaseModel
 
 from lerobot.motors.feetech import FeetechMotorsBus
 
+from .motor_power import torque_limit_from_percent
 from .torque import force_disable_bus_torque
 from .utils.config import (
     CALIBRATION_BASE_PATH_ROBOTS,
+    FOLLOWER_CONFIG_PATH,
     LEADER_CONFIG_PATH,
     save_robot_record,
 )
@@ -70,6 +72,29 @@ class AutoCalibrationRequest(BaseModel):
     config_file: str
     robot_name: str | None = None
     arm: str = "left"  # "left" (also single) or "right"
+    # Calibration drive torque, as a percentage of full power (the robot's
+    # torque slider; clamped server-side to 10-100). Passed to the vendored
+    # script as --torque-limit (percent × 10). None = the script's default.
+    motor_power: int | None = None
+
+
+class AutoCalibrationBatchArm(BaseModel):
+    """One arm in a concurrent auto-calibration batch. Same fields as the
+    single-arm request minus robot_name (batch-level, shared by every arm)."""
+
+    device_type: str  # "teleop" (leader) or "robot" (follower)
+    port: str
+    config_file: str
+    arm: str = "left"  # "left" (also single) or "right"
+
+
+class AutoCalibrationBatchRequest(BaseModel):
+    arms: list[AutoCalibrationBatchArm]
+    robot_name: str | None = None
+    overwrite: bool = False
+    # Batch-level calibration drive torque (percent, 10-100), applied to every
+    # arm in the batch. None = the vendored script's default.
+    motor_power: int | None = None
 
 
 @dataclass
@@ -113,6 +138,17 @@ def _remove_stray_calibration_file(device_type: str, config_stem: str) -> None:
         logger.warning(f"Could not remove stray auto-calibration file {path}: {e}")
 
 
+def _calibration_name_taken(device_type: str, config_stem: str) -> bool:
+    """True if a calibration file already exists under the name the run would
+    --save. Mirrors the single-arm library layout: leaders live under
+    teleoperators/so_leader, followers under robots/so_follower."""
+    if device_type == "teleop":
+        path = os.path.join(LEADER_CONFIG_PATH, f"{config_stem}.json")
+    else:
+        path = os.path.join(FOLLOWER_CONFIG_PATH, f"{config_stem}.json")
+    return os.path.exists(path)
+
+
 def _release_arm_torque(port: str) -> list[str]:
     """Fallback torque release, run from THIS process after the calibration
     subprocess is dead (so the serial port is free again).
@@ -148,8 +184,16 @@ def _release_arm_torque(port: str) -> list[str]:
             logger.warning(f"Auto-calibration fallback release: disconnect failed: {e}")
 
 
-class AutoCalibrationManager:
-    """Runs the auto-calibration subprocess and tracks its state + logs."""
+class _AutoCalArmRunner:
+    """Runs the auto-calibration subprocess for ONE arm and tracks its state +
+    logs. Owns all the per-arm machinery (subprocess, log reader, success
+    finalization, escalating stop, fallback torque release) that was previously
+    inlined in AutoCalibrationManager. Both the single-arm manager (one runner)
+    and the concurrent batch manager (a runner per arm) drive it.
+
+    Each runner has its own lock and threads, so several run fully independently
+    and in parallel: one arm's failure, timeout, or wedged teardown never blocks
+    another's."""
 
     def __init__(self) -> None:
         self._proc: subprocess.Popen | None = None
@@ -184,6 +228,10 @@ class AutoCalibrationManager:
                 "--robot-type",
                 robot_type,
             ]
+            if request.motor_power is not None:
+                # The robot's torque slider drives the calibration torque:
+                # percent (clamped 10-100) → raw Torque_Limit register units.
+                command += ["--torque-limit", str(torque_limit_from_percent(request.motor_power))]
 
             self._logs.clear()
             self._request = request
@@ -209,7 +257,9 @@ class AutoCalibrationManager:
             self.status = AutoCalibrationStatus(
                 active=True, status="running", message="Auto-calibration running…"
             )
-            self._thread = threading.Thread(target=self._run, name="auto-calibration", daemon=True)
+            self._thread = threading.Thread(
+                target=self._run, name=f"auto-calibration:{request.port}", daemon=True
+            )
             self._thread.start()
             return {"success": True, "message": "Auto-calibration started"}
 
@@ -411,5 +461,180 @@ class AutoCalibrationManager:
                 "logs": list(self._logs),
             }
 
+    def arm_status(self) -> dict:
+        """Per-arm status enriched with this arm's identity — for the batch view.
+        A superset of get_status(): includes name/port/device_type/arm."""
+        req = self._request
+        status = self.get_status()
+        status.update(
+            {
+                "name": _stem(req.config_file) if req is not None else "",
+                "port": req.port if req is not None else "",
+                "device_type": req.device_type if req is not None else "",
+                "arm": req.arm if req is not None else "left",
+            }
+        )
+        return status
+
+
+class AutoCalibrationManager(_AutoCalArmRunner):
+    """Single-arm auto-calibration.
+
+    A thin subclass of _AutoCalArmRunner so the existing single-arm endpoints
+    (/start-auto-calibration, /stop-auto-calibration, /auto-calibration-status)
+    keep their exact behavior and every previously-inlined attribute/method
+    (_proc, _thread, _request, status, _finalize_success, _stop_worker, …) stays
+    directly reachable — the machinery just became shareable with the batch
+    path. No overrides: it exists to name the single-arm role."""
+
+
+class AutoCalibrationBatchManager:
+    """Runs auto-calibration on a USER-SELECTED SUBSET of arms CONCURRENTLY.
+
+    Each arm gets its own _AutoCalArmRunner (own subprocess, own serial port,
+    own lock and threads), so the arms run fully in parallel with independent
+    outcomes: one arm erroring, timing out, or wedging its teardown never blocks
+    another. Auto-cal is parallelizable precisely because each arm's subprocess
+    drives its own arm on its own bus with no human motion required — unlike the
+    human-in-the-loop manual flow, which is sequential.
+
+    Partial success is the norm: report each arm's terminal status plus overall
+    counts. A name persists only on that arm's success (the runner's
+    _finalize_success write-back), and a failed arm's stray --save file is
+    cleaned up by the runner, exactly as in the single-arm path."""
+
+    _MAX_ARMS = 4
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._runners: list[_AutoCalArmRunner] = []
+        self._robot_name: str | None = None
+
+    def _active(self) -> bool:
+        return any(r.get_status()["active"] for r in self._runners)
+
+    def start(self, request: AutoCalibrationBatchRequest) -> dict:
+        with self._lock:
+            if self._active():
+                return {"success": False, "message": "A batch auto-calibration is already running"}
+
+            arms = request.arms
+            # --- Fail-fast validation, before touching any hardware. ---
+            if not arms:
+                return {"success": False, "message": "No arms selected"}
+            if len(arms) > self._MAX_ARMS:
+                return {
+                    "success": False,
+                    "message": f"At most {self._MAX_ARMS} arms can be calibrated at once",
+                }
+            for arm in arms:
+                if arm.device_type not in ("teleop", "robot"):
+                    return {"success": False, "message": "Invalid device type"}
+                if not arm.port:
+                    return {"success": False, "message": "Every arm needs a port"}
+
+            # Distinct ports: two subprocesses cannot share one serial bus.
+            ports = [a.port for a in arms]
+            if len(set(ports)) != len(ports):
+                return {
+                    "success": False,
+                    "message": "Each arm needs its own port — two arms share a port",
+                }
+
+            # Distinct names within the same device_type/side (same file path).
+            side_names: set[tuple[str, str]] = set()
+            for a in arms:
+                key = (a.device_type, _stem(a.config_file))
+                if key in side_names:
+                    return {
+                        "success": False,
+                        "message": f"Two arms would save to the same name '{_stem(a.config_file)}'",
+                    }
+                side_names.add(key)
+
+            # Name-taken pre-check across all selected arms (unless overwrite).
+            if not request.overwrite:
+                taken = [
+                    _stem(a.config_file)
+                    for a in arms
+                    if _calibration_name_taken(a.device_type, _stem(a.config_file))
+                ]
+                if taken:
+                    return {
+                        "success": False,
+                        "code": "name_taken",
+                        "message": "Calibration name already exists: " + ", ".join(sorted(set(taken))),
+                        "names": sorted(set(taken)),
+                    }
+
+            # --- Launch every arm concurrently. Each runner spawns its own
+            # subprocess + reader thread, so this loop returns quickly and the
+            # arms run in parallel. If a launch fails, that arm is 'failed' and
+            # the rest still run. ---
+            self._robot_name = request.robot_name
+            self._runners = [_AutoCalArmRunner() for _ in arms]
+            launched = 0
+            for runner, arm in zip(self._runners, arms, strict=True):
+                req = AutoCalibrationRequest(
+                    device_type=arm.device_type,
+                    port=arm.port,
+                    config_file=arm.config_file,
+                    robot_name=request.robot_name,
+                    arm=arm.arm,
+                    motor_power=request.motor_power,
+                )
+                result = runner.start(req)
+                # Give the runner its identity even if the launch failed, so the
+                # status view can still name the failed arm.
+                runner._request = req
+                if result.get("success"):
+                    launched += 1
+                else:
+                    runner.status = AutoCalibrationStatus(
+                        active=False, status="failed", error=result.get("message", "launch failed")
+                    )
+
+            if launched == 0:
+                return {"success": False, "message": "No arm could be launched"}
+            return {
+                "success": True,
+                "message": f"Auto-calibration started on {launched} arm(s)",
+                "total": len(arms),
+                "launched": launched,
+            }
+
+    def stop(self) -> dict:
+        """Stop ALL arms: request a stop on each running runner. Each runner's
+        stop escalates (SIGTERM → SIGKILL) and releases that arm's torque in its
+        own worker thread, so a stall in one arm's teardown never blocks the
+        others."""
+        with self._lock:
+            if not self._active():
+                return {"success": False, "message": "No batch auto-calibration is running"}
+            stopped = 0
+            for runner in self._runners:
+                if runner.get_status()["active"] and runner.stop().get("success"):
+                    stopped += 1
+            return {"success": True, "message": f"Stopping {stopped} arm(s)"}
+
+    def get_status(self) -> dict:
+        with self._lock:
+            arms = [r.arm_status() for r in self._runners]
+            total = len(arms)
+            completed = sum(1 for a in arms if a["status"] == "completed")
+            failed = sum(1 for a in arms if a["status"] in ("failed", "stopped"))
+            active = any(a["active"] for a in arms)
+            return {
+                "active": active,
+                "arms": arms,
+                "total": total,
+                "completed": completed,
+                "failed": failed,
+                # Combined log stream, per-arm prefixed so a single panel can
+                # show everything at once; each arm also carries its own logs.
+                "logs": [f"[{a['name'] or a['port']}] {line}" for a in arms for line in a["logs"]],
+            }
+
 
 auto_calibration_manager = AutoCalibrationManager()
+auto_calibration_batch_manager = AutoCalibrationBatchManager()
