@@ -131,6 +131,29 @@ uv pip install -e .
 .venv/bin/makerlab
 ```
 
+The `lerobot` dependency is pinned to a Git revision
+(`git+https://github.com/huggingface/lerobot.git@v0.6.0`), so installation
+reaches GitHub at resolve time. On networks where GitHub is blocked or
+unreliable, build the wheel on a connected machine and carry it over. LeRobot is
+pure Python, so the wheel is portable across platforms and architectures:
+
+```bash
+# Connected machine
+pip wheel "lerobot[core_scripts,feetech,training] @ git+https://github.com/huggingface/lerobot.git@v0.6.0" \
+  --no-deps -w wheels/
+
+# Target machine, after transferring wheels/lerobot-*.whl
+pip install lerobot-*.whl
+pip install -e . --no-deps
+```
+
+The `--no-deps` install assumes the environment already carries MakerLab's
+other dependencies, as when updating an existing installation such as the
+Jetson flow. On a fresh environment, install the wheel first and the remaining
+dependencies resolve from PyPI—typically reachable even where GitHub is
+not—via `pip install -e . --no-deps && pip check`; install anything
+`pip check` names from PyPI directly.
+
 When working on the source, invoke `.venv/bin/makerlab` explicitly. A bare
 `makerlab` may resolve to an older `uv tool install` snapshot. Check with:
 
@@ -143,6 +166,33 @@ Running either entry point from the source environment also attempts to place
 non-destructive symlinks in `~/.local/bin`, making `makerlab` and
 `makerlab-station` available outside the checkout. Set
 `MAKERLAB_NO_PATH_LINK=1` to disable that convenience.
+
+### Jetson / ARM64 notes
+
+On an NVIDIA Jetson (aarch64 with CUDA), a fresh environment resolve breaks
+CUDA PyTorch in two ways:
+
+- PyPI's aarch64 `torch` wheels are CPU-only. CUDA PyTorch on Jetson comes only
+  from NVIDIA's wheel index or a manually installed wheel, so letting the
+  resolver pick `torch` silently downgrades the environment to CPU.
+- Even after reinstalling the correct CUDA build, the cuBLAS/cuBLASLt symlink
+  pairing that CUDA-13 pip wheels expect under `/usr/local/cuda` breaks again. A
+  mixed-generation `cublas`/`cublasLt` pair raises
+  `CUBLAS_STATUS_NOT_INITIALIZED` at the cuBLASLt heuristic, while a plain
+  `a @ b` matmul still passes and masks the failure.
+
+Update the environment in place; never recreate the venv to start clean. After
+any dependency change, verify with both probes. The `nn.Linear` probe is the
+load-bearing one, because a bare matmul passes while the layer path is broken:
+
+```bash
+.venv/bin/python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"
+.venv/bin/python -c "import torch, torch.nn as nn; m=nn.Linear(8,8).cuda(); print(m(torch.randn(4,8,device='cuda')).sum())"
+```
+
+Teleoperation and recording are torch-free paths; a CPU-only torch only degrades
+training and inference. See the [Jetson station guide](jetson/README.md) for the
+CUDA install order and the cuBLAS symlink repair.
 
 ### Run modes
 
