@@ -57,21 +57,35 @@ export function useCameraStream(deviceId: string, paused: boolean) {
 
     const start = async (attempt: number) => {
       try {
+        // Platform-gated resolution constraint. On Linux/V4L2 (Jetson
+        // Chromium) an unconstrained request lands on YUYV 640x480, and one
+        // raw stream costs ~150 Mbps of a 480 Mbps USB-2 bus — a third
+        // concurrent preview then fails NotReadableError ("could not start
+        // video source"). Asking for 720p30 there forces Chromium to
+        // negotiate the ~10x lighter MJPEG instead (these cameras can't do
+        // 720p@30 uncompressed); `ideal` degrades gracefully on cameras
+        // without 720p (no OverconstrainedError).
+        //
+        // macOS/AVFoundation must NOT get this constraint: it already picks
+        // MJPEG on its own, and the ideal-720p request silently ~triples
+        // preview resolution vs the unconstrained default — with 3 concurrent
+        // previews the third stops fitting the single-hub USB topology and
+        // fails. This regressed twice (2026-07-13 and again the night of
+        // 2026-07-14) before being gated to Linux only. macOS UAs never
+        // contain "Linux"; the !Android guard keeps this desktop-app check
+        // clean since Android UAs do.
+        const ua = navigator.userAgent;
+        const isLinux = /Linux/.test(ua) && !/Android/.test(ua);
         stream = await navigator.mediaDevices.getUserMedia({
           video: {
             deviceId: { exact: deviceId },
-            // Ask for 720p30 so Chromium negotiates MJPEG instead of raw
-            // YUYV. On Linux/V4L2 an unconstrained request lands on
-            // YUYV 640x480, and one raw stream costs ~150 Mbps of a
-            // 480 Mbps USB-2 bus — a third concurrent preview then fails
-            // NotReadableError ("could not start video source"). These
-            // cameras can't do 720p@30 uncompressed, so this forces the
-            // ~10x lighter MJPEG, matching what macOS/AVFoundation picks
-            // on its own. `ideal` degrades gracefully on cameras without
-            // 720p (no OverconstrainedError).
-            width: { ideal: 1280 },
-            height: { ideal: 720 },
-            frameRate: { ideal: 30 },
+            ...(isLinux
+              ? {
+                  width: { ideal: 1280 },
+                  height: { ideal: 720 },
+                  frameRate: { ideal: 30 },
+                }
+              : {}),
           },
         });
         if (cancelled) {
