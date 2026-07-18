@@ -153,3 +153,121 @@ def test_find_off_center_joints_tolerance_boundary() -> None:
     assert find_off_center_joints({"elbow_flex": (1447, 3447)}) == []
     # Midpoint 2448 deviates by 401 — just over the line.
     assert find_off_center_joints({"elbow_flex": (1448, 3448)}) == ["elbow_flex"]
+
+
+# ---------------------------------------------------------------------------
+# Servo snapshot/rollback: a canceled/errored calibration must restore the
+# EEPROM registers it mutated (Homing_Offset + range limits) so the arm's
+# persistent state does not diverge from its untouched calibration file.
+# ---------------------------------------------------------------------------
+
+_MOTORS = ("shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper")
+
+
+class _FakeBus:
+    """Minimal FeetechMotorsBus double: register store + a write log."""
+
+    def __init__(self, registers: dict[str, dict[str, int]]) -> None:
+        self.motors = dict.fromkeys(_MOTORS)
+        self.registers = registers  # {reg: {motor: value}}
+        self.writes: list[tuple[str, str, int]] = []
+        self.read_fail: set[tuple[str, str]] = set()
+        self.write_fail: set[tuple[str, str]] = set()
+
+    def read(self, reg: str, motor: str, normalize: bool = True) -> int:
+        if (reg, motor) in self.read_fail:
+            raise ConnectionError("no response")
+        return self.registers[reg][motor]
+
+    def write(self, reg: str, motor: str, value: int, normalize: bool = True) -> None:
+        if (reg, motor) in self.write_fail:
+            raise ConnectionError("write NAK")
+        self.writes.append((reg, motor, value))
+        self.registers.setdefault(reg, {})[motor] = value
+
+
+class _FakeDevice:
+    def __init__(self, bus: _FakeBus) -> None:
+        self.bus = bus
+        self.is_connected = True
+
+    def disconnect(self) -> None:
+        self.is_connected = False
+
+
+def _all_regs(value_of) -> dict[str, dict[str, int]]:
+    """Build a {register: {motor: value}} store from a per-register value fn."""
+    from makerlab.calibrate import _SNAPSHOT_REGISTERS
+
+    return {reg: {m: value_of(reg, m) for m in _MOTORS} for reg in _SNAPSHOT_REGISTERS}
+
+
+def _make_manager_with_snapshot(registers):
+    """A CalibrationManager wired to a fake device, snapshot already captured."""
+    from makerlab.calibrate import CalibrationManager
+
+    bus = _FakeBus(registers)
+    mgr = CalibrationManager()
+    mgr.device = _FakeDevice(bus)
+    mgr._snapshot_servo_state()
+    return mgr, bus
+
+
+def test_snapshot_captures_all_mutated_registers() -> None:
+    from makerlab.calibrate import _SNAPSHOT_REGISTERS
+
+    mgr, _ = _make_manager_with_snapshot(_all_regs(lambda reg, m: 111))
+    assert set(mgr._servo_snapshot) == set(_MOTORS)
+    for motor in _MOTORS:
+        assert set(mgr._servo_snapshot[motor]) == set(_SNAPSHOT_REGISTERS)
+
+
+def test_cancel_restores_snapshotted_servo_state() -> None:
+    """After a mutation (as the homing step would do), a cancel restores every
+    snapshotted register to its pre-session value."""
+    orig = _all_regs(lambda reg, m: {"Homing_Offset": 500, "Min_Position_Limit": 0, "Max_Position_Limit": 4095}[reg])
+    mgr, bus = _make_manager_with_snapshot(orig)
+
+    # Simulate the homing step rewriting Homing_Offset and reset_calibration
+    # rewriting the limits on every motor.
+    for m in _MOTORS:
+        bus.write("Homing_Offset", m, 1234)
+        bus.write("Min_Position_Limit", m, 0)
+        bus.write("Max_Position_Limit", m, 4095)
+
+    mgr._cleanup_and_finish("Calibration cancelled", status="idle")
+
+    # Registers are back to their original snapshot values.
+    for m in _MOTORS:
+        assert bus.registers["Homing_Offset"][m] == 500
+    # Snapshot discarded (no double restore) and no rollback warning surfaced.
+    assert mgr._servo_snapshot is None
+    assert mgr.status.warning is None
+
+
+def test_restore_failure_surfaces_warning() -> None:
+    """When a restore write fails, the status carries an explicit inconsistency
+    warning naming the offending motor/register."""
+    mgr, bus = _make_manager_with_snapshot(_all_regs(lambda reg, m: 500))
+    bus.write_fail = {("Homing_Offset", "elbow_flex")}
+
+    mgr._cleanup_and_finish("Calibration cancelled", status="idle")
+
+    assert mgr.status.warning is not None
+    assert "may be inconsistent" in mgr.status.warning
+    assert "elbow_flex.Homing_Offset" in mgr.status.warning
+
+
+def test_success_discards_snapshot_so_no_restore_runs() -> None:
+    """Once the snapshot is discarded (a successful save), cleanup must not write
+    any register back — the freshly-saved calibration is the truth."""
+    mgr, bus = _make_manager_with_snapshot(_all_regs(lambda reg, m: 500))
+
+    # A successful save discards the snapshot.
+    mgr._servo_snapshot = None
+    writes_before = len(bus.writes)
+
+    mgr._cleanup_and_finish("Calibration completed", status="completed")
+
+    assert len(bus.writes) == writes_before  # no restore writes
+    assert mgr.status.warning is None

@@ -17,14 +17,18 @@ subprocess (it drives the arm under torque to find each joint's range), stream
 its logs, and on success copy the file to MakerLab's expected path + write the
 config back into the robot record.
 
-The vendored script (makerlab/vendor/feetech_autocal) always saves to
-``.../calibration/robots/<robot_type>/<id>.json``. For a follower that IS MakerLab's
-follower dir; for a leader we copy it to ``.../teleoperators/so_leader``.
+The vendored script (makerlab/vendor/feetech_autocal) saves to
+``<HF_LEROBOT_CALIBRATION>/robots/<robot_type>/<id>.json``. We launch it with
+HF_LEROBOT_CALIBRATION pointed at a private staging dir (see _staging_base), so
+its output never lands directly in the real library. Only a fully-successful
+run promotes the staged file into MakerLab's library (followers ->
+robots/so_follower, leaders -> teleoperators/so_leader); a failed/stopped run
+just deletes the staged file. This is what keeps a cancel/failure from ever
+destroying a pre-existing profile that was being recalibrated over.
 """
 
 import logging
 import os
-import shutil
 import subprocess
 import sys
 import threading
@@ -101,33 +105,47 @@ def _stem(name: str) -> str:
     return name[: -len(".json")] if name.endswith(".json") else name
 
 
+def _staging_base() -> str:
+    """Directory handed to the subprocess as HF_LEROBOT_CALIBRATION so it writes
+    its --save output into a private staging area instead of the real library.
+
+    Kept under the same calibration home as the library dirs (a sibling of
+    ``.../calibration/robots`` and ``.../calibration/teleoperators``) so a
+    successful run can os.replace() the staged file into place atomically —
+    os.replace requires the same filesystem."""
+    return os.path.join(os.path.dirname(CALIBRATION_BASE_PATH_ROBOTS), ".autocal_staging")
+
+
 def _subprocess_output_path(device_type: str, config_stem: str) -> str:
     """The file the vendored subprocess writes with --save.
 
-    It always saves under ``.../calibration/robots/<robot_type>/<id>.json``:
-    for a follower that IS MakerLab's real library dir; for a leader it's a scratch
-    location (robots/so_leader) that _finalize_success later copies into the real
-    leader library (teleoperators/so_leader). Used to remove a stray file left by
-    a run that didn't finish cleanly, so a failed/aborted/dropped auto-calibration
-    never leaves a phantom library entry (follower) or scratch file (leader)."""
+    The subprocess runs with HF_LEROBOT_CALIBRATION = _staging_base(), so it
+    writes to ``<staging>/robots/<robot_type>/<id>.json`` — NEVER the real
+    library. A successful run promotes this file into the library
+    (_finalize_success); a failed/stopped run just deletes it. Because the
+    subprocess only ever writes inside staging, cleanup can never delete a
+    pre-existing library profile that the run was recalibrating over."""
     robot_type = "so_follower" if device_type == "robot" else "so_leader"
-    return os.path.join(CALIBRATION_BASE_PATH_ROBOTS, robot_type, f"{config_stem}.json")
+    return os.path.join(_staging_base(), "robots", robot_type, f"{config_stem}.json")
 
 
 def _remove_stray_calibration_file(device_type: str, config_stem: str) -> None:
-    """Best-effort removal of the subprocess's --save output on a non-success
-    run. The subprocess only writes it at the natural end of a fully-successful
-    calibration (an interrupt raises before its save block), so on the normal
-    failed/stopped path there is nothing to remove; this is the belt-and-braces
-    guard for the case where the process wrote the file and then exited non-zero
-    (or post-processing failed), which would otherwise leave a phantom entry."""
+    """Best-effort removal of the subprocess's staged --save output on a
+    non-success run. The file lives in the private staging dir (never the real
+    library), so this only ever deletes something THIS run created; a
+    pre-existing library profile being recalibrated over is untouched. The
+    subprocess only writes the file at the natural end of a fully-successful run
+    (an interrupt raises before its save block), so on the normal failed/stopped
+    path there is usually nothing to remove — this is the belt-and-braces guard
+    for the case where the process wrote the staged file and then exited non-zero
+    (or post-processing failed)."""
     path = _subprocess_output_path(device_type, config_stem)
     try:
         if os.path.exists(path):
             os.remove(path)
-            logger.info(f"Removed stray auto-calibration file from a non-successful run: {path}")
+            logger.info(f"Removed staged auto-calibration file from a non-successful run: {path}")
     except OSError as e:
-        logger.warning(f"Could not remove stray auto-calibration file {path}: {e}")
+        logger.warning(f"Could not remove staged auto-calibration file {path}: {e}")
 
 
 def _calibration_name_taken(device_type: str, config_stem: str) -> bool:
@@ -221,6 +239,13 @@ class _AutoCalArmRunner:
                 robot_type,
             ]
 
+            # Redirect the subprocess's --save output into a private staging dir
+            # so it never writes directly into the real calibration library. The
+            # vendored script builds its save path from HF_LEROBOT_CALIBRATION
+            # (evaluated at import in the fresh child), so overriding it here is
+            # enough; only a successful run promotes the staged file into place.
+            child_env = {**os.environ, "HF_LEROBOT_CALIBRATION": _staging_base()}
+
             self._logs.clear()
             self._request = request
             self._stop_thread = None
@@ -236,6 +261,7 @@ class _AutoCalArmRunner:
                     stderr=subprocess.STDOUT,
                     text=True,
                     bufsize=1,
+                    env=child_env,
                 )
             except Exception as e:
                 logger.error(f"Failed to launch auto-calibration: {e}")
@@ -271,11 +297,11 @@ class _AutoCalArmRunner:
                     )
                 except Exception as e:
                     logger.error(f"Auto-calibration post-processing failed: {e}")
-                    # Post-processing failed after the subprocess wrote its file
-                    # — don't leave that file behind as a phantom under a failed
-                    # status. (The record write-back never assigns the name on
-                    # this path either: it runs inside _finalize_success, which
-                    # aborted.)
+                    # Post-processing failed after the subprocess wrote its
+                    # staged file — delete the staged output so it isn't promoted
+                    # later. The real library (incl. any pre-existing profile of
+                    # this name) is untouched: promotion only happens on success,
+                    # inside _finalize_success, which aborted.
                     if request is not None:
                         _remove_stray_calibration_file(request.device_type, _stem(request.config_file))
                     self.status = AutoCalibrationStatus(active=False, status="failed", error=str(e))
@@ -288,9 +314,10 @@ class _AutoCalArmRunner:
                 pass
             else:
                 # Plain failure (nonzero exit, connection dropped): the
-                # subprocess writes its file only on a fully-successful run, so
-                # normally there's nothing here — but remove it defensively in
-                # case the process wrote then died, so no phantom entry remains.
+                # subprocess writes its staged file only on a fully-successful
+                # run, so normally there's nothing here — but remove the staged
+                # output defensively in case the process wrote then died. The
+                # real library is never touched on this path.
                 if request is not None:
                     _remove_stray_calibration_file(request.device_type, _stem(request.config_file))
                 self.status = AutoCalibrationStatus(
@@ -299,22 +326,28 @@ class _AutoCalArmRunner:
             self._proc = None
 
     def _finalize_success(self) -> None:
-        """Copy the leader file to MakerLab's path (if needed) and write the config
-        back into the robot record for the calibrated side + arm."""
+        """Promote the staged calibration file into MakerLab's real library and
+        write the config back into the robot record for the calibrated side + arm."""
         request = self._request
         if request is None:
             return
         config_stem = _stem(request.config_file)
 
-        # The script saves leaders under robots/so_leader; MakerLab reads leaders
-        # from teleoperators/so_leader. Copy it over.
+        # The subprocess wrote into the private staging dir. Now that the run
+        # succeeded, move it into the real library: followers land in
+        # robots/so_follower, leaders in teleoperators/so_leader. os.replace is
+        # atomic (same filesystem) and overwrites any previous profile of the
+        # same name in one step — the ONLY point at which a pre-existing profile
+        # is ever replaced.
+        src = _subprocess_output_path(request.device_type, config_stem)
         if request.device_type == "teleop":
-            src = os.path.join(CALIBRATION_BASE_PATH_ROBOTS, "so_leader", f"{config_stem}.json")
             dst = os.path.join(LEADER_CONFIG_PATH, f"{config_stem}.json")
-            if os.path.exists(src):
-                os.makedirs(LEADER_CONFIG_PATH, exist_ok=True)
-                shutil.copy2(src, dst)
-                logger.info(f"Copied auto-calibrated leader config to {dst}")
+        else:
+            dst = os.path.join(CALIBRATION_BASE_PATH_ROBOTS, "so_follower", f"{config_stem}.json")
+        if os.path.exists(src):
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            os.replace(src, dst)
+            logger.info(f"Promoted auto-calibrated config to {dst}")
 
         # Write port + config back into the robot record (arm-aware), mirroring
         # the manual calibration write-back.
@@ -418,11 +451,13 @@ class _AutoCalArmRunner:
                     # (and its saved file — this was a success, not a stop).
                     pass
                 else:
-                    # A stopped run must leave no phantom library entry. The
-                    # subprocess only writes its file at the natural end of a
-                    # fully-successful run, so a stop mid-calibration normally
-                    # wrote nothing — remove it defensively in case a stop
-                    # landed just after the save block.
+                    # A stopped run must leave no staged output to be promoted
+                    # later. The subprocess only writes its staged file at the
+                    # natural end of a fully-successful run, so a stop
+                    # mid-calibration normally wrote nothing — remove the staged
+                    # output defensively in case a stop landed just after the save
+                    # block. The real library (and any pre-existing profile of
+                    # this name) is untouched.
                     request = self._request
                     if request is not None:
                         _remove_stray_calibration_file(request.device_type, _stem(request.config_file))

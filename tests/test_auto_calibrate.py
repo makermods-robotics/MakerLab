@@ -229,7 +229,8 @@ def test_stop_surfaces_failed_torque_release(
 
 
 # ---------------------------------------------------------------------------
-# Success-only persistence: a non-successful run must leave no phantom file
+# Data safety: a cancel/failure never deletes a pre-existing library profile,
+# only the run's own staged output; success promotes staging into the library.
 # ---------------------------------------------------------------------------
 
 
@@ -237,24 +238,37 @@ def _point_robots_base_at(monkeypatch: pytest.MonkeyPatch, base: str) -> None:
     """Redirect the module-level robots calibration base the manager reads.
 
     auto_calibrate binds CALIBRATION_BASE_PATH_ROBOTS at import, so patching
-    cfg alone wouldn't reach it — patch the name on the module directly."""
+    cfg alone wouldn't reach it — patch the name on the module directly. The
+    private staging dir is derived from this base's parent, so both the real
+    library and staging land under the (temp) filesystem."""
     monkeypatch.setattr(auto_calibrate, "CALIBRATION_BASE_PATH_ROBOTS", base)
 
 
 def _plant_follower_file(base: str, stem: str) -> str:
-    """Create the file the subprocess would have written for a follower run."""
+    """Create a pre-existing follower profile in the REAL library dir — the
+    'last working calibration' a recalibration would run over."""
     path = os.path.join(base, "so_follower", f"{stem}.json")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
-        f.write("{}")
+        f.write('{"pre-existing": true}')
     return path
 
 
-def test_stray_file_removed_when_run_fails_nonzero(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
-    """A run that exits non-zero after the subprocess already wrote its file
-    must not leave a phantom library entry behind."""
+def _plant_staged_file(stem: str) -> str:
+    """Create the STAGED file the subprocess writes (HF_LEROBOT_CALIBRATION
+    redirected), standing in for output the run itself produced."""
+    path = auto_calibrate._subprocess_output_path("robot", stem)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        f.write('{"staged": true}')
+    return path
+
+
+def test_preexisting_profile_survives_nonzero_failure(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """A run that exits non-zero must NOT delete the pre-existing library profile
+    it was recalibrating over — cleanup only touches the run's staged output."""
     _point_robots_base_at(monkeypatch, str(tmp_path))
-    stray = _plant_follower_file(str(tmp_path), "my_arm")
+    preexisting = _plant_follower_file(str(tmp_path), "my_arm")
 
     class FailProc:
         def __init__(self) -> None:
@@ -274,15 +288,16 @@ def test_stray_file_removed_when_run_fails_nonzero(monkeypatch: pytest.MonkeyPat
         mgr._thread.join(timeout=2)
 
     assert mgr.get_status()["status"] == "failed"
-    assert not os.path.exists(stray)
+    assert os.path.exists(preexisting)  # last working profile preserved
 
 
-def test_stray_file_removed_when_post_processing_fails(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
-    """A successful subprocess whose post-processing (_finalize_success) raises
-    must clean up the file the subprocess wrote — the run is 'failed', so its
-    name must not persist as a phantom entry."""
+def test_preexisting_profile_survives_post_processing_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """A zero-exit whose post-processing (_finalize_success) raises leaves the run
+    'failed' — the pre-existing library profile must still be intact."""
     _point_robots_base_at(monkeypatch, str(tmp_path))
-    stray = _plant_follower_file(str(tmp_path), "my_arm")
+    preexisting = _plant_follower_file(str(tmp_path), "my_arm")
 
     class OkProc:
         def __init__(self) -> None:
@@ -307,14 +322,14 @@ def test_stray_file_removed_when_post_processing_fails(monkeypatch: pytest.Monke
         mgr._thread.join(timeout=2)
 
     assert mgr.get_status()["status"] == "failed"
-    assert not os.path.exists(stray)
+    assert os.path.exists(preexisting)  # last working profile preserved
 
 
-def test_stray_file_removed_on_stop(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
-    """A stopped run must leave no phantom file even if a stop landed just after
-    the subprocess wrote it."""
+def test_preexisting_profile_survives_stop(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """A stopped run must not delete the pre-existing library profile it was
+    recalibrating over."""
     _point_robots_base_at(monkeypatch, str(tmp_path))
-    stray = _plant_follower_file(str(tmp_path), "my_arm")
+    preexisting = _plant_follower_file(str(tmp_path), "my_arm")
 
     proc = StoppableFakeProc()
     released: list[str] = []
@@ -324,7 +339,67 @@ def test_stray_file_removed_on_stop(monkeypatch: pytest.MonkeyPatch, tmp_path) -
     _join_stop(mgr)
 
     assert mgr.get_status()["status"] == "stopped"
-    assert not os.path.exists(stray)
+    assert os.path.exists(preexisting)  # last working profile preserved
+
+
+def test_staged_output_cleaned_on_failure(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """A run's own staged output (a file the run DID create) is still cleaned up
+    on a non-success exit, so it is never promoted into the library later."""
+    _point_robots_base_at(monkeypatch, str(tmp_path))
+    staged = _plant_staged_file("my_arm")
+
+    class FailProc:
+        def __init__(self) -> None:
+            self.stdout = iter(["Stage 0: init\n"])
+
+        def wait(self) -> int:
+            return 1
+
+        def terminate(self) -> None:
+            pass
+
+    monkeypatch.setattr(auto_calibrate.subprocess, "Popen", lambda *a, **k: FailProc())
+
+    mgr = auto_calibrate.AutoCalibrationManager()
+    mgr.start(auto_calibrate.AutoCalibrationRequest(device_type="robot", port="/dev/x", config_file="my_arm"))
+    if mgr._thread is not None:
+        mgr._thread.join(timeout=2)
+
+    assert mgr.get_status()["status"] == "failed"
+    assert not os.path.exists(staged)  # the run's own stray output is gone
+    # And nothing was promoted into the library.
+    assert not os.path.exists(os.path.join(str(tmp_path), "so_follower", "my_arm.json"))
+
+
+def test_success_promotes_staged_file_into_library(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """On success the staged file is moved (not copied) into the real library —
+    including overwriting a pre-existing profile of the same name."""
+    _point_robots_base_at(monkeypatch, str(tmp_path))
+    preexisting = _plant_follower_file(str(tmp_path), "my_arm")  # the old profile
+    staged = _plant_staged_file("my_arm")  # what the subprocess "wrote"
+
+    class OkProc:
+        def __init__(self) -> None:
+            self.stdout = iter(["calibration done\n"])
+
+        def wait(self) -> int:
+            return 0
+
+        def terminate(self) -> None:
+            pass
+
+    monkeypatch.setattr(auto_calibrate.subprocess, "Popen", lambda *a, **k: OkProc())
+
+    mgr = auto_calibrate.AutoCalibrationManager()
+    # No robot_name -> no record write-back, so only the file promotion runs.
+    mgr.start(auto_calibrate.AutoCalibrationRequest(device_type="robot", port="/dev/x", config_file="my_arm"))
+    if mgr._thread is not None:
+        mgr._thread.join(timeout=2)
+
+    assert mgr.get_status()["status"] == "completed"
+    assert not os.path.exists(staged)  # moved out of staging
+    with open(preexisting) as f:
+        assert "staged" in f.read()  # library now holds the newly-calibrated data
 
 
 def test_completed_during_grace_keeps_file(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:

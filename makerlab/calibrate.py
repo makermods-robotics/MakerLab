@@ -70,6 +70,14 @@ CENTERING_EXEMPT_MOTORS = frozenset({"gripper", "wrist_roll"})
 FULL_TURN_MOTORS = frozenset({"wrist_roll"})
 FULL_TURN_RANGE = (0, 4095)
 
+# Servo EEPROM registers the calibration flow mutates before a successful save,
+# and which therefore must be snapshotted at session start and rolled back on
+# cancel/error. reset_calibration() writes all three per motor (Homing_Offset=0,
+# Min_Position_Limit=0, Max_Position_Limit=max_res); the homing step then
+# re-writes Homing_Offset. Homing_Offset is also what arm_identity fingerprints,
+# so leaving it diverged after a cancel trips the next session's identity check.
+_SNAPSHOT_REGISTERS = ("Homing_Offset", "Min_Position_Limit", "Max_Position_Limit")
+
 
 def final_motor_ranges(
     mins: dict[str, int], maxes: dict[str, int]
@@ -132,6 +140,9 @@ class CalibrationStatus:
     total_steps: int = 1  # Total number of calibration steps
     current_positions: dict[str, float] = None
     recorded_ranges: dict[str, dict[str, float]] = None  # {motor: {min: val, max: val, current: val}}
+    # Set when a cancel/error rollback of the servo EEPROM could not be fully
+    # applied, so the arm's persistent state may not match its calibration file.
+    warning: str | None = None
 
 
 @dataclass
@@ -162,6 +173,10 @@ class CalibrationManager:
         self._maxes = {}
         self._homing_offsets = {}
         self._current_request: CalibrationRequest | None = None
+        # Pre-session servo EEPROM snapshot ({motor: {register: value}}) captured
+        # before the homing step mutates any register. Restored on cancel/error,
+        # discarded on a successful save. None means nothing to roll back.
+        self._servo_snapshot: dict[str, dict[str, int]] | None = None
 
         # Initialize logging
         init_logging()
@@ -256,6 +271,7 @@ class CalibrationManager:
             self._mins = {}
             self._maxes = {}
             self._homing_offsets = {}
+            self._servo_snapshot = None
 
             self._update_status(
                 calibration_active=True,
@@ -266,6 +282,7 @@ class CalibrationManager:
                 step=0,
                 current_positions=None,
                 recorded_ranges=None,
+                warning=None,
             )
             self._current_request = request
 
@@ -330,7 +347,11 @@ class CalibrationManager:
             self._cleanup_and_finish("Calibration stopped", status="idle")
 
             logger.info("Calibration stop completed")
-            return {"success": True, "message": "Calibration stopped"}
+            result = {"success": True, "message": "Calibration stopped"}
+            # Surface any rollback warning immediately, not just via status poll.
+            if self.status.warning is not None:
+                result["warning"] = self.status.warning
+            return result
 
         except Exception as e:
             logger.error(f"Error stopping calibration: {e}")
@@ -410,6 +431,10 @@ class CalibrationManager:
     def _step_homing(self):
         """Auto-capture homing offsets from the device's current position."""
         logger.info("Setting homing offsets from current position")
+
+        # Snapshot the servo calibration registers BEFORE any mutation, so a
+        # cancel/error can roll the arm's persistent state back to how it was.
+        self._snapshot_servo_state()
 
         # Disable torque to allow manual movement during recording
         self.device.bus.disable_torque()
@@ -623,6 +648,11 @@ class CalibrationManager:
         self.device.bus.write_calibration(calibration)
         self.device._save_calibration()
 
+        # The saved calibration is now the arm's truth; there is nothing to roll
+        # back. Discard the snapshot so cleanup does not "restore" stale values
+        # over the freshly-written calibration.
+        self._servo_snapshot = None
+
         logger.info(f"Calibration saved to {self.device.calibration_fpath}")
 
         # Robot-record write-back: if this calibration was launched from a tile,
@@ -650,11 +680,75 @@ class CalibrationManager:
             except Exception as e:
                 logger.warning(f"Robot-record write-back failed for {request.robot_name}: {e}")
 
+    def _snapshot_servo_state(self):
+        """Read and store the servo calibration registers the flow is about to
+        mutate, so a cancel/error can roll them back. Best-effort per motor and
+        per register: a read failure just omits that value (it can't be
+        restored, and we log it)."""
+        if not (self.device and getattr(self.device, "bus", None)):
+            return
+        snapshot: dict[str, dict[str, int]] = {}
+        for motor in self.device.bus.motors:
+            regs: dict[str, int] = {}
+            for reg in _SNAPSHOT_REGISTERS:
+                try:
+                    regs[reg] = self.device.bus.read(reg, motor, normalize=False)
+                except Exception as e:
+                    logger.warning(f"Snapshot: could not read {reg} for {motor}: {e}")
+            if regs:
+                snapshot[motor] = regs
+        self._servo_snapshot = snapshot
+        logger.info(f"Captured pre-calibration servo snapshot for: {sorted(snapshot)}")
+
+    def _restore_servo_state_if_needed(self) -> str | None:
+        """Roll the snapshotted servo registers back to their pre-session values.
+
+        Runs on any cancel/error BEFORE a successful save (the success path
+        discards the snapshot first, so this is a no-op then). Best-effort,
+        per-motor/per-register like force_disable_torque; if any write fails the
+        arm's EEPROM may not match its calibration file, so return a warning for
+        the caller to surface. Torque is intentionally left disabled throughout.
+        Returns None when there was nothing to restore or every write succeeded."""
+        snapshot = self._servo_snapshot
+        self._servo_snapshot = None  # pop: a second cleanup pass must not re-run
+        if not snapshot:
+            return None
+
+        inconsistent = "Servo calibration state may be inconsistent — recalibrate this arm"
+        if not (self.device and getattr(self.device, "bus", None) and self.device.is_connected):
+            logger.error("Cannot restore servo calibration snapshot: device not connected")
+            return f"{inconsistent} (could not reconnect to roll back)."
+
+        failed: list[str] = []
+        for motor, regs in snapshot.items():
+            for reg, value in regs.items():
+                try:
+                    self.device.bus.write(reg, motor, value, normalize=False)
+                except Exception as e:
+                    logger.error(f"Restore: failed to write {reg}={value} for {motor}: {e}")
+                    failed.append(f"{motor}.{reg}")
+        if failed:
+            return f"{inconsistent} (failed to restore: {', '.join(failed)})."
+        logger.info("Restored pre-calibration servo snapshot")
+        return None
+
     def _cleanup_and_finish(self, message: str, status: str = "completed"):
         """Clean up and finish calibration"""
+        # Roll the servo EEPROM back to its pre-session state BEFORE disconnect
+        # (needs a live bus). No-op on the success path (snapshot discarded after
+        # the save). Torque stays disabled throughout.
+        warning = self._restore_servo_state_if_needed()
         self._cleanup_device()
         self._recording_active = False
-        self._update_status(calibration_active=False, status=status, message=message)
+        updates: dict[str, Any] = {
+            "calibration_active": False,
+            "status": status,
+            "message": message,
+        }
+        if warning is not None:
+            updates["warning"] = warning
+            logger.error(warning)
+        self._update_status(**updates)
 
     def _cleanup_device(self):
         """Clean up device connection"""
