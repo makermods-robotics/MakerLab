@@ -317,6 +317,70 @@ def test_read_metrics_history_stitches_resume_lineage(tmp_path) -> None:
     assert [p.step for p in reg.read_metrics_history("A")] == [50, 100]
 
 
+def test_parse_metrics_into_snaps_abbreviated_step_to_log_freq_multiple() -> None:
+    """lerobot prints the INFO-line step via format_big_number, so at >=1000
+    steps the token is rounded to the nearest thousand ("8K" for 8250). The bar
+    fires exactly every log_freq steps, so we recover the EXACT step by snapping
+    the tqdm-tracked step to the nearest log_freq multiple. The tqdm reading is a
+    couple of steps behind the true log step (8248 vs 8250) — snapping must land
+    on the exact multiple 8250, never leave 8248 and never show "8K"."""
+    from makerlab.jobs import TrainingMetrics, parse_metrics_into
+
+    m = TrainingMetrics()
+    parse_metrics_into("Training:  82%|████░| 8248/10000 [41:00<08:30, 3.3step/s]", m)
+    parse_metrics_into(
+        "INFO ... step:8K smpl:134K loss:0.141 grdn:0.9 lr:0.0001 ...",
+        m,
+        log_freq=250,
+    )
+
+    assert m.current_step == 8250  # snapped to the exact log_freq multiple
+    assert m.current_loss == pytest.approx(0.141)
+
+
+def test_parse_metrics_into_snap_without_log_freq_keeps_tqdm_step() -> None:
+    """With no log_freq the parser can't snap; it must keep the exact tqdm step
+    rather than zeroing on the unparseable "8K" token (legacy behaviour)."""
+    from makerlab.jobs import TrainingMetrics, parse_metrics_into
+
+    m = TrainingMetrics()
+    parse_metrics_into("Training:  82%|████░| 8248/10000 [41:00<08:30, 3.3step/s]", m)
+    parse_metrics_into("INFO ... step:8K loss:0.141 ...", m)
+    assert m.current_step == 8248  # unchanged, not snapped, not zeroed
+
+
+def test_read_metrics_history_stamps_exact_steps_from_abbreviated_log(tmp_path) -> None:
+    """End-to-end: a realistic log where every INFO step is abbreviated ("8K")
+    must reconstruct history points at the EXACT log_freq multiples (8250, 8500),
+    using the run's log_freq — never the rounded "8K" and never the off-by-a-few
+    tqdm reading (8249, 8498)."""
+    from makerlab.jobs import JobRecord, JobRegistry, LogLine, _job_log_path
+    from makerlab.train import TrainingRequest
+
+    reg = JobRegistry(tmp_path)
+    root = reg._output_root
+    msgs = [
+        "Training:  82%|████░| 8249/10000 [41:00<08:30, 3.3step/s]",
+        "INFO ... step:8K smpl:134K loss:0.141 grdn:0.9 lr:0.0001 ...",
+        "Training:  85%|████▌| 8498/10000 [42:15<07:15, 3.3step/s]",
+        "INFO ... step:8K smpl:139K loss:0.132 grdn:0.8 lr:0.0001 ...",
+    ]
+    p = _job_log_path(root, "J")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with p.open("w") as f:
+        for msg in msgs:
+            f.write(LogLine(timestamp=0.0, message=msg).model_dump_json() + "\n")
+    reg._records["J"] = JobRecord(
+        id="J", name="j", state="done",
+        config=TrainingRequest(dataset_repo_id="d", steps=10000, log_freq=250),
+        output_dir=str(root / "J" / "run"), started_at=0.0,
+    )
+
+    points = reg.read_metrics_history("J")
+    assert [pt.step for pt in points] == [8250, 8500]
+    assert [pt.loss for pt in points] == pytest.approx([0.141, 0.132])
+
+
 def test_parse_metrics_into_ignores_unrelated_lines() -> None:
     from makerlab.jobs import TrainingMetrics, parse_metrics_into
 

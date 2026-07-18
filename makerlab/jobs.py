@@ -179,7 +179,10 @@ def _parse_duration(s: str) -> float | None:
 
 
 def parse_metrics_into(
-    line: str, metrics: TrainingMetrics, resume_total: int | None = None
+    line: str,
+    metrics: TrainingMetrics,
+    resume_total: int | None = None,
+    log_freq: int | None = None,
 ) -> None:
     """Update `metrics` in-place from one stdout line.
 
@@ -192,8 +195,16 @@ def parse_metrics_into(
     fresh run). On resume lerobot's tqdm bar counts only the remaining window
     (0 → steps−checkpoint), so the raw bar understates the true global step; we
     rebase it to `checkpoint + bar = resume_total − remaining_total + bar` so
-    the UI shows e.g. 150/200 instead of 50/100. The `step:N` log line already
-    carries the true global step, so it needs no rebasing.
+    the UI shows e.g. 150/200 instead of 50/100.
+
+    `log_freq` is the trainer's logging cadence. lerobot renders the INFO line's
+    step with `format_big_number`, so at >=1000 steps its token is ROUNDED to the
+    nearest thousand ("8K" for anything in [7500, 8499]) — unusable for display.
+    But lerobot emits that INFO line exactly when `global_step % log_freq == 0`,
+    and the interleaved tqdm counter already tracks the exact step to within a
+    few steps. So when the token is rounded we recover the EXACT step by snapping
+    the tqdm-tracked step to the nearest multiple of `log_freq`. When the token
+    parses cleanly (steps <1000, no suffix) it is already exact and used as-is.
     """
     try:
         tqdm_match = _TQDM_RE.search(line)
@@ -215,8 +226,17 @@ def parse_metrics_into(
                 pass
 
         if "step:" in line and "loss:" in line:
-            with contextlib.suppress(ValueError):
-                metrics.current_step = int(line.split("step:")[1].split()[0].replace(",", ""))
+            step_token = line.split("step:")[1].split()[0].replace(",", "")
+            try:
+                # Plain integer token (steps <1000): already exact.
+                metrics.current_step = int(step_token)
+            except ValueError:
+                # Rounded token ("8K"): snap the exact tqdm-tracked step to the
+                # nearest log_freq multiple to recover the true global step.
+                if log_freq and log_freq > 0 and metrics.current_step > 0:
+                    metrics.current_step = (
+                        round(metrics.current_step / log_freq) * log_freq
+                    )
             with contextlib.suppress(ValueError):
                 metrics.current_loss = float(line.split("loss:")[1].split()[0])
             if "lr:" in line:
@@ -237,7 +257,7 @@ def _resume_total_steps(config: TrainingRequest) -> int | None:
 
 
 def _read_log_metrics(
-    path: Path, resume_total: int | None
+    path: Path, resume_total: int | None, log_freq: int | None = None
 ) -> builtins.list[MetricsHistoryPoint]:
     """Parse one job's log.jsonl into (step, loss, lr, grad_norm) points.
 
@@ -262,7 +282,7 @@ def _read_log_metrics(
             except Exception:
                 continue  # skip malformed line, same as read_persisted_logs
             msg = log_line.message
-            parse_metrics_into(msg, acc, resume_total)
+            parse_metrics_into(msg, acc, resume_total, log_freq)
             # Only the log-freq lines carry loss/lr; tqdm lines just advance the
             # step. Emit a point only when a loss value is present so we don't
             # add a flat point per tqdm tick.
@@ -303,6 +323,7 @@ class LocalJobRunner:
         self._log_file = None  # type: ignore[assignment]
         self._wandb_run_url: str | None = None
         self._resume_total: int | None = None
+        self._log_freq: int | None = None
 
     def start(
         self,
@@ -314,6 +335,7 @@ class LocalJobRunner:
             raise RuntimeError("LocalJobRunner already started")
 
         self._resume_total = _resume_total_steps(config)
+        self._log_freq = config.log_freq
 
         # Build the command via the helper that lives in train.py.
         cmd = build_training_command(config, output_dir, sys.executable)
@@ -400,7 +422,9 @@ class LocalJobRunner:
                 stripped = line.rstrip()
                 if not stripped:
                     continue
-                parse_metrics_into(stripped, self._metrics, self._resume_total)
+                parse_metrics_into(
+                    stripped, self._metrics, self._resume_total, self._log_freq
+                )
                 if self._wandb_run_url is None:
                     url = extract_wandb_run_url(stripped)
                     if url is not None:
@@ -440,11 +464,13 @@ class TailingJobRunner:
         log_file_path: Path,
         pid: int,
         resume_total: int | None = None,
+        log_freq: int | None = None,
     ) -> None:
         self._metrics = metrics
         self._log_file_path = log_file_path
         self._pid = pid
         self._resume_total = resume_total
+        self._log_freq = log_freq
         self._log_queue: Queue[LogLine] = Queue()
         self._tail_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
@@ -525,7 +551,10 @@ class TailingJobRunner:
                         except Exception:
                             continue
                         parse_metrics_into(
-                            log_line.message, self._metrics, self._resume_total
+                            log_line.message,
+                            self._metrics,
+                            self._resume_total,
+                            self._log_freq,
                         )
                         if self._wandb_run_url is None:
                             url = extract_wandb_run_url(log_line.message)
@@ -1210,7 +1239,13 @@ class JobRegistry:
             if target.runner == "local":
                 runner = LocalJobRunner(record.metrics, log_file_path=log_path)
             else:
-                runner = HfCloudJobRunner(record.metrics, log_path, target.flavor)
+                runner = HfCloudJobRunner(
+                    record.metrics,
+                    log_path,
+                    target.flavor,
+                    _resume_total_steps(config),
+                    config.log_freq,
+                )
 
             try:
                 runner.start(job_id, config, lerobot_output_dir)
@@ -1453,7 +1488,9 @@ class JobRegistry:
         by_step: dict[int, MetricsHistoryPoint] = {}
         for record in chain:
             log_path = _job_log_path(self._output_root, record.id)
-            for point in _read_log_metrics(log_path, _resume_total_steps(record.config)):
+            for point in _read_log_metrics(
+                log_path, _resume_total_steps(record.config), record.config.log_freq
+            ):
                 by_step[point.step] = point
         return sorted(by_step.values(), key=lambda p: p.step)
 
@@ -1582,6 +1619,7 @@ class JobRegistry:
                             _job_log_path(self._output_root, record.id),
                             pid,
                             _resume_total_steps(record.config),
+                            record.config.log_freq,
                         )
                         runner.start_tailing()
                         self._runners[record.id] = runner
@@ -1607,6 +1645,8 @@ class JobRegistry:
                         record.metrics,
                         _job_log_path(self._output_root, record.id),
                         record.hf_flavor,
+                        _resume_total_steps(record.config),
+                        record.config.log_freq,
                     )
                     runner.reattach(record.hf_job_id)
                     self._runners[record.id] = runner

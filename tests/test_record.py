@@ -250,6 +250,42 @@ def test_create_record_config_builds_biso_for_bimanual(monkeypatch: pytest.Monke
     assert staged["follower"] == ("bob", "dave")
 
 
+def test_create_record_config_selects_auto_rgb_encoder(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Recording must request hardware-accelerated RGB encoding via lerobot's
+    "auto" selector so streaming encode stays off the capture loop's critical
+    path (NVENC on Jetson, VideoToolbox on macOS, software libsvtav1 fallback).
+
+    The stored ``rgb_encoder.vcodec`` is the resolved codec (auto is resolved in
+    ``RGBEncoderConfig.__post_init__`` on the machine building the config), so we
+    assert it landed on a hardware encoder or the software fallback — never left
+    unresolved as the literal string "auto".
+    """
+    import makerlab.record as record
+    from lerobot.configs.video import HW_VIDEO_CODECS
+
+    monkeypatch.setattr(
+        "makerlab.utils.robot_factory.setup_calibration_files",
+        lambda leader, follower: ("leader", "follower"),
+    )
+
+    request = record.RecordingRequest(
+        leader_port="/dev/leader",
+        follower_port="/dev/follower",
+        leader_config="leader",
+        follower_config="follower",
+        dataset_repo_id="user/dataset",
+        single_task="pick up the cube",
+        cameras={"wrist": {"type": "opencv", "camera_index": 0, "width": 640, "height": 480, "fps": 30}},
+    )
+
+    config = record.create_record_config(request)
+    vcodec = config.dataset.rgb_encoder.vcodec
+    assert vcodec != "auto"  # must be resolved, not the unresolved sentinel
+    assert vcodec in {*HW_VIDEO_CODECS, "libsvtav1"}
+    # Depth encoder is left at the lerobot default (untouched by MakerLab).
+    assert config.dataset.depth_encoder.vcodec == "hevc"
+
+
 def test_build_camera_configs_uses_default_backend_when_unset() -> None:
     from lerobot.cameras.configs import Cv2Backends
     from makerlab.record import _build_camera_configs

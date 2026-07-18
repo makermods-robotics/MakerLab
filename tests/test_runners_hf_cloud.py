@@ -475,3 +475,214 @@ def test_ensure_dataset_on_hub_skips_when_already_on_hub(
     runner._ensure_dataset_on_hub("user/already-there")
 
     assert captured == {}
+
+
+# --- tail-loop: metric rebasing, bar collapse, reattach dedup ----------------
+
+
+def _tail_runner(
+    monkeypatch,
+    log_path: Path,
+    lines: list[str],
+    *,
+    resume_total: int | None = None,
+    log_freq: int | None = 50,
+    reattach_disk_skip: int = 0,
+    lines_processed: int = 0,
+    open_mode: str = "w",
+):
+    """Build a real HfCloudJobRunner (patching only the consuming module's
+    shared_hf_api binding so __init__ doesn't hit the network) wired to a fake
+    fetch_job_logs that yields `lines` then stops the loop. Returns the runner
+    with its log file opened; call runner._tail_loop() to drive it once."""
+    from makerlab.jobs import TrainingMetrics
+    from makerlab.runners import hf_cloud
+
+    monkeypatch.setattr(hf_cloud, "shared_hf_api", lambda: object())
+    runner = hf_cloud.HfCloudJobRunner(
+        TrainingMetrics(), log_path, "t4-small", resume_total, log_freq
+    )
+    runner._hf_job_id = "job-1"
+    runner._reattach_disk_skip = reattach_disk_skip
+    runner._lines_processed = lines_processed
+
+    class _Api:
+        def fetch_job_logs(self, job_id, follow):
+            yield from lines
+            runner._stop_event.set()
+
+    runner._api = _Api()
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    runner._log_file = log_path.open(open_mode, buffering=1)
+    return runner
+
+
+def _persisted_messages(log_path: Path) -> list[str]:
+    from makerlab.jobs import LogLine
+
+    out = []
+    for raw in log_path.read_text().splitlines():
+        if raw.strip():
+            out.append(LogLine.model_validate_json(raw).message)
+    return out
+
+
+_BAR = "Training:  {pct}%|xxx| {step}/10000 [00:{s:02d}<04:30, 3.3step/s]"
+
+
+def _bar(step: int, pct: int = 10, s: int = 30) -> str:
+    return _BAR.format(pct=pct, step=step, s=s)
+
+
+def test_tail_loop_collapses_consecutive_bar_lines(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The persisted cloud log collapses each run of consecutive tqdm bar
+    renders to its LAST line, and never drops or reorders non-bar lines."""
+    log_path = tmp_path / "log.jsonl"
+    lines = [
+        _bar(100),
+        _bar(101),
+        _bar(102),  # last of run 1 -> kept
+        "INFO metric step:250 smpl:2000 loss:0.5 grdn:1 lr:0.001",
+        _bar(300),
+        _bar(301),  # last of run 2 -> kept
+        "INFO metric step:500 smpl:4000 loss:0.4 grdn:1 lr:0.001",
+    ]
+    runner = _tail_runner(monkeypatch, log_path, lines)
+    runner._tail_loop()
+
+    persisted = _persisted_messages(log_path)
+    # Both non-bar INFO lines survive, in order.
+    infos = [m for m in persisted if m.startswith("INFO")]
+    assert infos == [
+        "INFO metric step:250 smpl:2000 loss:0.5 grdn:1 lr:0.001",
+        "INFO metric step:500 smpl:4000 loss:0.4 grdn:1 lr:0.001",
+    ]
+    # Only the last bar of each run remains (102, 301); earlier bars dropped.
+    bars = [m for m in persisted if m.startswith("Training:")]
+    assert len(bars) == 2
+    assert "102/10000" in bars[0]
+    assert "301/10000" in bars[1]
+    # Full sequence order preserved.
+    assert persisted == [lines[2], lines[3], lines[5], lines[6]]
+
+
+def test_tail_loop_flushes_trailing_bar(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A run that ends on a bar (no following non-bar line) still persists the
+    last bar via the finally-flush, so the final progress point isn't lost."""
+    log_path = tmp_path / "log.jsonl"
+    runner = _tail_runner(monkeypatch, log_path, [_bar(900), _bar(901), _bar(902)])
+    runner._tail_loop()
+    persisted = _persisted_messages(log_path)
+    assert len(persisted) == 1
+    assert "902/10000" in persisted[0]
+
+
+def test_reattach_does_not_duplicate_persisted_lines(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """After a restart the SSE stream replays its full history into an append-
+    mode file. Seeding the disk-write gate from the existing file count makes the
+    reattached tail re-collapse the replay, suppress the already-persisted lines,
+    and append only genuinely new content (Model Training Bug 17)."""
+    from makerlab.runners.hf_cloud import _count_existing_log_lines
+
+    log_path = tmp_path / "log.jsonl"
+    session1_lines = [
+        _bar(100),
+        _bar(101),
+        _bar(102),
+        "INFO metric step:250 smpl:2000 loss:0.5 grdn:1 lr:0.001",
+        _bar(300),
+        _bar(301),
+        "INFO metric step:500 smpl:4000 loss:0.4 grdn:1 lr:0.001",
+    ]
+    runner1 = _tail_runner(monkeypatch, log_path, session1_lines)
+    runner1._tail_loop()
+    after_session1 = _persisted_messages(log_path)
+    assert len(after_session1) == 4  # collapsed: 2 bars + 2 infos
+
+    # Reattach: the SSE replays the FULL history, then yields new live lines.
+    skip = _count_existing_log_lines(log_path)
+    assert skip == 4
+    new_live = [
+        _bar(600),
+        "INFO metric step:750 smpl:6000 loss:0.3 grdn:1 lr:0.001",
+    ]
+    runner2 = _tail_runner(
+        monkeypatch,
+        log_path,
+        session1_lines + new_live,
+        reattach_disk_skip=skip,
+        open_mode="a",
+    )
+    runner2._tail_loop()
+
+    after_reattach = _persisted_messages(log_path)
+    # No duplication: the original 4 lines appear exactly once, plus the 2 new.
+    assert after_reattach == after_session1 + [new_live[0], new_live[1]]
+    assert after_reattach.count(session1_lines[3]) == 1  # step:250 not doubled
+    assert after_reattach.count(session1_lines[6]) == 1  # step:500 not doubled
+
+
+def test_tail_loop_parse_applies_resume_offset(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The cloud tail must rebase a resumed run's remaining-window tqdm bar to
+    the global step, matching the local runners and read_metrics_history
+    (Model Training Bug 16). 55/100 with resume_total=200 -> global step 155."""
+    log_path = tmp_path / "log.jsonl"
+    runner = _tail_runner(
+        monkeypatch,
+        log_path,
+        ["Training:  55%|xxx| 55/100 [00:30<01:00, 2.0s/step]"],
+        resume_total=200,
+    )
+    runner._tail_loop()
+    assert runner._metrics.current_step == 155  # 200 - 100 + 55
+    assert runner._metrics.total_steps == 200
+
+
+def test_tail_loop_applies_log_freq_for_exact_step(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The cloud tail threads log_freq so an abbreviated INFO step ("8K") snaps
+    to the exact log_freq multiple, same as the local path."""
+    log_path = tmp_path / "log.jsonl"
+    runner = _tail_runner(
+        monkeypatch,
+        log_path,
+        [
+            "Training:  82%|xxx| 8248/10000 [41:00<08:30, 3.3step/s]",
+            "INFO ... step:8K smpl:134K loss:0.141 grdn:0.9 lr:0.0001 ...",
+        ],
+        log_freq=250,
+    )
+    runner._tail_loop()
+    assert runner._metrics.current_step == 8250
+    assert runner._metrics.current_loss == pytest.approx(0.141)
+
+
+def test_count_existing_log_lines_excludes_host_upload_lines(tmp_path: Path) -> None:
+    """Host-injected `[upload]` progress lines are not part of the SSE stream, so
+    they must be excluded from the reattach seed — counting them would overcount
+    and silently drop that many genuinely-new SSE lines."""
+    from makerlab.jobs import LogLine
+    from makerlab.runners.hf_cloud import _count_existing_log_lines
+
+    log_path = tmp_path / "log.jsonl"
+    msgs = [
+        "[upload] dataset user/ds not on Hub; pushing local copy (private)...",
+        "[upload] dataset user/ds uploaded.",
+        "Training:  10%|xxx| 100/10000 [00:30<04:30, 3.3step/s]",
+        "INFO metric step:250 loss:0.5",
+    ]
+    with log_path.open("w") as f:
+        for m in msgs:
+            f.write(LogLine(timestamp=0.0, message=m).model_dump_json() + "\n")
+
+    assert _count_existing_log_lines(log_path) == 2  # only the 2 non-upload lines
+    assert _count_existing_log_lines(tmp_path / "missing.jsonl") == 0

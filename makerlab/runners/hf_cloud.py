@@ -42,7 +42,13 @@ from huggingface_hub import get_token
 from huggingface_hub.errors import RepositoryNotFoundError
 from packaging.requirements import Requirement
 
-from ..jobs import LogLine, TrainingMetrics, extract_wandb_run_url, parse_metrics_into
+from ..jobs import (
+    _TQDM_RE,
+    LogLine,
+    TrainingMetrics,
+    extract_wandb_run_url,
+    parse_metrics_into,
+)
 from ..train import TrainingRequest, build_training_command, parse_hf_duration
 from ..utils.config import with_makerlab_tag
 from ..utils.hf_auth import cached_whoami, shared_hf_api
@@ -434,6 +440,45 @@ _TAIL_CLEAN_END_WAIT_S = 15.0
 # (transient network blip during a long training).
 _TAIL_RECONNECT_BACKOFF_S = 5.0
 
+# Prefix on host-injected log lines (dataset-upload progress written by
+# _log_line before the job runs). These are NOT part of the HF SSE log stream,
+# so they must be excluded when reconstructing the SSE-line count on reattach.
+_HOST_LOG_PREFIX = "[upload]"
+
+
+def _count_existing_log_lines(path: Path) -> int:
+    """Count persisted SSE-origin log lines already in `path`.
+
+    Used to seed HfCloudJobRunner._lines_processed on reattach so the replayed
+    SSE history isn't appended a second time (Model Training Bug 17). The tail
+    loop's `seen` counter indexes lines yielded by fetch_job_logs, which replays
+    exactly the container stdout we previously persisted — i.e. every persisted
+    line EXCEPT the host-injected `[upload]` progress lines. Counting those host
+    lines would overcount the seed and silently drop that many genuinely-new
+    lines, so they're excluded here. Malformed/unparseable lines are also
+    excluded (conservative toward not dropping new content).
+    """
+    if not path.exists():
+        return 0
+    count = 0
+    try:
+        with path.open() as f:
+            for raw in f:
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    log_line = LogLine.model_validate_json(raw)
+                except Exception:
+                    continue
+                if log_line.message.startswith(_HOST_LOG_PREFIX):
+                    continue
+                count += 1
+    except OSError as exc:
+        logger.warning("Could not count existing log lines in %s: %s", path, exc)
+        return 0
+    return count
+
 
 def resolve_wandb_api_key() -> str | None:
     """Look up the host's wandb API key for forwarding to a cloud job.
@@ -464,10 +509,19 @@ class HfCloudJobRunner:
         metrics: TrainingMetrics,
         log_file_path: Path,
         flavor: str,
+        resume_total: int | None = None,
+        log_freq: int | None = None,
     ) -> None:
         self._metrics = metrics
         self._log_file_path = log_file_path
         self._flavor = flavor
+        # Rebase/exact-step context for parse_metrics_into, mirroring the local
+        # runners: resume_total rebases a resumed run's remaining-window tqdm bar
+        # to the global step; log_freq recovers the exact step from the rounded
+        # INFO token. Without these, live cloud-resume progress disagrees with
+        # read_metrics_history (which does rebase). See Model Training Bug 16.
+        self._resume_total = resume_total
+        self._log_freq = log_freq
         # Shared HfApi: its in-process whoami cache covers run_job's
         # internal self.whoami(token=...) call too (see utils/hf_auth.py),
         # so submitting many jobs doesn't hammer /whoami-v2.
@@ -489,9 +543,23 @@ class HfCloudJobRunner:
         # registry can surface it to the UI instead of a synthetic exit code.
         self._terminal_message: str | None = None
         self._wandb_run_url: str | None = None
-        # Count of log lines processed across (possibly multiple) SSE
-        # connections, so reconnects skip the replayed prefix.
+        # Count of SSE lines processed (parsed + queued) across (possibly
+        # multiple) SSE connections, so a within-session reconnect skips the
+        # replayed prefix. Stays 0 on reattach so a fresh process reprocesses
+        # the full history to rebuild live metrics + refill the log queue.
         self._lines_processed: int = 0
+        # Disk-write dedup, decoupled from _lines_processed because the on-disk
+        # log is COLLAPSED (consecutive tqdm bar renders reduced to the last of
+        # each run), so its line count is far smaller than the SSE index. A
+        # running counter of collapse-persisted lines this process would write;
+        # physical writes below _reattach_disk_skip are suppressed because they
+        # are already on disk from a previous process. See Model Training Bug 17.
+        self._disk_lines_written: int = 0
+        self._reattach_disk_skip: int = 0
+        # Collapse buffer: the most recent consecutive tqdm bar-render line,
+        # held until a non-bar line arrives (then flushed) so only the LAST bar
+        # of each run reaches disk. See Model Training Bug list Part 3.
+        self._pending_bar: LogLine | None = None
 
     def start(self, job_id: str, config: TrainingRequest, output_dir: str) -> None:
         # output_dir is the host-local path the registry pins for local jobs;
@@ -606,6 +674,15 @@ class HfCloudJobRunner:
             raise RuntimeError("HfCloudJobRunner already started")
         self._hf_job_id = hf_job_id
         self._log_file_path.parent.mkdir(parents=True, exist_ok=True)
+        # Seed the DISK-WRITE gate from what is already persisted. The Hub SSE
+        # stream replays its full historical prefix on (re)connect, and the file
+        # is opened in append mode; previously _lines_processed was 0 and every
+        # replayed line was re-appended, duplicating the whole history on each
+        # restart. We deliberately leave _lines_processed at 0 (so parse + queue
+        # reprocess the history to rebuild live state) and instead suppress the
+        # physical file write for lines already on disk, reproduced identically
+        # by re-collapsing the replayed stream. See Model Training Bug 17.
+        self._reattach_disk_skip = _count_existing_log_lines(self._log_file_path)
         self._log_file = self._log_file_path.open("a", buffering=1)
         self._start_worker_threads(f"{hf_job_id}-reattach")
 
@@ -700,17 +777,19 @@ class HfCloudJobRunner:
                         stripped = raw.rstrip()
                         if not stripped:
                             continue
-                        parse_metrics_into(stripped, self._metrics)
+                        # Parse + queue happen for EVERY line (the parser needs
+                        # every tqdm bar for current_step; the queue feeds the
+                        # live view, which filters bars client-side). Only the
+                        # on-disk persistence is collapsed below.
+                        parse_metrics_into(
+                            stripped, self._metrics, self._resume_total, self._log_freq
+                        )
                         if self._wandb_run_url is None:
                             url = extract_wandb_run_url(stripped)
                             if url is not None:
                                 self._wandb_run_url = url
                         log_line = LogLine(timestamp=time.time(), message=stripped)
-                        if self._log_file is not None:
-                            try:
-                                self._log_file.write(log_line.model_dump_json() + "\n")
-                            except Exception as exc:  # pragma: no cover
-                                logger.exception("Error writing HF log: %s", exc)
+                        self._persist_collapsed(log_line, stripped)
                         if self._log_queue.qsize() >= 1000:
                             with contextlib.suppress(Empty):
                                 self._log_queue.get_nowait()
@@ -723,10 +802,46 @@ class HfCloudJobRunner:
                 if self._stop_event.wait(wait_s):
                     return
         finally:
+            # Flush any bar still buffered so the last progress point isn't lost.
+            self._flush_pending_bar()
             if self._log_file is not None:
                 with contextlib.suppress(Exception):
                     self._log_file.close()
                 self._log_file = None
+
+    def _persist_collapsed(self, log_line: LogLine, stripped: str) -> None:
+        """Append `log_line` to the on-disk log, collapsing consecutive tqdm
+        bar-render lines to the last of each run.
+
+        A bar line is buffered (replacing any prior buffered bar — that is the
+        collapse) rather than written; the next non-bar line flushes the buffer
+        first, then writes itself. Non-bar lines are never dropped or reordered.
+        Collapse is deterministic on the SSE stream, so re-collapsing the
+        replayed history on reattach reproduces the exact persisted sequence,
+        which _reattach_disk_skip then suppresses (see Bug 17)."""
+        if _TQDM_RE.search(stripped):
+            # Consecutive bar: drop the previous pending one, keep this (latest).
+            self._pending_bar = log_line
+            return
+        self._flush_pending_bar()
+        self._write_to_disk(log_line)
+
+    def _flush_pending_bar(self) -> None:
+        pending, self._pending_bar = self._pending_bar, None
+        if pending is not None:
+            self._write_to_disk(pending)
+
+    def _write_to_disk(self, log_line: LogLine) -> None:
+        """Advance the collapse-persist counter and physically write unless the
+        line is already on disk from a previous process (reattach)."""
+        self._disk_lines_written += 1
+        if self._disk_lines_written <= self._reattach_disk_skip:
+            return
+        if self._log_file is not None:
+            try:
+                self._log_file.write(log_line.model_dump_json() + "\n")
+            except Exception as exc:  # pragma: no cover
+                logger.exception("Error writing HF log: %s", exc)
 
     def _status_poll_loop(self) -> None:
         """Poll inspect_job until the job reaches a terminal stage.

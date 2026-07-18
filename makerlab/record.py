@@ -30,6 +30,7 @@ from pydantic import BaseModel
 from lerobot.cameras.configs import Cv2Backends
 from lerobot.cameras.opencv import OpenCVCameraConfig
 from lerobot.configs.dataset import DatasetRecordConfig
+from lerobot.configs.video import RGBEncoderConfig
 from lerobot.datasets import LeRobotDataset
 from lerobot.motors.motors_bus import MotorsBus
 
@@ -413,6 +414,22 @@ def create_record_config(request: RecordingRequest) -> RecordConfig:
         tags=with_makerlab_tag(request.tags) if request.push_to_hub else None,
         private=request.private,
         streaming_encoding=request.streaming_encoding,
+        # Hardware-accelerated RGB encoding, resolved on THIS machine at
+        # construction time (RGBEncoderConfig.__post_init__ probes the local
+        # FFmpeg build). "auto" picks the first available hardware encoder from
+        # lerobot's HW_VIDEO_CODECS preference list — h264_videotoolbox on
+        # macOS, h264_nvenc/hevc_nvenc on Jetson/Linux-NVIDIA — and falls back
+        # to software libsvtav1 (a logged warning, no error) when no hardware
+        # encoder exists, preserving the previous default everywhere else.
+        # This matters because streaming_encoding is on by default: on
+        # Jetson-class CPUs, software SVT-AV1 can run below realtime, fill the
+        # encoder queue, and block the capture loop (feed_frame blocks up to
+        # 100ms/camera) — the suspected cause of record-lag. Hardware encoding
+        # keeps encode off the capture thread's critical path. Output is
+        # standard h264/hevc mp4, which lerobot's decoders read natively (its
+        # depth encoder already defaults to hevc); depth_encoder left at its
+        # default_factory (unchanged).
+        rgb_encoder=RGBEncoderConfig(vcodec="auto"),
     )
 
     # Create the main record config
