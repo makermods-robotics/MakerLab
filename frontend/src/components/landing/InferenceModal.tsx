@@ -348,9 +348,11 @@ const InferenceModal: React.FC<Props> = ({
     (m) => liveCameraByKey(cameraBindings[m.requestKey]) != null,
   );
 
+  // Inference drives the follower(s) only — gate on follower_ready, not
+  // is_clean, so a robot with no leader setup can still run a policy.
   const canStart =
     !!robot &&
-    robot.is_clean &&
+    robot.follower_ready &&
     !robotCheckpointArmMismatch &&
     selectedRef != null &&
     !!policyConfig &&
@@ -470,12 +472,13 @@ const InferenceModal: React.FC<Props> = ({
                   Select and configure a robot on the Landing page first.
                 </AlertDescription>
               </Alert>
-            ) : !robot.is_clean ? (
+            ) : !robot.follower_ready ? (
               <Alert className="border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-200">
                 <AlertTriangle className="h-4 w-4" />
                 <AlertDescription>
-                  <strong>{robot.name}</strong> {robotSetupGap(robot)}. Open
-                  Robot settings before running inference.
+                  <strong>{robot.name}</strong> {robotSetupGap(robot, "follower")}.
+                  Open Robot settings before running inference. (Inference only
+                  uses the follower arm — leader setup isn't needed.)
                 </AlertDescription>
               </Alert>
             ) : (

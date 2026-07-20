@@ -113,7 +113,9 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
     if (!selectedCameraIndex || !cameraName.trim()) {
       toast({
         title: "Missing Information",
-        description: "Please select a camera and provide a name.",
+        description: !selectedCameraIndex
+          ? "Select a camera first."
+          : "Give this camera a name before adding it (e.g. workspace_cam).",
         variant: "destructive",
       });
       return;
@@ -287,7 +289,7 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
             <div className="flex flex-col justify-center gap-4">
               <div className="space-y-2">
                 <Label className="text-sm font-medium text-muted-foreground">
-                  Camera Name
+                  Camera Name <span className="text-warn">*</span>
                 </Label>
                 <Input
                   value={cameraName}
@@ -297,14 +299,21 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
                 />
               </div>
 
+              {/* Deliberately NOT disabled when the name is missing: a dead
+                  button can't explain itself, so clicking runs addCamera's
+                  validation and its toast says what's missing. */}
               <Button
                 onClick={addCamera}
                 className="bg-primary text-primary-foreground hover:bg-primary/90"
-                disabled={!selectedCameraIndex || !cameraName.trim()}
               >
                 <Plus className="w-4 h-4 mr-2" />
                 Add Camera
               </Button>
+              {!cameraName.trim() && (
+                <p className="text-xs text-muted-foreground">
+                  Name this camera to add it.
+                </p>
+              )}
             </div>
           </div>
         )}

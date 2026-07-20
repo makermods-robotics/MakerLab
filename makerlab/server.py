@@ -2366,8 +2366,17 @@ def get_robot_port(robot_type: RobotSideLiteral):
 
 
 def _record_with_clean(record: dict) -> dict:
-    """Attach `is_clean` to a record for API responses."""
-    return {**record, "is_clean": is_robot_record_clean(record)}
+    """Attach readiness flags to a record for API responses.
+
+    `is_clean` folds every arm of the mode (gates teleop/record, which drive
+    leaders AND followers); `follower_ready` scopes to the follower side so
+    follower-only activities (inference, replay) aren't blocked by a leader arm
+    they never touch."""
+    return {
+        **record,
+        "is_clean": is_robot_record_clean(record),
+        "follower_ready": is_robot_record_clean(record, arms="follower"),
+    }
 
 
 @app.get("/robots")

@@ -69,7 +69,7 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { PanelHeader, SLIDE } from "@/components/studio/panel/primitives";
-import { RobotRecord } from "@/hooks/useRobots";
+import { RobotRecord, robotSetupGap } from "@/hooks/useRobots";
 
 const DISCONTINUITY_ERROR_PREFIX = "Motor discontinuity detected";
 
@@ -196,6 +196,17 @@ const RobotConfigWindow = ({
     [portDraft, robot],
   );
   const [saving, setSaving] = useState(false);
+  // Transient post-save acknowledgment on the Save button itself ("Saved ✓"
+  // for ~2s). Without it a successful save drops the button straight into the
+  // same disabled-gray it has when there's nothing to save — which reads as
+  // "you can't save", not "you're done". Cleared by the timeout; the label
+  // also ignores it while new edits are pending (isDirty re-enables Save).
+  const [justSaved, setJustSaved] = useState(false);
+  useEffect(() => {
+    if (!justSaved) return;
+    const t = setTimeout(() => setJustSaved(false), 2000);
+    return () => clearTimeout(t);
+  }, [justSaved]);
   const [quitPromptOpen, setQuitPromptOpen] = useState(false);
   // Closing the window during a live MANUAL calibration aborts it (the exit
   // guard's unmount cleanup) — confirm that first, like the page's back-button
@@ -1288,6 +1299,7 @@ const RobotConfigWindow = ({
         setRobot(data.robot);
         setPortDraft({});
         setCameras((data.robot as RobotRecord).cameras ?? []);
+        setJustSaved(true);
         toast({ title: "Changes saved" });
       } else {
         // Surface the backend guard (e.g. duplicate-port 409) and stay put.
@@ -1388,7 +1400,7 @@ const RobotConfigWindow = ({
         </span>
       </div>
 
-      <div className="grid grid-cols-[minmax(0,1fr)_220px] items-start gap-3">
+      <div className="grid grid-cols-[minmax(0,1fr)_320px] items-start gap-3">
         {/* Main vertical: actions, batch picker, status, live data. */}
         <div className="flex min-w-0 flex-col gap-3">
           {calibrationStatus.calibration_active ? (
@@ -1768,61 +1780,6 @@ const RobotConfigWindow = ({
               </Alert>
             ))}
 
-          {/* Auto-calibration drive torque lives under Advanced parameters
-              (the studio's collapsible pattern, as in RecordingForm): sent
-              with the auto-calibrate start (current slider position),
-              persisted on Save. Manual calibration and regular sessions
-              don't use it. */}
-          {robot && (
-            <Collapsible className="group space-y-3">
-              <CollapsibleTrigger className="flex w-full items-center justify-between border-b border-border pb-2 text-sm font-semibold text-foreground">
-                <span>Advanced parameters</span>
-                <ChevronDown className="h-4 w-4 transition-transform group-data-[state=open]:rotate-180" />
-              </CollapsibleTrigger>
-              <CollapsibleContent className={SLIDE}>
-                <div className="space-y-2">
-                  <Label htmlFor="motorPower" className="text-sm font-medium">
-                    Auto-calibration torque
-                  </Label>
-                  <div className="flex items-center gap-3">
-                    <input
-                      id="motorPower"
-                      type="range"
-                      min={TORQUE_LIMIT_MIN}
-                      max={TORQUE_LIMIT_MAX}
-                      step={TORQUE_LIMIT_PER_PERCENT}
-                      value={torqueLimitDraft}
-                      onChange={(e) => {
-                        // Slider is in raw Torque_Limit units; store as percent.
-                        setPowerDraft(
-                          Number(e.target.value) / TORQUE_LIMIT_PER_PERCENT,
-                        );
-                      }}
-                      list="motorTorqueTicks"
-                      className="h-1.5 flex-1 cursor-pointer accent-primary"
-                      aria-label="Auto-calibration torque (Torque_Limit register, 0-1000 scale)"
-                    />
-                    <datalist id="motorTorqueTicks">
-                      {/* The vendored script's stock torque, as a reference tick. */}
-                      <option value={DEFAULT_TORQUE_LIMIT_REF} />
-                    </datalist>
-                    <span className="w-12 shrink-0 text-right font-mono text-sm text-foreground">
-                      {torqueLimitDraft}
-                    </span>
-                  </div>
-                  <p className="text-xs text-muted-foreground">
-                    Torque the arm drives itself at during auto-calibration
-                    (raw servo <code>Torque_Limit</code>, 0–1000 scale; the
-                    tick marks the stock {DEFAULT_TORQUE_LIMIT_REF}). Lower =
-                    gentler unfold and limit-probing; below {TORQUE_LIMIT_MIN}{" "}
-                    the arm can't move its own weight. Teleoperation,
-                    recording, and skill runs always use LeRobot's standard
-                    torque — this slider doesn't affect them.
-                  </p>
-                </div>
-              </CollapsibleContent>
-            </Collapsible>
-          )}
         </div>
 
         {/* The demo is big, so it sits beside the main vertical instead of
@@ -1854,6 +1811,60 @@ const RobotConfigWindow = ({
           </div>
         </div>
       </div>
+
+      {/* Auto-calibration drive torque lives under Advanced parameters
+          (the studio's collapsible pattern, as in RecordingForm): sent
+          with the auto-calibrate start (current slider position),
+          persisted on Save. Manual calibration and regular sessions
+          don't use it. Full panel width, below the controls/demo grid,
+          so expanding it grows the panel evenly instead of stretching
+          only the left column. */}
+      {robot && (
+        <Collapsible className="group space-y-3">
+          <CollapsibleTrigger className="flex w-full items-center justify-between border-b border-border pb-2 text-sm font-semibold text-foreground">
+            <span>Advanced parameters</span>
+            <ChevronDown className="h-4 w-4 transition-transform group-data-[state=open]:rotate-180" />
+          </CollapsibleTrigger>
+          <CollapsibleContent className={SLIDE}>
+            <div className="space-y-2">
+              <Label htmlFor="motorPower" className="text-sm font-medium">
+                Auto-calibration torque
+              </Label>
+              <div className="flex items-center gap-3">
+                <input
+                  id="motorPower"
+                  type="range"
+                  min={TORQUE_LIMIT_MIN}
+                  max={TORQUE_LIMIT_MAX}
+                  step={TORQUE_LIMIT_PER_PERCENT}
+                  value={torqueLimitDraft}
+                  onChange={(e) => {
+                    // Slider is in raw Torque_Limit units; store as percent.
+                    setPowerDraft(
+                      Number(e.target.value) / TORQUE_LIMIT_PER_PERCENT,
+                    );
+                  }}
+                  list="motorTorqueTicks"
+                  className="h-1.5 flex-1 cursor-pointer accent-primary"
+                  aria-label="Auto-calibration torque (Torque_Limit register, 0-1000 scale)"
+                />
+                <datalist id="motorTorqueTicks">
+                  {/* The vendored script's stock torque, as a reference tick. */}
+                  <option value={DEFAULT_TORQUE_LIMIT_REF} />
+                </datalist>
+                <span className="w-12 shrink-0 text-right font-mono text-sm text-foreground">
+                  {torqueLimitDraft}
+                </span>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Raw servo <code>Torque_Limit</code> (tick = stock{" "}
+                {DEFAULT_TORQUE_LIMIT_REF}) — lower is gentler; below{" "}
+                {TORQUE_LIMIT_MIN} the arm can't lift itself.
+              </p>
+            </div>
+          </CollapsibleContent>
+        </Collapsible>
+      )}
     </div>
   );
 
@@ -2003,7 +2014,7 @@ const RobotConfigWindow = ({
                     calibrationStatus.calibration_active ||
                     batchAutoCal.active
                   }
-                  title="Identify by hand: swing the arm's base left and right"
+                  title="Identify by hand: swing the arm's base wide, both left and right"
                   className="w-28 shrink-0"
                 >
                   {detecting ? (
@@ -2014,8 +2025,9 @@ const RobotConfigWindow = ({
                   {detecting ? "Watching…" : "Detect"}
                 </Button>
                 <p className="min-w-[200px] flex-1 text-xs text-muted-foreground">
-                  Identify by hand — swing the arm's base left and right; the
-                  port that moves is assigned.
+                  Identify by hand — swing the arm's base wide to the left AND
+                  the right (10–15° past where it started, each way); the port
+                  that moves is assigned. Small wiggles won't register.
                 </p>
               </div>
               <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
@@ -2044,8 +2056,10 @@ const RobotConfigWindow = ({
               </div>
               {detecting && (
                 <p className="text-xs text-ok">
-                  Swing the base of the arm left and right — the port that sees
-                  the motion will be assigned to this arm.
+                  Swing the base of the arm wide — clearly past its starting
+                  point both left and right. A small or one-sided wiggle is
+                  ignored (that's how bumps are filtered out). The port that
+                  sees the motion will be assigned to this arm.
                 </p>
               )}
             </div>
@@ -2272,12 +2286,20 @@ const RobotConfigWindow = ({
             pressed. Quit closes the window, confirming first if there are
             unsaved drafts (or a live manual calibration to abort). */}
         <div className="flex shrink-0 items-center justify-between gap-3 border-t border-border bg-background px-6 py-3">
+          {/* Left label: draft state first; when everything is saved but the
+              robot still isn't ready (a silently-disabled Save explains
+              nothing), name the concrete setup gap instead of a bare
+              "All changes saved". */}
           <span
             className={`text-sm ${
               isDirty ? "text-warn" : "text-muted-foreground"
             }`}
           >
-            {isDirty ? "Unsaved changes" : "All changes saved"}
+            {isDirty
+              ? "Unsaved changes"
+              : robot && !robot.is_clean
+                ? `Saved — but this robot ${robotSetupGap(robot)}`
+                : "All changes saved"}
           </span>
           <div className="flex gap-2">
             <Button variant="outline" onClick={requestClose}>
@@ -2289,7 +2311,7 @@ const RobotConfigWindow = ({
               ) : (
                 <CheckCircle className="mr-2 h-4 w-4" />
               )}
-              {saving ? "Saving…" : "Save"}
+              {saving ? "Saving…" : justSaved && !isDirty ? "Saved ✓" : "Save"}
             </Button>
           </div>
         </div>

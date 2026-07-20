@@ -485,9 +485,12 @@ const DeployPanel: React.FC = () => {
 
   const inferenceActive = status?.inference_active === true;
 
+  // Inference drives the follower(s) only — gate on follower_ready, not
+  // is_clean, so a robot with no leader port/calibration (which inference
+  // never touches) can still deploy.
   const canStart =
     !!robot &&
-    robot.is_clean &&
+    robot.follower_ready &&
     !robotCheckpointArmMismatch &&
     selectedRef != null &&
     !!policyConfig &&
@@ -674,15 +677,18 @@ const DeployPanel: React.FC = () => {
               <Alert className="border-warn/40 text-warn [&>svg]:text-warn">
                 <AlertTriangle className="h-4 w-4" />
                 <AlertDescription>
-                  Select a robot in the corner to deploy.
+                  Select a robot to deploy — use the robot menu in the
+                  top-right corner of this window.
                 </AlertDescription>
               </Alert>
-            ) : !robot.is_clean ? (
+            ) : !robot.follower_ready ? (
               <Alert className="border-warn/40 text-warn [&>svg]:text-warn">
                 <AlertTriangle className="h-4 w-4" />
                 <AlertDescription>
-                  <strong>{robot.name}</strong> {robotSetupGap(robot)}. Open
-                  Robot settings before running inference.
+                  <strong>{robot.name}</strong> {robotSetupGap(robot, "follower")}.
+                  Open Robot settings before running inference. (Inference only
+                  uses the follower arm{isBimanual ? "s" : ""} — leader setup
+                  isn't needed.)
                 </AlertDescription>
               </Alert>
             ) : (
@@ -724,7 +730,7 @@ const DeployPanel: React.FC = () => {
                         <strong>bimanual robot</strong> ({checkpointDim}-dim state,{" "}
                         {checkpointArms} arms), but <strong>{robot?.name}</strong> is
                         a single-arm robot. Pick a single-arm checkpoint, or select a
-                        bimanual robot in the corner.
+                        bimanual robot from the top-right robot menu.
                       </>
                     ) : (
                       <>
@@ -732,7 +738,7 @@ const DeployPanel: React.FC = () => {
                         <strong>single-arm robot</strong> ({checkpointDim}-dim
                         state), but <strong>{robot?.name}</strong> is a bimanual
                         robot. Pick a bimanual checkpoint, or select a single-arm
-                        robot in the corner.
+                        robot from the top-right robot menu.
                       </>
                     )}
                   </AlertDescription>

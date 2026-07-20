@@ -501,6 +501,46 @@ def test_bimanual_record_clean_requires_all_four_calibrations(tmp_lerobot_home: 
     assert cfg.is_robot_record_clean(record) is True
 
 
+def test_is_robot_record_clean_follower_scope_ignores_leader(tmp_lerobot_home: Path) -> None:
+    """arms="follower" (inference/replay) must not be blocked by leader gaps."""
+    from makerlab.utils import config as cfg
+
+    record = {
+        "name": "r",
+        "follower_port": "/dev/f",
+        "follower_config": "F",
+    }
+    # Follower calibration file missing -> not ready under either scope.
+    assert cfg.is_robot_record_clean(record, arms="follower") is False
+    (Path(cfg.FOLLOWER_CONFIG_PATH) / "F.json").write_text("{}")
+    # No leader port/config at all: follower scope passes, full scope fails.
+    assert cfg.is_robot_record_clean(record, arms="follower") is True
+    assert cfg.is_robot_record_clean(record) is False
+    # A missing follower port still fails the follower scope.
+    assert cfg.is_robot_record_clean(dict(record, follower_port=""), arms="follower") is False
+
+
+def test_is_robot_record_clean_follower_scope_bimanual(tmp_lerobot_home: Path) -> None:
+    """Bimanual follower scope needs BOTH followers, still no leaders."""
+    from makerlab.utils import config as cfg
+
+    record = {
+        "name": "bi",
+        "mode": "bimanual",
+        "follower_port": "/dev/lf",
+        "follower_config": "LF",
+        "right_follower_port": "/dev/rf",
+        "right_follower_config": "RF",
+    }
+    (Path(cfg.FOLLOWER_CONFIG_PATH) / "LF.json").write_text("{}")
+    # Right follower's file missing -> not ready.
+    assert cfg.is_robot_record_clean(record, arms="follower") is False
+    (Path(cfg.FOLLOWER_CONFIG_PATH) / "RF.json").write_text("{}")
+    assert cfg.is_robot_record_clean(record, arms="follower") is True
+    # Full scope still fails: both leaders are unconfigured.
+    assert cfg.is_robot_record_clean(record) is False
+
+
 def test_config_slot_conflict_detects_same_side_duplicate() -> None:
     from makerlab.utils import config as cfg
 

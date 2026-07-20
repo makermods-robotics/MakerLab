@@ -86,7 +86,8 @@ const RecordingForm: React.FC<RecordingFormProps> = ({
           <div className="flex gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-700 dark:text-amber-200">
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
             <span>
-              Select or create a robot from the corner menu before recording.
+              Select or create a robot before recording — use the robot menu in
+              the top-right corner of this window.
             </span>
           </div>
         ) : !robot.is_clean ? (

@@ -94,6 +94,14 @@ _inference_proc: subprocess.Popen | None = None
 _inference_started_at: float | None = None
 _inference_rollout_started_at: float | None = None
 _inference_meta: dict[str, Any] = {}
+# The finished (exited) status payload of the most recent run, kept until the
+# NEXT start claims the slot. Terminal outcomes must be idempotent, not
+# consume-once: several surfaces poll /inference-status concurrently (the
+# session dialog at 1 Hz, the Deploy panel at 0.5 Hz), and with a
+# report-once-then-clear scheme whichever poll lands first after the subprocess
+# dies swallows the outcome/error/hint — the dialog then sees a bare idle
+# status and misreports a crash as a clean finish.
+_last_result: dict[str, Any] | None = None
 # Set for the CURRENT session at claim time; the background startup worker
 # captures its own reference and stop() sets it. It's the only way to abandon a
 # start that's still in its pre-subprocess window (Hub download / arm preflight),
@@ -712,15 +720,16 @@ def _prepare_robot(request: InferenceRequest) -> tuple[list[str], list[str]]:
 
 def _fail_startup(error: str) -> None:
     """Record a background-startup failure (download or preflight — before any
-    subprocess exists) as a terminal FAILED state on the meta, reusing the exact
+    subprocess exists) as the terminal `_last_result` payload, reusing the exact
     outcome/error/hint contract the subprocess-exit path already exposes so the
-    inference page surfaces it the same way.
+    inference page surfaces it the same way (and keeps surfacing it on every
+    poll until the next run starts).
 
     A no-op when a stop already tore the session down (inference_active False):
     the stop wins, and a download that raised while being abandoned must not
     resurrect a phantom failure."""
     global inference_active, _inference_proc, _inference_started_at
-    global _inference_rollout_started_at, _inference_meta
+    global _inference_rollout_started_at, _inference_meta, _last_result
     with _state_lock:
         if not inference_active:
             return
@@ -729,13 +738,22 @@ def _fail_startup(error: str) -> None:
         _inference_proc = None
         _inference_started_at = None
         _inference_rollout_started_at = None
-        _inference_meta = {
-            "phase": PHASE_ERROR,
+        _inference_meta = {}
+        _last_result = {
+            "inference_active": False,
             "exited": True,
+            "exit_code": None,
             "outcome": "failed",
             "error": error,
             "hint": friendly_hint(error),
+            "phase": PHASE_ERROR,
             "policy_ref": policy_ref,
+            "duration_s": None,
+            "log_path": None,
+            "started_at": None,
+            "rollout_started_at": None,
+            "rollout_elapsed_s": 0,
+            "elapsed_s": 0,
         }
 
 
@@ -891,6 +909,7 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
     launch modal; the multi-minute Hub download moves off the request thread so
     the UI lands on the inference page and shows download progress there."""
     global inference_active, _inference_started_at, _inference_meta, _inference_cancel
+    global _last_result
 
     # Mutex with teleop and recording: all three drive the same serial bus.
     from . import record as _record, teleoperate as _teleoperate
@@ -924,6 +943,9 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
         _inference_cancel = threading.Event()
         cancel_event = _inference_cancel
         _inference_meta = {"phase": PHASE_STARTING, "policy_ref": request.policy_ref}
+        # A new run supersedes the previous run's terminal payload — status
+        # polls must reflect THIS session from the first tick.
+        _last_result = None
 
     def _release_slot() -> None:
         global inference_active, _inference_started_at, _inference_cancel, _inference_meta
@@ -1076,35 +1098,19 @@ def handle_inference_log(max_lines: int = _INFERENCE_LOG_MAX_LINES) -> dict[str,
 
 def handle_inference_status() -> dict[str, Any]:
     global inference_active, _inference_proc, _inference_started_at
-    global _inference_rollout_started_at, _inference_meta
+    global _inference_rollout_started_at, _inference_meta, _last_result
 
     # Finalise state lazily if the subprocess died on its own.
     with _state_lock:
         proc = _inference_proc
-        # Terminal FAILURE recorded by the background startup worker before any
-        # subprocess existed (a model-download or preflight failure — see
-        # _fail_startup). Reuses the same exited/outcome/error/hint shape as the
-        # subprocess-exit path below so the inference page renders it identically.
-        # Reported once, then the meta is cleared (mirrors that finalisation).
-        if proc is None and not inference_active and _inference_meta.get("exited"):
-            finished = _inference_meta
-            _inference_meta = {}
-            return {
-                "inference_active": False,
-                "exited": True,
-                "exit_code": None,
-                "outcome": finished.get("outcome"),
-                "error": finished.get("error"),
-                "hint": finished.get("hint"),
-                "phase": finished.get("phase", PHASE_ERROR),
-                "policy_ref": finished.get("policy_ref"),
-                "duration_s": finished.get("duration_s"),
-                "log_path": finished.get("log_path"),
-                "started_at": finished.get("started_at"),
-                "rollout_started_at": None,
-                "rollout_elapsed_s": 0,
-                "elapsed_s": 0,
-            }
+        # Idle with a recorded terminal result (a subprocess exit finalised
+        # below, or a download/preflight failure from _fail_startup): keep
+        # returning that payload verbatim until the next start clears it.
+        # Idempotence matters — several surfaces poll this endpoint
+        # concurrently, and a consume-once payload lets one poller swallow the
+        # error the user needed to see (see _last_result's declaration).
+        if proc is None and not inference_active and _last_result is not None:
+            return dict(_last_result)
         if proc is not None and proc.poll() is not None:
             rc = proc.returncode
             logger.info("Inference subprocess exited rc=%s", rc)
@@ -1129,7 +1135,7 @@ def handle_inference_status() -> dict[str, Any]:
             # as a hard error.
             error = _extract_error_from_log(finished_meta.get("log_path")) if rc else None
             outcome = _classify_outcome(rc, finished_rollout_started is not None, error)
-            return {
+            _last_result = {
                 "inference_active": False,
                 "exited": True,
                 "exit_code": rc,
@@ -1145,6 +1151,7 @@ def handle_inference_status() -> dict[str, Any]:
                 "rollout_elapsed_s": 0,
                 "elapsed_s": 0,
             }
+            return dict(_last_result)
         elapsed = (time.time() - _inference_started_at) if _inference_started_at else 0
         rollout_elapsed = time.time() - _inference_rollout_started_at if _inference_rollout_started_at else 0
         return {

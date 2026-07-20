@@ -471,16 +471,23 @@ def rename_robot_record(old_name: str, new_name: str) -> tuple[bool, str]:
     return True, ""
 
 
-def is_robot_record_clean(record: dict) -> bool:
+def is_robot_record_clean(record: dict, arms: str = "all") -> bool:
     """
     A record is 'clean' when every operational field for its mode is populated AND
     every referenced calibration file exists on disk. Cameras are optional.
 
     - single   : the leader/follower pair (4 fields, 2 calibration files).
     - bimanual : that pair (= left arm) plus the right pair (8 fields, 4 files).
+
+    `arms` scopes the check to what an activity actually drives:
+    - "all"      — leader + follower (teleoperation, recording).
+    - "follower" — follower side only (inference, replay never open the leader
+      bus, so an unassigned leader port / missing leader calibration must not
+      block them; bimanual = both followers, still no leaders).
     """
     if not record:
         return False
+    follower_only = arms == "follower"
 
     # Config fields are stems; the file on disk is "<stem>.json". Tolerate a
     # stored value that still carries the extension (defensive).
@@ -490,20 +497,22 @@ def is_robot_record_clean(record: dict) -> bool:
 
     bimanual = record.get("mode") == "bimanual"
     required_fields = _SINGLE_CONFIG_FIELDS + (_BIMANUAL_CONFIG_FIELDS if bimanual else ())
+    if follower_only:
+        required_fields = tuple(f for f in required_fields if "follower" in f)
     for field in required_fields:
         value = record.get(field, "")
         if not isinstance(value, str) or not value.strip():
             return False
 
     config_files = [
-        _file_for(LEADER_CONFIG_PATH, record["leader_config"]),
         _file_for(FOLLOWER_CONFIG_PATH, record["follower_config"]),
     ]
+    if not follower_only:
+        config_files.append(_file_for(LEADER_CONFIG_PATH, record["leader_config"]))
     if bimanual:
-        config_files += [
-            _file_for(LEADER_CONFIG_PATH, record["right_leader_config"]),
-            _file_for(FOLLOWER_CONFIG_PATH, record["right_follower_config"]),
-        ]
+        config_files.append(_file_for(FOLLOWER_CONFIG_PATH, record["right_follower_config"]))
+        if not follower_only:
+            config_files.append(_file_for(LEADER_CONFIG_PATH, record["right_leader_config"]))
     return all(os.path.exists(p) for p in config_files)
 
 
