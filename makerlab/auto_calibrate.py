@@ -209,6 +209,32 @@ class _AutoCalArmRunner:
             if self.status.active:
                 return {"success": False, "message": "Auto-calibration is already running"}
 
+            # Mutex with every other feature that drives the same serial bus
+            # (see CLAUDE.md's "State model & mutual exclusion"). Lazy
+            # imports to dodge circular imports at module load time (matches
+            # the existing pattern in teleoperate.py/record.py/rollout.py).
+            from . import (
+                calibrate as _calibrate,
+                record as _record,
+                rollout as _rollout,
+                teleoperate as _teleoperate,
+                wiggle as _wiggle,
+            )
+
+            if _teleoperate.teleoperation_active:
+                return {"success": False, "message": "Teleoperation is currently active. Stop it first."}
+            if _record.recording_active:
+                return {"success": False, "message": "Recording is currently active. Stop it first."}
+            if _rollout.inference_active:
+                return {"success": False, "message": "Inference is currently active. Stop it first."}
+            if _calibrate.calibration_is_active():
+                return {"success": False, "message": "Calibration is currently active. Stop it first."}
+            if _wiggle.wiggle_active:
+                return {
+                    "success": False,
+                    "message": "A gripper wiggle is currently in progress. Wait for it to finish.",
+                }
+
             if request.device_type not in ("teleop", "robot"):
                 return {"success": False, "message": "Invalid device type"}
             if not request.port:
@@ -518,6 +544,35 @@ class AutoCalibrationBatchManager:
             if self._active():
                 return {"success": False, "message": "A batch auto-calibration is already running"}
 
+            # Mutex with every other feature that drives the same serial bus
+            # (see CLAUDE.md's "State model & mutual exclusion"). Checked
+            # up front, before launching any arm, so a doomed batch refuses
+            # cleanly instead of partially launching some arms before a
+            # later arm's own runner.start() hits the same check mid-loop
+            # (belt-and-braces with that per-runner check). Lazy imports to
+            # dodge circular imports at module load time.
+            from . import (
+                calibrate as _calibrate,
+                record as _record,
+                rollout as _rollout,
+                teleoperate as _teleoperate,
+                wiggle as _wiggle,
+            )
+
+            if _teleoperate.teleoperation_active:
+                return {"success": False, "message": "Teleoperation is currently active. Stop it first."}
+            if _record.recording_active:
+                return {"success": False, "message": "Recording is currently active. Stop it first."}
+            if _rollout.inference_active:
+                return {"success": False, "message": "Inference is currently active. Stop it first."}
+            if _calibrate.calibration_is_active():
+                return {"success": False, "message": "Calibration is currently active. Stop it first."}
+            if _wiggle.wiggle_active:
+                return {
+                    "success": False,
+                    "message": "A gripper wiggle is currently in progress. Wait for it to finish.",
+                }
+
             arms = request.arms
             # --- Fail-fast validation, before touching any hardware. ---
             if not arms:
@@ -638,3 +693,10 @@ class AutoCalibrationBatchManager:
 
 auto_calibration_manager = AutoCalibrationManager()
 auto_calibration_batch_manager = AutoCalibrationBatchManager()
+
+
+def auto_calibration_is_active() -> bool:
+    """True while EITHER the single-arm manager or a batch run owns a serial
+    bus. Reads the singletons' real state so other feature modules'
+    reciprocal mutex checks (see CLAUDE.md) can't drift out of sync."""
+    return auto_calibration_manager.status.active or auto_calibration_batch_manager._active()

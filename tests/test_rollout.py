@@ -393,6 +393,38 @@ def test_handle_start_inference_blocked_when_already_active(monkeypatch) -> None
     assert "already active" in result["message"]
 
 
+def test_handle_start_inference_blocked_when_calibration_active(monkeypatch) -> None:
+    """Inference must refuse to start while manual calibration owns the same
+    serial bus, rather than opening a second connection on a live port."""
+    from makerlab.rollout import handle_start_inference
+
+    monkeypatch.setattr("makerlab.calibrate.calibration_manager.status.calibration_active", True)
+    result = handle_start_inference(_stub_request())
+    assert result["success"] is False
+    assert result["status_code"] == 409
+    assert "Calibration" in result["message"]
+
+
+def test_handle_start_inference_blocked_when_auto_calibration_active(monkeypatch) -> None:
+    from makerlab.rollout import handle_start_inference
+
+    monkeypatch.setattr("makerlab.auto_calibrate.auto_calibration_manager.status.active", True)
+    result = handle_start_inference(_stub_request())
+    assert result["success"] is False
+    assert result["status_code"] == 409
+    assert "Auto-calibration" in result["message"]
+
+
+def test_handle_start_inference_blocked_when_wiggle_active(monkeypatch) -> None:
+    from makerlab.rollout import handle_start_inference
+
+    monkeypatch.setattr("makerlab.wiggle.wiggle_active", True)
+    result = handle_start_inference(_stub_request())
+    assert result["success"] is False
+    assert result["status_code"] == 409
+    assert "wiggle" in result["message"].lower()
+
+
 def test_handle_start_inference_pins_return_to_initial_position(monkeypatch, tmp_path) -> None:
     """The stop dialog promises the follower eases back to its start pose on
     teardown. That behaviour is lerobot's `return_to_initial_position`, which

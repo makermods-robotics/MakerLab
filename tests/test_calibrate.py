@@ -75,6 +75,68 @@ def test_calibration_manager_rejects_double_start_via_message() -> None:
     assert "already" in result.get("message", "").lower()
 
 
+def test_start_calibration_blocked_when_teleoperation_active(monkeypatch) -> None:
+    """Calibration must refuse to start while teleop owns the same serial
+    bus, rather than opening a second connection on a live port."""
+    from makerlab.calibrate import CalibrationManager, CalibrationRequest
+
+    monkeypatch.setattr("makerlab.teleoperate.teleoperation_active", True)
+    mgr = CalibrationManager()
+    result = mgr.start_calibration(
+        CalibrationRequest(device_type="teleop", port="/dev/null", config_file="x")
+    )
+    assert result["success"] is False
+    assert "Teleoperation" in result["message"]
+
+
+def test_start_calibration_blocked_when_recording_active(monkeypatch) -> None:
+    from makerlab.calibrate import CalibrationManager, CalibrationRequest
+
+    monkeypatch.setattr("makerlab.record.recording_active", True)
+    mgr = CalibrationManager()
+    result = mgr.start_calibration(
+        CalibrationRequest(device_type="teleop", port="/dev/null", config_file="x")
+    )
+    assert result["success"] is False
+    assert "Recording" in result["message"]
+
+
+def test_start_calibration_blocked_when_inference_active(monkeypatch) -> None:
+    from makerlab.calibrate import CalibrationManager, CalibrationRequest
+
+    monkeypatch.setattr("makerlab.rollout.inference_active", True)
+    mgr = CalibrationManager()
+    result = mgr.start_calibration(
+        CalibrationRequest(device_type="teleop", port="/dev/null", config_file="x")
+    )
+    assert result["success"] is False
+    assert "Inference" in result["message"]
+
+
+def test_start_calibration_blocked_when_auto_calibration_active(monkeypatch) -> None:
+    from makerlab.calibrate import CalibrationManager, CalibrationRequest
+
+    monkeypatch.setattr("makerlab.auto_calibrate.auto_calibration_manager.status.active", True)
+    mgr = CalibrationManager()
+    result = mgr.start_calibration(
+        CalibrationRequest(device_type="teleop", port="/dev/null", config_file="x")
+    )
+    assert result["success"] is False
+    assert "Auto-calibration" in result["message"]
+
+
+def test_start_calibration_blocked_when_wiggle_active(monkeypatch) -> None:
+    from makerlab.calibrate import CalibrationManager, CalibrationRequest
+
+    monkeypatch.setattr("makerlab.wiggle.wiggle_active", True)
+    mgr = CalibrationManager()
+    result = mgr.start_calibration(
+        CalibrationRequest(device_type="teleop", port="/dev/null", config_file="x")
+    )
+    assert result["success"] is False
+    assert "wiggle" in result["message"].lower()
+
+
 def test_start_calibration_refuses_existing_config_without_overwrite(tmp_lerobot_home) -> None:
     """Completing calibration saves <config_file>.json; if that name already
     exists, start must refuse (code=name_taken) unless overwrite=True — so no

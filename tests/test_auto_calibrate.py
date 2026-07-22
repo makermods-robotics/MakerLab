@@ -95,6 +95,58 @@ def _join_stop(mgr) -> None:
         mgr._thread.join(timeout=5)
 
 
+def test_auto_calibration_blocked_when_teleoperation_active(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Auto-calibration must refuse to start while teleop owns the same
+    serial bus, rather than opening a second connection on a live port."""
+    import makerlab.auto_calibrate as ac
+
+    monkeypatch.setattr("makerlab.teleoperate.teleoperation_active", True)
+    mgr = ac.AutoCalibrationManager()
+    result = mgr.start(ac.AutoCalibrationRequest(device_type="robot", port="/dev/arm", config_file="c"))
+    assert result["success"] is False
+    assert "Teleoperation" in result["message"]
+
+
+def test_auto_calibration_blocked_when_recording_active(monkeypatch: pytest.MonkeyPatch) -> None:
+    import makerlab.auto_calibrate as ac
+
+    monkeypatch.setattr("makerlab.record.recording_active", True)
+    mgr = ac.AutoCalibrationManager()
+    result = mgr.start(ac.AutoCalibrationRequest(device_type="robot", port="/dev/arm", config_file="c"))
+    assert result["success"] is False
+    assert "Recording" in result["message"]
+
+
+def test_auto_calibration_blocked_when_inference_active(monkeypatch: pytest.MonkeyPatch) -> None:
+    import makerlab.auto_calibrate as ac
+
+    monkeypatch.setattr("makerlab.rollout.inference_active", True)
+    mgr = ac.AutoCalibrationManager()
+    result = mgr.start(ac.AutoCalibrationRequest(device_type="robot", port="/dev/arm", config_file="c"))
+    assert result["success"] is False
+    assert "Inference" in result["message"]
+
+
+def test_auto_calibration_blocked_when_calibration_active(monkeypatch: pytest.MonkeyPatch) -> None:
+    import makerlab.auto_calibrate as ac
+
+    monkeypatch.setattr("makerlab.calibrate.calibration_manager.status.calibration_active", True)
+    mgr = ac.AutoCalibrationManager()
+    result = mgr.start(ac.AutoCalibrationRequest(device_type="robot", port="/dev/arm", config_file="c"))
+    assert result["success"] is False
+    assert "Calibration" in result["message"]
+
+
+def test_auto_calibration_blocked_when_wiggle_active(monkeypatch: pytest.MonkeyPatch) -> None:
+    import makerlab.auto_calibrate as ac
+
+    monkeypatch.setattr("makerlab.wiggle.wiggle_active", True)
+    mgr = ac.AutoCalibrationManager()
+    result = mgr.start(ac.AutoCalibrationRequest(device_type="robot", port="/dev/arm", config_file="c"))
+    assert result["success"] is False
+    assert "wiggle" in result["message"].lower()
+
+
 def test_auto_calibration_rejects_bad_device() -> None:
     import makerlab.auto_calibrate as ac
 
@@ -801,6 +853,36 @@ def _join_batch(mgr) -> None:
             runner._thread.join(timeout=2)
         if runner._stop_thread is not None:
             runner._stop_thread.join(timeout=5)
+
+
+def test_batch_blocked_when_teleoperation_active(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A batch launch must refuse up front (before starting any arm) while
+    teleop owns a serial bus, rather than partially launching some arms."""
+    monkeypatch.setattr("makerlab.teleoperate.teleoperation_active", True)
+    mgr = auto_calibrate.AutoCalibrationBatchManager()
+    arms = [_arm(port="/dev/a", name="n1")]
+    result = mgr.start(auto_calibrate.AutoCalibrationBatchRequest(arms=arms))
+    assert result["success"] is False
+    assert "Teleoperation" in result["message"]
+    assert mgr._runners == []  # nothing launched
+
+
+def test_batch_blocked_when_calibration_active(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("makerlab.calibrate.calibration_manager.status.calibration_active", True)
+    mgr = auto_calibrate.AutoCalibrationBatchManager()
+    arms = [_arm(port="/dev/a", name="n1")]
+    result = mgr.start(auto_calibrate.AutoCalibrationBatchRequest(arms=arms))
+    assert result["success"] is False
+    assert "Calibration" in result["message"]
+
+
+def test_batch_blocked_when_wiggle_active(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("makerlab.wiggle.wiggle_active", True)
+    mgr = auto_calibrate.AutoCalibrationBatchManager()
+    arms = [_arm(port="/dev/a", name="n1")]
+    result = mgr.start(auto_calibrate.AutoCalibrationBatchRequest(arms=arms))
+    assert result["success"] is False
+    assert "wiggle" in result["message"].lower()
 
 
 def test_batch_rejects_empty() -> None:

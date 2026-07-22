@@ -160,6 +160,58 @@ def test_start_teleoperation_disconnects_follower_when_leader_fails(
     assert teleop.teleoperation_active is False
 
 
+def _stub_teleop_request():
+    from makerlab.teleoperate import TeleoperateRequest
+
+    return TeleoperateRequest(
+        leader_port="/dev/leader",
+        follower_port="/dev/follower",
+        leader_config="leader",
+        follower_config="follower",
+    )
+
+
+def test_start_teleoperation_blocked_when_calibration_active(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Teleoperation must refuse to start while manual calibration owns the
+    same serial bus, rather than opening a second connection on a live port."""
+    import makerlab.teleoperate as teleop
+
+    monkeypatch.setattr(teleop, "teleoperation_active", False)
+    monkeypatch.setattr("makerlab.calibrate.calibration_manager.status.calibration_active", True)
+
+    result = teleop.handle_start_teleoperation(_stub_teleop_request())
+    assert result == {
+        "success": False,
+        "message": "Calibration is currently active. Stop it first.",
+    }
+
+
+def test_start_teleoperation_blocked_when_auto_calibration_active(monkeypatch: pytest.MonkeyPatch) -> None:
+    import makerlab.teleoperate as teleop
+
+    monkeypatch.setattr(teleop, "teleoperation_active", False)
+    monkeypatch.setattr("makerlab.auto_calibrate.auto_calibration_manager.status.active", True)
+
+    result = teleop.handle_start_teleoperation(_stub_teleop_request())
+    assert result == {
+        "success": False,
+        "message": "Auto-calibration is currently active. Stop it first.",
+    }
+
+
+def test_start_teleoperation_blocked_when_wiggle_active(monkeypatch: pytest.MonkeyPatch) -> None:
+    import makerlab.teleoperate as teleop
+
+    monkeypatch.setattr(teleop, "teleoperation_active", False)
+    monkeypatch.setattr("makerlab.wiggle.wiggle_active", True)
+
+    result = teleop.handle_start_teleoperation(_stub_teleop_request())
+    assert result == {
+        "success": False,
+        "message": "A gripper wiggle is currently in progress. Wait for it to finish.",
+    }
+
+
 # ---------------------------------------------------------------------------
 # Teleop opens no cameras: it consumes no frames (only motor positions drive the
 # URDF viewer). The follower config it builds therefore carries an empty camera

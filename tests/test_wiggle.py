@@ -28,6 +28,93 @@ async def test_wiggle_gripper_rejects_empty_port() -> None:
     assert result == {"success": False, "message": "No port provided."}
 
 
+async def test_wiggle_gripper_blocked_when_already_wiggling(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A second concurrent wiggle must refuse rather than opening a second
+    connection on the same port a live wiggle is already driving."""
+    from makerlab.wiggle import wiggle_gripper
+
+    monkeypatch.setattr("makerlab.wiggle.wiggle_active", True)
+    result = await wiggle_gripper("/dev/fake")
+    assert result["success"] is False
+    assert "already in progress" in result["message"]
+
+
+async def test_wiggle_gripper_blocked_when_teleoperation_active(monkeypatch: pytest.MonkeyPatch) -> None:
+    from makerlab.wiggle import wiggle_gripper
+
+    monkeypatch.setattr("makerlab.teleoperate.teleoperation_active", True)
+    result = await wiggle_gripper("/dev/fake")
+    assert result["success"] is False
+    assert "Teleoperation" in result["message"]
+
+
+async def test_wiggle_gripper_blocked_when_recording_active(monkeypatch: pytest.MonkeyPatch) -> None:
+    from makerlab.wiggle import wiggle_gripper
+
+    monkeypatch.setattr("makerlab.record.recording_active", True)
+    result = await wiggle_gripper("/dev/fake")
+    assert result["success"] is False
+    assert "Recording" in result["message"]
+
+
+async def test_wiggle_gripper_blocked_when_inference_active(monkeypatch: pytest.MonkeyPatch) -> None:
+    from makerlab.wiggle import wiggle_gripper
+
+    monkeypatch.setattr("makerlab.rollout.inference_active", True)
+    result = await wiggle_gripper("/dev/fake")
+    assert result["success"] is False
+    assert "Inference" in result["message"]
+
+
+async def test_wiggle_gripper_blocked_when_calibration_active(monkeypatch: pytest.MonkeyPatch) -> None:
+    from makerlab.wiggle import wiggle_gripper
+
+    monkeypatch.setattr("makerlab.calibrate.calibration_manager.status.calibration_active", True)
+    result = await wiggle_gripper("/dev/fake")
+    assert result["success"] is False
+    assert "Calibration" in result["message"]
+
+
+async def test_wiggle_gripper_blocked_when_auto_calibration_active(monkeypatch: pytest.MonkeyPatch) -> None:
+    from makerlab.wiggle import wiggle_gripper
+
+    monkeypatch.setattr("makerlab.auto_calibrate.auto_calibration_manager.status.active", True)
+    result = await wiggle_gripper("/dev/fake")
+    assert result["success"] is False
+    assert "Auto-calibration" in result["message"]
+
+
+async def test_wiggle_gripper_clears_wiggle_active_after_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """wiggle_active must be reset once the drive finishes, so a later wiggle
+    isn't wrongly refused forever."""
+    import makerlab.wiggle as wiggle
+
+    monkeypatch.setattr(wiggle, "_wiggle_gripper_sync", lambda port: None)
+
+    result = await wiggle.wiggle_gripper("/dev/fake")
+    assert result["success"] is True
+    assert wiggle.wiggle_active is False
+
+
+async def test_wiggle_gripper_clears_wiggle_active_after_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """wiggle_active must be reset even when the drive raises, so one failed
+    wiggle can't wedge every later wiggle attempt shut."""
+    import makerlab.wiggle as wiggle
+
+    def boom(port: str) -> None:
+        raise RuntimeError("no device on port")
+
+    monkeypatch.setattr(wiggle, "_wiggle_gripper_sync", boom)
+
+    result = await wiggle.wiggle_gripper("/dev/fake")
+    assert result["success"] is False
+    assert wiggle.wiggle_active is False
+
+
 def test_wiggle_endpoint_success(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     # Stub the blocking hardware call so the happy path runs without a device.
     monkeypatch.setattr("makerlab.wiggle._wiggle_gripper_sync", lambda port: None)
