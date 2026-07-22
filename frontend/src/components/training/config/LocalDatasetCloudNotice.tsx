@@ -78,8 +78,10 @@ const LocalDatasetCloudNotice: React.FC<LocalDatasetCloudNoticeProps> = ({
             Hugging Face Cloud trains from the Hub, so{" "}
             <span className="font-medium">{repoId}</span>
             {sizeLabel ? ` (~${sizeLabel})` : ""} will be uploaded as a{" "}
-            <span className="font-medium">private</span> dataset before training
-            starts.
+            <span className="font-medium">public</span> dataset before training
+            starts — including any camera footage it contains. You can make it
+            private afterward from the dataset's "Visibility &amp; tags"
+            settings.
           </p>
           {uploading ? (
             <p className="mt-2 flex items-center gap-2 text-amber-700 dark:text-amber-100">
