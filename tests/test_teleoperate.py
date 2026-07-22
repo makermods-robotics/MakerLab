@@ -160,6 +160,102 @@ def test_start_teleoperation_disconnects_follower_when_leader_fails(
     assert teleop.teleoperation_active is False
 
 
+def test_start_teleoperation_force_disables_torque_and_warns_when_setup_fails_after_configure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """robot.configure() is what actually writes Torque_Enable=1 on the real
+    follower servos. If a LATER setup step (e.g. the leader's configure())
+    raises, the follower is left physically energized — the except block must
+    run the same force_disable_torque + _safe_disconnect cleanup as the
+    worker's normal path and surface any problem via last_cleanup_error and a
+    "warning" key, not silently drop it.
+    """
+    import makerlab.teleoperate as teleop
+
+    monkeypatch.setattr(teleop, "teleoperation_active", False)
+    monkeypatch.setattr(
+        "makerlab.utils.robot_factory.setup_calibration_files",
+        lambda leader, follower: ("leader", "follower"),
+    )
+    monkeypatch.setattr(teleop, "verify_devices", lambda *a, **k: [])
+    monkeypatch.setattr(teleop, "reset_torque_limit", lambda *a, **k: [])
+    monkeypatch.setattr(teleop, "clear_goal_velocity", lambda *a, **k: [])
+
+    class _FollowerBus:
+        def __init__(self) -> None:
+            self.port = "COM_FOLLOWER"
+            self.motors = {"shoulder_pan": 1, "elbow_flex": 3}
+
+        def connect(self) -> None:
+            pass
+
+        def write_calibration(self, calibration) -> None:
+            pass
+
+        def disable_torque(self, motor: str, num_retry: int = 0) -> None:
+            # Once the follower is armed, this motor won't release.
+            raise ConnectionError(f"no response from {motor}")
+
+    class _Follower:
+        def __init__(self, config) -> None:
+            self.bus = _FollowerBus()
+            self.cameras: dict = {}
+            self.calibration: dict = {}
+            self.configured = False
+            self.disconnected = False
+
+        def configure(self) -> None:
+            # This is the real write that energizes the servos.
+            self.configured = True
+
+        def disconnect(self) -> None:
+            self.disconnected = True
+
+    class _LeaderBus:
+        def connect(self) -> None:
+            pass
+
+        def write_calibration(self, calibration) -> None:
+            pass
+
+    class _Leader:
+        def __init__(self, config) -> None:
+            self.bus = _LeaderBus()
+            self.calibration: dict = {}
+            self.disconnected = False
+
+        def configure(self) -> None:
+            # Fails AFTER the follower has already configured (armed).
+            raise RuntimeError("leader configure failed")
+
+        def disconnect(self) -> None:
+            self.disconnected = True
+
+    created: dict = {}
+    monkeypatch.setattr(
+        teleop, "SO101Follower", lambda config: created.setdefault("follower", _Follower(config))
+    )
+    monkeypatch.setattr(teleop, "SO101Leader", lambda config: created.setdefault("leader", _Leader(config)))
+
+    request = teleop.TeleoperateRequest(
+        leader_port="COM_LEADER",
+        follower_port="COM_FOLLOWER",
+        leader_config="leader",
+        follower_config="follower",
+    )
+    result = teleop.handle_start_teleoperation(request)
+
+    assert result["success"] is False
+    # The follower really was configured (torque enabled) before the failure.
+    assert created["follower"].configured is True
+    assert teleop.last_cleanup_error is not None
+    assert "TORQUE MAY STILL BE ENABLED" in teleop.last_cleanup_error
+    assert "warning" in result
+    assert "TORQUE MAY STILL BE ENABLED" in result["warning"]
+    assert created["follower"].disconnected is True
+    assert created["leader"].disconnected is True
+
+
 # ---------------------------------------------------------------------------
 # Teleop opens no cameras: it consumes no frames (only motor positions drive the
 # URDF viewer). The follower config it builds therefore carries an empty camera

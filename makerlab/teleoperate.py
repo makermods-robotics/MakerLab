@@ -808,16 +808,29 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
 
     except Exception as e:
         # Connection (or setup) failed before the loop started: release any
-        # device that did open, reset state, and surface the error.
-        _safe_disconnect(robot, "follower arm")
-        _safe_disconnect(teleop_device, "leader arm")
+        # device that did open, reset state, and surface the error. Mirrors
+        # the worker's normal cleanup below — robot.configure() above may
+        # already have written Torque_Enable=1 on the real follower servos
+        # before this fired, so skipping the explicit disable (or dropping
+        # _safe_disconnect's error text) would leave the arm energized with
+        # no warning surfaced.
+        problems = force_disable_torque(robot, "follower arm")
+        problems += force_disable_torque(teleop_device, "leader arm")
+        for device, label in ((robot, "follower arm"), (teleop_device, "leader arm")):
+            error = _safe_disconnect(device, label)
+            if error:
+                problems.append(error)
+        last_cleanup_error = " ".join(problems) if problems else None
         teleoperation_active = False
         current_robot = None
         current_teleop = None
         logger.error(f"Failed to start teleoperation: {e}")
         # str(e) is already a user-facing message for the connection failures
         # raised above; the toast title supplies the "error starting" context.
-        return {"success": False, "message": str(e)}
+        response = {"success": False, "message": str(e)}
+        if last_cleanup_error:
+            response["warning"] = last_cleanup_error
+        return response
 
 
 def handle_stop_teleoperation() -> dict[str, Any]:
