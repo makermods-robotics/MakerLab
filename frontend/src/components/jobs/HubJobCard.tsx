@@ -1,6 +1,7 @@
 import React from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import MetaRows from "@/components/library/MetaRows";
 import { HubJob, isHubJobActive } from "@/lib/jobsApi";
 import {
   ExternalLink,
@@ -40,33 +41,40 @@ interface StagePresentation {
 }
 
 const stagePresentation: Record<string, StagePresentation> = {
-  RUNNING: { label: "Running", color: "text-green-400", Icon: Loader2, spin: true },
-  QUEUED: { label: "Queued", color: "text-amber-400", Icon: Clock },
-  SCHEDULING: { label: "Scheduling", color: "text-amber-400", Icon: Clock },
-  COMPLETED: { label: "Done", color: "text-slate-400", Icon: CheckCircle2 },
-  FAILED: { label: "Failed", color: "text-red-400", Icon: XCircle },
+  RUNNING: { label: "Running", color: "text-ok", Icon: Loader2, spin: true },
+  QUEUED: { label: "Queued", color: "text-warn", Icon: Clock },
+  SCHEDULING: { label: "Scheduling", color: "text-warn", Icon: Clock },
+  COMPLETED: { label: "Done", color: "text-muted-foreground", Icon: CheckCircle2 },
+  FAILED: { label: "Failed", color: "text-destructive", Icon: XCircle },
   // HF API uses "CANCELED" (single L); accept both spellings.
-  CANCELED: { label: "Cancelled", color: "text-amber-400", Icon: AlertTriangle },
-  CANCELLED: { label: "Cancelled", color: "text-amber-400", Icon: AlertTriangle },
+  CANCELED: { label: "Cancelled", color: "text-warn", Icon: AlertTriangle },
+  CANCELLED: { label: "Cancelled", color: "text-warn", Icon: AlertTriangle },
 };
 
 const HubJobCard: React.FC<Props> = ({ job, onDismiss }) => {
   const stage = job.status?.stage?.toUpperCase() ?? "";
   const present: StagePresentation = stagePresentation[stage] ?? {
     label: stage || "Unknown",
-    color: "text-slate-400",
+    color: "text-muted-foreground",
     Icon: HelpCircle,
   };
   const Icon = present.Icon;
   const title =
     job.docker_image ?? job.space_id ?? `Job ${job.id.slice(0, 12)}…`;
 
+  // Unified metadata rows (same format as the dataset/job/model cards).
+  const metaRows: Array<[string, string]> = [
+    ["Flavor", job.flavor ?? "—"],
+    ["Created", relativeTime(job.created_at)],
+  ];
+  if (job.owner) metaRows.push(["Owner", job.owner]);
+
   return (
     <Card
       onClick={() => window.open(job.url, "_blank", "noopener,noreferrer")}
-      className="bg-slate-800/50 border-slate-700 rounded-xl cursor-pointer hover:border-slate-500 transition-colors"
+      className="bg-card border-border rounded-md cursor-pointer hover:border-ring/50 hover:bg-muted/40 transition-colors h-full"
     >
-      <CardContent className="p-4 space-y-3">
+      <CardContent className="flex h-full flex-col gap-2.5 p-3">
         <div className="flex items-start justify-between gap-2">
           <div className={`flex items-center gap-1.5 text-xs font-semibold ${present.color}`}>
             <Icon className={`w-3.5 h-3.5 ${present.spin ? "animate-spin" : ""}`} />
@@ -77,7 +85,7 @@ const HubJobCard: React.FC<Props> = ({ job, onDismiss }) => {
               variant="ghost"
               size="icon"
               asChild
-              className="h-7 w-7 text-slate-400 hover:text-white"
+              className="h-7 w-7 text-muted-foreground hover:text-foreground"
               aria-label="View on Hub"
             >
               <a
@@ -102,7 +110,7 @@ const HubJobCard: React.FC<Props> = ({ job, onDismiss }) => {
                   )
                     onDismiss(job.id);
                 }}
-                className="h-7 w-7 text-slate-400 hover:text-red-400"
+                className="h-7 w-7 text-muted-foreground hover:text-destructive"
                 aria-label="Remove job from list"
                 title="Remove from list"
               >
@@ -112,16 +120,13 @@ const HubJobCard: React.FC<Props> = ({ job, onDismiss }) => {
           </div>
         </div>
         <div>
-          <div className="text-white font-semibold truncate" title={title}>
+          <div className="text-foreground font-semibold truncate" title={title}>
             {title}
           </div>
-          <div className="text-xs text-slate-400 truncate">
-            {job.flavor ?? "—"} · {relativeTime(job.created_at)}
-            {job.owner ? ` · ${job.owner}` : ""}
-          </div>
         </div>
+        <MetaRows rows={metaRows} />
         {job.status?.message ? (
-          <div className="text-xs text-slate-500 truncate" title={job.status.message}>
+          <div className="text-xs text-muted-foreground truncate" title={job.status.message}>
             {job.status.message}
           </div>
         ) : null}

@@ -1,41 +1,40 @@
-
-import React from 'react';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { FileText } from 'lucide-react';
-import { LogEntry } from '../types';
+import React from "react";
+import { Card, CardContent, CardHeader } from "@/components/ui/card";
+import { FileText } from "lucide-react";
+import { LogEntry } from "../types";
 
 interface TrainingLogsProps {
   logs: LogEntry[];
   logContainerRef: React.RefObject<HTMLDivElement>;
 }
 
-const TrainingLogs: React.FC<TrainingLogsProps> = ({ logs, logContainerRef }) => {
+const TrainingLogs: React.FC<TrainingLogsProps> = ({
+  logs,
+  logContainerRef,
+}) => {
   return (
-    <Card className="bg-slate-800/50 border-slate-700 rounded-xl">
-      <CardHeader>
-        <CardTitle className="flex items-center gap-3 text-white">
-          <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-slate-700">
-            <FileText className="w-5 h-5 text-sky-400" />
-          </div>
-          Training Logs
-        </CardTitle>
+    <Card className="bg-card border-border rounded-md">
+      <CardHeader className="pb-2">
+        <h3 className="eyebrow flex items-center gap-1.5">
+          <FileText className="h-3.5 w-3.5" /> Training logs
+        </h3>
       </CardHeader>
       <CardContent>
         <div
           ref={logContainerRef}
-          className="bg-slate-900 rounded-lg p-4 h-96 overflow-y-auto font-mono text-sm border border-slate-700"
+          className="h-96 overflow-y-auto rounded-md border border-border bg-muted p-4 font-mono text-xs"
         >
           {logs.length === 0 ? (
-            <div className="text-slate-500 py-8">
+            <div className="py-8 text-muted-foreground">
               No training logs yet. Start training to see output.
             </div>
           ) : (
             logs.map((log, index) => (
               <div
                 key={index}
-                className="text-slate-300 break-words whitespace-pre-wrap"
+                className="text-foreground break-words whitespace-pre-wrap"
               >
-                <span className="text-slate-500 mr-2 select-none">
+                <span className="text-muted-foreground mr-2 select-none">
                   {new Date(log.timestamp * 1000).toLocaleTimeString()}
                 </span>
                 {log.message}

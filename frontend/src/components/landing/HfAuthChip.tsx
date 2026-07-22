@@ -9,8 +9,8 @@ const HfAuthChip: React.FC = () => {
 
   if (auth.status === "loading") {
     return (
-      <div className="inline-flex items-center gap-2 rounded-full border border-gray-800 bg-gray-900/60 px-3 py-1 text-xs text-gray-400">
-        <Loader2 className="w-3 h-3 animate-spin" />
+      <div className="inline-flex h-8 items-center gap-2 rounded-full border border-border bg-muted/60 px-3 text-sm font-medium text-muted-foreground">
+        <Loader2 className="h-3.5 w-3.5 animate-spin" />
         <span>Checking HF…</span>
       </div>
     );
@@ -19,14 +19,17 @@ const HfAuthChip: React.FC = () => {
   if (auth.status === "authenticated") {
     return (
       <div
-        className="inline-flex items-center gap-2 rounded-full border border-gray-800 bg-gray-900/60 px-3 py-1 text-xs text-gray-200"
-        title="Hugging Face authenticated"
+        className="inline-flex h-8 items-center gap-2 rounded-full border border-border bg-muted/60 px-3 text-sm font-medium"
+        title={`Logged in to Hugging Face as ${auth.username}`}
       >
         <span
-          className="h-2 w-2 rounded-full bg-emerald-400"
+          className="h-2 w-2 rounded-full bg-ok"
           aria-hidden="true"
         />
-        <span>{auth.username}</span>
+        <span className="max-w-[180px] truncate">
+          <span className="text-muted-foreground">Hugging Face: </span>
+          {auth.username}
+        </span>
       </div>
     );
   }
@@ -37,14 +40,14 @@ const HfAuthChip: React.FC = () => {
       <button
         type="button"
         onClick={() => setDialogOpen(true)}
-        className="inline-flex items-center gap-2 rounded-full border border-amber-700/60 bg-amber-950/40 px-3 py-1 text-xs text-amber-100 hover:bg-amber-900/40 transition-colors"
-        aria-label="Hugging Face not configured — show login instructions"
+        className="inline-flex h-8 items-center gap-2 rounded-full border border-warn/50 bg-warn/10 px-3 text-sm font-medium text-warn hover:bg-warn/20 transition-colors"
+        aria-label="Not logged in to Hugging Face — show login instructions"
       >
         <span
-          className="h-2 w-2 rounded-full bg-amber-400"
+          className="h-2 w-2 rounded-full bg-warn"
           aria-hidden="true"
         />
-        <span>HF not configured</span>
+        <span>Log in to Hugging Face</span>
       </button>
       <HfAuthDialog open={dialogOpen} onOpenChange={setDialogOpen} />
     </>

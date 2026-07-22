@@ -20,11 +20,59 @@ export interface RobotRecord {
   right_leader_config: string;
   right_follower_config: string;
   cameras: CameraConfig[];
-  // Follower torque as a percentage of full power (10-100, default 100).
-  // Written to the servos' volatile torque-limit register at session start.
+  // Auto-calibration drive torque as a percentage of full power (10-100,
+  // default 38 = the vendored script's stock 380). Sessions (teleop/record/
+  // skill runs) use stock LeRobot torque and ignore this value.
   motor_power: number;
   is_clean: boolean;
+  // Follower-side readiness only (ports + calibrations for the follower arm(s)).
+  // Follower-only activities (inference, replay) gate on this instead of
+  // is_clean so a missing LEADER setup — which they never touch — can't block
+  // them. Mirrors the backend's is_robot_record_clean(record, arms="follower").
+  follower_ready: boolean;
 }
+
+// Human-readable diagnosis for a record with `is_clean === false` (or, with
+// scope "follower", `follower_ready === false`). The backend folds ports,
+// calibration assignments, and on-disk calibration files into one boolean, so
+// warning surfaces can't tell WHAT is missing from the flag alone — and blaming
+// "missing a calibration" when only a port is unassigned sends the user to
+// recalibrate an arm that's already calibrated. Returns a predicate to append
+// after the robot's name, e.g. "has no port assigned for the follower arm".
+// `scope` must match the flag being diagnosed: follower-only surfaces
+// (inference/replay) pass "follower" so the message never blames leader-arm
+// gaps their activity doesn't care about.
+export const robotSetupGap = (
+  robot: RobotRecord,
+  scope: "all" | "follower" = "all",
+): string => {
+  const allArms =
+    robot.mode === "bimanual"
+      ? [
+          { label: "left leader", port: robot.leader_port, config: robot.leader_config, follower: false },
+          { label: "left follower", port: robot.follower_port, config: robot.follower_config, follower: true },
+          { label: "right leader", port: robot.right_leader_port, config: robot.right_leader_config, follower: false },
+          { label: "right follower", port: robot.right_follower_port, config: robot.right_follower_config, follower: true },
+        ]
+      : [
+          { label: "leader", port: robot.leader_port, config: robot.leader_config, follower: false },
+          { label: "follower", port: robot.follower_port, config: robot.follower_config, follower: true },
+        ];
+  const arms = scope === "follower" ? allArms.filter((a) => a.follower) : allArms;
+  const armList = (labels: string[]) =>
+    `${labels.join(" and ")} arm${labels.length > 1 ? "s" : ""}`;
+  const noConfig = arms.filter((a) => !a.config?.trim()).map((a) => a.label);
+  const noPort = arms.filter((a) => !a.port?.trim()).map((a) => a.label);
+  const parts: string[] = [];
+  if (noConfig.length) parts.push(`is missing a calibration for the ${armList(noConfig)}`);
+  if (noPort.length) parts.push(`has no port assigned for the ${armList(noPort)}`);
+  if (parts.length === 0) {
+    // Every field is populated, so the backend must have flagged a referenced
+    // calibration file that no longer exists on disk.
+    return "references a calibration file that no longer exists — reassign or recalibrate";
+  }
+  return parts.join(" and ");
+};
 
 const SELECTED_KEY = "makerlab.selectedRobot";
 
@@ -103,38 +151,37 @@ export const useRobots = () => {
     getSnapshot
   );
 
-  // Re-fetch records when location changes (RobotConfigManager mounts only on Landing,
-  // so this fires on initial mount and on back-navigation to Landing)
-  useEffect(() => {
-    let cancelled = false;
-    const fetchAll = async () => {
-      pendingFetches += 1;
-      setState({ isLoading: true });
-      try {
-        const res = await fetchWithHeaders(`${baseUrl}/robots`);
-        const data = await res.json();
-        if (cancelled) return;
-        const next: Record<string, RobotRecord> = {};
-        for (const r of data.robots ?? []) next[r.name] = r;
-        setState({ records: next });
-        // Drop the selection if the underlying record vanished (deleted from another tab)
-        if (state.selectedName && !(state.selectedName in next)) {
-          setSelectedShared(null);
-        }
-      } catch (e) {
-        if (!cancelled) {
-          console.error("Failed to fetch robots:", e);
-        }
-      } finally {
-        pendingFetches -= 1;
-        setState({ isLoading: pendingFetches > 0 });
+  // Re-fetch the shared store from the backend. Exposed as `refresh` so
+  // surfaces that mutate records without a route change (e.g. closing the
+  // Robot settings dialog, which may have saved ports/cameras/calibrations)
+  // can update every subscriber. Writes go to the module-level store, so a
+  // late response after unmount is harmless.
+  const refresh = useCallback(async () => {
+    pendingFetches += 1;
+    setState({ isLoading: true });
+    try {
+      const res = await fetchWithHeaders(`${baseUrl}/robots`);
+      const data = await res.json();
+      const next: Record<string, RobotRecord> = {};
+      for (const r of data.robots ?? []) next[r.name] = r;
+      setState({ records: next });
+      // Drop the selection if the underlying record vanished (deleted from another tab)
+      if (state.selectedName && !(state.selectedName in next)) {
+        setSelectedShared(null);
       }
-    };
-    fetchAll();
-    return () => {
-      cancelled = true;
-    };
-  }, [baseUrl, fetchWithHeaders, location.key]);
+    } catch (e) {
+      console.error("Failed to fetch robots:", e);
+    } finally {
+      pendingFetches -= 1;
+      setState({ isLoading: pendingFetches > 0 });
+    }
+  }, [baseUrl, fetchWithHeaders]);
+
+  // Re-fetch records when location changes (fires on initial mount and on
+  // back-navigation to a page that mounts a useRobots consumer).
+  useEffect(() => {
+    refresh();
+  }, [refresh, location.key]);
 
   const selectRobot = useCallback((name: string) => {
     setSelectedShared(name);
@@ -286,6 +333,7 @@ export const useRobots = () => {
     selectedRecord,
     availableNames,
     isLoading,
+    refresh,
     selectRobot,
     clearSelection,
     createRobot,

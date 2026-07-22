@@ -37,15 +37,12 @@ export function useCameraStream(deviceId: string, paused: boolean) {
   // Only retry when we're actually in the error state, so an unrelated change
   // (e.g. plugging in a mic) never tears down a healthy stream.
   useEffect(() => {
-    // navigator.mediaDevices only exists in secure contexts (https/localhost);
-    // without it there's no stream to retry anyway.
-    const md = navigator.mediaDevices;
-    if (!md) return;
     const onDeviceChange = () => {
       if (hasErrorRef.current) setRetryKey((k) => k + 1);
     };
-    md.addEventListener("devicechange", onDeviceChange);
-    return () => md.removeEventListener("devicechange", onDeviceChange);
+    navigator.mediaDevices.addEventListener("devicechange", onDeviceChange);
+    return () =>
+      navigator.mediaDevices.removeEventListener("devicechange", onDeviceChange);
   }, []);
 
   useEffect(() => {
@@ -61,7 +58,21 @@ export function useCameraStream(deviceId: string, paused: boolean) {
     const start = async (attempt: number) => {
       try {
         stream = await navigator.mediaDevices.getUserMedia({
-          video: { deviceId: { exact: deviceId } },
+          video: {
+            deviceId: { exact: deviceId },
+            // Ask for 720p30 so Chromium negotiates MJPEG instead of raw
+            // YUYV. On Linux/V4L2 an unconstrained request lands on
+            // YUYV 640x480, and one raw stream costs ~150 Mbps of a
+            // 480 Mbps USB-2 bus — a third concurrent preview then fails
+            // NotReadableError ("could not start video source"). These
+            // cameras can't do 720p@30 uncompressed, so this forces the
+            // ~10x lighter MJPEG, matching what macOS/AVFoundation picks
+            // on its own. `ideal` degrades gracefully on cameras without
+            // 720p (no OverconstrainedError).
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+            frameRate: { ideal: 30 },
+          },
         });
         if (cancelled) {
           stream.getTracks().forEach((t) => t.stop());

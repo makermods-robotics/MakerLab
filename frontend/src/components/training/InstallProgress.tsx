@@ -39,11 +39,11 @@ export function installTitle(state: InstallState, idleTitle: string): string {
 }
 
 export function InstallTitleIcon({ state }: { state: InstallState }) {
-  if (state === "done") return <CheckCircle2 className="w-6 h-6 text-green-400" />;
-  if (state === "error") return <XCircle className="w-6 h-6 text-red-400" />;
+  if (state === "done") return <CheckCircle2 className="w-6 h-6 text-ok" />;
+  if (state === "error") return <XCircle className="w-6 h-6 text-destructive" />;
   if (state === "installing")
-    return <Loader2 className="w-6 h-6 text-sky-400 animate-spin" />;
-  return <AlertTriangle className="w-6 h-6 text-amber-400" />;
+    return <Loader2 className="w-6 h-6 text-info animate-spin" />;
+  return <AlertTriangle className="w-6 h-6 text-warn" />;
 }
 
 export const InstallProgress: React.FC<InstallProgressProps> = ({
@@ -77,16 +77,16 @@ export const InstallProgress: React.FC<InstallProgressProps> = ({
     <>
       {state === "idle" && (
         <>
-          <p className="text-slate-300">{idleDescription}</p>
+          <p className="text-muted-foreground">{idleDescription}</p>
           <div className="flex items-center gap-2">
-            <code className="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 font-mono">
+            <code className="flex-1 bg-muted border border-border rounded-lg px-3 py-2 text-sm text-foreground font-mono">
               {installHint}
             </code>
             <Button
               variant="ghost"
               size="icon"
               onClick={handleCopy}
-              className="text-slate-400 hover:text-white"
+              className="text-muted-foreground hover:text-foreground"
               aria-label="Copy install command"
             >
               <Copy className="w-4 h-4" />
@@ -94,7 +94,7 @@ export const InstallProgress: React.FC<InstallProgressProps> = ({
           </div>
           <Button
             onClick={onInstall}
-            className="bg-green-500 hover:bg-green-600 text-white font-semibold"
+            className="bg-primary hover:bg-primary/90 text-primary-foreground font-semibold"
           >
             Install Now
           </Button>
@@ -102,9 +102,9 @@ export const InstallProgress: React.FC<InstallProgressProps> = ({
       )}
 
       {state === "installing" && (
-        <p className="text-slate-300">
+        <p className="text-muted-foreground">
           Installing{" "}
-          <code className="px-1 py-0.5 rounded bg-slate-900 text-sky-300">
+          <code className="px-1 py-0.5 rounded bg-muted text-info">
             {packageName}
           </code>
           . This usually takes about 10 seconds.
@@ -112,15 +112,15 @@ export const InstallProgress: React.FC<InstallProgressProps> = ({
       )}
 
       {state === "done" && (
-        <div className="space-y-3 text-slate-300">{doneDescription}</div>
+        <div className="space-y-3 text-muted-foreground">{doneDescription}</div>
       )}
 
       {state === "error" && (
         <>
-          <p className="text-red-300">{error || "Install failed."}</p>
+          <p className="text-destructive">{error || "Install failed."}</p>
           <Button
             onClick={onRetry}
-            className="bg-slate-700 hover:bg-slate-600 text-white"
+            className="bg-secondary hover:bg-secondary/80 text-secondary-foreground"
           >
             Try again
           </Button>
@@ -130,7 +130,7 @@ export const InstallProgress: React.FC<InstallProgressProps> = ({
       {state === "error" && logs.length > 0 && (
         <div
           ref={logBoxRef}
-          className="bg-slate-900 rounded-lg p-3 h-48 overflow-y-auto font-mono text-xs border border-slate-700 text-slate-300 whitespace-pre-wrap break-words"
+          className="bg-muted rounded-lg p-3 h-48 overflow-y-auto font-mono text-xs border border-border text-muted-foreground whitespace-pre-wrap break-words"
         >
           {logs.map((log, idx) => (
             <div key={idx}>{log.message}</div>

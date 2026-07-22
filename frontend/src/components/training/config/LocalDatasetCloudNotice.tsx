@@ -47,16 +47,16 @@ const LocalDatasetCloudNotice: React.FC<LocalDatasetCloudNoticeProps> = ({
 
   if (offline) {
     return (
-      <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-4 text-sm text-amber-100">
+      <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-4 text-sm text-amber-700 dark:text-amber-100">
         <div className="flex items-start gap-2">
-          <WifiOff className="w-4 h-4 mt-0.5 shrink-0 text-amber-300" />
+          <WifiOff className="w-4 h-4 mt-0.5 shrink-0 text-amber-600 dark:text-amber-300" />
           <div>
             <div className="font-semibold">
               This dataset is only on this machine
             </div>
-            <p className="mt-1 text-amber-200/80">
+            <p className="mt-1 text-amber-700/80 dark:text-amber-200/80">
               Hugging Face Cloud trains from the Hub, but the server is in
-              offline mode (<code className="text-amber-100">HF_HUB_OFFLINE</code>
+              offline mode (<code className="text-amber-700 dark:text-amber-100">HF_HUB_OFFLINE</code>
               ), so <span className="font-medium">{repoId}</span> can't be
               uploaded. Switch off offline mode, or run this training locally.
             </p>
@@ -67,14 +67,14 @@ const LocalDatasetCloudNotice: React.FC<LocalDatasetCloudNoticeProps> = ({
   }
 
   return (
-    <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-4 text-sm text-amber-100">
+    <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-4 text-sm text-amber-700 dark:text-amber-100">
       <div className="flex items-start gap-2">
-        <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0 text-amber-300" />
+        <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0 text-amber-600 dark:text-amber-300" />
         <div className="w-full">
           <div className="font-semibold">
             This dataset is only on this machine
           </div>
-          <p className="mt-1 text-amber-200/80">
+          <p className="mt-1 text-amber-700/80 dark:text-amber-200/80">
             Hugging Face Cloud trains from the Hub, so{" "}
             <span className="font-medium">{repoId}</span>
             {sizeLabel ? ` (~${sizeLabel})` : ""} will be uploaded as a{" "}
@@ -82,7 +82,7 @@ const LocalDatasetCloudNotice: React.FC<LocalDatasetCloudNoticeProps> = ({
             starts.
           </p>
           {uploading ? (
-            <p className="mt-2 flex items-center gap-2 text-amber-100">
+            <p className="mt-2 flex items-center gap-2 text-amber-700 dark:text-amber-100">
               <Loader2 className="w-4 h-4 animate-spin" />
               Uploading to the Hub… this can take a few minutes for large
               datasets.
@@ -90,7 +90,7 @@ const LocalDatasetCloudNotice: React.FC<LocalDatasetCloudNoticeProps> = ({
           ) : errorMessage ? (
             <p className="mt-2 text-red-300">{errorMessage}</p>
           ) : (
-            <p className="mt-2 flex items-center gap-2 text-amber-200/70">
+            <p className="mt-2 flex items-center gap-2 text-amber-700/70 dark:text-amber-200/70">
               <UploadCloud className="w-4 h-4" />
               Use “Upload &amp; start training” below to upload, then launch.
             </p>

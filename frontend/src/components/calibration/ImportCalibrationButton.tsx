@@ -111,19 +111,19 @@ const ImportCalibrationButton: React.FC<ImportCalibrationButtonProps> = ({
       <Button
         size="icon"
         variant="ghost"
-        className="h-7 w-7 text-slate-300 hover:text-white"
+        className="shrink-0 text-muted-foreground hover:text-foreground"
         onClick={pickFile}
         aria-label={`Import ${sideLabel} calibration`}
         title={`Import ${sideLabel} calibration`}
       >
-        <Upload className="w-4 h-4" />
+        <Upload className="h-4 w-4" />
       </Button>
 
       <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="bg-slate-900 border-slate-800 text-white">
+        <DialogContent>
           <DialogHeader>
             <DialogTitle>Import {sideLabel} calibration</DialogTitle>
-            <DialogDescription className="text-slate-400">
+            <DialogDescription className="text-muted-foreground">
               Saves the uploaded calibration as a new {sideLabel} config. Won't
               overwrite an existing name — pick a different one if it's taken.
             </DialogDescription>
@@ -142,19 +142,16 @@ const ImportCalibrationButton: React.FC<ImportCalibrationButtonProps> = ({
             }}
             autoFocus
             placeholder="Config name"
-            className="bg-slate-800 border-slate-700 text-white"
           />
-          {error && <p className="text-sm text-red-400">{error}</p>}
+          {error && <p className="text-sm text-destructive">{error}</p>}
           <DialogFooter className="flex gap-2 justify-end">
             <Button
               variant="outline"
-              className="border-slate-600 text-slate-700 dark:text-slate-300"
               onClick={() => setOpen(false)}
             >
               Cancel
             </Button>
             <Button
-              className="bg-blue-600 hover:bg-blue-700 text-white"
               disabled={busy || !name.trim()}
               onClick={submit}
             >

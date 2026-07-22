@@ -71,3 +71,6 @@ HTTPS_SETUP.md
 
 # Self-signed dev certs (regenerate per HTTPS_SETUP.md)
 certs/
+
+# Local design draft (pending review)
+reference/openbooth-abstract.svg

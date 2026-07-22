@@ -13,12 +13,12 @@ const TrainingHeader: React.FC = () => {
           variant="ghost"
           size="icon"
           onClick={() => navigate('/')}
-          className="text-slate-400 hover:bg-slate-800 hover:text-white rounded-lg"
+          className="text-muted-foreground hover:bg-muted hover:text-foreground rounded-lg"
         >
           <ArrowLeft className="w-5 h-5" />
         </Button>
         <Logo />
-        <h1 className="font-bold text-white text-2xl">Training</h1>
+        <h1 className="font-bold text-foreground text-2xl">Training</h1>
       </div>
     </div>
   );

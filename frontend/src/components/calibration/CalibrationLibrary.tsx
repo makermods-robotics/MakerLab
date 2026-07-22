@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { Download, Pencil, Trash2 } from "lucide-react";
+import { Pencil, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -53,18 +53,28 @@ interface CalibrationLibraryProps {
   /** Called after a successful reassignment so the parent can refetch the robot. */
   onAssigned?: () => void | Promise<void>;
   /**
+   * Called after an operation that changes the FILE LIBRARY itself (rename /
+   * delete / import). Each arm row renders its own CalibrationLibrary with a
+   * private config list, so without this the SIBLING instances (e.g. the other
+   * same-side arm in bimanual mode) keep showing stale filenames — the parent
+   * should bump `reloadToken` here to refresh every instance.
+   */
+  onLibraryChanged?: () => void;
+  /**
    * Bump to force a re-fetch of the saved-config list — e.g. after a
-   * calibration completes and may have written a brand-new named file.
+   * calibration completes and may have written a brand-new named file, or a
+   * sibling instance renamed/deleted/imported one (see onLibraryChanged).
    */
   reloadToken?: number;
 }
 
 /**
- * Per-side calibration "library" as a dropdown: pick a saved config, then
- * Download, Rename, or Delete it, or Import a new one. Delete acts on the
- * selected config (not per dropdown entry, which would clash with
- * swap-on-select); deleting an in-use config unassigns it server-side and the
- * affected arm returns to "needs calibration".
+ * Per-side calibration "library" as a dropdown: picking a saved config
+ * assigns it to this robot's slot immediately (no separate "Use for this
+ * robot" confirmation), and the selection can then be Renamed, Deleted, or
+ * supplemented via Import. Delete acts on the selected config (not per
+ * dropdown entry); deleting an in-use config unassigns it server-side and
+ * the affected arm returns to "needs calibration".
  */
 const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
   device,
@@ -74,6 +84,7 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
   excludeConfig,
   excludeConfigField,
   onAssigned,
+  onLibraryChanged,
   reloadToken,
 }) => {
   const { baseUrl, fetchWithHeaders } = useApi();
@@ -128,39 +139,12 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
       if (assignedChanged && assignedInList) return assignedConfig;
       if (prev && configs.some((c) => c.name === prev)) return prev;
       if (assignedInList) return assignedConfig;
-      return configs[0]?.name ?? null;
+      // Nothing assigned: show the placeholder. Selecting now MEANS assigning,
+      // so defaulting to an arbitrary first config would read as a choice the
+      // user never made.
+      return null;
     });
   }, [configs, assignedConfig]);
-
-  const download = useCallback(
-    async (name: string) => {
-      try {
-        const res = await fetchWithHeaders(
-          `${baseUrl}/calibration-configs/${device}/${encodeURIComponent(name)}/download`,
-        );
-        if (!res.ok) {
-          toast({ title: "Download failed", variant: "destructive" });
-          return;
-        }
-        const blob = await res.blob();
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = `${name}.json`;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        URL.revokeObjectURL(url);
-      } catch (e) {
-        toast({
-          title: "Download failed",
-          description: String(e),
-          variant: "destructive",
-        });
-      }
-    },
-    [baseUrl, fetchWithHeaders, device, toast],
-  );
 
   const confirmDelete = useCallback(async () => {
     const name = pendingDelete;
@@ -189,6 +173,8 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
           // Refetch the robot so the arm's status flips to uncalibrated.
           await onAssigned?.();
         }
+        // Refresh sibling arm rows' config lists (see onLibraryChanged doc).
+        onLibraryChanged?.();
       } else {
         toast({
           title: "Delete failed",
@@ -203,74 +189,79 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
         variant: "destructive",
       });
     }
-  }, [baseUrl, fetchWithHeaders, device, pendingDelete, toast, onAssigned]);
+  }, [baseUrl, fetchWithHeaders, device, pendingDelete, toast, onAssigned, onLibraryChanged]);
 
-  const assignToRobot = useCallback(async () => {
-    if (!selected || !robotName) return;
-    setAssigning(true);
-    try {
-      const field =
-        configField ??
-        (device === "teleop" ? "leader_config" : "follower_config");
-      // If the picked config is the one the counterpart same-side slot holds,
-      // SWAP: this slot takes `selected`, the counterpart takes this slot's
-      // current config. One upsert of both fields — the backend's
-      // config-slot-conflict guard evaluates the merged record, so a two-slot
-      // swap of distinct configs passes. Otherwise a plain single-field assign.
-      const isSwap =
-        !!excludeConfig &&
-        !!excludeConfigField &&
-        selected === excludeConfig &&
-        excludeConfigField !== field;
-      const body = isSwap
-        ? { [field]: selected, [excludeConfigField as string]: assignedConfig ?? "" }
-        : { [field]: selected };
-      const res = await fetchWithHeaders(
-        `${baseUrl}/robots/${encodeURIComponent(robotName)}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-        },
-      );
-      const data = await res.json().catch(() => ({}));
-      if (res.ok && data.status === "success") {
-        toast({
-          title: isSwap ? "Configs swapped" : "Config assigned",
-          description: isSwap
-            ? `"${selected}" is now used for this arm; the other arm took "${assignedConfig || "(none)"}".`
-            : `"${selected}" is now used for this robot.`,
-        });
-        await onAssigned?.();
-      } else {
+  // Assign a config to this robot's slot. Called straight from the dropdown's
+  // onValueChange — picking a config IS choosing it for this robot; there is
+  // no separate "Use for this robot" confirmation step.
+  const assignToRobot = useCallback(
+    async (name: string) => {
+      if (!name || !robotName) return;
+      setAssigning(true);
+      try {
+        const field =
+          configField ??
+          (device === "teleop" ? "leader_config" : "follower_config");
+        // If the picked config is the one the counterpart same-side slot holds,
+        // SWAP: this slot takes `name`, the counterpart takes this slot's
+        // current config. One upsert of both fields — the backend's
+        // config-slot-conflict guard evaluates the merged record, so a two-slot
+        // swap of distinct configs passes. Otherwise a plain single-field assign.
+        const isSwap =
+          !!excludeConfig &&
+          !!excludeConfigField &&
+          name === excludeConfig &&
+          excludeConfigField !== field;
+        const body = isSwap
+          ? { [field]: name, [excludeConfigField as string]: assignedConfig ?? "" }
+          : { [field]: name };
+        const res = await fetchWithHeaders(
+          `${baseUrl}/robots/${encodeURIComponent(robotName)}`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          },
+        );
+        const data = await res.json().catch(() => ({}));
+        if (res.ok && data.status === "success") {
+          toast({
+            title: isSwap ? "Configs swapped" : "Config assigned",
+            description: isSwap
+              ? `"${name}" is now used for this arm; the other arm took "${assignedConfig || "(none)"}".`
+              : `"${name}" is now used for this robot.`,
+          });
+          await onAssigned?.();
+        } else {
+          toast({
+            title: "Assign failed",
+            description: data.message,
+            variant: "destructive",
+          });
+        }
+      } catch (e) {
         toast({
           title: "Assign failed",
-          description: data.message,
+          description: String(e),
           variant: "destructive",
         });
+      } finally {
+        setAssigning(false);
       }
-    } catch (e) {
-      toast({
-        title: "Assign failed",
-        description: String(e),
-        variant: "destructive",
-      });
-    } finally {
-      setAssigning(false);
-    }
-  }, [
-    selected,
-    robotName,
-    device,
-    configField,
-    assignedConfig,
-    excludeConfig,
-    excludeConfigField,
-    baseUrl,
-    fetchWithHeaders,
-    toast,
-    onAssigned,
-  ]);
+    },
+    [
+      robotName,
+      device,
+      configField,
+      assignedConfig,
+      excludeConfig,
+      excludeConfigField,
+      baseUrl,
+      fetchWithHeaders,
+      toast,
+      onAssigned,
+    ],
+  );
 
   const openRename = useCallback(() => {
     if (!selected) return;
@@ -312,6 +303,9 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
         setSelected(data.name);
         // A robot referencing this config was repointed server-side; refetch it.
         await onAssigned?.();
+        // Sibling arm rows hold their own (now stale) config lists — tell the
+        // parent so it bumps reloadToken and every instance re-fetches.
+        onLibraryChanged?.();
       } else {
         // 409/400 keep the dialog open with the message for a retry.
         setRenameError(data.message || "Rename failed.");
@@ -330,50 +324,48 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
     toast,
     refresh,
     onAssigned,
+    onLibraryChanged,
   ]);
 
   const empty = configs.length === 0;
-  const canAssign = !!robotName && !!selected && selected !== assignedConfig;
-  // True when assigning the selected config would swap it with the counterpart
-  // same-side slot (used only to label the button — the swap is done in
-  // assignToRobot).
-  const willSwap =
-    !!excludeConfig &&
-    !!excludeConfigField &&
-    selected === excludeConfig &&
-    excludeConfigField !==
-      (configField ?? (device === "teleop" ? "leader_config" : "follower_config"));
 
   return (
     <div className="mt-1 ml-6 space-y-1">
       <div className="flex items-center gap-1">
         <Select
           value={selected ?? ""}
-          onValueChange={setSelected}
-          disabled={empty}
+          onValueChange={(name) => {
+            setSelected(name);
+            // Selecting IS choosing: assign immediately, no second
+            // confirmation button. Re-picking the in-use config is a no-op.
+            if (robotName && name && name !== assignedConfig) {
+              void assignToRobot(name);
+            }
+          }}
+          disabled={empty || assigning}
         >
-          <SelectTrigger className="h-8 flex-1 bg-slate-800 border-slate-700 text-white">
+          <SelectTrigger className="flex-1">
             <SelectValue
               placeholder={empty ? "No saved configs" : "Select a config"}
             />
           </SelectTrigger>
-          <SelectContent className="bg-slate-800 border-slate-700 text-white">
+          <SelectContent>
             {configs.map((c) => {
               // The counterpart same-side slot's config stays selectable now:
               // picking it swaps the two slots' assignments (see assignToRobot).
               const usedByOtherArm =
                 !!excludeConfig && c.name === excludeConfig;
               return (
-                <SelectItem key={c.name} value={c.name} className="text-white">
+                <SelectItem key={c.name} value={c.name}>
                   <span className="flex items-center gap-2">
                     {c.name}
                     {c.name === assignedConfig && (
-                      <span className="text-[10px] uppercase tracking-wide text-green-400 border border-green-500/40 rounded px-1">
+                      <span className="text-[10px] uppercase tracking-wide text-ok border border-ok/40 rounded px-1">
                         in use
                       </span>
                     )}
                     {usedByOtherArm && (
-                      <span className="text-[10px] uppercase tracking-wide text-amber-400 border border-amber-500/40 rounded px-1">
+                      <span className="rounded border border-warn/40 px-1 text-[10px] uppercase tracking-wide text-warn">
                         other arm
                       </span>
                     )}
@@ -387,66 +379,41 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
         <Button
           size="icon"
           variant="ghost"
-          className="h-8 w-8 text-slate-300 hover:text-white"
-          disabled={!selected}
-          onClick={() => selected && download(selected)}
-          aria-label="Download selected config"
-          title="Download"
-        >
-          <Download className="w-4 h-4" />
-        </Button>
-        <Button
-          size="icon"
-          variant="ghost"
-          className="h-8 w-8 text-slate-300 hover:text-white"
+          className="shrink-0 text-muted-foreground hover:text-foreground"
           disabled={!selected}
           onClick={openRename}
           aria-label="Rename selected config"
           title="Rename"
         >
-          <Pencil className="w-4 h-4" />
+          <Pencil className="h-4 w-4" />
         </Button>
         <Button
           size="icon"
           variant="ghost"
-          className="h-8 w-8 text-slate-300 hover:text-red-400"
+          className="shrink-0 text-muted-foreground hover:text-destructive"
           disabled={!selected}
           onClick={() => selected && setPendingDelete(selected)}
           aria-label="Delete selected config"
           title="Delete"
         >
-          <Trash2 className="w-4 h-4" />
+          <Trash2 className="h-4 w-4" />
         </Button>
         <ImportCalibrationButton
           device={device}
           onImported={async (name) => {
             await refresh();
             setSelected(name);
+            // Refresh sibling arm rows' config lists (see onLibraryChanged doc).
+            onLibraryChanged?.();
           }}
         />
       </div>
 
-      {canAssign && (
-        <Button
-          size="sm"
-          variant="outline"
-          className="w-full h-7 border-blue-500/50 text-blue-700 hover:text-blue-800 dark:text-blue-300 hover:bg-blue-900/20 dark:hover:text-blue-200"
-          disabled={assigning}
-          onClick={assignToRobot}
-        >
-          {assigning
-            ? "Assigning…"
-            : willSwap
-              ? `Swap in "${selected}" (other arm takes "${assignedConfig || "none"}")`
-              : `Use "${selected}" for this robot`}
-        </Button>
-      )}
-
       <Dialog open={renameOpen} onOpenChange={setRenameOpen}>
-        <DialogContent className="bg-slate-900 border-slate-800 text-white">
+        <DialogContent>
           <DialogHeader>
             <DialogTitle>Rename config</DialogTitle>
-            <DialogDescription className="text-slate-400">
+            <DialogDescription className="text-muted-foreground">
               Renames the calibration file. Robots using it are updated
               automatically. Won't overwrite an existing name.
             </DialogDescription>
@@ -465,19 +432,16 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
             }}
             autoFocus
             placeholder="New name"
-            className="bg-slate-800 border-slate-700 text-white"
           />
-          {renameError && <p className="text-sm text-red-400">{renameError}</p>}
+          {renameError && <p className="text-sm text-destructive">{renameError}</p>}
           <DialogFooter className="flex gap-2 justify-end">
             <Button
               variant="outline"
-              className="border-slate-600 text-slate-700 dark:text-slate-300"
               onClick={() => setRenameOpen(false)}
             >
               Cancel
             </Button>
             <Button
-              className="bg-blue-600 hover:bg-blue-700 text-white"
               disabled={
                 renaming ||
                 !renameValue.trim() ||
@@ -495,10 +459,10 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
         open={pendingDelete !== null}
         onOpenChange={(o) => !o && setPendingDelete(null)}
       >
-        <DialogContent className="bg-slate-900 border-slate-800 text-white">
+        <DialogContent>
           <DialogHeader>
             <DialogTitle>Delete config "{pendingDelete}"?</DialogTitle>
-            <DialogDescription className="text-slate-400">
+            <DialogDescription className="text-muted-foreground">
               This permanently deletes the calibration file — you'd have to
               recalibrate the arm to recreate it. Any robot using it will need
               calibration before its next use.
@@ -507,13 +471,12 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
           <DialogFooter className="flex gap-2 justify-end">
             <Button
               variant="outline"
-              className="border-slate-600 text-slate-700 dark:text-slate-300"
               onClick={() => setPendingDelete(null)}
             >
               Cancel
             </Button>
             <Button
-              className="bg-red-600 hover:bg-red-700 text-white"
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
               onClick={confirmDelete}
             >
               Delete

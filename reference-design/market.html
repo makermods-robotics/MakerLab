@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Market — MakerLab</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/shad.css">
+<style>
+  .market-search { width: min(300px, 100%); }
+  .market-tabs { margin-bottom: 16px; }
+  .market-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+  .market-card { padding: 0; overflow: hidden; }
+  .market-card .media {
+    height: 130px;
+    min-height: 130px;
+    border: 0;
+    border-bottom: 1px dashed var(--border);
+    border-radius: calc(var(--radius) + 4px) calc(var(--radius) + 4px) 0 0;
+  }
+  .market-card-body { padding: 14px 16px 16px; display: grid; gap: 10px; }
+  .market-card h2 { font-size: 16px; font-weight: 600; margin-bottom: 0; }
+  .market-tags { display: flex; flex-wrap: wrap; gap: 6px; }
+  .market-meta { color: var(--muted-foreground); font-size: 12.5px; }
+  .market-foot { display: flex; justify-content: flex-end; margin-top: 2px; }
+  .market-note { color: var(--muted-foreground); font-size: 12px; margin-top: 18px; }
+  @media (max-width: 800px) {
+    .page-head { align-items: stretch; flex-direction: column; }
+    .market-search { width: 100%; }
+    .market-tabs { display: flex; width: 100%; }
+    .market-tabs .tabs-trigger { flex: 1; }
+    .market-grid { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body data-stage="market">
+
+<main class="page">
+  <div class="page-head">
+    <div>
+      <h1>Market</h1>
+      <p class="gloss">skills and data for your robots — a skill bundles a dataset with its trained policies</p>
+    </div>
+    <input class="input market-search" placeholder="Search skills, datasets, policies" aria-label="Search skills, datasets, policies">
+  </div>
+
+  <div class="tabs-list market-tabs" aria-label="Market filters">
+    <button class="tabs-trigger active" data-filter="all">All</button>
+    <button class="tabs-trigger" data-filter="skill">Skills</button>
+    <button class="tabs-trigger" data-filter="dataset">Datasets</button>
+    <button class="tabs-trigger" data-filter="policy">Policies</button>
+  </div>
+
+  <section class="market-grid" aria-label="Market listings">
+    <article class="card market-card" data-kind="skill">
+      <div class="media" data-label="task preview"></div>
+      <div class="market-card-body">
+        <h2>fold-sock</h2>
+        <div class="market-tags"><span class="badge secondary">120 ep</span><span class="badge outline">ACT</span></div>
+        <p class="market-meta">SO-101 · single · by Ada · 1.2k installs</p>
+        <div class="market-foot"><button class="btn" data-install>Get</button></div>
+      </div>
+    </article>
+
+    <article class="card market-card" data-kind="skill">
+      <div class="media" data-label="task preview"></div>
+      <div class="market-card-body">
+        <h2>pick-cube</h2>
+        <div class="market-tags"><span class="badge secondary">240 ep</span><span class="badge outline">SMOLVLA</span></div>
+        <p class="market-meta">SO-101 · single · by Noor · 3.8k installs</p>
+        <div class="market-foot"><button class="btn outline" data-install>Installed ✓</button></div>
+      </div>
+    </article>
+
+    <article class="card market-card" data-kind="dataset">
+      <div class="media" data-label="task preview"></div>
+      <div class="market-card-body">
+        <h2>stack-blocks</h2>
+        <div class="market-tags"><span class="badge outline">dataset</span></div>
+        <p class="market-meta">SO-101 · single · by Min · 940 installs</p>
+        <div class="market-foot"><button class="btn" data-install>Get</button></div>
+      </div>
+    </article>
+
+    <article class="card market-card" data-kind="policy">
+      <div class="media" data-label="task preview"></div>
+      <div class="market-card-body">
+        <h2>open-drawer</h2>
+        <div class="market-tags"><span class="badge outline">policy</span></div>
+        <p class="market-meta">SO-101 · single · by Kepler · 2.4k installs</p>
+        <div class="market-foot"><button class="btn" data-install>Get</button></div>
+      </div>
+    </article>
+
+    <article class="card market-card" data-kind="dataset">
+      <div class="media" data-label="task preview"></div>
+      <div class="market-card-body">
+        <h2>pour-cup</h2>
+        <div class="market-tags"><span class="badge outline">dataset</span></div>
+        <p class="market-meta">SO-101 · single · by Rhea · 680 installs</p>
+        <div class="market-foot"><button class="btn" data-install>Get</button></div>
+      </div>
+    </article>
+
+    <article class="card market-card" data-kind="policy">
+      <div class="media" data-label="task preview"></div>
+      <div class="market-card-body">
+        <h2>sort-bins</h2>
+        <div class="market-tags"><span class="badge outline">policy</span></div>
+        <p class="market-meta">SO-101 · single · by Tessa · 1.7k installs</p>
+        <div class="market-foot"><button class="btn" data-install>Get</button></div>
+      </div>
+    </article>
+  </section>
+
+  <p class="market-note">Installed datasets appear in Collect. Installed policies appear in Train &amp; Deploy.</p>
+</main>
+
+<script src="assets/shad.js"></script>
+<script>
+  const tabs = document.querySelectorAll('[data-filter]');
+  const cards = document.querySelectorAll('[data-kind]');
+
+  tabs.forEach((tab) => {
+    tab.addEventListener('click', () => {
+      const filter = tab.dataset.filter;
+      tabs.forEach((item) => item.classList.toggle('active', item === tab));
+      cards.forEach((card) => {
+        card.hidden = filter !== 'all' && card.dataset.kind !== filter;
+      });
+    });
+  });
+
+  document.querySelectorAll('[data-install]').forEach((button) => {
+    button.addEventListener('click', () => {
+      button.className = 'btn outline';
+      button.textContent = 'Installed ✓';
+    });
+  });
+</script>
+</body>
+</html>

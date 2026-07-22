@@ -39,11 +39,21 @@ def test_recording_status_handler_exposes_state_fields() -> None:
     assert "available_controls" in result
 
 
-def test_handle_stop_recording_when_idle_returns_dict(tmp_lerobot_home) -> None:
-    from makerlab.record import handle_stop_recording
+def test_recording_status_surfaces_preparing_substeps(monkeypatch) -> None:
+    """record_with_web_events refines the coarse "preparing" window into named
+    substeps ("connecting_robot", "connecting_teleop") by writing current_phase.
+    The status handler must pass those through verbatim so the UI can name the
+    substep — verified here without touching hardware by driving the module
+    global the worker sets."""
+    from makerlab import record
 
-    result = handle_stop_recording()
-    assert isinstance(result, dict)
+    for substep in ("connecting_robot", "connecting_teleop"):
+        monkeypatch.setattr(record, "current_phase", substep)
+        # An active session with no config still surfaces current_phase.
+        result = record.handle_recording_status()
+        assert result["current_phase"] == substep
+        # A preparing substep is not a completed/errored session.
+        assert result["session_ended"] is False
 
 
 class _FakeWorker:
@@ -164,7 +174,10 @@ def test_create_record_config_pins_dshow_on_windows(monkeypatch: pytest.MonkeyPa
     from lerobot.cameras.configs import Cv2Backends
 
     monkeypatch.setattr("platform.system", lambda: "Windows")
-    monkeypatch.setattr(record, "setup_calibration_files", lambda leader, follower: ("leader", "follower"))
+    monkeypatch.setattr(
+        "makerlab.utils.robot_factory.setup_calibration_files",
+        lambda leader, follower: ("leader", "follower"),
+    )
 
     request = record.RecordingRequest(
         leader_port="COM_LEADER",
@@ -197,7 +210,7 @@ def test_create_record_config_builds_biso_for_bimanual(monkeypatch: pytest.Monke
         )
         return (f"/staging/{base}/leader", f"/staging/{base}/follower", base)
 
-    monkeypatch.setattr(record, "stage_bimanual_calibrations", _fake_stage)
+    monkeypatch.setattr("makerlab.utils.robot_factory.stage_bimanual_calibrations", _fake_stage)
 
     # Config names are ARBITRARY — no "<base>_left/right" convention required.
     request = record.RecordingRequest(
@@ -238,8 +251,31 @@ def test_build_camera_configs_uses_default_backend_when_unset() -> None:
     configs = _build_camera_configs(cameras, Cv2Backends.AVFOUNDATION)
 
     assert configs["cam"].backend == Cv2Backends.AVFOUNDATION
-    assert configs["cam"].fourcc is None
+    # fourcc defaults to MJPG (compressed) to avoid USB isochronous-bandwidth
+    # exhaustion on multi-camera Linux rigs; an explicit choice still wins.
+    assert configs["cam"].fourcc == "MJPG"
     assert configs["cam"].index_or_path == 0
+
+
+def test_build_camera_configs_defaults_fourcc_to_mjpg() -> None:
+    from lerobot.cameras.configs import Cv2Backends
+    from makerlab.record import _DEFAULT_FOURCC, _build_camera_configs
+
+    cameras = {"cam": {"type": "opencv", "camera_index": 0}}
+    configs = _build_camera_configs(cameras, Cv2Backends.ANY)
+
+    assert _DEFAULT_FOURCC == "MJPG"
+    assert configs["cam"].fourcc == "MJPG"
+
+
+def test_build_camera_configs_explicit_fourcc_overrides_mjpg_default() -> None:
+    from lerobot.cameras.configs import Cv2Backends
+    from makerlab.record import _build_camera_configs
+
+    cameras = {"cam": {"type": "opencv", "camera_index": 0, "fourcc": "YUYV"}}
+    configs = _build_camera_configs(cameras, Cv2Backends.ANY)
+
+    assert configs["cam"].fourcc == "YUYV"
 
 
 def test_build_camera_configs_passes_fourcc_through() -> None:
@@ -355,6 +391,129 @@ def test_discard_empty_dataset_invalidates_hub_status(tmp_lerobot_home) -> None:
 
     with datasets._HUB_STATUS_LOCK:
         assert "tester/probed_20260703" not in datasets._HUB_STATUS_CACHE
+
+
+# ---------------------------------------------------------------------------
+# Quit-without-saving (discard) — _discard_session_dataset + the stop handler.
+# The resume-protection test comes FIRST and is the load-bearing data-safety
+# guarantee: a quit must never delete a pre-existing (resume) dataset.
+# ---------------------------------------------------------------------------
+
+
+def test_discard_session_dataset_never_touches_resume_session(tmp_lerobot_home) -> None:
+    """A QUIT on a RESUME session must NEVER delete the pre-existing dataset —
+    lerobot already committed its earlier episodes, so they must survive. The
+    resume guard is checked first; this is the load-bearing safety property."""
+    import makerlab.record as record
+
+    target = _make_dataset_dir(tmp_lerobot_home, "tester/preexisting", total_episodes=5)
+
+    removed = record._discard_session_dataset("tester/preexisting", resume=True)
+
+    assert removed is False
+    assert target.exists()  # every already-saved episode is intact
+
+
+def test_discard_session_dataset_removes_fresh_dir_with_episodes(tmp_lerobot_home) -> None:
+    """A QUIT on a FRESH session removes the whole stamped directory even when
+    episodes were saved earlier THIS session — quit discards everything the
+    session created (unlike _discard_empty_dataset, which keeps a non-empty dir)."""
+    import makerlab.record as record
+
+    target = _make_dataset_dir(tmp_lerobot_home, "tester/quit_20260708_120000", total_episodes=3)
+    assert target.exists()
+
+    removed = record._discard_session_dataset("tester/quit_20260708_120000", resume=False)
+
+    assert removed is True
+    assert not target.exists()
+
+
+def test_discard_session_dataset_rejects_path_traversal(tmp_lerobot_home) -> None:
+    """A repo_id escaping the cache root is refused — no deletion outside cache."""
+    import makerlab.record as record
+
+    removed = record._discard_session_dataset("../../etc", resume=False)
+    assert removed is False
+
+
+def test_discard_session_dataset_invalidates_hub_status(tmp_lerobot_home) -> None:
+    """Discarding a quit session drops any cached Hub-existence probe for it."""
+    import makerlab.datasets as datasets
+    import makerlab.record as record
+
+    _make_dataset_dir(tmp_lerobot_home, "tester/quit_probed", total_episodes=2)
+    with datasets._HUB_STATUS_LOCK:
+        datasets._HUB_STATUS_CACHE["tester/quit_probed"] = "local_only"
+
+    assert record._discard_session_dataset("tester/quit_probed", resume=False) is True
+
+    with datasets._HUB_STATUS_LOCK:
+        assert "tester/quit_probed" not in datasets._HUB_STATUS_CACHE
+
+
+def test_handle_stop_recording_discard_arms_flag_and_stop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Quit stop (discard=True) on a live session arms discard_requested, sets
+    the same stop events a Done stop does, and echoes discard in the response."""
+    import makerlab.record as record
+
+    events = {"stop_recording": False, "exit_early": False}
+    monkeypatch.setattr(record, "releasing", False)
+    monkeypatch.setattr(record, "recording_active", True)
+    monkeypatch.setattr(record, "recording_events", events)
+    monkeypatch.setattr(record, "discard_requested", False)
+
+    result = record.handle_stop_recording(discard=True)
+
+    assert result["success"] is True
+    assert result["discard"] is True
+    assert record.discard_requested is True
+    assert events["stop_recording"] is True
+    assert events["exit_early"] is True
+    assert "without saving" in result["message"].lower()
+
+
+def test_handle_stop_recording_discard_ignored_when_idle(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A discard stop against no active session is refused and never arms the
+    discard flag — an idle/mutex miss can't schedule a dataset deletion."""
+    import makerlab.record as record
+
+    monkeypatch.setattr(record, "releasing", False)
+    monkeypatch.setattr(record, "recording_active", False)
+    monkeypatch.setattr(record, "recording_events", None)
+    monkeypatch.setattr(record, "discard_requested", False)
+
+    result = record.handle_stop_recording(discard=True)
+
+    assert result["success"] is False
+    assert record.discard_requested is False
+
+
+def test_worker_quit_discards_fresh_dataset_with_saved_episodes(
+    monkeypatch: pytest.MonkeyPatch, tmp_lerobot_home
+) -> None:
+    """End-to-end through the real worker: a fresh session whose user quit
+    (discard_requested set) has its whole stamped directory removed in the
+    finally block, even with episodes saved, and reports discarded_empty."""
+    import makerlab.record as record
+
+    def _work_then_quit(cfg, events, **kwargs):
+        # Create the dataset dir at the stamped repo id the session recorded into,
+        # then simulate a completed loop with saved episodes and a user quit.
+        repo_id = record.recording_config.dataset_repo_id
+        _make_dataset_dir(tmp_lerobot_home, repo_id, total_episodes=2)
+        record.current_phase = "completed"
+        record.saved_episodes = 2
+        record.discard_requested = True  # handle_stop_recording(discard=True) would set this
+
+    try:
+        status = _start_session_with_fake_work(monkeypatch, _work_then_quit)
+
+        assert status["session_ended"] is True
+        assert status["discarded_empty"] is True
+        assert not (tmp_lerobot_home / status["dataset_repo_id"]).exists()
+    finally:
+        record.discard_requested = False  # don't leak the armed flag into later tests
 
 
 def test_recording_status_reports_discarded_empty_at_session_end(
@@ -484,7 +643,7 @@ def _run_record_session(
 
     monkeypatch.setattr(record, "_return_followers_to_rest", _spy_return)
     monkeypatch.setattr(record, "force_disable_torque", lambda device, label="": [])
-    monkeypatch.setattr(record, "apply_motor_power", lambda *a, **k: [])
+    monkeypatch.setattr(record, "reset_torque_limit", lambda *a, **k: [])
     monkeypatch.setattr(record, "clear_goal_velocity", lambda *a, **k: [])
     monkeypatch.setattr(record, "verify_devices", lambda *a, **k: [])
 
@@ -571,9 +730,11 @@ def _run_record_session(
 def test_record_accepts_bare_repo_id(monkeypatch: pytest.MonkeyPatch, tmp_lerobot_home) -> None:
     """A bare dataset name (no HF login → no `user/` namespace) records fine —
     lerobot's sanity_check_dataset_name would crash on it, so we don't call it."""
-    import makerlab.record as record
 
-    monkeypatch.setattr(record, "setup_calibration_files", lambda leader, follower: ("leader", "follower"))
+    monkeypatch.setattr(
+        "makerlab.utils.robot_factory.setup_calibration_files",
+        lambda leader, follower: ("leader", "follower"),
+    )
     bus = _RecReturnBus(positions=dict.fromkeys(_RecReturnBus._MOTORS, 1500))
     robot = _RecRobot(bus)
 
@@ -585,9 +746,11 @@ def test_record_accepts_bare_repo_id(monkeypatch: pytest.MonkeyPatch, tmp_lerobo
 def test_record_refuses_eval_prefixed_repo_id(monkeypatch: pytest.MonkeyPatch, tmp_lerobot_home) -> None:
     """eval_ names are reserved for policy-evaluation recordings (rollout flow),
     with or without a namespace."""
-    import makerlab.record as record
 
-    monkeypatch.setattr(record, "setup_calibration_files", lambda leader, follower: ("leader", "follower"))
+    monkeypatch.setattr(
+        "makerlab.utils.robot_factory.setup_calibration_files",
+        lambda leader, follower: ("leader", "follower"),
+    )
     for repo_id in ("eval_ds", "tester/eval_ds"):
         bus = _RecReturnBus(positions=dict.fromkeys(_RecReturnBus._MOTORS, 1500))
         robot = _RecRobot(bus)
@@ -601,7 +764,10 @@ def test_record_normal_end_returns_then_releases(monkeypatch: pytest.MonkeyPatch
     (once), then disconnects — same as teleop's stop, no timed hold."""
     import makerlab.record as record
 
-    monkeypatch.setattr(record, "setup_calibration_files", lambda leader, follower: ("leader", "follower"))
+    monkeypatch.setattr(
+        "makerlab.utils.robot_factory.setup_calibration_files",
+        lambda leader, follower: ("leader", "follower"),
+    )
     bus = _RecReturnBus(positions=dict.fromkeys(_RecReturnBus._MOTORS, 1500))
     robot = _RecRobot(bus)
 
@@ -618,9 +784,11 @@ def test_record_captures_pose_per_follower_excluding_gripper(
 ) -> None:
     """The captured pose is the follower's raw ticks with the gripper removed
     (it may be holding an object at stop time)."""
-    import makerlab.record as record
 
-    monkeypatch.setattr(record, "setup_calibration_files", lambda leader, follower: ("leader", "follower"))
+    monkeypatch.setattr(
+        "makerlab.utils.robot_factory.setup_calibration_files",
+        lambda leader, follower: ("leader", "follower"),
+    )
     positions = {
         "shoulder_pan": 1111,
         "shoulder_lift": 2222,
@@ -645,9 +813,11 @@ def test_record_captures_pose_per_follower_excluding_gripper(
 def test_record_double_stop_skips_the_return(monkeypatch: pytest.MonkeyPatch, tmp_lerobot_home) -> None:
     """A second stop (release-now) set before the session-end cleanup runs must
     skip the return and release immediately, mirroring teleop."""
-    import makerlab.record as record
 
-    monkeypatch.setattr(record, "setup_calibration_files", lambda leader, follower: ("leader", "follower"))
+    monkeypatch.setattr(
+        "makerlab.utils.robot_factory.setup_calibration_files",
+        lambda leader, follower: ("leader", "follower"),
+    )
     robot = _RecRobot(_RecReturnBus())
 
     return_calls, robot, error, _dataset_calls = _run_record_session(
@@ -664,9 +834,11 @@ def test_record_error_path_skips_return_and_releases(
 ) -> None:
     """An exception in the loop (dead bus) skips the return entirely — the bus
     may be gone, so release ASAP — but still disconnects."""
-    import makerlab.record as record
 
-    monkeypatch.setattr(record, "setup_calibration_files", lambda leader, follower: ("leader", "follower"))
+    monkeypatch.setattr(
+        "makerlab.utils.robot_factory.setup_calibration_files",
+        lambda leader, follower: ("leader", "follower"),
+    )
     robot = _RecRobot(_RecReturnBus())
 
     return_calls, robot, error, _dataset_calls = _run_record_session(monkeypatch, robot, raise_in_loop=True)
@@ -685,7 +857,10 @@ def test_stop_during_recording_phase_discards_episode_no_reset(
     immediately, with no reset detour, then return to rest and disconnect once."""
     import makerlab.record as record
 
-    monkeypatch.setattr(record, "setup_calibration_files", lambda leader, follower: ("leader", "follower"))
+    monkeypatch.setattr(
+        "makerlab.utils.robot_factory.setup_calibration_files",
+        lambda leader, follower: ("leader", "follower"),
+    )
     robot = _RecRobot(_RecReturnBus())
 
     # No _exit_early_triggered: the pre-fix classification would have called this
@@ -709,7 +884,10 @@ def test_stop_wins_over_skip_when_both_set_in_same_episode(
     not saved. (Stop is a deliberate 'end now, drop this take' action.)"""
     import makerlab.record as record
 
-    monkeypatch.setattr(record, "setup_calibration_files", lambda leader, follower: ("leader", "follower"))
+    monkeypatch.setattr(
+        "makerlab.utils.robot_factory.setup_calibration_files",
+        lambda leader, follower: ("leader", "follower"),
+    )
     robot = _RecRobot(_RecReturnBus())
 
     return_calls, robot, error, dataset_calls = _run_record_session(
@@ -883,3 +1061,326 @@ def test_delete_dataset_refused_mid_upload(tmp_lerobot_home, monkeypatch: pytest
     assert result["success"] is False
     assert "uploaded" in result["message"].lower()
     assert (tmp_lerobot_home / repo_id).exists()
+
+
+def test_delete_dataset_refused_mid_recording(tmp_lerobot_home, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Deleting a dataset an active recording session is writing is refused —
+    the delete guard now runs the full _dataset_in_use check, not just the
+    upload one."""
+    import json
+    from unittest.mock import MagicMock
+
+    import makerlab.record as record
+    from makerlab.record import DatasetInfoRequest, handle_delete_dataset
+
+    repo_id = "tester/recording_ds"
+    meta = tmp_lerobot_home / repo_id / "meta"
+    meta.mkdir(parents=True)
+    (meta / "info.json").write_text(json.dumps({"total_episodes": 1}))
+
+    cfg = MagicMock()
+    cfg.dataset_repo_id = repo_id
+    monkeypatch.setattr(record, "recording_active", True)
+    monkeypatch.setattr(record, "recording_config", cfg)
+
+    result = handle_delete_dataset(DatasetInfoRequest(dataset_repo_id=repo_id))
+    assert result["success"] is False
+    assert "recording" in result["message"].lower()
+    assert (tmp_lerobot_home / repo_id).exists()
+
+
+def test_delete_dataset_refused_mid_merge(tmp_lerobot_home, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Deleting the output dataset of a running merge is refused."""
+    import json
+
+    from makerlab import merge
+    from makerlab.record import DatasetInfoRequest, handle_delete_dataset
+
+    repo_id = "tester/merging_ds"
+    meta = tmp_lerobot_home / repo_id / "meta"
+    meta.mkdir(parents=True)
+    (meta / "info.json").write_text(json.dumps({"total_episodes": 1}))
+
+    monkeypatch.setattr(merge.merge_manager, "state", "running")
+    monkeypatch.setattr(merge.merge_manager, "output_repo_id", repo_id)
+
+    result = handle_delete_dataset(DatasetInfoRequest(dataset_repo_id=repo_id))
+    assert result["success"] is False
+    assert "merge" in result["message"].lower()
+    assert (tmp_lerobot_home / repo_id).exists()
+
+
+def test_delete_dataset_refused_mid_local_training(tmp_lerobot_home, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Deleting a dataset a running local training job reads is refused."""
+    import json
+    from unittest.mock import MagicMock
+
+    from makerlab import jobs
+    from makerlab.record import DatasetInfoRequest, handle_delete_dataset
+
+    repo_id = "tester/training_ds"
+    meta = tmp_lerobot_home / repo_id / "meta"
+    meta.mkdir(parents=True)
+    (meta / "info.json").write_text(json.dumps({"total_episodes": 1}))
+
+    job = MagicMock()
+    job.state = "running"
+    job.runner = "local"
+    job.config.dataset_repo_id = repo_id
+    monkeypatch.setattr(jobs.job_registry, "list", lambda limit=200: [job])
+
+    result = handle_delete_dataset(DatasetInfoRequest(dataset_repo_id=repo_id))
+    assert result["success"] is False
+    assert "training" in result["message"].lower()
+    assert (tmp_lerobot_home / repo_id).exists()
+
+
+def test_delete_refusal_wording_is_action_neutral(tmp_lerobot_home, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The shared in-use guard's refusals are action-neutral ("Stop it first."),
+    not rename-specific — they now surface from delete too."""
+    import json
+    from unittest.mock import MagicMock
+
+    import makerlab.record as record
+    from makerlab.record import DatasetInfoRequest, handle_delete_dataset
+
+    repo_id = "tester/neutral_ds"
+    meta = tmp_lerobot_home / repo_id / "meta"
+    meta.mkdir(parents=True)
+    (meta / "info.json").write_text(json.dumps({"total_episodes": 1}))
+
+    cfg = MagicMock()
+    cfg.dataset_repo_id = repo_id
+    monkeypatch.setattr(record, "recording_active", True)
+    monkeypatch.setattr(record, "recording_config", cfg)
+
+    result = handle_delete_dataset(DatasetInfoRequest(dataset_repo_id=repo_id))
+    assert result["success"] is False
+    assert "renaming" not in result["message"]
+    assert result["message"].endswith("Stop it first.")
+
+
+def test_start_recording_resume_skips_timestamp_stamp(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Resume must append to the EXISTING directory: the repo_id is used
+    verbatim (no '_<timestamp>' suffix), unlike a fresh session which stamps
+    one. Regression-guards the `if not request.resume` skip."""
+    import re
+
+    import makerlab.record as record
+    import makerlab.rollout as rollout
+    import makerlab.teleoperate as teleop
+
+    monkeypatch.setattr(record, "recording_active", False)
+    monkeypatch.setattr(record, "recording_thread", None)
+    monkeypatch.setattr(record, "releasing", False)
+    monkeypatch.setattr(teleop, "teleoperation_active", False)
+    monkeypatch.setattr(teleop, "teleoperation_thread", None)
+    monkeypatch.setattr(rollout, "inference_active", False)
+
+    # Fail fast AFTER the stamp point (create_record_config runs right after),
+    # before any hardware is touched.
+    def _boom(request):
+        raise RuntimeError("stop before hardware")
+
+    monkeypatch.setattr(record, "create_record_config", _boom)
+
+    def _start(resume: bool):
+        req = record.RecordingRequest(
+            leader_port="COM_LEADER",
+            follower_port="COM_FOLLOWER",
+            leader_config="leader",
+            follower_config="follower",
+            dataset_repo_id="tester/existing_ds",
+            single_task="pick",
+            resume=resume,
+        )
+        result = record.handle_start_recording(req)
+        assert result["success"] is False  # the _boom stub stopped the start
+        return req.dataset_repo_id
+
+    # Resume: the id is untouched. Fresh: a "_YYYYMMDD_HHMMSS" stamp lands.
+    assert _start(resume=True) == "tester/existing_ds"
+    monkeypatch.setattr(record, "recording_active", False)  # release the claim
+    assert re.fullmatch(r"tester/existing_ds_\d{8}_\d{6}", _start(resume=False))
+
+
+# ---------------------------------------------------------------------------
+# Session error taxonomy — outcome / error / hint (in-process twin of the
+# rollout exited payload). The worker's catch site holds the actual exception,
+# so the error text is formatted from the object (no log forensics); the
+# outcome is classified by catch-site phase: an exception AFTER the recording
+# loop finished (phase already "completed" — episodes saved) is only noisy
+# teardown, a warning; any earlier phase is a real failure.
+# ---------------------------------------------------------------------------
+
+
+def test_classify_outcome_three_ways() -> None:
+    """The pure classifier behind both record and teleop catch sites."""
+    from makerlab.utils.errors import classify_outcome
+
+    # No error: the session was fine, wherever it stood.
+    assert classify_outcome(work_completed=True, error_text=None) == "ok"
+    assert classify_outcome(work_completed=False, error_text=None) == "ok"
+    # The saved-episodes-then-teardown-overload case: the loop finished its
+    # real work, then disabling torque on a loaded gripper raised. Data is
+    # safe — a warning, NOT a failed session.
+    assert (
+        classify_outcome(True, "RuntimeError: Overload detected on gripper (torque_enable failed)")
+        == "ran_with_warning"
+    )
+    # The mid-episode-failure case: same-looking error text, but the work was
+    # cut short — catch-site phase (not text markers) decides: failed.
+    assert classify_outcome(False, "RuntimeError: Overload detected on gripper") == "failed"
+    assert classify_outcome(False, "ConnectionError: could not connect to the arm") == "failed"
+
+
+def test_format_exception_type_message_and_truncation() -> None:
+    from makerlab.utils.errors import format_exception
+
+    assert format_exception(RuntimeError("boom")) == "RuntimeError: boom"
+    out = format_exception(RuntimeError("x" * 2000))
+    assert out.startswith("RuntimeError: ")
+    assert out.endswith("…")
+    assert len(out) <= 501  # 500-char cap + ellipsis
+
+
+def test_recording_status_carries_outcome_error_hint_at_session_end(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The session-end status payload exposes the taxonomy fields, with the
+    hint derived from the error text via friendly_hint."""
+    import makerlab.record as record
+
+    monkeypatch.setattr(record, "recording_active", False)
+    monkeypatch.setattr(record, "current_phase", "completed")
+    monkeypatch.setattr(record, "last_session_outcome", "ran_with_warning")
+    monkeypatch.setattr(
+        record,
+        "last_session_error",
+        "RuntimeError: Overload detected on gripper (torque_enable failed)",
+    )
+
+    status = record.handle_recording_status()
+
+    assert status["session_ended"] is True
+    assert status["outcome"] == "ran_with_warning"
+    assert "Overload" in status["error"]
+    assert "motor overloaded" in status["hint"].lower()
+
+
+def test_recording_status_omits_outcome_fields_while_active(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The taxonomy describes an ENDED session only — a live session's status
+    carries none of the three fields (mirrors discarded_empty)."""
+    import makerlab.record as record
+
+    monkeypatch.setattr(record, "recording_active", True)
+    monkeypatch.setattr(record, "current_phase", "recording")
+
+    status = record.handle_recording_status()
+
+    assert status["session_ended"] is False
+    for key in ("outcome", "error", "hint"):
+        assert key not in status
+
+
+def _start_session_with_fake_work(monkeypatch: pytest.MonkeyPatch, fake_work):
+    """Drive handle_start_recording with record_with_web_events replaced by
+    `fake_work`, so the REAL worker thread runs the real catch site. Returns
+    after joining the worker. All feature mutexes idle; no hardware touched."""
+    import makerlab.record as record
+    import makerlab.rollout as rollout
+    import makerlab.teleoperate as teleop
+
+    monkeypatch.setattr(record, "recording_active", False)
+    monkeypatch.setattr(record, "recording_thread", None)
+    monkeypatch.setattr(record, "releasing", False)
+    monkeypatch.setattr(record, "current_phase", "preparing")
+    monkeypatch.setattr(record, "last_session_outcome", None)
+    monkeypatch.setattr(record, "last_session_error", None)
+    monkeypatch.setattr(teleop, "teleoperation_active", False)
+    monkeypatch.setattr(teleop, "teleoperation_thread", None)
+    monkeypatch.setattr(rollout, "inference_active", False)
+    monkeypatch.setattr(record, "create_record_config", lambda request: None)
+    monkeypatch.setattr(record, "record_with_web_events", fake_work)
+
+    result = record.handle_start_recording(
+        record.RecordingRequest(
+            leader_port="COM_LEADER",
+            follower_port="COM_FOLLOWER",
+            leader_config="leader",
+            follower_config="follower",
+            dataset_repo_id="tester/taxonomy_ds",
+            single_task="pick",
+        )
+    )
+    assert result["success"] is True
+    record.recording_thread.join(timeout=5.0)
+    assert not record.recording_thread.is_alive()
+    return record.handle_recording_status()
+
+
+def test_worker_classifies_teardown_failure_as_warning(
+    monkeypatch: pytest.MonkeyPatch, tmp_lerobot_home
+) -> None:
+    """THE headline case: a session whose recording loop finished (episodes
+    saved, phase "completed") but whose teardown overloaded the gripper must
+    end ran_with_warning with phase "completed" — NOT a failed session."""
+    import makerlab.record as record
+
+    def _work_then_teardown_boom(cfg, events, **kwargs):
+        # The loop finished its real work before cleanup raised.
+        record.current_phase = "completed"
+        record.saved_episodes = 3
+        raise RuntimeError("Overload detected on gripper while disabling torque (torque_enable)")
+
+    status = _start_session_with_fake_work(monkeypatch, _work_then_teardown_boom)
+
+    assert status["session_ended"] is True
+    assert status["current_phase"] == "completed"  # not "error"
+    assert status["outcome"] == "ran_with_warning"
+    assert "Overload" in status["error"]
+    assert "motor overloaded" in status["hint"].lower()
+
+
+def test_worker_classifies_midsession_failure_as_failed(
+    monkeypatch: pytest.MonkeyPatch, tmp_lerobot_home
+) -> None:
+    """An exception mid-episode (loop still in "recording") is a real failure:
+    phase "error", outcome "failed", with the camera hint mapped."""
+
+    import makerlab.record as record
+
+    def _boom_mid_episode(cfg, events, **kwargs):
+        record.current_phase = "recording"
+        raise RuntimeError("Camera cam0: frame is too old (age 3.2s)")
+
+    status = _start_session_with_fake_work(monkeypatch, _boom_mid_episode)
+
+    assert status["session_ended"] is True
+    assert status["current_phase"] == "error"
+    assert status["outcome"] == "failed"
+    assert "frame is too old" in status["error"]
+    assert "camera" in status["hint"].lower()
+
+
+def test_worker_reports_ok_outcome_on_clean_end(monkeypatch: pytest.MonkeyPatch, tmp_lerobot_home) -> None:
+    """A session that ends without raising reports outcome "ok" (no error, no
+    hint) so the frontend's normal navigate-to-upload path is untouched."""
+    import makerlab.record as record
+
+    class _FakeDataset:
+        num_episodes = 2
+
+    def _clean_work(cfg, events, **kwargs):
+        record.current_phase = "completed"
+        record.saved_episodes = 2
+        return _FakeDataset()
+
+    status = _start_session_with_fake_work(monkeypatch, _clean_work)
+
+    assert status["session_ended"] is True
+    assert status["outcome"] == "ok"
+    assert status["error"] is None
+    assert status["hint"] is None

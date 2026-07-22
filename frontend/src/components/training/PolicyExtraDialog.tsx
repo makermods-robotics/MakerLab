@@ -39,9 +39,9 @@ const PolicyExtraDialog: React.FC<Props> = ({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="bg-slate-800 border-slate-700 text-white max-w-2xl">
+      <DialogContent className="bg-background border-border max-w-2xl">
         <DialogHeader>
-          <DialogTitle className="flex items-center gap-3 text-white">
+          <DialogTitle className="flex items-center gap-3 text-foreground">
             <InstallTitleIcon state={install.state} />
             {installTitle(install.state, title)}
           </DialogTitle>
@@ -64,9 +64,9 @@ const PolicyExtraDialog: React.FC<Props> = ({
             idleDescription={
               <>
                 Training a <span className="font-semibold">{policyType}</span> policy needs the{" "}
-                <code className="px-1 py-0.5 rounded bg-slate-900 text-sky-300">{packageName}</code>{" "}
+                <code className="px-1 py-0.5 rounded bg-muted text-info">{packageName}</code>{" "}
                 package (installed via{" "}
-                <code className="px-1 py-0.5 rounded bg-slate-900 text-sky-300">{installTarget}</code>),
+                <code className="px-1 py-0.5 rounded bg-muted text-info">{installTarget}</code>),
                 which isn't in this environment yet. Install it to train this policy.
               </>
             }

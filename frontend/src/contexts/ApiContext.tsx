@@ -1,4 +1,5 @@
-import React, { createContext, useContext, ReactNode, useState, useCallback, useMemo } from "react";
+import React, { createContext, useContext, ReactNode, useState, useCallback, useEffect, useMemo, useRef } from "react";
+import { mockHubResponse } from "@/lib/mockHub";
 
 interface ApiContextType {
   baseUrl: string;
@@ -40,10 +41,49 @@ const resolveInitialBaseUrl = (): string => {
 export const ApiProvider: React.FC<{ children: ReactNode }> = ({
   children,
 }) => {
-  const [baseUrl] = useState<string>(resolveInitialBaseUrl);
+  const [baseUrl, setBaseUrl] = useState<string>(resolveInitialBaseUrl);
   const wsBaseUrl = httpToWs(baseUrl);
 
+  // Self-heal a stale saved override. A `?api=` visit persists its URL to
+  // localStorage forever — if that server is gone (temporary HTTPS/phone-cam
+  // setup, a dead port), every request "Failed to fetch" with no way back
+  // from the UI. Probe the override once on startup; if it's unreachable,
+  // drop it and fall back to the default so plain http://localhost:8080/
+  // always recovers on reload. An HTTP error status still counts as
+  // reachable — only a network-level failure (or a 4s timeout) falls back.
+  const probedRef = useRef(false);
+  useEffect(() => {
+    if (probedRef.current) return;
+    probedRef.current = true;
+    const fallback = defaultBaseUrl();
+    if (baseUrl === fallback) return;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 4000);
+    fetch(`${baseUrl}/hf-auth-status`, { signal: controller.signal })
+      .catch(() => {
+        console.warn(
+          `Saved API address ${baseUrl} is unreachable — falling back to ${fallback}.`,
+        );
+        try {
+          window.localStorage.removeItem(STORAGE_KEY);
+        } catch {
+          // storage unavailable — the in-memory fallback still applies
+        }
+        setBaseUrl(fallback);
+      })
+      .finally(() => clearTimeout(timer));
+    return () => {
+      clearTimeout(timer);
+    };
+  }, [baseUrl]);
+
   const fetchWithHeaders = useCallback(async (url: string, options: RequestInit = {}): Promise<Response> => {
+    // Dev-only Hub mock (?mockHub=1): serves canned jobs/models/auth so UI
+    // work can continue through a huggingface.co outage. No-op in prod builds.
+    if (import.meta.env.DEV) {
+      const mocked = mockHubResponse(url, options);
+      if (mocked) return mocked;
+    }
     return fetch(url, {
       ...options,
       headers: {

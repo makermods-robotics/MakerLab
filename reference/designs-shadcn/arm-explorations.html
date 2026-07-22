@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Arm explorations — MakerLab</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/shad.css">
+<style>
+  main.page { max-width: 960px; padding-bottom: 60px; }
+  .idea { margin-bottom: 28px; }
+  .idea .card-content { padding: 0; }
+  .idea svg { width: 100%; height: auto; display: block; }
+  .idea .meta { display: flex; align-items: baseline; gap: 10px; }
+  .idea .meta .badge { transform: translateY(-2px); }
+
+  /* shared drawing vocabulary */
+  .booth-line { stroke: var(--muted-foreground); stroke-opacity: .45; stroke-width: 1.2; fill: none; }
+  .booth-line.soft { stroke-opacity: .22; }
+  .arm-link { stroke: var(--foreground); stroke-width: 7; stroke-linecap: round; }
+  .arm-link.thin { stroke-width: 5; }
+  .arm-joint { fill: var(--background); stroke: var(--foreground); stroke-width: 2; }
+  .arm-base { fill: var(--muted); stroke: var(--foreground); stroke-width: 1.5; }
+  .grip { stroke: var(--foreground); stroke-width: 4; stroke-linecap: round; fill: none; }
+  .block { fill: var(--foreground); rx: 2.5; }
+  .block.ghost { fill: var(--muted-foreground); opacity: .4; }
+  .booth-label { font-family: "JetBrains Mono", monospace; font-size: 10px; fill: var(--muted-foreground); letter-spacing: .08em; }
+  .target-dot { fill: var(--muted-foreground); }
+  .node { fill: var(--background); stroke: var(--foreground); stroke-width: 1.6; }
+  .node-core { fill: var(--foreground); }
+  .hairline { stroke: var(--muted-foreground); stroke-opacity: .5; stroke-width: 1.1; }
+</style>
+</head>
+<body data-stage="rig">
+
+<main class="page">
+  <div class="page-head">
+    <div>
+      <h1>Abstract arm — three directions</h1>
+      <p class="gloss">Replacing the literal 3D render on the home screen. All three animate; pick one (or a blend).</p>
+    </div>
+  </div>
+
+  <!-- ——— A · OpenBooth wireframe ——— -->
+  <section class="idea card">
+    <div class="card-header">
+      <div class="meta"><span class="badge">A</span><div>
+        <div class="card-title">OpenBooth — the product, as a line drawing</div>
+        <div class="card-desc">Wireframe booth, bimanual SO-101 passing blocks left → center → right. Interior wash nods to the booth's blue lighting.</div>
+      </div></div>
+    </div>
+    <div class="card-content" style="padding-top:14px">
+      <svg id="booth" viewBox="0 0 800 440" aria-label="OpenBooth wireframe animation">
+        <defs>
+          <linearGradient id="wash" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0" stop-color="#60A5FA" stop-opacity=".10"/>
+            <stop offset="1" stop-color="#60A5FA" stop-opacity=".03"/>
+          </linearGradient>
+        </defs>
+        <!-- interior wash -->
+        <polygon points="210,70 590,70 590,310 710,390 90,390 210,310" fill="url(#wash)" stroke="none"/>
+        <!-- booth: back wall -->
+        <rect x="210" y="70" width="380" height="240" class="booth-line"/>
+        <!-- side walls -->
+        <polyline points="210,70 90,30 90,390 210,310" class="booth-line"/>
+        <polyline points="590,70 710,30 710,390 590,310" class="booth-line"/>
+        <!-- top + floor front edges -->
+        <line x1="90" y1="30" x2="710" y2="30" class="booth-line"/>
+        <line x1="90" y1="390" x2="710" y2="390" class="booth-line"/>
+        <!-- floor guides -->
+        <line x1="210" y1="310" x2="590" y2="310" class="booth-line soft"/>
+        <line x1="150" y1="350" x2="650" y2="350" class="booth-line soft"/>
+        <text x="400" y="24" text-anchor="middle" class="booth-label">[ OpenBooth ]</text>
+
+        <!-- dressing blocks -->
+        <rect class="block ghost" x="196" y="370" width="14" height="14" rx="2.5"/>
+        <rect class="block ghost" x="214" y="370" width="14" height="14" rx="2.5"/>
+        <rect class="block ghost" x="576" y="370" width="14" height="14" rx="2.5"/>
+        <!-- the travelling block -->
+        <rect class="block" id="blockA" x="232" y="370" width="14" height="14" rx="2.5"/>
+
+        <!-- arms drawn by JS -->
+        <g id="armL"></g>
+        <g id="armR"></g>
+      </svg>
+    </div>
+  </section>
+
+  <!-- ——— B · Signal arm ——— -->
+  <section class="idea card">
+    <div class="card-header">
+      <div class="meta"><span class="badge">B</span><div>
+        <div class="card-title">Signal — one arm, one intent</div>
+        <div class="card-desc">A single stroke-drawn arm quietly tracking a drifting target: the act of teleoperation reduced to its essence.</div>
+      </div></div>
+    </div>
+    <div class="card-content" style="padding-top:14px">
+      <svg id="signal" viewBox="0 0 800 340" aria-label="Minimal arm tracking a target">
+        <line x1="120" y1="300" x2="680" y2="300" class="booth-line soft"/>
+        <circle id="target" class="target-dot" r="4" cx="520" cy="150"/>
+        <circle id="target-ring" cx="520" cy="150" r="12" fill="none" stroke="var(--muted-foreground)" stroke-opacity=".4" stroke-width="1"/>
+        <g id="armS"></g>
+      </svg>
+    </div>
+  </section>
+
+  <!-- ——— C · Chain ——— -->
+  <section class="idea card">
+    <div class="card-header">
+      <div class="meta"><span class="badge">C</span><div>
+        <div class="card-title">Chain — joints as a living system</div>
+        <div class="card-desc">Fully abstract: a kinematic chain of nodes breathing in a slow wave. Reads “robotics” without drawing a robot.</div>
+      </div></div>
+    </div>
+    <div class="card-content" style="padding-top:14px">
+      <svg id="chain" viewBox="0 0 800 300" aria-label="Abstract kinematic chain">
+        <g id="chainG"></g>
+      </svg>
+    </div>
+  </section>
+
+  <p class="hint" style="margin-top:6px">All three respect reduced-motion (static pose). Drawing vocabulary is shared — strokes and tokens come from the design system, so any pick drops into the home screen as-is.</p>
+</main>
+
+<script>
+(function () {
+  const NS = 'http://www.w3.org/2000/svg';
+  const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const el = (tag, attrs, parent) => {
+    const n = document.createElementNS(NS, tag);
+    for (const k in attrs) n.setAttribute(k, attrs[k]);
+    parent.appendChild(n);
+    return n;
+  };
+  const ease = (u) => u < .5 ? 4*u*u*u : 1 - Math.pow(-2*u + 2, 3) / 2;
+
+  /* ---------- generic 2-link IK arm ---------- */
+  function makeArm(parent, opts) {
+    const g = el('g', {}, parent);
+    const { sx, sy, L1, L2, G } = opts;
+    el('rect', { class: 'arm-base', x: sx - 9, y: sy, width: 18, height: opts.baseH || 26, rx: 3 }, g);
+    const link1 = el('line', { class: 'arm-link' + (opts.thin ? ' thin' : '') }, g);
+    const link2 = el('line', { class: 'arm-link' + (opts.thin ? ' thin' : '') }, g);
+    const wristSeg = el('line', { class: 'grip' }, g);
+    const f1 = el('polyline', { class: 'grip' }, g);
+    const f2 = el('polyline', { class: 'grip' }, g);
+    const jS = el('circle', { class: 'arm-joint', r: 5, cx: sx, cy: sy }, g);
+    const jE = el('circle', { class: 'arm-joint', r: 4.5 }, g);
+    const jW = el('circle', { class: 'arm-joint', r: 4 }, g);
+
+    // pose to tip position (gripper points straight down); grip: 0 closed … 1 open
+    function pose(tx, ty, grip) {
+      const wx = tx, wy = ty - G;                    // wrist sits above the tip
+      let dx = wx - sx, dy = wy - sy;
+      let d = Math.hypot(dx, dy);
+      const max = L1 + L2 - 1;
+      if (d > max) { dx *= max / d; dy *= max / d; d = max; }
+      const alpha = Math.atan2(dy, dx);
+      const cosA = Math.min(1, Math.max(-1, (L1*L1 + d*d - L2*L2) / (2*L1*d)));
+      const a1 = alpha - Math.acos(cosA) * (opts.elbow || 1);   // elbow-up
+      const ex = sx + L1 * Math.cos(a1), ey = sy + L1 * Math.sin(a1);
+      link1.setAttribute('x1', sx); link1.setAttribute('y1', sy);
+      link1.setAttribute('x2', ex); link1.setAttribute('y2', ey);
+      link2.setAttribute('x1', ex); link2.setAttribute('y1', ey);
+      link2.setAttribute('x2', wx); link2.setAttribute('y2', wy);
+      wristSeg.setAttribute('x1', wx); wristSeg.setAttribute('y1', wy);
+      wristSeg.setAttribute('x2', tx); wristSeg.setAttribute('y2', ty - 8);
+      const spread = 3 + grip * 6;
+      f1.setAttribute('points', `${tx - spread},${ty - 9} ${tx - spread},${ty} ${tx - spread + 2.5},${ty + 2}`);
+      f2.setAttribute('points', `${tx + spread},${ty - 9} ${tx + spread},${ty} ${tx + spread - 2.5},${ty + 2}`);
+      jE.setAttribute('cx', ex); jE.setAttribute('cy', ey);
+      jW.setAttribute('cx', wx); jW.setAttribute('cy', wy);
+      return { tx, ty };
+    }
+    return { pose };
+  }
+
+  /* sample a tip-keyframe timeline: [{t, x, y, g}] over period P */
+  function sample(frames, t, P) {
+    const tt = t % P;
+    let i = 0;
+    while (i < frames.length - 1 && frames[i + 1].t <= tt) i++;
+    const a = frames[i], b = frames[(i + 1) % frames.length];
+    const span = (b.t > a.t ? b.t : P + b.t) - a.t;
+    const u = span === 0 ? 0 : Math.min(1, (tt - a.t) / span);
+    const e = ease(u);
+    return { x: a.x + (b.x - a.x) * e, y: a.y + (b.y - a.y) * e, g: a.g + (b.g - a.g) * e };
+  }
+
+  /* ---------- A · OpenBooth ---------- */
+  const booth = document.getElementById('booth');
+  if (booth) {
+    const FLOOR = 384;                       // tip y when touching a floor block
+    const armL = makeArm(document.getElementById('armL'), { sx: 285, sy: 314, L1: 74, L2: 62, G: 24 });
+    const armR = makeArm(document.getElementById('armR'), { sx: 515, sy: 314, L1: 74, L2: 62, G: 24, elbow: -1 });
+    const blockA = document.getElementById('blockA');
+    const P = 12;
+    const REST_L = { x: 250, y: 320 }, REST_R = { x: 550, y: 320 };
+    // left: pick outer-left block, place center
+    const framesL = [
+      { t: 0.0, x: REST_L.x, y: REST_L.y, g: 1 },
+      { t: 1.0, x: 239, y: FLOOR, g: 1 },      // over the block
+      { t: 1.5, x: 239, y: FLOOR, g: 0 },      // close
+      { t: 2.6, x: 320, y: 300, g: 0 },        // lift
+      { t: 3.8, x: 400, y: FLOOR, g: 0 },      // to center
+      { t: 4.3, x: 400, y: FLOOR, g: 1 },      // release
+      { t: 5.6, x: REST_L.x, y: REST_L.y, g: 1 },
+      { t: 11.4, x: REST_L.x, y: REST_L.y + 3, g: 1 },
+    ];
+    // right: wait, pick center, place outer-right
+    const framesR = [
+      { t: 0.0, x: REST_R.x, y: REST_R.y, g: 1 },
+      { t: 5.4, x: REST_R.x, y: REST_R.y + 3, g: 1 },
+      { t: 6.4, x: 400, y: FLOOR, g: 1 },
+      { t: 6.9, x: 400, y: FLOOR, g: 0 },
+      { t: 8.0, x: 480, y: 300, g: 0 },
+      { t: 9.2, x: 561, y: FLOOR, g: 0 },
+      { t: 9.7, x: 561, y: FLOOR, g: 1 },
+      { t: 11.0, x: REST_R.x, y: REST_R.y, g: 1 },
+    ];
+    const blockHome = { x: 232, y: 370 };
+    function boothFrame(t) {
+      const pl = sample(framesL, t, P);
+      const pr = sample(framesR, t, P);
+      armL.pose(pl.x, pl.y, pl.g);
+      armR.pose(pr.x, pr.y, pr.g);
+      // block state machine (times mirror the frames above)
+      const tt = t % P;
+      let bx = blockHome.x, by = blockHome.y, o = 1;
+      if (tt >= 1.5 && tt < 4.3) { bx = pl.x - 7; by = pl.y - 12; }            // held by left
+      else if (tt >= 4.3 && tt < 6.9) { bx = 393; by = 370; }                  // on center floor
+      else if (tt >= 6.9 && tt < 9.7) { bx = pr.x - 7; by = pr.y - 12; }       // held by right
+      else if (tt >= 9.7) { bx = 554; by = 370; o = Math.max(0, 1 - (tt - 11.2) / .6); } // placed right, fade
+      else if (tt < 1.5) { o = Math.min(1, tt / .4); }                          // fade back in at left
+      blockA.setAttribute('x', bx); blockA.setAttribute('y', by); blockA.setAttribute('opacity', o);
+    }
+    if (reduced) boothFrame(2.2);
+    else requestAnimationFrame(function loop(ms) { boothFrame(ms / 1000); requestAnimationFrame(loop); });
+  }
+
+  /* ---------- B · Signal ---------- */
+  const signal = document.getElementById('signal');
+  if (signal) {
+    const arm = makeArm(document.getElementById('armS'), { sx: 300, sy: 300, L1: 120, L2: 100, G: 30, baseH: 0, thin: false });
+    const target = document.getElementById('target');
+    const ring = document.getElementById('target-ring');
+    function sigFrame(t) {
+      const tx = 430 + 150 * Math.sin(t * 0.31) + 40 * Math.sin(t * 0.83);
+      const ty = 150 + 70 * Math.sin(t * 0.47 + 1.3) + 20 * Math.sin(t * 1.1);
+      target.setAttribute('cx', tx); target.setAttribute('cy', ty);
+      ring.setAttribute('cx', tx); ring.setAttribute('cy', ty);
+      ring.setAttribute('r', 10 + 3 * Math.sin(t * 2));
+      // arm tip lags the target slightly — pursuit, not attachment
+      const lx = tx - 14 * Math.sin(t * 0.31), ly = ty + 18;
+      arm.pose(lx, ly, 0.5 + 0.4 * Math.sin(t * 0.6));
+    }
+    if (reduced) sigFrame(2.0);
+    else requestAnimationFrame(function loop(ms) { sigFrame(ms / 1000 + 40); requestAnimationFrame(loop); });
+  }
+
+  /* ---------- C · Chain ---------- */
+  const chain = document.getElementById('chain');
+  if (chain) {
+    const g = document.getElementById('chainG');
+    const N = 7, L = 70;
+    const lines = [], nodes = [], cores = [];
+    for (let i = 0; i < N - 1; i++) lines.push(el('line', { class: 'hairline' }, g));
+    for (let i = 0; i < N; i++) {
+      nodes.push(el('circle', { class: 'node', r: i === 0 ? 10 : 7 - i * 0.5 }, g));
+      cores.push(el('circle', { class: 'node-core', r: 2 }, g));
+    }
+    function chainFrame(t) {
+      let x = 165, y = 185, ang = -0.12;
+      for (let i = 0; i < N; i++) {
+        nodes[i].setAttribute('cx', x); nodes[i].setAttribute('cy', y);
+        cores[i].setAttribute('cx', x); cores[i].setAttribute('cy', y);
+        const pulse = 0.5 + 0.5 * Math.sin(t * 1.4 - i * 0.7);
+        cores[i].setAttribute('opacity', 0.25 + 0.75 * pulse);
+        if (i < N - 1) {
+          ang += 0.19 * Math.sin(t * 0.5 - i * 0.65) - 0.012;
+          const nx = x + L * Math.cos(ang), ny = y + L * Math.sin(ang) * 0.55;
+          lines[i].setAttribute('x1', x); lines[i].setAttribute('y1', y);
+          lines[i].setAttribute('x2', nx); lines[i].setAttribute('y2', ny);
+          x = nx; y = ny;
+        }
+      }
+    }
+    if (reduced) chainFrame(1.2);
+    else requestAnimationFrame(function loop(ms) { chainFrame(ms / 1000); requestAnimationFrame(loop); });
+  }
+})();
+</script>
+</body>
+</html>

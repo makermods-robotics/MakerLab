@@ -51,6 +51,11 @@ export interface TrainingConfig {
 
   // Advanced configuration
   use_policy_training_preset: boolean;
+
+  // HF Cloud only: optional per-run override for the HF Jobs timeout, as a
+  // duration string ("2h", "45m", "3h30m"). Undefined/blank ⇒ backend applies
+  // its default. Ignored for local runs.
+  hf_job_timeout?: string;
 }
 
 // The policy types the trainer supports. The model is chosen up-front on the
@@ -90,6 +95,16 @@ export const POLICY_TYPE_OPTIONS: {
 export function policyTypeDisplayName(value: string): string {
   return (
     POLICY_TYPE_OPTIONS.find((o) => o.value === value)?.display ||
+    value.toUpperCase()
+  );
+}
+
+// Short label for a policy type value (the picker-row form: "ACT", "SmolVLA",
+// "Diffusion"…) — the same mapping as policyTypeDisplayName but the compact
+// `label`. Same raw-value-uppercased fallback for unknown/older types.
+export function policyTypeShortLabel(value: string): string {
+  return (
+    POLICY_TYPE_OPTIONS.find((o) => o.value === value)?.label ||
     value.toUpperCase()
   );
 }

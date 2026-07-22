@@ -1,0 +1,383 @@
+import React, {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
+import { useApi } from "@/contexts/ApiContext";
+import { useToast } from "@/hooks/use-toast";
+import { useJobsChangedSignal } from "@/hooks/useJobsChangedSignal";
+import {
+  HubJob,
+  HubModel,
+  JobProgressSnapshot,
+  JobRecord,
+  deleteJob,
+  dismissHubJob,
+  getJob,
+  listHubJobs,
+  listJobs,
+  stopJob,
+} from "@/lib/jobsApi";
+
+const LIMIT = 10;
+
+export const isJobActive = (j: JobRecord) =>
+  j.state === "running" || j.checkpoint_count > 0;
+
+interface JobsDataValue {
+  /** Local job registry page (trainings, cloud mirrors, imports). */
+  jobs: JobRecord[];
+  localJobs: JobRecord[];
+  trackedCloudJobs: JobRecord[];
+  importedJobs: JobRecord[];
+  /** Hub jobs with no mirroring local record. */
+  untrackedHubJobs: HubJob[];
+  /** Uploaded hub model repos no job (cloud run or import) tracks. */
+  untrackedHubModels: HubModel[];
+  /** Parents hidden from top-level lists because a successor resumed them. */
+  supersededIds: Set<string>;
+  /** Resume lineage of a job, nearest parent first. */
+  ancestorsOf: (job: JobRecord) => JobRecord[];
+  hubAuthenticated: boolean;
+  hubJobsPermission: boolean;
+  error: string | null;
+  hubError: string | null;
+  refresh: () => Promise<void>;
+  stop: (id: string) => Promise<void>;
+  remove: (id: string) => Promise<void>;
+  dismissHub: (id: string) => Promise<void>;
+}
+
+const JobsDataContext = createContext<JobsDataValue | null>(null);
+
+/**
+ * Shared job/model registry state for the studio panels. Extracted from the
+ * old JobsSection so the Train panel's jobs library and the Deploy panel's
+ * model library read one fetch + one WS subscription instead of duplicating
+ * the /jobs + Hub round-trips (the Hub listing is rate-limit sensitive).
+ */
+export const JobsDataProvider: React.FC<{ children: React.ReactNode }> = ({
+  children,
+}) => {
+  const { baseUrl, fetchWithHeaders } = useApi();
+  const { toast } = useToast();
+
+  const [jobs, setJobs] = useState<JobRecord[]>([]);
+  // Ancestors referenced via resume_from_job_id but paged out of the list, so a
+  // resumed run can still nest its source even when the source is old.
+  const [ancestorCache, setAncestorCache] = useState<Record<string, JobRecord>>(
+    {},
+  );
+  const [hubJobs, setHubJobs] = useState<HubJob[]>([]);
+  const [hubModels, setHubModels] = useState<HubModel[]>([]);
+  const [hubAuthenticated, setHubAuthenticated] = useState(false);
+  const [hubJobsPermission, setHubJobsPermission] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [hubError, setHubError] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    // Settle the two fetches independently: a hub failure (network, HF outage,
+    // missing scope) must never blank the local jobs, and vice versa.
+    const [localRes, hubRes] = await Promise.allSettled([
+      listJobs(baseUrl, fetchWithHeaders, LIMIT),
+      listHubJobs(baseUrl, fetchWithHeaders),
+    ]);
+    if (localRes.status === "fulfilled") {
+      setJobs(localRes.value);
+      setError(null);
+    } else {
+      const r = localRes.reason;
+      setError(r instanceof Error ? r.message : String(r));
+    }
+    if (hubRes.status === "fulfilled") {
+      setHubJobs(hubRes.value.jobs);
+      setHubModels(hubRes.value.models);
+      setHubAuthenticated(hubRes.value.authenticated);
+      setHubJobsPermission(hubRes.value.jobs_permission ?? true);
+      setHubError(null);
+    } else {
+      const r = hubRes.reason;
+      setHubError(r instanceof Error ? r.message : String(r));
+    }
+  }, [baseUrl, fetchWithHeaders]);
+
+  // Initial fetch on mount + refetch when the tab regains focus. Backend
+  // pushes a `jobs_changed` WS event on every registry mutation, which
+  // covers any change originating on this machine. The focus refresh
+  // catches changes originating elsewhere (e.g. a job submitted from
+  // another tab or the HF dashboard) without burning the rate limit.
+  useEffect(() => {
+    refresh();
+    const onVisible = () => {
+      if (document.visibilityState === "visible") refresh();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", refresh);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", refresh);
+    };
+  }, [refresh]);
+
+  const applyProgress = useCallback((snapshots: JobProgressSnapshot[]) => {
+    if (snapshots.length === 0) return;
+    setJobs((prev) => {
+      if (prev.length === 0) return prev;
+      const byId = new Map(snapshots.map((s) => [s.id, s]));
+      let mutated = false;
+      const next = prev.map((j) => {
+        const s = byId.get(j.id);
+        if (!s) return j;
+        mutated = true;
+        return {
+          ...j,
+          state: s.state,
+          metrics: s.metrics,
+          wandb_run_url: s.wandb_run_url,
+          checkpoint_count: s.checkpoint_count,
+        };
+      });
+      return mutated ? next : prev;
+    });
+  }, []);
+
+  useJobsChangedSignal(refresh, applyProgress);
+
+  // Fetch the transitive closure of resume ancestors that aren't in the loaded
+  // page (or already cached), so nesting works regardless of how old the source
+  // run is. Idempotent: only unseen ids are fetched, so the frequent list
+  // refreshes during a run don't re-fetch. Missing/deleted ancestors are
+  // skipped, ending the chain.
+  useEffect(() => {
+    let cancelled = false;
+    const loaded = new Set(jobs.map((j) => j.id));
+    const queue = jobs
+      .map((j) => j.config?.resume_from_job_id)
+      .filter(
+        (id): id is string => !!id && !loaded.has(id) && !ancestorCache[id],
+      );
+    if (queue.length === 0) return;
+    (async () => {
+      const fetched: Record<string, JobRecord> = {};
+      const seen = new Set(queue);
+      while (queue.length > 0) {
+        const id = queue.shift() as string;
+        try {
+          const rec = await getJob(baseUrl, fetchWithHeaders, id);
+          fetched[id] = rec;
+          const parent = rec.config?.resume_from_job_id;
+          if (
+            parent &&
+            !loaded.has(parent) &&
+            !ancestorCache[parent] &&
+            !seen.has(parent)
+          ) {
+            seen.add(parent);
+            queue.push(parent);
+          }
+        } catch {
+          // Ancestor deleted or unreachable — skip; the chain just stops here.
+        }
+      }
+      if (!cancelled && Object.keys(fetched).length > 0) {
+        setAncestorCache((prev) => ({ ...prev, ...fetched }));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [jobs, ancestorCache, baseUrl, fetchWithHeaders]);
+
+  const stop = useCallback(
+    async (id: string) => {
+      try {
+        await stopJob(baseUrl, fetchWithHeaders, id);
+        toast({ title: "Job stopping" });
+        refresh();
+      } catch (e) {
+        toast({
+          title: "Stop failed",
+          description: e instanceof Error ? e.message : String(e),
+          variant: "destructive",
+        });
+      }
+    },
+    [baseUrl, fetchWithHeaders, toast, refresh],
+  );
+
+  const remove = useCallback(
+    async (id: string) => {
+      try {
+        await deleteJob(baseUrl, fetchWithHeaders, id);
+        toast({ title: "Job removed" });
+        refresh();
+      } catch (e) {
+        toast({
+          title: "Delete failed",
+          description: e instanceof Error ? e.message : String(e),
+          variant: "destructive",
+        });
+      }
+    },
+    [baseUrl, fetchWithHeaders, toast, refresh],
+  );
+
+  // Untracked hub jobs aren't deletable on the Hub (the Jobs API has no
+  // delete), so "remove" is a persisted backend-side dismissal.
+  const dismissHub = useCallback(
+    async (id: string) => {
+      try {
+        await dismissHubJob(baseUrl, fetchWithHeaders, id);
+        toast({ title: "Job removed from list" });
+        refresh();
+      } catch (e) {
+        toast({
+          title: "Remove failed",
+          description: e instanceof Error ? e.message : String(e),
+          variant: "destructive",
+        });
+      }
+    },
+    [baseUrl, fetchWithHeaders, toast, refresh],
+  );
+
+  const localJobs = useMemo(
+    () => jobs.filter((j) => j.runner === "local"),
+    [jobs],
+  );
+  const trackedCloudJobs = useMemo(
+    () => jobs.filter((j) => j.runner === "hf_cloud"),
+    [jobs],
+  );
+  const importedJobs = useMemo(
+    () => jobs.filter((j) => j.runner === "imported"),
+    [jobs],
+  );
+  // Hub jobs already mirrored by a local JobRecord get their richer card via
+  // trackedCloudJobs; everything else from the hub gets a plain HubJobCard.
+  const trackedHfJobIds = useMemo(
+    () =>
+      new Set(
+        trackedCloudJobs
+          .map((j) => j.hf_job_id)
+          .filter((id): id is string => !!id),
+      ),
+    [trackedCloudJobs],
+  );
+  const untrackedHubJobs = useMemo(
+    () => hubJobs.filter((h) => !trackedHfJobIds.has(h.id)),
+    [hubJobs, trackedHfJobIds],
+  );
+  // Hide model repos already claimed by a tracked job — a cloud run (shown via
+  // JobCard) OR an imported model (also a JobCard, and the target a lazy
+  // auto-import lands on). Repo ids are compared case-insensitively to match
+  // the backend's find_imported dedup. The remainder are past trainings the
+  // registry no longer remembers, rendered as untracked Hub cards.
+  const trackedRepoIds = useMemo(
+    () =>
+      new Set(
+        [...trackedCloudJobs, ...importedJobs]
+          .map((j) => j.hf_repo_id?.toLowerCase())
+          .filter((id): id is string => !!id),
+      ),
+    [trackedCloudJobs, importedJobs],
+  );
+  const untrackedHubModels = useMemo(
+    () =>
+      hubModels.filter((m) => !trackedRepoIds.has(m.repo_id.toLowerCase())),
+    [hubModels, trackedRepoIds],
+  );
+
+  // Resume lineage: job B stores config.resume_from_job_id = A. Hide A (the
+  // superseded run) from the top level and nest it under B, so a resumed chain
+  // reads as one entry. Lineage is linear — each job resumes from one parent.
+  const byId = useMemo(() => {
+    const m = new Map(jobs.map((j) => [j.id, j]));
+    // Cached ancestors fill in parents paged out of the list (never overriding
+    // a loaded record).
+    for (const rec of Object.values(ancestorCache)) {
+      if (!m.has(rec.id)) m.set(rec.id, rec);
+    }
+    return m;
+  }, [jobs, ancestorCache]);
+  const supersededIds = useMemo(() => {
+    const s = new Set<string>();
+    for (const j of jobs) {
+      const parent = j.config?.resume_from_job_id;
+      // Only a real successor (running or with its own checkpoints) supersedes
+      // its parent — a failed continuation shouldn't hide the source run.
+      const legit = j.state === "running" || j.checkpoint_count > 0;
+      if (parent && byId.has(parent) && legit) s.add(parent);
+    }
+    return s;
+  }, [jobs, byId]);
+  const ancestorsOf = useCallback(
+    (job: JobRecord): JobRecord[] => {
+      const chain: JobRecord[] = [];
+      const seen = new Set<string>([job.id]);
+      let cur = byId.get(job.config?.resume_from_job_id ?? "");
+      while (cur && !seen.has(cur.id)) {
+        chain.push(cur);
+        seen.add(cur.id);
+        cur = byId.get(cur.config?.resume_from_job_id ?? "");
+      }
+      return chain;
+    },
+    [byId],
+  );
+
+  const value = useMemo(
+    () => ({
+      jobs,
+      localJobs,
+      trackedCloudJobs,
+      importedJobs,
+      untrackedHubJobs,
+      untrackedHubModels,
+      supersededIds,
+      ancestorsOf,
+      hubAuthenticated,
+      hubJobsPermission,
+      error,
+      hubError,
+      refresh,
+      stop,
+      remove,
+      dismissHub,
+    }),
+    [
+      jobs,
+      localJobs,
+      trackedCloudJobs,
+      importedJobs,
+      untrackedHubJobs,
+      untrackedHubModels,
+      supersededIds,
+      ancestorsOf,
+      hubAuthenticated,
+      hubJobsPermission,
+      error,
+      hubError,
+      refresh,
+      stop,
+      remove,
+      dismissHub,
+    ],
+  );
+
+  return (
+    <JobsDataContext.Provider value={value}>
+      {children}
+    </JobsDataContext.Provider>
+  );
+};
+
+export function useJobsData(): JobsDataValue {
+  const ctx = useContext(JobsDataContext);
+  if (!ctx)
+    throw new Error("useJobsData must be used within JobsDataProvider");
+  return ctx;
+}

@@ -34,11 +34,13 @@ def _patch_robots_path(tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(cfg, "ROBOTS_PATH", str(robots_dir))
 
 
-def test_port_persistence_round_trips(tmp_lerobot_home: Path) -> None:
+def test_get_saved_robot_port_reads_legacy_port_files(tmp_lerobot_home: Path) -> None:
     from makerlab.utils import config as cfg
 
-    cfg.save_robot_port("leader", "/dev/ttyUSB0")
-    cfg.save_robot_port("follower", "/dev/ttyUSB1")
+    # Nothing writes these files anymore, but existing installs still have
+    # them; the read path keeps honoring them as the default port.
+    Path(cfg.LEADER_PORT_FILE).write_text("/dev/ttyUSB0")
+    Path(cfg.FOLLOWER_PORT_FILE).write_text("/dev/ttyUSB1")
 
     assert cfg.get_saved_robot_port("leader") == "/dev/ttyUSB0"
     assert cfg.get_saved_robot_port("follower") == "/dev/ttyUSB1"
@@ -48,31 +50,6 @@ def test_get_saved_robot_port_returns_none_when_unset(tmp_lerobot_home: Path) ->
     from makerlab.utils import config as cfg
 
     assert cfg.get_saved_robot_port("leader") is None
-
-
-def test_saved_robot_config_round_trips(tmp_lerobot_home: Path) -> None:
-    from makerlab.utils import config as cfg
-
-    cfg.save_robot_config("leader", "my_calib")
-    assert cfg.get_saved_robot_config("leader") == "my_calib"
-
-
-def test_get_default_robot_config_falls_back_to_first_available(
-    tmp_lerobot_home: Path,
-) -> None:
-    from makerlab.utils import config as cfg
-
-    available = ["alpha", "beta", "gamma"]
-    # No saved config → first available wins.
-    assert cfg.get_default_robot_config("leader", available) == "alpha"
-
-    # After saving, the saved one wins if it's still available.
-    cfg.save_robot_config("leader", "beta")
-    assert cfg.get_default_robot_config("leader", available) == "beta"
-
-    # Saved config no longer in the available list → fall back to first.
-    cfg.save_robot_config("leader", "deleted")
-    assert cfg.get_default_robot_config("leader", available) == "alpha"
 
 
 def test_is_valid_robot_name_accepts_simple_names(tmp_lerobot_home: Path) -> None:
@@ -524,6 +501,46 @@ def test_bimanual_record_clean_requires_all_four_calibrations(tmp_lerobot_home: 
     assert cfg.is_robot_record_clean(record) is True
 
 
+def test_is_robot_record_clean_follower_scope_ignores_leader(tmp_lerobot_home: Path) -> None:
+    """arms="follower" (inference/replay) must not be blocked by leader gaps."""
+    from makerlab.utils import config as cfg
+
+    record = {
+        "name": "r",
+        "follower_port": "/dev/f",
+        "follower_config": "F",
+    }
+    # Follower calibration file missing -> not ready under either scope.
+    assert cfg.is_robot_record_clean(record, arms="follower") is False
+    (Path(cfg.FOLLOWER_CONFIG_PATH) / "F.json").write_text("{}")
+    # No leader port/config at all: follower scope passes, full scope fails.
+    assert cfg.is_robot_record_clean(record, arms="follower") is True
+    assert cfg.is_robot_record_clean(record) is False
+    # A missing follower port still fails the follower scope.
+    assert cfg.is_robot_record_clean(dict(record, follower_port=""), arms="follower") is False
+
+
+def test_is_robot_record_clean_follower_scope_bimanual(tmp_lerobot_home: Path) -> None:
+    """Bimanual follower scope needs BOTH followers, still no leaders."""
+    from makerlab.utils import config as cfg
+
+    record = {
+        "name": "bi",
+        "mode": "bimanual",
+        "follower_port": "/dev/lf",
+        "follower_config": "LF",
+        "right_follower_port": "/dev/rf",
+        "right_follower_config": "RF",
+    }
+    (Path(cfg.FOLLOWER_CONFIG_PATH) / "LF.json").write_text("{}")
+    # Right follower's file missing -> not ready.
+    assert cfg.is_robot_record_clean(record, arms="follower") is False
+    (Path(cfg.FOLLOWER_CONFIG_PATH) / "RF.json").write_text("{}")
+    assert cfg.is_robot_record_clean(record, arms="follower") is True
+    # Full scope still fails: both leaders are unconfigured.
+    assert cfg.is_robot_record_clean(record) is False
+
+
 def test_config_slot_conflict_detects_same_side_duplicate() -> None:
     from makerlab.utils import config as cfg
 
@@ -740,24 +757,40 @@ def test_bimanual_base_id_uses_valid_name_else_default() -> None:
     assert bimanual_base_id("../escape") == DEFAULT_BIMANUAL_BASE
 
 
-def test_with_makerlab_tag_appends_to_existing_tags() -> None:
-    from makerlab.utils.config import MAKERLAB_TAG, with_makerlab_tag
+def test_with_makerlab_tag_appends_required_tags_to_existing() -> None:
+    from makerlab.utils.config import REQUIRED_HUB_TAGS, with_makerlab_tag
 
-    assert with_makerlab_tag(["robotics", "lerobot"]) == ["robotics", "lerobot", MAKERLAB_TAG]
+    # Caller tags come first, then every required tag in order.
+    assert with_makerlab_tag(["robotics", "lerobot"]) == ["robotics", "lerobot", *REQUIRED_HUB_TAGS]
 
 
 def test_with_makerlab_tag_handles_none_and_empty() -> None:
-    from makerlab.utils.config import MAKERLAB_TAG, with_makerlab_tag
+    from makerlab.utils.config import REQUIRED_HUB_TAGS, with_makerlab_tag
 
-    assert with_makerlab_tag(None) == [MAKERLAB_TAG]
-    assert with_makerlab_tag([]) == [MAKERLAB_TAG]
+    assert with_makerlab_tag(None) == list(REQUIRED_HUB_TAGS)
+    assert with_makerlab_tag([]) == list(REQUIRED_HUB_TAGS)
 
 
 def test_with_makerlab_tag_dedupes() -> None:
     from makerlab.utils.config import MAKERLAB_TAG, with_makerlab_tag
 
-    # Caller-supplied MakerLab is not duplicated, and order is preserved.
-    assert with_makerlab_tag(["robotics", MAKERLAB_TAG, "lerobot"]) == ["robotics", MAKERLAB_TAG, "lerobot"]
+    # Caller-supplied required tags are not duplicated, and order is preserved.
+    out = with_makerlab_tag(["robotics", MAKERLAB_TAG, "lerobot", "makermods"])
+    # No tag appears twice.
+    assert len(out) == len(set(out))
+    # The caller's positions for already-present tags are preserved.
+    assert out[:4] == ["robotics", MAKERLAB_TAG, "lerobot", "makermods"]
+
+
+def test_with_makerlab_tag_always_includes_makermods_and_openbooth() -> None:
+    """The core requirement: every Hub push through this funnel carries the
+    org/product tags, regardless of what the caller supplies (or omits)."""
+    from makerlab.utils.config import with_makerlab_tag
+
+    for caller in (None, [], ["robotics"], ["makermods"], ["openbooth", "x"]):
+        out = with_makerlab_tag(caller)
+        assert "makermods" in out
+        assert "openbooth" in out
 
 
 def test_clear_config_references_unassigns_matching_records(tmp_lerobot_home: Path) -> None:

@@ -23,6 +23,7 @@ and starts uvicorn with --reload. Opens the browser to :8080.
 """
 
 import argparse
+import contextlib
 import logging
 import os
 import signal
@@ -34,6 +35,7 @@ import time
 import webbrowser
 from pathlib import Path
 
+import psutil
 import uvicorn
 
 logging.basicConfig(level=logging.INFO)
@@ -45,7 +47,7 @@ FRONTEND_DIST = FRONTEND_PATH / "dist"
 FRONTEND_PACKAGE_JSON = FRONTEND_PATH / "package.json"
 BACKEND_PORT = 8000
 FRONTEND_DEV_PORT = 8080
-ENTRY_POINT_NAMES = ("makerlab", "makerlab-station", "makerlabs")
+ENTRY_POINT_NAMES = ("makerlab", "makerlab-station")
 # `uv tool install` lays down a symlink in ~/.local/bin that resolves into
 # this tree (verified empirically: ~/.local/bin/<exe> ->
 # ~/.local/share/uv/tools/<tool>/bin/<exe>). We use containment under this
@@ -77,7 +79,7 @@ def _ensure_path_symlinks(
     """Self-install the entry points onto PATH (idempotent, best-effort).
 
     pip has no post-install hook, so the first run by full path does the
-    INSTALL.md symlink step itself: each venv entry point gets a symlink in
+    README.md symlink step itself: each venv entry point gets a symlink in
     ~/.local/bin. Correct links are left alone; stale symlinks (an old
     clone's venv) are repointed; anything that is NOT a symlink is never
     clobbered. A name already owned by a `uv tool install` (its symlink
@@ -147,6 +149,140 @@ def _wait_for_port(port: int, timeout: int = 30) -> bool:
     return False
 
 
+def _is_port_open(port: int, host: str = "127.0.0.1") -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(1)
+        return sock.connect_ex((host, port)) == 0
+
+
+def _ensure_port_available(name: str, port: int, host: str = "127.0.0.1") -> None:
+    """Fail fast if `port` is already taken on the host we're about to bind.
+
+    A previous run that left an orphaned uvicorn/Vite holding the port is the
+    common cause, so point the user at `makerlab --stop` to reclaim it.
+    """
+    if not _is_port_open(port, host):
+        return
+    logger.error("❌ %s port %d is already in use on %s.", name, port, host)
+    logger.error(
+        "   If a previous MakerLab run is still holding it, run `makerlab --stop` "
+        "to free it, then run the command again."
+    )
+    sys.exit(1)
+
+
+def _identity_reason(cmdline: str, proc: psutil.Process) -> str | None:
+    """Why `proc` is recognisably one of ours, or None if it isn't.
+
+    Two independent identity signals, deliberately narrow so `--stop` never
+    touches an unrelated dev server that merely happens to hold :8000/:8080:
+      1. cmdline runs `uvicorn ... makerlab.server` (the reload supervisor / prod
+         server — matches even a stale uv-tool snapshot from another venv).
+      2. an orphaned reload worker (`multiprocessing.spawn` / `spawn_main`)
+         whose cwd is THIS project checkout.
+    """
+    if "makerlab.server" in cmdline:
+        return "uvicorn (makerlab.server)"
+    if "multiprocessing.spawn" in cmdline or "spawn_main" in cmdline:
+        with contextlib.suppress(psutil.AccessDenied, psutil.NoSuchProcess, OSError):
+            if Path(proc.cwd()) == PROJECT_ROOT:
+                return "orphaned reload worker"
+    return None
+
+
+def _listening_port(proc: psutil.Process, ports: set[int]) -> int | None:
+    """The first of `ports` that `proc` is LISTENING on, or None."""
+    try:
+        get_conns = getattr(proc, "net_connections", None) or proc.connections
+        for conn in get_conns(kind="inet"):
+            if conn.laddr and conn.laddr.port in ports and conn.status == psutil.CONN_LISTEN:
+                return conn.laddr.port
+    except (psutil.AccessDenied, psutil.NoSuchProcess):
+        pass
+    return None
+
+
+def _find_makerlab_pids() -> tuple[dict[int, str], dict[int, tuple[int, str]]]:
+    """Partition candidate processes into (kill_targets, port_strangers).
+
+    kill_targets: pid -> reason, for anything matching an identity signal
+      (see `_identity_reason`). These are safe to terminate.
+    port_strangers: pid -> (port, name), for a process LISTENING on one of our
+      ports that matches NO identity signal. We report these but never kill
+      them — they might be someone else's server on the same port.
+    """
+    me = os.getpid()
+    ports = {BACKEND_PORT, FRONTEND_DEV_PORT}
+    kill_targets: dict[int, str] = {}
+    strangers: dict[int, tuple[int, str]] = {}
+    for proc in psutil.process_iter(["pid", "cmdline", "name"]):
+        pid = proc.info["pid"]
+        if pid == me:
+            continue
+        cmdline = " ".join(proc.info.get("cmdline") or [])
+        reason = _identity_reason(cmdline, proc)
+        if reason is not None:
+            kill_targets[pid] = reason
+            continue
+        listening = _listening_port(proc, ports)
+        if listening is not None:
+            strangers[pid] = (listening, proc.info.get("name") or "?")
+    return kill_targets, strangers
+
+
+def _terminate_tree(pid: int, timeout: int = 5) -> None:
+    """Terminate a process and every descendant.
+
+    Dev mode's children are themselves process trees (npm -> node -> vite, and
+    uvicorn --reload -> reloader -> worker). Signalling only the direct child
+    leaves grandchildren orphaned still holding :8000/:8080, so walk the whole
+    tree: terminate → wait → kill any survivors.
+    """
+    try:
+        parent = psutil.Process(pid)
+    except psutil.NoSuchProcess:
+        return
+    procs = parent.children(recursive=True)
+    procs.append(parent)
+    for proc in procs:
+        with contextlib.suppress(psutil.NoSuchProcess):
+            proc.terminate()
+    _gone, alive = psutil.wait_procs(procs, timeout=timeout)
+    for proc in alive:
+        with contextlib.suppress(psutil.NoSuchProcess):
+            proc.kill()
+
+
+def _run_stop() -> None:
+    """Stop a running MakerLab and free :8000 / :8080, then return.
+
+    The escape hatch for when a previous run left an orphaned Vite or uvicorn
+    holding the ports. Identity-scoped: we only kill processes we recognise as
+    ours, and merely warn about an unrelated stranger on the same port.
+    """
+    kill_targets, strangers = _find_makerlab_pids()
+    for pid, (port, name) in strangers.items():
+        logger.warning(
+            "port %d is held by pid %d (%s) — not a MakerLab process; not touching it. "
+            "Stop it manually if it's stale.",
+            port,
+            pid,
+            name,
+        )
+    if not kill_targets:
+        if not strangers:
+            logger.info(
+                "Nothing to stop: no MakerLab process found on :%d / :%d.",
+                BACKEND_PORT,
+                FRONTEND_DEV_PORT,
+            )
+        return
+    for pid, reason in kill_targets.items():
+        logger.info("🛑 Stopping pid %d (%s)...", pid, reason)
+        _terminate_tree(pid)
+    logger.info("✅ MakerLab stopped.")
+
+
 def _open_browser_when_ready():
     """Background-thread helper: poll the port, open the browser when up."""
     for _ in range(60):
@@ -174,6 +310,7 @@ def _run_prod(lan: bool = False):
         sys.exit(1)
 
     host = "0.0.0.0" if lan else "127.0.0.1"  # noqa: S104
+    _ensure_port_available("Backend", BACKEND_PORT, host)
     if lan:
         logger.info("🚀 Starting MakerLab on http://0.0.0.0:%d (LAN) ...", BACKEND_PORT)
     else:
@@ -182,7 +319,7 @@ def _run_prod(lan: bool = False):
 
     # Run uvicorn in the main thread so its native SIGINT handler works,
     # and bound graceful shutdown so a stuck WebSocket can't hang Ctrl+C.
-    uvicorn.run(
+    config = uvicorn.Config(
         "makerlab.server:app",
         host=host,
         port=BACKEND_PORT,
@@ -190,6 +327,35 @@ def _run_prod(lan: bool = False):
         reload=False,
         timeout_graceful_shutdown=2,
     )
+    server = uvicorn.Server(config)
+
+    if os.name == "nt":
+        # On Windows, uvicorn's graceful shutdown frequently hangs on Ctrl+C
+        # (the asyncio Proactor loop doesn't wind down cleanly), leaving the
+        # terminal stuck. Take over signal handling: stop hard and reap any
+        # child subprocesses (training/recording/inference) so the prompt
+        # always returns. On macOS/Linux uvicorn's native handlers give us the
+        # bounded graceful shutdown above, so leave them in place.
+        server.install_signal_handlers = lambda: None
+
+        def _shutdown(_signum, _frame) -> None:
+            logger.info("🛑 Shutting down...")
+            try:
+                for child in psutil.Process().children(recursive=True):
+                    with contextlib.suppress(psutil.NoSuchProcess):
+                        child.terminate()
+            except Exception:
+                pass
+            os._exit(0)
+
+        signal.signal(signal.SIGINT, _shutdown)
+        for _name in ("SIGTERM", "SIGBREAK"):
+            _sig = getattr(signal, _name, None)
+            if _sig is not None:
+                with contextlib.suppress(ValueError, OSError):
+                    signal.signal(_sig, _shutdown)
+
+    server.run()
 
 
 def _run_dev():
@@ -204,9 +370,12 @@ def _run_dev():
         logger.error(
             "   You're likely running a `uv tool install` copy (frontend source "
             "isn't shipped in the wheel). Clone the repo and run `makerlab --dev` "
-            "from there — see INSTALL.md."
+            "from there — see README.md."
         )
         sys.exit(1)
+
+    _ensure_port_available("Frontend", FRONTEND_DEV_PORT)
+    _ensure_port_available("Backend", BACKEND_PORT)
 
     logger.info("📦 Installing frontend deps...")
     subprocess.run(["npm", "install"], check=True, cwd=FRONTEND_PATH)
@@ -222,7 +391,7 @@ def _run_dev():
 
     if not _wait_for_port(FRONTEND_DEV_PORT):
         logger.error("❌ Frontend never came up")
-        frontend_process.terminate()
+        _terminate_tree(frontend_process.pid)
         sys.exit(1)
 
     logger.info("🚀 Starting backend (port %d) with --reload...", BACKEND_PORT)
@@ -246,10 +415,7 @@ def _run_dev():
     if not _wait_for_port(BACKEND_PORT, timeout=15):
         logger.error("❌ Backend never came up")
         for p in (backend_process, frontend_process):
-            try:
-                os.killpg(os.getpgid(p.pid), signal.SIGTERM)
-            except Exception:
-                p.terminate()
+            _terminate_tree(p.pid)
         sys.exit(1)
 
     logger.info("🌐 Opening browser...")
@@ -261,17 +427,11 @@ def _run_dev():
 
     def shutdown(signum, frame):
         logger.info("🛑 Shutting down...")
+        # Walk each child's whole process tree (npm -> node -> vite, uvicorn
+        # --reload -> reloader -> worker) so no grandchild outlives Ctrl+C and
+        # keeps holding :8000/:8080.
         for name, p in [("backend", backend_process), ("frontend", frontend_process)]:
-            try:
-                os.killpg(os.getpgid(p.pid), signal.SIGTERM)
-                p.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(os.getpgid(p.pid), signal.SIGKILL)
-                except Exception:
-                    p.kill()
-            except Exception:
-                pass
+            _terminate_tree(p.pid)
             logger.info(f"  ✅ {name} stopped")
         sys.exit(0)
 
@@ -305,7 +465,16 @@ def main():
         action="store_true",
         help="Set HF_HUB_OFFLINE=1: every Hub call fails fast (all hardware flows work offline)",
     )
+    parser.add_argument(
+        "--stop",
+        action="store_true",
+        help="Stop a running MakerLab and free its ports (:8000/:8080), then exit.",
+    )
     args = parser.parse_args()
+
+    if args.stop:
+        _run_stop()
+        return
 
     _ensure_path_symlinks()
 
@@ -331,8 +500,7 @@ def station():
     """Entry point for headless robot stations: `makerlab --lan --offline`.
 
     Installed as `makerlab-station` (see pyproject.toml) so the posture is a
-    first-class command — and what deploy/makerlab-station.service runs at boot.
-    Extra CLI args still pass through.
+    first-class command. Extra CLI args still pass through.
     """
     sys.argv = [sys.argv[0], "--lan", "--offline", *sys.argv[1:]]
     main()

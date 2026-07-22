@@ -17,6 +17,8 @@ import {
   Trash2,
   AlertTriangle,
   CheckCircle2,
+  Globe,
+  HardDrive,
   Loader2,
   XCircle,
   ExternalLink,
@@ -27,7 +29,9 @@ import {
   Sparkles,
   Upload,
 } from "lucide-react";
+import MetaRows from "@/components/library/MetaRows";
 import { useApi } from "@/contexts/ApiContext";
+import { useStudio } from "@/contexts/StudioContext";
 import { useToast } from "@/hooks/use-toast";
 import { JobCheckpoint, listJobCheckpoints } from "@/lib/checkpointsApi";
 import CheckpointDropdown from "@/components/jobs/CheckpointDropdown";
@@ -61,12 +65,12 @@ const statePresentation: Record<
     Icon: React.ComponentType<{ className?: string }>;
   }
 > = {
-  running: { label: "Running", color: "text-green-400", Icon: Loader2 },
-  done: { label: "Done", color: "text-slate-400", Icon: CheckCircle2 },
-  failed: { label: "Failed", color: "text-red-400", Icon: XCircle },
+  running: { label: "Running", color: "text-ok", Icon: Loader2 },
+  done: { label: "Done", color: "text-muted-foreground", Icon: CheckCircle2 },
+  failed: { label: "Failed", color: "text-destructive", Icon: XCircle },
   interrupted: {
     label: "Interrupted",
-    color: "text-amber-400",
+    color: "text-warn",
     Icon: AlertTriangle,
   },
 };
@@ -82,6 +86,7 @@ const JobCard: React.FC<Props> = ({
   const navigate = useNavigate();
   const { baseUrl, fetchWithHeaders } = useApi();
   const { toast } = useToast();
+  const { openStudio, openJobMonitor } = useStudio();
   const present = statePresentation[job.state];
   const Icon = present.Icon;
   const isRunning = job.state === "running";
@@ -364,17 +369,17 @@ const JobCard: React.FC<Props> = ({
     lineageCheckpoints.length > 0 &&
     selectedStep != null;
 
+  // No dialog and no route jump: fine-tuning opens the Train panel's
+  // "Start a new training" form with the base skill (and the dropdown's
+  // checkpoint step) prefilled.
   const handleFinetune = (e: React.MouseEvent) => {
     e.stopPropagation();
     if (selectedStep == null) return;
-    navigate("/training", {
-      state: {
-        finetune: {
-          jobId: selectedJob.id,
-          step: selectedStep,
-          name: jobDisplayName(selectedJob),
-          policyType: selectedJob.config.policy_type,
-        },
+    openStudio("train", {
+      train: {
+        baseJobId: selectedJob.id,
+        baseStep: selectedStep,
+        baseName: jobDisplayName(selectedJob),
       },
     });
   };
@@ -419,16 +424,32 @@ const JobCard: React.FC<Props> = ({
   const showInferenceRow =
     lineageCheckpoints.length > 0 && selectedStep != null;
 
+  // Unified metadata rows (same format as the dataset/model cards). Imported
+  // models keep their source path in the subtitle; trainings surface what they
+  // ran on. Rows are omitted when the fact is absent.
+  const metaRows: Array<[string, string]> = [];
+  if (job.config?.policy_type) metaRows.push(["Policy", job.config.policy_type]);
+  // Imported pseudo-jobs carry the "(imported)" sentinel, not a real dataset.
+  if (job.config?.dataset_repo_id && job.config.dataset_repo_id !== "(imported)")
+    metaRows.push(["Dataset", job.config.dataset_repo_id]);
+  if (!isImported && (job.config?.steps ?? 0) > 0)
+    metaRows.push([
+      "Steps",
+      isRunning
+        ? `${job.metrics.current_step.toLocaleString()} / ${job.config.steps.toLocaleString()}`
+        : job.config.steps.toLocaleString(),
+    ]);
+
   return (
     <Card
       onClick={() => {
-        if (!isImported) navigate(`/training/${job.id}`);
+        if (!isImported) openJobMonitor(job.id);
       }}
-      className={`bg-slate-800/50 border-slate-700 rounded-xl transition-colors ${
-        isImported ? "" : "cursor-pointer hover:border-slate-500"
+      className={`@container bg-card border-border rounded-md transition-colors h-full ${
+        isImported ? "" : "cursor-pointer hover:border-ring/50 hover:bg-muted/40"
       }`}
     >
-      <CardContent className="p-4 space-y-3">
+      <CardContent className="flex h-full flex-col gap-2.5 p-3">
         <div className="flex items-start justify-between gap-2">
           <div className="flex items-center gap-2">
             <div
@@ -439,9 +460,29 @@ const JobCard: React.FC<Props> = ({
               />
               {stateLabel}
             </div>
+            {/* Location chip — with local and cloud runs mixed in one grid,
+                each card says where it runs (same family as the dataset
+                card's Local/Hub source badge). */}
+            {!isImported ? (
+              <div
+                className="flex items-center gap-1 text-[11px] font-medium text-muted-foreground"
+                title={
+                  job.runner === "hf_cloud"
+                    ? "Runs on Hugging Face cloud"
+                    : "Runs on this machine"
+                }
+              >
+                {job.runner === "hf_cloud" ? (
+                  <Globe className="w-3 h-3" />
+                ) : (
+                  <HardDrive className="w-3 h-3" />
+                )}
+                {job.runner === "hf_cloud" ? "Cloud" : "Local"}
+              </div>
+            ) : null}
             {isHubImport ? (
               <div
-                className="flex items-center gap-1 text-[11px] font-medium text-sky-400"
+                className="flex items-center gap-1 text-[11px] font-medium text-info"
                 title="Imported from a Hugging Face Hub repo"
               >
                 <Upload className="w-3 h-3" />
@@ -454,7 +495,7 @@ const JobCard: React.FC<Props> = ({
               variant="ghost"
               size="icon"
               onClick={openRename}
-              className="h-7 w-7 text-slate-400 hover:text-white"
+              className="h-7 w-7 text-muted-foreground hover:text-foreground"
               aria-label="Rename model"
               title="Rename"
             >
@@ -465,7 +506,7 @@ const JobCard: React.FC<Props> = ({
                 variant="ghost"
                 size="icon"
                 asChild
-                className="h-7 w-7 text-slate-400 hover:text-white"
+                className="h-7 w-7 text-muted-foreground hover:text-foreground"
                 aria-label="Open Hub job page"
               >
                 <a
@@ -487,8 +528,8 @@ const JobCard: React.FC<Props> = ({
                 variant="ghost"
                 size="icon"
                 onClick={handleAction}
-                className={`h-7 w-7 text-slate-400 ${
-                  isRunning ? "hover:text-white" : "hover:text-red-400"
+                className={`h-7 w-7 text-muted-foreground ${
+                  isRunning ? "hover:text-foreground" : "hover:text-destructive"
                 }`}
                 aria-label={isRunning ? "Stop job" : "Delete job"}
               >
@@ -503,7 +544,7 @@ const JobCard: React.FC<Props> = ({
         </div>
         <div>
           <div
-            className="text-white font-semibold truncate"
+            className="text-foreground font-semibold truncate"
             title={displayName}
           >
             {displayName}
@@ -512,7 +553,7 @@ const JobCard: React.FC<Props> = ({
               trainings (imported models already show their repo id / path in
               the subtitle below). */}
           {!isImported && job.display_name ? (
-            <div className="text-[11px] text-slate-500 truncate" title={job.id}>
+            <div className="text-[11px] text-muted-foreground truncate" title={job.id}>
               {job.id}
             </div>
           ) : null}
@@ -521,7 +562,7 @@ const JobCard: React.FC<Props> = ({
               visible. The leading LRM keeps the path's first "/" from being
               bidi-reordered to the wrong end. */}
           <div
-            className="text-xs text-slate-400 truncate"
+            className="text-xs text-muted-foreground truncate"
             title={subtitle}
             style={
               isImported ? { direction: "rtl", textAlign: "left" } : undefined
@@ -530,10 +571,11 @@ const JobCard: React.FC<Props> = ({
             {isImported ? "\u200e" + subtitle : subtitle}
           </div>
         </div>
+        <MetaRows rows={metaRows} />
         {showProgressBar ? (
-          <div className="relative h-5 w-full overflow-hidden rounded-md bg-slate-900 border border-slate-700">
+          <div className="relative h-5 w-full overflow-hidden rounded-md bg-muted border border-border">
             <div
-              className="h-full bg-gradient-to-r from-blue-500 to-sky-400 transition-[width] duration-500"
+              className="h-full bg-info transition-[width] duration-500"
               style={{ width: `${progressPct}%` }}
             />
             <div className="absolute inset-0 flex items-center justify-center text-xs font-semibold text-white tabular-nums drop-shadow">
@@ -542,29 +584,41 @@ const JobCard: React.FC<Props> = ({
           </div>
         ) : null}
         {showInferenceRow ? (
-          <div className="flex flex-wrap items-center gap-2">
-            <CheckpointDropdown
-              checkpoints={checkpoints}
-              selectedStep={selectedStep}
-              onChange={setSelectedStep}
-            />
+          // Single-line action row: the checkpoint dropdown flexes and the
+          // buttons never wrap. Secondary actions (Continue / Resume /
+          // Download) are icon-only so the row fits a narrow grid card.
+          <div className="mt-auto flex items-center gap-1.5 pt-1">
+            {/* A single checkpoint offers no choice — skip the dropdown and
+                free the row for the buttons (imported models are the common
+                case: one "latest" entry). */}
+            {checkpoints.length > 1 ? (
+              <div className="min-w-0 flex-1">
+                <CheckpointDropdown
+                  checkpoints={checkpoints}
+                  selectedStep={selectedStep}
+                  onChange={setSelectedStep}
+                  className="w-full min-w-0"
+                />
+              </div>
+            ) : null}
             <Button
-              size="icon"
+              size="sm"
               onClick={handlePlay}
-              className="h-8 w-8 bg-green-500 hover:bg-green-600 text-white"
+              className="h-8 shrink-0 gap-1 bg-primary hover:bg-primary/90 text-primary-foreground"
               aria-label="Run inference with this checkpoint"
             >
-              <Play className="w-4 h-4" />
+              <Play className="w-3.5 h-3.5" /> Run
             </Button>
             {canContinue ? (
               <Button
                 size="sm"
                 variant="outline"
                 onClick={handleContinue}
-                className="h-8 gap-1 border-sky-500/50 text-sky-700 dark:text-sky-300 hover:bg-sky-500/10"
+                className="h-8 w-8 shrink-0 p-0 border-info/50 text-info hover:bg-info/10"
                 aria-label="Continue training from this checkpoint"
+                title="Continue training from this checkpoint"
               >
-                <FastForward className="w-3.5 h-3.5" /> Continue
+                <FastForward className="w-3.5 h-3.5" />
               </Button>
             ) : null}
             {canResumeCloud ? (
@@ -572,11 +626,11 @@ const JobCard: React.FC<Props> = ({
                 size="sm"
                 variant="outline"
                 onClick={handleResumeCloud}
-                className="h-8 gap-1 border-sky-500/50 text-sky-700 dark:text-sky-300 hover:bg-sky-500/10"
+                className="h-8 w-8 shrink-0 p-0 border-info/50 text-info hover:bg-info/10"
                 aria-label="Resume this cloud run from its last checkpoint"
                 title="Resume: launch a new cloud job continuing from this checkpoint"
               >
-                <FastForward className="w-3.5 h-3.5" /> Resume
+                <FastForward className="w-3.5 h-3.5" />
               </Button>
             ) : null}
             {canFinetune ? (
@@ -584,11 +638,14 @@ const JobCard: React.FC<Props> = ({
                 size="sm"
                 variant="outline"
                 onClick={handleFinetune}
-                className="h-8 gap-1 border-violet-500/50 text-violet-700 dark:text-violet-300 hover:bg-violet-500/10"
+                className="h-8 shrink-0 gap-1 border-primary/40 text-primary hover:bg-primary/10"
                 aria-label="Fine-tune a new run from this model's weights"
                 title="Fine-tune a new run from this model's weights"
               >
-                <Sparkles className="w-3.5 h-3.5" /> Fine-tune
+                <Sparkles className="w-3.5 h-3.5" />
+                {/* Label only when the card is wide enough for the whole row
+                    to stay on one line; the tooltip covers the narrow case. */}
+                <span className="hidden @[13rem]:inline">Fine-tune</span>
               </Button>
             ) : null}
             {canDownload ? (
@@ -596,41 +653,47 @@ const JobCard: React.FC<Props> = ({
                 size="sm"
                 variant="outline"
                 onClick={handleDownload}
-                className="h-8 gap-1 border-slate-500/50 text-slate-700 dark:text-slate-300 hover:bg-slate-500/10"
+                className="h-8 w-8 shrink-0 p-0 border-border text-muted-foreground hover:bg-muted"
                 aria-label="Download this checkpoint"
                 title="Download this checkpoint"
               >
-                <Download className="w-3.5 h-3.5" /> Download
+                <Download className="w-3.5 h-3.5" />
               </Button>
             ) : null}
           </div>
         ) : null}
         {missingExtra ? (
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={(e) => {
-              e.stopPropagation();
-              setExtraDialogOpen(true);
-            }}
-            className="h-8 gap-1.5 border-amber-500/50 text-amber-700 dark:text-amber-300 hover:bg-amber-500/10"
+          // When there's no inference row this is the card's only CTA — pin it
+          // to the footer like every other card's action row.
+          <div
+            className={`flex items-center ${showInferenceRow ? "" : "mt-auto pt-1"}`}
           >
-            <Download className="w-3.5 h-3.5" /> Install{" "}
-            {missingExtra.installTarget}
-          </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={(e) => {
+                e.stopPropagation();
+                setExtraDialogOpen(true);
+              }}
+              className="h-8 gap-1.5 border-warn/50 text-warn hover:bg-warn/10"
+            >
+              <Download className="w-3.5 h-3.5" /> Install{" "}
+              {missingExtra.installTarget}
+            </Button>
+          </div>
         ) : null}
       </CardContent>
       <Dialog open={renameOpen} onOpenChange={setRenameOpen}>
         <DialogContent
-          className="bg-slate-900 border-slate-800 text-white"
+          className="bg-background border-border"
           onClick={(e) => e.stopPropagation()}
         >
           <DialogHeader>
             <DialogTitle>Rename model</DialogTitle>
-            <DialogDescription className="text-slate-400">
+            <DialogDescription className="text-muted-foreground">
               Sets a display name only — the underlying{" "}
               {isImported && job.hf_repo_id ? "Hub repo" : "run"} (
-              <span className="font-mono text-slate-300">
+              <span className="font-mono text-muted-foreground">
                 {isImported ? importedSource : job.id}
               </span>
               ) is not moved or changed.
@@ -650,19 +713,19 @@ const JobCard: React.FC<Props> = ({
             }}
             autoFocus
             placeholder="New name"
-            className="bg-slate-800 border-slate-700 text-white"
+            className="bg-background border-input"
           />
-          {renameError && <p className="text-sm text-red-400">{renameError}</p>}
+          {renameError && <p className="text-sm text-destructive">{renameError}</p>}
           <DialogFooter className="flex gap-2 justify-end">
             <Button
               variant="outline"
-              className="border-slate-600 text-slate-700 dark:text-slate-300"
+              className="border-border text-muted-foreground"
               onClick={() => setRenameOpen(false)}
             >
               Cancel
             </Button>
             <Button
-              className="bg-blue-600 hover:bg-blue-700 text-white"
+              className="bg-primary hover:bg-primary/90 text-primary-foreground"
               disabled={
                 renaming ||
                 !renameValue.trim() ||

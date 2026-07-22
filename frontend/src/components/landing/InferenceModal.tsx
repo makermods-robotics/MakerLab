@@ -19,10 +19,10 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { AlertTriangle, CheckCircle, Loader2, Play, VideoOff } from "lucide-react";
-import { RobotRecord } from "@/hooks/useRobots";
+import { RobotRecord, robotSetupGap } from "@/hooks/useRobots";
 import { useApi } from "@/contexts/ApiContext";
 import { useToast } from "@/hooks/use-toast";
-import { useNavigate } from "react-router-dom";
+import { useInferenceSession } from "@/contexts/InferenceSessionContext";
 import {
   JobCheckpoint,
   PolicyConfigSummary,
@@ -31,51 +31,11 @@ import {
 } from "@/lib/checkpointsApi";
 import { startInference } from "@/lib/inferenceApi";
 import CheckpointDropdown from "@/components/jobs/CheckpointDropdown";
-import { useAvailableCameras } from "@/hooks/useAvailableCameras";
+import {
+  AvailableCamera,
+  useAvailableCameras,
+} from "@/hooks/useAvailableCameras";
 import { useCameraStream } from "@/hooks/useCameraStream";
-import BackendCameraStream from "@/components/BackendCameraStream";
-
-const CameraThumbnail: React.FC<{
-  deviceId: string;
-  /** cv2 index on the server — MJPEG fallback when there's no deviceId match
-   * (headless deployment: the cameras are plugged into the server). */
-  cameraIndex?: number;
-  paused: boolean;
-}> = ({ deviceId, cameraIndex, paused }) => {
-  const { videoRef, hasError } = useCameraStream(deviceId, paused);
-
-  const showVideo = !paused && deviceId && !hasError;
-  // BackendCameraStream owns its own failure/retry UI — no error latch here.
-  const showMjpeg = !paused && !deviceId && cameraIndex !== undefined;
-
-  if (showVideo) {
-    return (
-      <video
-        ref={videoRef}
-        autoPlay
-        muted
-        playsInline
-        className="w-32 h-24 object-cover rounded border border-gray-700 bg-black"
-      />
-    );
-  }
-  if (showMjpeg) {
-    return (
-      <BackendCameraStream
-        cameraIndex={cameraIndex}
-        className="w-32 h-24 object-cover rounded border border-gray-700 bg-black"
-      />
-    );
-  }
-  return (
-    <div className="w-32 h-24 bg-gray-800 rounded border border-gray-700 flex flex-col items-center justify-center">
-      <VideoOff className="w-5 h-5 text-gray-500 mb-1" />
-      <span className="text-[10px] text-gray-500">
-        {paused ? "Released" : "No preview"}
-      </span>
-    </div>
-  );
-};
 
 interface Props {
   open: boolean;
@@ -86,6 +46,37 @@ interface Props {
 }
 
 const DEFAULT_FPS = 30;
+
+const cameraKey = (cam: AvailableCamera) => String(cam.index);
+
+/** Small getUserMedia preview for verifying which physical camera a role binds
+ * to. `paused` drops the browser stream so the rollout subprocess can open the
+ * same device via OpenCV without contending. */
+const CameraThumbnail: React.FC<{ deviceId: string; paused: boolean }> = ({
+  deviceId,
+  paused,
+}) => {
+  const { videoRef, hasError } = useCameraStream(deviceId, paused);
+  if (paused || hasError || !deviceId) {
+    return (
+      <div className="w-32 h-24 bg-muted rounded border border-border flex flex-col items-center justify-center">
+        <VideoOff className="w-5 h-5 text-muted-foreground mb-1" />
+        <span className="text-[10px] text-muted-foreground">
+          {paused ? "Released" : "No preview"}
+        </span>
+      </div>
+    );
+  }
+  return (
+    <video
+      ref={videoRef}
+      autoPlay
+      muted
+      playsInline
+      className="w-32 h-24 object-cover rounded border border-border bg-muted"
+    />
+  );
+};
 
 /**
  * One camera as the modal sees it. The BiSO prefix round-trip lives here so the
@@ -167,7 +158,7 @@ const InferenceModal: React.FC<Props> = ({
 }) => {
   const { baseUrl, fetchWithHeaders } = useApi();
   const { toast } = useToast();
-  const navigate = useNavigate();
+  const { openInferenceSession } = useInferenceSession();
 
   const [checkpoints, setCheckpoints] = useState<JobCheckpoint[]>([]);
   const [selectedStep, setSelectedStep] = useState<number | null>(initialStep);
@@ -179,10 +170,11 @@ const InferenceModal: React.FC<Props> = ({
   const [policyConfigLoading, setPolicyConfigLoading] = useState(false);
   const [policyConfigError, setPolicyConfigError] = useState<string | null>(null);
 
-  // Per camera DISPLAY name → user-selected physical camera index (or null).
-  // Keyed by the stripped display name (== requestKey), not the checkpoint
-  // feature key — see `cameraMappings` / the CameraMapping doc for the round-trip.
-  const [cameraBindings, setCameraBindings] = useState<Record<string, number | null>>({});
+  // Per camera DISPLAY name → user-selected physical camera key (the raw cv2
+  // index string). Keyed by the stripped display name (== requestKey), not the
+  // checkpoint feature key — see `cameraMappings` / the CameraMapping doc for
+  // the round-trip.
+  const [cameraBindings, setCameraBindings] = useState<Record<string, string | null>>({});
   const { cameras: availableCameras } = useAvailableCameras({ enabled: open });
 
   // `lerobot-rollout` drives any Robot generically, including `bi_so_follower`,
@@ -198,6 +190,22 @@ const InferenceModal: React.FC<Props> = ({
     () => cameraMappings(Object.keys(policyConfig?.image_features ?? {}), isBimanual),
     [policyConfig, isBimanual],
   );
+
+  const liveCameraByKey = React.useCallback(
+    (key: string | null | undefined) =>
+      key == null
+        ? undefined
+        : availableCameras.find((cam) => cameraKey(cam) === key),
+    [availableCameras],
+  );
+
+  // Re-arm Start on reopen. The success path closes the modal with
+  // `submitting` still true (previews stay released while the rollout owns the
+  // cameras), and the component stays MOUNTED in its consumers — so without
+  // this reset a reopened modal would be stuck on a disabled "Starting…".
+  useEffect(() => {
+    if (open) setSubmitting(false);
+  }, [open]);
 
   // Load checkpoints when modal opens.
   useEffect(() => {
@@ -240,7 +248,7 @@ const InferenceModal: React.FC<Props> = ({
         // bimanual mode). Preserve any prior selection that's still relevant.
         const mappings = cameraMappings(Object.keys(cfg.image_features), isBimanual);
         setCameraBindings((prev) => {
-          const next: Record<string, number | null> = {};
+          const next: Record<string, string | null> = {};
           for (const m of mappings) {
             next[m.requestKey] = prev[m.requestKey] ?? null;
           }
@@ -263,8 +271,8 @@ const InferenceModal: React.FC<Props> = ({
   // If the selected robot has cameras whose names match a policy-expected
   // camera, auto-bind them. Match against the DISPLAY name (the bare name the
   // user chose at record time — that's what the robot record stores), not the
-  // `left_`-prefixed checkpoint feature. Prefer matching by browser device_id
-  // (stable across cv2 index drift); fall back to the saved camera_index.
+  // `left_`-prefixed checkpoint feature. Prefer the stored browser device_id,
+  // then the saved camera_index fallback.
   useEffect(() => {
     if (!policyConfig) return;
     const robotCams = robot?.cameras ?? [];
@@ -278,18 +286,32 @@ const InferenceModal: React.FC<Props> = ({
           (c) => c.name.toLowerCase() === m.display.toLowerCase(),
         );
         if (!robotCam) continue;
-        const live =
-          (robotCam.device_id &&
-            availableCameras.find((c) => c.deviceId === robotCam.device_id)) ||
-          availableCameras.find((c) => c.index === robotCam.camera_index);
+        const live = robotCam.device_id
+          ? availableCameras.find((c) => c.deviceId === robotCam.device_id)
+          : availableCameras.find((c) => c.index === robotCam.camera_index);
         if (live) {
-          next[m.requestKey] = live.index;
+          next[m.requestKey] = cameraKey(live);
           changed = true;
         }
       }
       return changed ? next : prev;
     });
   }, [policyConfig, robot, availableCameras, cameraMap]);
+
+  useEffect(() => {
+    if (!policyConfig || availableCameras.length === 0) return;
+    setCameraBindings((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      for (const [name, key] of Object.entries(prev)) {
+        if (key != null && !liveCameraByKey(key)) {
+          next[name] = null;
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [policyConfig, availableCameras, liveCameraByKey]);
 
   const selectedRef =
     selectedStep != null
@@ -323,12 +345,14 @@ const InferenceModal: React.FC<Props> = ({
     checkpointIsBimanual !== isBimanual;
 
   const allCamerasBound = cameraMap.every(
-    (m) => cameraBindings[m.requestKey] != null,
+    (m) => liveCameraByKey(cameraBindings[m.requestKey]) != null,
   );
 
+  // Inference drives the follower(s) only — gate on follower_ready, not
+  // is_clean, so a robot with no leader setup can still run a policy.
   const canStart =
     !!robot &&
-    robot.is_clean &&
+    robot.follower_ready &&
     !robotCheckpointArmMismatch &&
     selectedRef != null &&
     !!policyConfig &&
@@ -353,30 +377,40 @@ const InferenceModal: React.FC<Props> = ({
     // re-prefixes with `left_` — reconstructing the checkpoint's `left_<name>`
     // feature. Resolution still comes from the checkpoint feature's dims.
     const cameraDict: Record<string, {
-      type: string; camera_index?: number; width: number; height: number; fps?: number;
+      type: string;
+      camera_index?: number;
+      width: number;
+      height: number;
+      fps?: number;
+      fourcc?: string;
     }> = {};
     for (const m of cameraMap) {
-      const idx = cameraBindings[m.requestKey];
-      if (idx == null) continue;
+      const key = cameraBindings[m.requestKey];
+      if (key == null) continue;
+      const live = liveCameraByKey(key);
+      if (!live) continue;
       const dims = policyConfig.image_features[m.feature];
       cameraDict[m.requestKey] = {
         type: "opencv",
-        camera_index: idx,
+        camera_index: live.index,
         width: dims.width,
         height: dims.height,
         fps: DEFAULT_FPS,
       };
     }
     try {
-      const result = await startInference(baseUrl, fetchWithHeaders, {
+      // The POST now returns immediately (it only validates cheaply, then the
+      // server downloads the model + preflights the arm in the background), so
+      // this opens the inference dialog right away — the download and its
+      // progress, any warn-but-allow arm finding, and any failure all surface
+      // there via /inference-status polling.
+      await startInference(baseUrl, fetchWithHeaders, {
         follower_port: robot.follower_port,
         follower_config: robot.follower_config,
         policy_ref: selectedRef,
         task,
         cameras: cameraDict,
         duration_s: durationS,
-        // Follower torque limit for the session (10-100% of full power).
-        motor_power: robot.motor_power ?? 100,
         // Bimanual: forward the mode + right-arm follower so the server builds a
         // `bi_so_follower` command staging both follower calibrations. In single
         // mode the right_* fields are inert (mode defaults to "single"
@@ -390,17 +424,8 @@ const InferenceModal: React.FC<Props> = ({
         // observation.state — the server then defers to its shape check).
         checkpoint_state_dim: policyConfig.state_dim ?? undefined,
       });
-      // A success can carry a warn-but-allow arm-identity finding — surface
-      // it instead of silently dropping it.
-      if (result.warning) {
-        toast({
-          title: "Started with a warning",
-          description: result.warning,
-          duration: 10000,
-        });
-      }
       onOpenChange(false);
-      navigate("/inference");
+      openInferenceSession();
     } catch (e) {
       toast({
         title: "Couldn't start inference",
@@ -413,53 +438,53 @@ const InferenceModal: React.FC<Props> = ({
   };
 
   const onCameraBindingChange = (name: string, value: string) => {
-    const idx = Number(value);
-    setCameraBindings((prev) => ({ ...prev, [name]: idx }));
+    setCameraBindings((prev) => ({ ...prev, [name]: value }));
   };
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="bg-gray-900 border-gray-800 text-white sm:max-w-[600px] p-8 max-h-[90vh] overflow-y-auto">
+      <DialogContent className="sm:max-w-[600px] p-8 max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <div className="flex justify-center items-center mb-4">
-            <div className="w-8 h-8 bg-green-500 rounded-full flex items-center justify-center">
-              <Play className="w-4 h-4 text-white" />
+            <div className="w-8 h-8 bg-primary rounded-full flex items-center justify-center">
+              <Play className="w-4 h-4 text-primary-foreground" />
             </div>
           </div>
-          <DialogTitle className="text-white text-center text-2xl font-bold">
+          <DialogTitle className="text-center text-2xl font-bold">
             Configure Inference
           </DialogTitle>
         </DialogHeader>
 
         <div className="space-y-6 py-4">
-          <DialogDescription className="text-gray-400 text-base leading-relaxed text-center">
+          <DialogDescription className="text-base leading-relaxed text-center">
             Pick a checkpoint and confirm hardware. The selected policy will
             drive the follower autonomously for the configured duration.
           </DialogDescription>
 
           <div className="space-y-4">
-            <h3 className="text-lg font-semibold text-white border-b border-gray-700 pb-2">
+            <h3 className="text-lg font-semibold border-b border-border pb-2">
               Robot Configuration
             </h3>
             {!robot ? (
-              <Alert className="bg-amber-900/40 border-amber-700 text-amber-100">
+              <Alert className="border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-200">
                 <AlertTriangle className="h-4 w-4" />
                 <AlertDescription>
                   Select and configure a robot on the Landing page first.
                 </AlertDescription>
               </Alert>
-            ) : !robot.is_clean ? (
-              <Alert className="bg-amber-900/40 border-amber-700 text-amber-100">
+            ) : !robot.follower_ready ? (
+              <Alert className="border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-200">
                 <AlertTriangle className="h-4 w-4" />
                 <AlertDescription>
-                  <strong>{robot.name}</strong> is missing a calibration.
-                  Configure it before running inference.
+                  <strong>{robot.name}</strong> {robotSetupGap(robot, "follower")}.
+                  Open Robot settings before running inference. (Inference only
+                  uses the follower arm — leader setup isn't needed.)
                 </AlertDescription>
               </Alert>
             ) : (
               <div className="flex items-center gap-2 text-sm">
-                <CheckCircle className="w-4 h-4 text-green-400" />
-                <span className="text-slate-200">
+                <CheckCircle className="w-4 h-4 text-ok" />
+                <span className="text-foreground">
                   Running on <strong>{robot.name}</strong>
                   {isBimanual ? " (bimanual — both followers)" : ""}
                 </span>
@@ -468,11 +493,11 @@ const InferenceModal: React.FC<Props> = ({
           </div>
 
           <div className="space-y-4">
-            <h3 className="text-lg font-semibold text-white border-b border-gray-700 pb-2">
+            <h3 className="text-lg font-semibold border-b border-border pb-2">
               Checkpoint
             </h3>
             {checkpoints.length === 0 ? (
-              <Alert className="bg-amber-900/40 border-amber-700 text-amber-100">
+              <Alert className="border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-200">
                 <AlertTriangle className="h-4 w-4" />
                 <AlertDescription>
                   No checkpoints available for this job yet.
@@ -486,7 +511,7 @@ const InferenceModal: React.FC<Props> = ({
               />
             )}
             {robotCheckpointArmMismatch ? (
-              <Alert className="bg-amber-900/40 border-amber-700 text-amber-100">
+              <Alert className="border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-200">
                 <AlertTriangle className="h-4 w-4" />
                 <AlertDescription>
                   {checkpointIsBimanual ? (
@@ -512,12 +537,12 @@ const InferenceModal: React.FC<Props> = ({
           </div>
 
           <div className="space-y-4">
-            <h3 className="text-lg font-semibold text-white border-b border-gray-700 pb-2">
+            <h3 className="text-lg font-semibold border-b border-border pb-2">
               Run parameters
             </h3>
             {policyConfig?.requires_task ? (
               <div className="space-y-2">
-                <Label htmlFor="task" className="text-sm font-medium text-gray-300">
+                <Label htmlFor="task" className="text-sm font-medium text-muted-foreground">
                   Task description
                 </Label>
                 <Input
@@ -525,15 +550,15 @@ const InferenceModal: React.FC<Props> = ({
                   value={task}
                   onChange={(e) => setTask(e.target.value)}
                   placeholder="e.g., pick up the red block"
-                  className="bg-gray-800 border-gray-700 text-white"
+                  className=""
                 />
-                <p className="text-xs text-gray-500">
+                <p className="text-xs text-muted-foreground">
                   This policy is language-conditioned ({policyConfig.policy_type}).
                 </p>
               </div>
             ) : null}
             <div className="space-y-2">
-              <Label htmlFor="durationS" className="text-sm font-medium text-gray-300">
+              <Label htmlFor="durationS" className="text-sm font-medium text-muted-foreground">
                 Max duration (seconds)
               </Label>
               <NumberInput
@@ -543,71 +568,68 @@ const InferenceModal: React.FC<Props> = ({
                 onChange={(v) => {
                   if (v !== undefined) setDurationS(v);
                 }}
-                className="bg-gray-800 border-gray-700 text-white"
+                className=""
               />
             </div>
           </div>
 
           <div className="space-y-4">
-            <h3 className="text-lg font-semibold text-white border-b border-gray-700 pb-2">
+            <h3 className="text-lg font-semibold border-b border-border pb-2">
               Cameras
             </h3>
             {policyConfigLoading ? (
-              <div className="flex items-center gap-2 text-sm text-slate-400">
+              <div className="flex items-center gap-2 text-sm text-muted-foreground">
                 <Loader2 className="w-4 h-4 animate-spin" />
                 Reading policy config…
               </div>
             ) : policyConfigError ? (
-              <Alert className="bg-red-900/40 border-red-700 text-red-100">
+              <Alert className="border-destructive/40 bg-destructive/10 text-destructive">
                 <AlertTriangle className="h-4 w-4" />
                 <AlertDescription>
                   Couldn't load policy config: {policyConfigError}
                 </AlertDescription>
               </Alert>
             ) : !policyConfig ? null : cameraMap.length === 0 ? (
-              <p className="text-xs text-gray-500">
+              <p className="text-xs text-muted-foreground">
                 This policy doesn't use cameras.
               </p>
             ) : (
               <div className="space-y-3">
-                <p className="text-xs text-gray-500">
+                <p className="text-xs text-muted-foreground">
                   Bind a physical camera to each name the policy was trained
                   with. Resolution comes from the checkpoint.
                 </p>
                 {cameraMap.map((m) => {
                   const dims = policyConfig.image_features[m.feature];
                   const value = cameraBindings[m.requestKey];
-                  const bound =
-                    value != null
-                      ? availableCameras.find((c) => c.index === value)
-                      : undefined;
+                  const selectedCamera = liveCameraByKey(value);
                   return (
                     <div key={m.requestKey} className="flex items-center gap-3">
                       <div className="flex-1">
-                        <Label className="text-sm font-medium text-gray-200">
+                        <Label className="text-sm font-medium text-foreground">
                           {m.display}
                         </Label>
-                        <p className="text-xs text-gray-500">
+                        <p className="text-xs text-muted-foreground">
                           {dims.width}×{dims.height}
                         </p>
                       </div>
                       <Select
-                        value={value != null ? String(value) : undefined}
+                        value={value ?? undefined}
                         onValueChange={(v) => onCameraBindingChange(m.requestKey, v)}
                       >
-                        <SelectTrigger className="bg-gray-800 border-gray-700 text-white w-56">
+                        <SelectTrigger className="w-56">
                           <SelectValue placeholder="Select a camera" />
                         </SelectTrigger>
-                        <SelectContent className="bg-gray-900 border-gray-700 text-white">
+                        <SelectContent>
                           {availableCameras.length === 0 ? (
-                            <div className="px-2 py-1.5 text-xs text-gray-500">
+                            <div className="px-2 py-1.5 text-xs text-muted-foreground">
                               No cameras detected
                             </div>
                           ) : (
                             availableCameras.map((cam) => (
                               <SelectItem
-                                key={cam.index}
-                                value={String(cam.index)}
+                                key={cameraKey(cam)}
+                                value={cameraKey(cam)}
                               >
                                 #{cam.index} — {cam.name}
                               </SelectItem>
@@ -615,9 +637,10 @@ const InferenceModal: React.FC<Props> = ({
                           )}
                         </SelectContent>
                       </Select>
+                      {/* getUserMedia preview so the user can verify which
+                          physical camera this role binds to. */}
                       <CameraThumbnail
-                        deviceId={bound?.deviceId ?? ""}
-                        cameraIndex={value ?? undefined}
+                        deviceId={selectedCamera?.deviceId ?? ""}
                         paused={submitting}
                       />
                     </div>
@@ -631,7 +654,7 @@ const InferenceModal: React.FC<Props> = ({
             <Button
               onClick={handleStart}
               disabled={!canStart}
-              className="w-full sm:w-auto bg-green-500 hover:bg-green-600 text-white px-10 py-6 text-lg disabled:opacity-40 disabled:cursor-not-allowed"
+              className="w-full sm:w-auto px-10 py-6 text-lg disabled:opacity-40 disabled:cursor-not-allowed"
             >
               <Play className="w-5 h-5 mr-2" />
               {submitting ? "Starting…" : "Start Inference"}
@@ -639,7 +662,7 @@ const InferenceModal: React.FC<Props> = ({
             <Button
               onClick={() => onOpenChange(false)}
               variant="outline"
-              className="w-full sm:w-auto border-gray-500 hover:border-gray-200 px-10 py-6 text-lg text-zinc-500 bg-zinc-900 hover:bg-zinc-800"
+              className="w-full sm:w-auto px-10 py-6 text-lg"
             >
               Cancel
             </Button>

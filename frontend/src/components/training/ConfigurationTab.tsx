@@ -9,6 +9,9 @@ interface ConfigurationTabProps extends ConfigComponentProps {
   authenticated: boolean;
   flavors: RunnerFlavor[];
   hardwareLoading: boolean;
+  /** True when a base skill (fine-tune) or resume seed fixes the policy —
+   * the run must train the source checkpoint's architecture. */
+  policyLocked?: boolean;
 }
 
 const ConfigurationTab: React.FC<ConfigurationTabProps> = ({
@@ -17,9 +20,10 @@ const ConfigurationTab: React.FC<ConfigurationTabProps> = ({
   authenticated,
   flavors,
   hardwareLoading,
+  policyLocked,
 }) => {
   return (
-    <div className="max-w-3xl mx-auto space-y-6">
+    <div className="space-y-6">
       <TargetCard
         config={config}
         updateConfig={updateConfig}
@@ -27,7 +31,11 @@ const ConfigurationTab: React.FC<ConfigurationTabProps> = ({
         flavors={flavors}
         loading={hardwareLoading}
       />
-      <EssentialsCard config={config} updateConfig={updateConfig} />
+      <EssentialsCard
+        config={config}
+        updateConfig={updateConfig}
+        policyLocked={policyLocked}
+      />
       <AdvancedCard config={config} updateConfig={updateConfig} />
     </div>
   );

@@ -613,7 +613,9 @@ def test_graceful_stop_diagnoses_a_stalled_return(
     assert "ticks" in out
 
 
-def test_graceful_stop_diagnoses_a_missing_pose(no_sleep: list[float], capsys: pytest.CaptureFixture) -> None:
+def test_graceful_stop_diagnoses_a_missing_pose(
+    no_sleep: list[float], capsys: pytest.CaptureFixture
+) -> None:
     bus = _FakeScriptBus()
 
     acs._graceful_stop(bus, {})
@@ -754,3 +756,310 @@ def test_release_arm_torque_reports_connect_failure(monkeypatch: pytest.MonkeyPa
     assert len(problems) == 1
     assert "TORQUE MAY STILL BE ENABLED" in problems[0]
     assert "/dev/arm" in problems[0]
+
+
+# ---------------------------------------------------------------------------
+# Concurrent batch auto-calibration (subset of arms, partial success)
+# ---------------------------------------------------------------------------
+
+
+def _arm(device_type: str = "robot", port: str = "/dev/a", name: str = "arm_a", arm: str = "left"):
+    """Build one AutoCalibrationBatchArm."""
+    return auto_calibrate.AutoCalibrationBatchArm(
+        device_type=device_type, port=port, config_file=name, arm=arm
+    )
+
+
+def _port_of(popen_args) -> str:
+    """Extract the --port value from a Popen command list."""
+    argv = popen_args[0]
+    return argv[argv.index("--port") + 1]
+
+
+class _ExitProc:
+    """Fake process that emits one line then exits with a fixed code."""
+
+    def __init__(self, code: int, port: str) -> None:
+        self.stdout = iter([f"Stage 0: init on {port}\n"])
+        self._code = code
+
+    def wait(self, timeout=None) -> int:
+        return self._code
+
+    def terminate(self) -> None:
+        pass
+
+
+def _no_name_taken(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Nothing on disk is 'taken' — the pre-check passes for every arm."""
+    monkeypatch.setattr(auto_calibrate, "_calibration_name_taken", lambda dt, stem: False)
+
+
+def _join_batch(mgr) -> None:
+    for runner in mgr._runners:
+        if runner._thread is not None:
+            runner._thread.join(timeout=2)
+        if runner._stop_thread is not None:
+            runner._stop_thread.join(timeout=5)
+
+
+def test_batch_rejects_empty() -> None:
+    mgr = auto_calibrate.AutoCalibrationBatchManager()
+    result = mgr.start(auto_calibrate.AutoCalibrationBatchRequest(arms=[]))
+    assert result["success"] is False
+
+
+def test_batch_rejects_more_than_four() -> None:
+    mgr = auto_calibrate.AutoCalibrationBatchManager()
+    arms = [_arm(port=f"/dev/a{i}", name=f"n{i}") for i in range(5)]
+    result = mgr.start(auto_calibrate.AutoCalibrationBatchRequest(arms=arms))
+    assert result["success"] is False
+    assert "4" in result["message"]
+
+
+def test_batch_rejects_duplicate_ports() -> None:
+    mgr = auto_calibrate.AutoCalibrationBatchManager()
+    arms = [_arm(port="/dev/shared", name="n1"), _arm(port="/dev/shared", name="n2")]
+    result = mgr.start(auto_calibrate.AutoCalibrationBatchRequest(arms=arms))
+    assert result["success"] is False
+    assert "port" in result["message"].lower()
+
+
+def test_batch_rejects_duplicate_same_side_names() -> None:
+    mgr = auto_calibrate.AutoCalibrationBatchManager()
+    # Same device_type + same name (different ports) collide on one file path.
+    arms = [
+        _arm(device_type="robot", port="/dev/a", name="dup"),
+        _arm(device_type="robot", port="/dev/b", name="dup"),
+    ]
+    result = mgr.start(auto_calibrate.AutoCalibrationBatchRequest(arms=arms))
+    assert result["success"] is False
+    assert "dup" in result["message"]
+
+
+def test_batch_same_name_different_side_is_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A leader and a follower may share a name — they save to different dirs."""
+    _no_name_taken(monkeypatch)
+    monkeypatch.setattr(auto_calibrate.subprocess, "Popen", lambda *a, **k: _ExitProc(0, _port_of(a)))
+    mgr = auto_calibrate.AutoCalibrationBatchManager()
+    arms = [
+        _arm(device_type="teleop", port="/dev/lead", name="shared"),
+        _arm(device_type="robot", port="/dev/follow", name="shared"),
+    ]
+    result = mgr.start(auto_calibrate.AutoCalibrationBatchRequest(arms=arms))
+    assert result["success"] is True
+    _join_batch(mgr)
+
+
+def test_batch_name_taken_precheck_rejects(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An existing name is rejected up front (before any subprocess launches)."""
+    launched: list = []
+    monkeypatch.setattr(
+        auto_calibrate.subprocess, "Popen", lambda *a, **k: launched.append(a) or _ExitProc(0, "x")
+    )
+    monkeypatch.setattr(auto_calibrate, "_calibration_name_taken", lambda dt, stem: stem == "taken_arm")
+    mgr = auto_calibrate.AutoCalibrationBatchManager()
+    arms = [_arm(port="/dev/a", name="fresh"), _arm(port="/dev/b", name="taken_arm")]
+    result = mgr.start(auto_calibrate.AutoCalibrationBatchRequest(arms=arms))
+    assert result["success"] is False
+    assert result["code"] == "name_taken"
+    assert "taken_arm" in result["names"]
+    assert launched == []  # fail-fast: no hardware touched
+
+
+def test_batch_name_taken_bypassed_by_overwrite(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(auto_calibrate.subprocess, "Popen", lambda *a, **k: _ExitProc(0, _port_of(a)))
+    monkeypatch.setattr(auto_calibrate, "_calibration_name_taken", lambda dt, stem: True)
+    mgr = auto_calibrate.AutoCalibrationBatchManager()
+    arms = [_arm(port="/dev/a", name="n1"), _arm(port="/dev/b", name="n2")]
+    result = mgr.start(auto_calibrate.AutoCalibrationBatchRequest(arms=arms, overwrite=True))
+    assert result["success"] is True
+    _join_batch(mgr)
+
+
+def test_batch_threads_motor_power_into_torque_limit_arg(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The robot's torque slider (percent) reaches the vendored script as
+    --torque-limit percent×10, on every arm; the flag is absent when the
+    request carries no motor_power (the script's default applies)."""
+    _no_name_taken(monkeypatch)
+    argvs: list[list[str]] = []
+
+    def _popen(*a, **k):
+        argvs.append(a[0])
+        return _ExitProc(0, _port_of(a))
+
+    monkeypatch.setattr(auto_calibrate.subprocess, "Popen", _popen)
+
+    mgr = auto_calibrate.AutoCalibrationBatchManager()
+    arms = [_arm(port="/dev/a", name="arm_a"), _arm(device_type="teleop", port="/dev/b", name="arm_b")]
+    result = mgr.start(auto_calibrate.AutoCalibrationBatchRequest(arms=arms, motor_power=25))
+    assert result["success"] is True
+    _join_batch(mgr)
+    for argv in argvs:
+        assert argv[argv.index("--torque-limit") + 1] == "250"
+
+    argvs.clear()
+    mgr2 = auto_calibrate.AutoCalibrationBatchManager()
+    result2 = mgr2.start(
+        auto_calibrate.AutoCalibrationBatchRequest(arms=[_arm(port="/dev/c", name="arm_c")])
+    )
+    assert result2["success"] is True
+    _join_batch(mgr2)
+    assert "--torque-limit" not in argvs[0]
+
+
+def test_batch_launches_concurrently_and_all_complete(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Three arms launch simultaneously, each on its own port, and all complete
+    — no robot_name so no filesystem write-back is needed."""
+    _no_name_taken(monkeypatch)
+    ports_seen: list[str] = []
+
+    def _popen(*a, **k):
+        port = _port_of(a)
+        ports_seen.append(port)
+        return _ExitProc(0, port)
+
+    monkeypatch.setattr(auto_calibrate.subprocess, "Popen", _popen)
+
+    mgr = auto_calibrate.AutoCalibrationBatchManager()
+    arms = [
+        _arm(port="/dev/a", name="arm_a"),
+        _arm(port="/dev/b", name="arm_b"),
+        _arm(device_type="teleop", port="/dev/c", name="arm_c"),
+    ]
+    result = mgr.start(auto_calibrate.AutoCalibrationBatchRequest(arms=arms))
+    assert result["success"] is True
+    assert result["total"] == 3 and result["launched"] == 3
+    _join_batch(mgr)
+
+    status = mgr.get_status()
+    assert status["total"] == 3
+    assert status["completed"] == 3
+    assert status["failed"] == 0
+    assert status["active"] is False
+    # One subprocess per distinct port.
+    assert sorted(ports_seen) == ["/dev/a", "/dev/b", "/dev/c"]
+    # Per-arm status carries identity; combined logs are per-arm prefixed.
+    names = {a["name"] for a in status["arms"]}
+    assert names == {"arm_a", "arm_b", "arm_c"}
+    assert any("[arm_a]" in line for line in status["logs"])
+
+
+def test_batch_partial_success_one_arm_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One arm's subprocess exits non-zero; the OTHERS still complete. The
+    failed arm is reported failed, its stray file removed, its name not saved."""
+    _no_name_taken(monkeypatch)
+    removed: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        auto_calibrate,
+        "_remove_stray_calibration_file",
+        lambda dt, stem: removed.append((dt, stem)),
+    )
+
+    def _popen(*a, **k):
+        port = _port_of(a)
+        # The arm on /dev/bad fails; the rest succeed.
+        return _ExitProc(1 if port == "/dev/bad" else 0, port)
+
+    monkeypatch.setattr(auto_calibrate.subprocess, "Popen", _popen)
+
+    mgr = auto_calibrate.AutoCalibrationBatchManager()
+    arms = [
+        _arm(port="/dev/ok1", name="ok1"),
+        _arm(port="/dev/bad", name="bad"),
+        _arm(port="/dev/ok2", name="ok2"),
+    ]
+    assert mgr.start(auto_calibrate.AutoCalibrationBatchRequest(arms=arms))["success"] is True
+    _join_batch(mgr)
+
+    status = mgr.get_status()
+    assert status["completed"] == 2
+    assert status["failed"] == 1
+    by_name = {a["name"]: a for a in status["arms"]}
+    assert by_name["ok1"]["status"] == "completed"
+    assert by_name["ok2"]["status"] == "completed"
+    assert by_name["bad"]["status"] == "failed"
+    # Only the failed arm's stray file is cleaned up.
+    assert removed == [("robot", "bad")]
+
+
+def test_batch_launch_failure_does_not_block_others(monkeypatch: pytest.MonkeyPatch) -> None:
+    """If one arm's Popen raises, that arm is 'failed' but the others launch."""
+    _no_name_taken(monkeypatch)
+
+    def _popen(*a, **k):
+        port = _port_of(a)
+        if port == "/dev/boom":
+            raise OSError("could not open serial port")
+        return _ExitProc(0, port)
+
+    monkeypatch.setattr(auto_calibrate.subprocess, "Popen", _popen)
+
+    mgr = auto_calibrate.AutoCalibrationBatchManager()
+    arms = [_arm(port="/dev/good", name="good"), _arm(port="/dev/boom", name="boom")]
+    result = mgr.start(auto_calibrate.AutoCalibrationBatchRequest(arms=arms))
+    assert result["success"] is True
+    assert result["launched"] == 1
+    _join_batch(mgr)
+
+    status = mgr.get_status()
+    by_name = {a["name"]: a for a in status["arms"]}
+    assert by_name["good"]["status"] == "completed"
+    assert by_name["boom"]["status"] == "failed"
+
+
+def test_batch_all_launches_fail_returns_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    _no_name_taken(monkeypatch)
+
+    def _popen(*a, **k):
+        raise OSError("no serial port")
+
+    monkeypatch.setattr(auto_calibrate.subprocess, "Popen", _popen)
+    mgr = auto_calibrate.AutoCalibrationBatchManager()
+    arms = [_arm(port="/dev/a", name="a"), _arm(port="/dev/b", name="b")]
+    result = mgr.start(auto_calibrate.AutoCalibrationBatchRequest(arms=arms))
+    assert result["success"] is False
+
+
+def test_batch_stop_stops_all_and_releases_each_torque(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stop terminates every running arm and releases EACH arm's torque over its
+    own port; a per-arm terminal status ('stopped') results."""
+    released: list[str] = []
+    monkeypatch.setattr(auto_calibrate, "_calibration_name_taken", lambda dt, stem: False)
+    monkeypatch.setattr(
+        auto_calibrate,
+        "_release_arm_torque",
+        lambda port: (released.append(port), [])[1],
+    )
+    monkeypatch.setattr(auto_calibrate, "_STOP_GRACE_S", 0.2)
+    monkeypatch.setattr(auto_calibrate, "_STOP_KILL_WAIT_S", 0.2)
+
+    procs = {"/dev/a": StoppableFakeProc(), "/dev/b": StoppableFakeProc()}
+    monkeypatch.setattr(auto_calibrate.subprocess, "Popen", lambda *a, **k: procs[_port_of(a)])
+
+    mgr = auto_calibrate.AutoCalibrationBatchManager()
+    arms = [_arm(port="/dev/a", name="a"), _arm(port="/dev/b", name="b")]
+    assert mgr.start(auto_calibrate.AutoCalibrationBatchRequest(arms=arms))["success"] is True
+
+    assert mgr.stop()["success"] is True
+    _join_batch(mgr)
+
+    status = mgr.get_status()
+    assert status["active"] is False
+    assert {a["status"] for a in status["arms"]} == {"stopped"}
+    assert sorted(released) == ["/dev/a", "/dev/b"]
+    assert procs["/dev/a"].terminated and procs["/dev/b"].terminated
+
+
+def test_batch_stop_when_idle_is_rejected() -> None:
+    mgr = auto_calibrate.AutoCalibrationBatchManager()
+    assert mgr.stop()["success"] is False
+
+
+def test_batch_status_idle() -> None:
+    status = auto_calibrate.AutoCalibrationBatchManager().get_status()
+    assert status["active"] is False
+    assert status["arms"] == []
+    assert status["total"] == 0
+    assert status["completed"] == 0
+    assert status["failed"] == 0

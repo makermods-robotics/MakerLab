@@ -9,7 +9,11 @@ description = "LeRobot Lab - A web interface for robotics with lerobot integrati
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
-requires-python = ">=3.12"
+# <3.14: the pinned lerobot/draccus stack crashes at CLI-parser construction on
+# Python 3.14 (argparse validates type= is callable; draccus 0.8.0 passes raw
+# annotations), killing every subprocess flow (rollout/training). Lift the cap
+# once a draccus release supports 3.14 and the lerobot pin picks it up.
+requires-python = ">=3.12,<3.14"
 dependencies = [
     "fastapi[standard]>=0.115.12",
     "websockets>=15.0.1",
@@ -35,15 +39,12 @@ test = [
 ]
 
 [project.scripts]
+# The installed command is `makerlab`. The Python package/module stays
+# `makerlab` (imports, the wheel, `makerlab.server:app`) — only the CLI is rebranded.
 makerlab = "makerlab.scripts.makerlab:main"
 # Headless robot-station posture as an installed command: --lan --offline
 # defaults, extra args pass through. What the systemd unit runs.
 makerlab-station = "makerlab.scripts.makerlab:station"
-# Convenience alias — `makerlabs` (plural) runs the same friendly default as
-# `makerlab` (localhost, opens a browser, Hub reachable). For the headless
-# offline station posture use `makerlab-station` (or pass `makerlabs --lan
-# --offline` ad hoc).
-makerlabs = "makerlab.scripts.makerlab:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

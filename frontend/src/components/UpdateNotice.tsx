@@ -94,15 +94,15 @@ const UpdateNotice = () => {
       }}
     >
       <DialogContent
-        className="bg-slate-800 border-slate-700 text-white max-w-lg"
+        className="bg-background border-border text-foreground max-w-lg"
         onOpenAutoFocus={(e) => e.preventDefault()}
       >
         <DialogHeader>
-          <DialogTitle className="flex items-center gap-3 text-white">
-            <Sparkles className="w-5 h-5 text-amber-400" />
+          <DialogTitle className="flex items-center gap-3 text-foreground">
+            <Sparkles className="w-5 h-5 text-warn" />
             MakerLab update available
           </DialogTitle>
-          <DialogDescription className="text-slate-300">
+          <DialogDescription className="text-muted-foreground">
             You're {behind} 😱.
             <br />
             Update to get the latest fixes and features 🤗.
@@ -113,7 +113,7 @@ const UpdateNotice = () => {
                   href={status.compare_url}
                   target="_blank"
                   rel="noreferrer"
-                  className="text-sky-300 underline hover:text-sky-200"
+                  className="text-info underline hover:text-info/80"
                 >
                   See what changed
                 </a>
@@ -125,13 +125,13 @@ const UpdateNotice = () => {
 
         <div className="space-y-4">
           <Collapsible>
-            <CollapsibleTrigger className="group flex items-center gap-1.5 text-xs font-medium text-slate-300 hover:text-white transition-colors">
+            <CollapsibleTrigger className="group flex items-center gap-1.5 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors">
               <ChevronRight className="w-3.5 h-3.5 transition-transform group-data-[state=open]:rotate-90" />
               Or update manually
             </CollapsibleTrigger>
             <CollapsibleContent className="pt-2">
               <div className="flex items-start gap-2">
-                <code className="min-w-0 flex-1 px-2 py-1.5 rounded bg-slate-900 text-sky-300 text-xs break-all whitespace-pre-wrap">
+                <code className="min-w-0 flex-1 px-2 py-1.5 rounded bg-muted text-info text-xs break-all whitespace-pre-wrap">
                   {status.update_command}
                 </code>
                 <Button
@@ -139,7 +139,7 @@ const UpdateNotice = () => {
                   size="icon"
                   onClick={copyCommand}
                   title="Copy command"
-                  className="shrink-0 bg-slate-900 border-slate-600 text-white hover:bg-slate-700"
+                  className="shrink-0 bg-background border-border text-foreground hover:bg-accent"
                 >
                   <Copy className="w-4 h-4" />
                 </Button>
@@ -148,17 +148,17 @@ const UpdateNotice = () => {
           </Collapsible>
 
           {output && (
-            <pre className="max-h-40 overflow-auto rounded bg-slate-900 p-2 text-xs text-slate-300 whitespace-pre-wrap">
+            <pre className="max-h-40 overflow-auto rounded bg-muted p-2 text-xs text-muted-foreground whitespace-pre-wrap">
               {output}
             </pre>
           )}
 
           <div className="flex items-center justify-between gap-3 pt-1">
-            <label className="flex items-center gap-2 text-sm text-slate-300">
+            <label className="flex items-center gap-2 text-sm text-muted-foreground">
               <Checkbox
                 checked={dontAsk}
                 onCheckedChange={(v) => setDontAsk(v === true)}
-                className="border-slate-300 data-[state=checked]:bg-slate-300 data-[state=checked]:text-slate-900"
+                className="border-border data-[state=checked]:bg-primary data-[state=checked]:text-primary-foreground"
               />
               Don't ask me again
             </label>
@@ -167,7 +167,7 @@ const UpdateNotice = () => {
                 variant="ghost"
                 onClick={() => dismiss(dontAsk)}
                 disabled={updating}
-                className="text-slate-300 hover:bg-slate-700 hover:text-white"
+                className="text-muted-foreground hover:bg-accent hover:text-foreground"
               >
                 Later
               </Button>

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import VisualizerPanel from "@/components/control/VisualizerPanel";
 import TeleopCameraPanel from "@/components/control/TeleopCameraPanel";
@@ -19,6 +19,55 @@ const TeleoperationPage = () => {
   // button, an in-app link, and the unmount safety net can't double-stop or
   // double-toast.
   const stoppedRef = useRef(false);
+
+  // Terminal outcome of a session that ended UNDER us (the status poll below
+  // caught the worker dying mid-loop, or a stop from elsewhere whose cleanup
+  // tripped) — rendered as an inline banner: failed red, ran_with_warning
+  // amber (mirrors Inference.tsx). Null while the session is live.
+  const [finished, setFinished] = useState<{
+    outcome: "ran_with_warning" | "failed";
+    error: string | null;
+    hint: string | null;
+  } | null>(null);
+
+  // Poll the session status so a mid-loop death (unplugged bus, camera crash)
+  // surfaces here instead of failing silently — the backend clears the
+  // outcome fields on start, so a previous session's result can't trigger
+  // this on mount. Stops polling once we've caught an outcome or the user
+  // initiated a stop (the stop flow owns its own toasts).
+  useEffect(() => {
+    let cancelled = false;
+    const tick = async () => {
+      if (cancelled || stoppedRef.current) return;
+      try {
+        const res = await fetchWithHeaders(`${baseUrl}/teleoperation-status`);
+        if (!res.ok) return;
+        const status = await res.json();
+        if (cancelled || stoppedRef.current) return;
+        if (
+          !status.teleoperation_active &&
+          !status.releasing &&
+          (status.outcome === "failed" || status.outcome === "ran_with_warning")
+        ) {
+          // The session is already gone — mark the leave safety net handled so
+          // unmount doesn't POST a spurious stop against a dead session.
+          stoppedRef.current = true;
+          setFinished({
+            outcome: status.outcome,
+            error: status.error ?? null,
+            hint: status.hint ?? null,
+          });
+        }
+      } catch {
+        /* best-effort; the next tick retries */
+      }
+    };
+    const id = setInterval(tick, 2000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [baseUrl, fetchWithHeaders]);
   const stopTeleoperation = useCallback(async () => {
     if (stoppedRef.current) return;
     stoppedRef.current = true;
@@ -55,7 +104,11 @@ const TeleoperationPage = () => {
             if (status?.last_cleanup_error) {
               toast({
                 title: "Check the arm",
-                description: status.last_cleanup_error,
+                // Lead with the plain-language hint when the backend mapped
+                // one (e.g. gripper overload) — the raw text follows.
+                description: status.hint
+                  ? `${status.hint} (${status.last_cleanup_error})`
+                  : status.last_cleanup_error,
                 variant: "destructive",
               });
             }
@@ -108,8 +161,48 @@ const TeleoperationPage = () => {
     navigate("/");
   };
 
+  const finishedWarn = finished?.outcome === "ran_with_warning";
+
   return (
-    <div className="min-h-screen bg-black flex items-center justify-center p-2 sm:p-4">
+    <div className="relative min-h-screen bg-background flex items-center justify-center p-2 sm:p-4">
+      {finished && (
+        <div
+          className={`absolute top-4 left-1/2 -translate-x-1/2 z-50 w-[calc(100%-2rem)] max-w-xl rounded-lg border p-4 ${
+            finishedWarn
+              ? "border-warn/40 bg-warn/10"
+              : "border-destructive/40 bg-destructive/10"
+          }`}
+        >
+          <div
+            className={`flex items-center gap-2 text-sm font-semibold ${
+              finishedWarn ? "text-warn" : "text-destructive"
+            }`}
+          >
+            <span
+              className={`w-2 h-2 rounded-full ${
+                finishedWarn ? "bg-warn" : "bg-destructive"
+              }`}
+            />
+            {finishedWarn
+              ? "Teleoperation ended with a cleanup warning"
+              : "Teleoperation failed"}
+          </div>
+          {finished.hint && (
+            <p
+              className={`mt-2 text-sm leading-relaxed ${
+                finishedWarn ? "text-warn/90" : "text-destructive/90"
+              }`}
+            >
+              {finished.hint}
+            </p>
+          )}
+          {finished.error && (
+            <pre className="mt-3 max-h-40 overflow-auto rounded bg-muted p-2 text-xs text-muted-foreground whitespace-pre-wrap break-words">
+              {finished.error}
+            </pre>
+          )}
+        </div>
+      )}
       <div className="w-full h-[95vh] flex">
         <VisualizerPanel
           onGoBack={handleGoBack}

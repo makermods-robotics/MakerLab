@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Collect — MakerLab</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/shad.css">
+<style>
+  .collect-grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(300px, 1fr); gap: 16px; }
+  .viz {
+    position: relative;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: calc(var(--radius) + 4px);
+    box-shadow: var(--shadow-sm);
+    height: 380px;
+    overflow: hidden;
+  }
+  .viz canvas { width: 100%; height: 100%; display: block; }
+  .viz .viz-tag { position: absolute; top: 12px; left: 14px; display: flex; gap: 6px; }
+  .viz .viz-state {
+    position: absolute; bottom: 12px; left: 14px;
+    font-size: 12px; font-weight: 500; color: var(--muted-foreground);
+  }
+  .viz.teleop-live .viz-state { color: var(--foreground); }
+  .cam-strip { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 16px; }
+  .cam-strip .media { height: 150px; }
+  .side { display: grid; gap: 16px; align-content: start; }
+  .teleop-actions { display: flex; gap: 9px; align-items: center; }
+  .teleop-status { font-family: "JetBrains Mono", monospace; font-size: 10.5px; color: var(--muted-foreground); margin-top: 12px; }
+  .form-2col { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .record-foot { display: flex; align-items: center; justify-content: space-between; margin-top: 4px; }
+  @media (max-width: 900px) { .collect-grid { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body data-stage="collect">
+
+<main class="page">
+  <div class="banner" data-post-banner hidden>
+    <div>
+      <b>pick-cube updated · +8 episodes (32 total)</b>
+      <small>Recorded just now on bench-01 · front + wrist cameras</small>
+    </div>
+    <a class="btn" href="train.html">Train on this dataset →</a>
+  </div>
+
+  <div class="page-head">
+    <div>
+      <h1>Collect</h1>
+      <p class="gloss">Teach by demonstration — practice with teleop, then record episodes.</p>
+    </div>
+  </div>
+
+  <div class="collect-grid">
+    <div>
+      <div class="viz" id="viz">
+        <div class="viz-tag"><span class="badge">SO-101</span><span class="badge secondary">bench-01</span></div>
+        <canvas id="viz-canvas" aria-label="SO-101 live view"></canvas>
+        <div class="viz-state" id="viz-state">Idle — start teleop to drive</div>
+      </div>
+      <div class="cam-strip">
+        <div class="media" data-label="front camera"></div>
+        <div class="media" data-label="wrist camera"></div>
+      </div>
+    </div>
+
+    <div class="side">
+      <section class="card">
+        <div class="card-header">
+          <div class="card-title">Teleoperate</div>
+          <div class="card-desc">Drive the follower with the leader arm. Nothing is saved.</div>
+        </div>
+        <div class="card-content">
+          <div class="teleop-actions">
+            <button class="btn" id="teleop-toggle">Start teleop</button>
+            <button class="btn outline" id="teleop-stop" hidden>Stop</button>
+          </div>
+          <p class="teleop-status" id="teleop-status">joints idle · leader detached</p>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-header">
+          <div class="card-title">Record dataset</div>
+          <div class="card-desc">Episodes go to the selected dataset.</div>
+        </div>
+        <div class="card-content">
+          <div class="field">
+            <label class="label">Dataset</label>
+            <select class="select"><option>pick-cube · 24 episodes</option><option>stack-blocks · 12 episodes</option><option>+ New dataset…</option></select>
+          </div>
+          <div class="field">
+            <label class="label">Task prompt</label>
+            <textarea class="input" rows="2">Pick up the cube and place it in the tray.</textarea>
+          </div>
+          <div class="form-2col">
+            <div class="field"><label class="label">Episodes</label><input class="input" value="10"></div>
+            <div class="field"><label class="label">Episode / reset s</label><input class="input" value="30 / 5"></div>
+          </div>
+          <div class="record-foot">
+            <span class="hint">cameras: front + wrist</span>
+            <a class="btn" href="record-live.html">Start recording</a>
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
+</main>
+
+<script src="assets/shad.js"></script>
+<script>
+  if (new URLSearchParams(location.search).has('post')) {
+    document.querySelector('[data-post-banner]').hidden = false;
+  }
+</script>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.177.0/build/three.module.js",
+    "three/examples/jsm/": "https://unpkg.com/three@0.177.0/examples/jsm/",
+    "urdf-loader": "https://unpkg.com/urdf-loader@0.12.6/src/URDFLoader.js"
+  }
+}
+</script>
+<script type="module">
+  import { mountSO101 } from './assets/so101.js';
+  const canvas = document.getElementById('viz-canvas');
+  let viewer = null;
+  try {
+    viewer = await mountSO101(canvas, { mode: 'idle', camera: [0.55, 0.34, 0.7] });
+  } catch (e) { console.warn('[collect] 3D unavailable:', e); }
+
+  const toggle = document.getElementById('teleop-toggle');
+  const stop = document.getElementById('teleop-stop');
+  const status = document.getElementById('teleop-status');
+  const viz = document.getElementById('viz');
+  const state = document.getElementById('viz-state');
+  const set = (on) => {
+    if (viewer) viewer.setMode(on ? 'teleop' : 'idle');
+    viz.classList.toggle('teleop-live', on);
+    state.textContent = on ? '● Teleop live — leader → follower' : 'Idle — start teleop to drive';
+    status.textContent = on ? 'joints streaming · 60 hz · nothing saved' : 'joints idle · leader detached';
+    toggle.hidden = on;
+    stop.hidden = !on;
+  };
+  toggle.addEventListener('click', () => set(true));
+  stop.addEventListener('click', () => set(false));
+</script>
+</body>
+</html>

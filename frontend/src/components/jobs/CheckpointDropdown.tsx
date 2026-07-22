@@ -7,6 +7,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { JobCheckpoint } from "@/lib/checkpointsApi";
+import { cn } from "@/lib/utils";
 
 interface Props {
   checkpoints: JobCheckpoint[];
@@ -14,6 +15,9 @@ interface Props {
   onChange: (step: number) => void;
   disabled?: boolean;
   placeholder?: string;
+  /** Extra classes for the trigger (e.g. `w-full min-w-0` when the dropdown
+   * flexes inside a card's single-line action row). */
+  className?: string;
 }
 
 export const CheckpointDropdown: React.FC<Props> = ({
@@ -22,6 +26,7 @@ export const CheckpointDropdown: React.FC<Props> = ({
   onChange,
   disabled,
   placeholder = "Select checkpoint",
+  className,
 }) => {
   // step 0 is the sentinel for an imported single-model checkpoint (lerobot
   // never saves at step 0), so it has no meaningful step number — show
@@ -35,12 +40,15 @@ export const CheckpointDropdown: React.FC<Props> = ({
       disabled={disabled || checkpoints.length === 0}
     >
       <SelectTrigger
-        className="bg-slate-800 border-slate-700 text-white h-8 text-xs px-2 w-auto min-w-[110px]"
+        className={cn(
+          "bg-background border-input h-8 text-xs px-2 w-auto min-w-[110px]",
+          className,
+        )}
         onClick={(e) => e.stopPropagation()}
       >
         <SelectValue placeholder={placeholder} />
       </SelectTrigger>
-      <SelectContent className="bg-slate-900 border-slate-700 text-white">
+      <SelectContent className="bg-popover border-border">
         {checkpoints.map((c) => (
           <SelectItem
             key={c.step}

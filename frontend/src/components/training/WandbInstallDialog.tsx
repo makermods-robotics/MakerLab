@@ -25,9 +25,9 @@ const WandbInstallDialog: React.FC<Props> = ({ open, onOpenChange, installHint }
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="bg-slate-800 border-slate-700 text-white max-w-2xl">
+      <DialogContent className="bg-background border-border max-w-2xl">
         <DialogHeader>
-          <DialogTitle className="flex items-center gap-3 text-white">
+          <DialogTitle className="flex items-center gap-3 text-foreground">
             <InstallTitleIcon state={install.state} />
             {installTitle(install.state, "Weights & Biases Not Installed")}
           </DialogTitle>
@@ -50,7 +50,7 @@ const WandbInstallDialog: React.FC<Props> = ({ open, onOpenChange, installHint }
             idleDescription={
               <>
                 Enabling W&amp;B logging requires the{" "}
-                <code className="px-1 py-0.5 rounded bg-slate-900 text-sky-300">
+                <code className="px-1 py-0.5 rounded bg-muted text-info">
                   wandb
                 </code>{" "}
                 package, which isn't installed in this environment. Install it
