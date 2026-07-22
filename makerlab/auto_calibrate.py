@@ -333,17 +333,30 @@ class AutoCalibrationManager:
         """Escalating stop: SIGTERM → grace period for the script's own torque
         release → SIGKILL → direct fallback torque release from this process.
 
-        SIGTERM makes the script raise KeyboardInterrupt and release torque
-        itself, but if its main thread is wedged in a C-level serial call the
-        exception never materializes and the process won't die — observed on
-        hardware. SIGKILL can't be caught, so after it the arm is assumed
+        On POSIX, proc.terminate() sends a real SIGTERM, which makes the
+        script raise KeyboardInterrupt and release torque itself — but if its
+        main thread is wedged in a C-level serial call the exception never
+        materializes and the process won't die — observed on hardware.
+        proc.kill() (SIGKILL) can't be caught, so after it the arm is assumed
         energized and we release torque directly over the (now free) port.
+
+        On Windows, proc.terminate() calls TerminateProcess() directly —
+        no signal is delivered to the child, so its SIGTERM handler never
+        fires and the graceful "return to starting position" release never
+        happens there; every stop goes straight to the same direct
+        torque-release fallback used for the SIGKILL case on POSIX. Not a
+        safety gap (torque is always released below regardless of platform
+        or exit path), but the arm won't retract smoothly first the way it
+        does on POSIX.
+
         Always ends on a terminal status so the UI can never freeze mid-stop.
         """
         killed = False
         problems: list[str] = []
         try:
             try:
+                # See the docstring above: on Windows this is an immediate
+                # hard-kill (TerminateProcess), not a real, catchable SIGTERM.
                 proc.terminate()
             except Exception as e:
                 logger.warning(f"Error terminating auto-calibration: {e}")
