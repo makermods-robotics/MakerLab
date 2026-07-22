@@ -872,7 +872,6 @@ def handle_stop_teleoperation() -> dict[str, Any]:
         worker.join(timeout=5.0)
         if worker.is_alive():
             logger.warning("Teleoperation worker did not exit within 5s")
-            teleoperation_thread = None
             return {
                 "success": True,
                 "message": "Release requested, but the worker has not shut down yet",
