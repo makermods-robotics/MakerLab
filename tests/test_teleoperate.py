@@ -444,6 +444,63 @@ def test_second_stop_during_grace_surfaces_cleanup_error(
     assert "TORQUE MAY STILL BE ENABLED" in result["warning"]
 
 
+class _StuckWorker:
+    """Thread double: never actually exits — join() times out, is_alive() stays True.
+
+    Simulates a worker still mid rest-pose-return/cleanup after a second stop's
+    `join(timeout=5.0)` elapses, so the code must NOT abandon the reference.
+    """
+
+    def __init__(self) -> None:
+        self.join_calls: list[float | None] = []
+
+    def is_alive(self) -> bool:
+        return True
+
+    def join(self, timeout: float | None = None) -> None:
+        self.join_calls.append(timeout)
+
+
+def test_second_stop_timeout_keeps_thread_reference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: when the second-stop join() times out (the worker is still
+    genuinely alive), `teleoperation_thread` must keep pointing at it instead
+    of being nulled out — nulling it would let a later start's mutex/guard
+    checks wrongly treat the still-running, still-hardware-holding worker as
+    gone (see finish_pending_release, which follows this same discipline).
+    """
+    import threading
+
+    import makerlab.teleoperate as teleop
+
+    worker = _StuckWorker()
+    monkeypatch.setattr(teleop, "teleoperation_active", False)
+    monkeypatch.setattr(teleop, "teleoperation_thread", worker)
+    monkeypatch.setattr(teleop, "_release_now", threading.Event())
+    monkeypatch.setattr(teleop, "last_cleanup_error", None)
+
+    result = teleop.handle_stop_teleoperation()
+
+    assert result["success"] is True
+    assert "has not shut down yet" in result["message"]
+    assert "did not shut down within 5s" in result["warning"]
+    # The key regression assertion: the module must still hold the SAME live
+    # thread object, not None.
+    assert teleop.teleoperation_thread is worker
+
+    # A subsequent finish_pending_release() must still recognize the worker as
+    # alive (not treat it as already gone) and attempt its own join.
+    assert teleop.finish_pending_release() is False
+    assert worker.join_calls  # finish_pending_release actually tried to join it
+
+    # A third manual stop press must re-enter the same second-stop branch
+    # (not fall through to "No teleoperation session is active").
+    result2 = teleop.handle_stop_teleoperation()
+    assert result2["message"] != "No teleoperation session is active"
+    assert teleop.teleoperation_thread is worker
+
+
 def test_finish_pending_release_cuts_grace_short(monkeypatch: pytest.MonkeyPatch) -> None:
     """A start arriving during the grace hold must release the arms and free
     the ports instead of failing port-busy for the rest of the grace.
