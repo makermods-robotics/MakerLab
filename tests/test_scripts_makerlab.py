@@ -11,11 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for makerlab.scripts.makerlab — covers `_wait_for_port` and
-`_ensure_path_symlinks`. The launcher's `_run_prod` / `_run_dev` / `main`
-functions are CLI/process glue (they call uvicorn.run, spawn npm, install
-SIGINT handlers) and have no unit-testable seam without rewriting them; they
-are left to manual smoke testing."""
+"""Tests for makerlab.scripts.makerlab — covers `_wait_for_port`,
+`_ensure_path_symlinks`, `_resolve_npm_command`, and `_kill_process_tree`.
+`_run_prod` / `_run_dev` / `main` themselves are CLI/process glue (they call
+uvicorn.run, spawn npm, install SIGINT handlers) and have no unit-testable
+seam without rewriting them; they are left to manual smoke testing."""
 
 from __future__ import annotations
 
@@ -298,3 +298,75 @@ def test_ensure_path_symlinks_leaves_uv_tool_entry_untouched(tmp_path) -> None:
     # The other two names, not uv-owned, are linked to the venv as usual.
     assert (bin_dir / "makerlabs").resolve() == (source_dir / "makerlabs").resolve()
     assert (bin_dir / "makerlab-station").resolve() == (source_dir / "makerlab-station").resolve()
+
+
+def test_resolve_npm_command_returns_resolved_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    from makerlab.scripts import makerlab
+
+    monkeypatch.setattr(makerlab.shutil, "which", lambda name: "/usr/local/bin/npm")
+    assert makerlab._resolve_npm_command() == ["/usr/local/bin/npm"]
+
+
+def test_resolve_npm_command_exits_when_npm_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    from makerlab.scripts import makerlab
+
+    monkeypatch.setattr(makerlab.shutil, "which", lambda name: None)
+    with pytest.raises(SystemExit):
+        makerlab._resolve_npm_command()
+
+
+def test_kill_process_tree_terminates_parent_and_children(monkeypatch: pytest.MonkeyPatch) -> None:
+    from unittest.mock import MagicMock
+
+    from makerlab.scripts import makerlab
+
+    fake_child = MagicMock(name="child-proc")
+    fake_parent = MagicMock(name="parent-proc")
+    fake_parent.children.return_value = [fake_child]
+
+    monkeypatch.setattr(makerlab.psutil, "Process", MagicMock(return_value=fake_parent))
+    monkeypatch.setattr(makerlab.psutil, "wait_procs", lambda procs, timeout: (procs, []))
+
+    fake_popen = MagicMock()
+    fake_popen.pid = 4242
+    makerlab._kill_process_tree(fake_popen)
+
+    fake_child.terminate.assert_called_once()
+    fake_parent.terminate.assert_called_once()
+    fake_child.kill.assert_not_called()
+    fake_parent.kill.assert_not_called()
+
+
+def test_kill_process_tree_escalates_to_kill_after_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    from unittest.mock import MagicMock
+
+    from makerlab.scripts import makerlab
+
+    fake_parent = MagicMock(name="parent-proc")
+    fake_parent.children.return_value = []
+
+    monkeypatch.setattr(makerlab.psutil, "Process", MagicMock(return_value=fake_parent))
+    # Simulate the parent still being alive after the terminate_timeout wait.
+    monkeypatch.setattr(makerlab.psutil, "wait_procs", lambda procs, timeout: ([], procs))
+
+    fake_popen = MagicMock()
+    fake_popen.pid = 4242
+    makerlab._kill_process_tree(fake_popen)
+
+    fake_parent.terminate.assert_called_once()
+    fake_parent.kill.assert_called_once()
+
+
+def test_kill_process_tree_survives_already_gone_process(monkeypatch: pytest.MonkeyPatch) -> None:
+    from unittest.mock import MagicMock
+
+    from makerlab.scripts import makerlab
+
+    def _raise(pid: int):
+        raise makerlab.psutil.NoSuchProcess(pid)
+
+    monkeypatch.setattr(makerlab.psutil, "Process", _raise)
+
+    fake_popen = MagicMock()
+    fake_popen.pid = 4242
+    makerlab._kill_process_tree(fake_popen)  # must not raise

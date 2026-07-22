@@ -23,8 +23,10 @@ and starts uvicorn with --reload. Opens the browser to :8080.
 """
 
 import argparse
+import contextlib
 import logging
 import os
+import shutil
 import signal
 import socket
 import subprocess
@@ -34,7 +36,10 @@ import time
 import webbrowser
 from pathlib import Path
 
+import psutil
 import uvicorn
+
+from ..utils.subprocess_env import process_isolation_kwargs
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -147,6 +152,46 @@ def _wait_for_port(port: int, timeout: int = 30) -> bool:
     return False
 
 
+def _resolve_npm_command() -> list[str]:
+    """Locate npm's real executable so Popen can invoke it without shell=True.
+
+    On Windows, "npm" on PATH resolves to npm.cmd, a shim script — not an
+    .exe. subprocess.Popen(["npm", ...]) without shell=True fails there with
+    FileNotFoundError: CreateProcess only auto-appends .exe when resolving a
+    bare command name, never .cmd/.bat. shutil.which() does the
+    platform-correct PATHEXT-aware search, so its result is always directly
+    executable.
+    """
+    npm_path = shutil.which("npm")
+    if npm_path is None:
+        logger.error("❌ npm not found on PATH — install Node.js first: https://nodejs.org/")
+        sys.exit(1)
+    return [npm_path]
+
+
+def _kill_process_tree(proc: subprocess.Popen, *, terminate_timeout: float = 5.0) -> None:
+    """Terminate proc and all its descendants, cross-platform.
+
+    Replaces the POSIX-only os.killpg(os.getpgid(...)) pattern: psutil walks
+    the process tree directly instead of relying on process-group semantics
+    (which Windows doesn't have in the POSIX sense), so the same code works
+    on both platforms. Escalates from terminate() to kill() for anything
+    still alive after terminate_timeout.
+    """
+    try:
+        parent = psutil.Process(proc.pid)
+    except psutil.NoSuchProcess:
+        return
+    procs = [*parent.children(recursive=True), parent]
+    for p in procs:
+        with contextlib.suppress(psutil.NoSuchProcess):
+            p.terminate()
+    _gone, alive = psutil.wait_procs(procs, timeout=terminate_timeout)
+    for p in alive:
+        with contextlib.suppress(psutil.NoSuchProcess):
+            p.kill()
+
+
 def _open_browser_when_ready():
     """Background-thread helper: poll the port, open the browser when up."""
     for _ in range(60):
@@ -208,16 +253,18 @@ def _run_dev():
         )
         sys.exit(1)
 
+    npm_cmd = _resolve_npm_command()
+
     logger.info("📦 Installing frontend deps...")
-    subprocess.run(["npm", "install"], check=True, cwd=FRONTEND_PATH)
+    subprocess.run([*npm_cmd, "install"], check=True, cwd=FRONTEND_PATH)
 
     logger.info("🎨 Starting Vite dev server (port %d)...", FRONTEND_DEV_PORT)
     frontend_process = subprocess.Popen(
-        ["npm", "run", "dev"],
+        [*npm_cmd, "run", "dev"],
         cwd=FRONTEND_PATH,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        start_new_session=True,
+        **process_isolation_kwargs(),
     )
 
     if not _wait_for_port(FRONTEND_DEV_PORT):
@@ -240,16 +287,13 @@ def _run_dev():
         ],
         cwd=PROJECT_ROOT,
         env=os.environ.copy(),
-        start_new_session=True,
+        **process_isolation_kwargs(),
     )
 
     if not _wait_for_port(BACKEND_PORT, timeout=15):
         logger.error("❌ Backend never came up")
         for p in (backend_process, frontend_process):
-            try:
-                os.killpg(os.getpgid(p.pid), signal.SIGTERM)
-            except Exception:
-                p.terminate()
+            _kill_process_tree(p)
         sys.exit(1)
 
     logger.info("🌐 Opening browser...")
@@ -262,16 +306,7 @@ def _run_dev():
     def shutdown(signum, frame):
         logger.info("🛑 Shutting down...")
         for name, p in [("backend", backend_process), ("frontend", frontend_process)]:
-            try:
-                os.killpg(os.getpgid(p.pid), signal.SIGTERM)
-                p.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(os.getpgid(p.pid), signal.SIGKILL)
-                except Exception:
-                    p.kill()
-            except Exception:
-                pass
+            _kill_process_tree(p)
             logger.info(f"  ✅ {name} stopped")
         sys.exit(0)
 

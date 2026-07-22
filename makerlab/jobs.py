@@ -23,7 +23,6 @@ import contextlib
 import json
 import logging
 import os
-import platform
 import re
 import shutil
 import subprocess
@@ -42,7 +41,7 @@ from pydantic import BaseModel
 from .train import TrainingRequest
 from .utils.config import is_valid_robot_name
 from .utils.hf_auth import shared_hf_api
-from .utils.subprocess_env import utf8_child_env
+from .utils.subprocess_env import process_isolation_kwargs, utf8_child_env
 
 logger = logging.getLogger(__name__)
 
@@ -128,40 +127,6 @@ class MetricsHistoryPoint(BaseModel):
     loss: float | None = None
     lr: float | None = None
     grad_norm: float | None = None
-
-
-def _process_isolation_kwargs() -> dict[str, object]:
-    """Popen kwargs that keep a spawned child alive through signals sent to
-    this process (uvicorn --reload restarting its worker on a .py file
-    change, or a user hitting Ctrl+C on the server's console) so training
-    survives and the next worker re-attaches via TailingJobRunner using
-    job.json's pid.
-
-    start_new_session=True (setsid) is how POSIX does this, but it is
-    silently discarded on Windows: CPython's Windows _execute_child names
-    the parameter unused_start_new_session and never passes it to
-    CreateProcess, so it provides zero isolation there — confirmed by
-    reading that source directly, not inferred. The Windows equivalent is
-    creationflags=CREATE_NEW_PROCESS_GROUP, which Microsoft's docs state
-    makes a process ignore a console-wide Ctrl+C.
-
-    NOTE: unlike the POSIX path, this hasn't been verified by observing a live
-    Ctrl+C actually fail to cascade on Windows (that requires a real
-    interactive console/session, which wasn't available when this was
-    written). Re-verify manually on a real Windows terminal before relying on
-    it under load.
-    """
-    if platform.system() == "Windows":
-        # getattr, not a direct attribute reference: CREATE_NEW_PROCESS_GROUP
-        # only exists on the Windows build of the subprocess module
-        # (CPython docs mark it "Availability: Windows"). A direct reference
-        # would raise AttributeError under a mocked-platform unit test
-        # running on our POSIX CI, even though this branch never actually
-        # executes there in production (platform.system() isn't mocked
-        # there). 0x00000200 is the documented win32 constant value.
-        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
-        return {"creationflags": creationflags}
-    return {"start_new_session": True}
 
 
 def _pid_alive(pid: int) -> bool:
@@ -363,8 +328,8 @@ class LocalJobRunner:
         # See utils/subprocess_env.py for why PYTHONIOENCODING is forced.
         child_env = utf8_child_env(PYTHONUNBUFFERED="1")
 
-        # See _process_isolation_kwargs() for why this isn't a plain
-        # start_new_session=True.
+        # See process_isolation_kwargs() in utils/subprocess_env.py for why
+        # this isn't a plain start_new_session=True.
         self._process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -374,7 +339,7 @@ class LocalJobRunner:
             errors="replace",
             bufsize=1,
             env=child_env,
-            **_process_isolation_kwargs(),
+            **process_isolation_kwargs(),
         )
 
         self._monitor_thread = threading.Thread(
