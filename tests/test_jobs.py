@@ -375,6 +375,44 @@ def test_pid_alive_returns_false_for_unlikely_pid() -> None:
     assert _pid_alive(999999999) is False
 
 
+def test_tailing_job_runner_stop_survives_missing_process(monkeypatch: pytest.MonkeyPatch) -> None:
+    """TailingJobRunner.stop() must not raise when the pid is already gone.
+
+    Regression test for the same bug class _pid_alive was fixed for: Windows
+    raises a plain OSError (not ProcessLookupError) for a stale/reused pid,
+    so a raw os.kill() + narrow except crashes here exactly like it did
+    there. psutil.Process(pid) raises psutil.NoSuchProcess uniformly on both
+    platforms for an already-gone pid, which is what stop() must tolerate.
+    """
+    import psutil
+
+    from makerlab.jobs import TailingJobRunner, TrainingMetrics
+
+    def _raise(pid: int):
+        raise psutil.NoSuchProcess(pid)
+
+    monkeypatch.setattr("makerlab.jobs.psutil.Process", _raise)
+
+    runner = TailingJobRunner(
+        TrainingMetrics(), log_file_path=Path("/tmp/does-not-matter.log"), pid=999999999
+    )
+    runner.stop()  # must not raise
+
+
+def test_tailing_job_runner_stop_terminates_live_process(monkeypatch: pytest.MonkeyPatch) -> None:
+    from unittest.mock import MagicMock
+
+    from makerlab.jobs import TailingJobRunner, TrainingMetrics
+
+    fake_process = MagicMock(name="psutil.Process()")
+    monkeypatch.setattr("makerlab.jobs.psutil.Process", MagicMock(return_value=fake_process))
+
+    runner = TailingJobRunner(TrainingMetrics(), log_file_path=Path("/tmp/does-not-matter.log"), pid=4242)
+    runner.stop()
+
+    fake_process.terminate.assert_called_once()
+
+
 def test_process_isolation_kwargs_uses_new_process_group_on_windows(monkeypatch) -> None:
     """start_new_session=True is a documented no-op on Windows (CPython's
     Windows _execute_child ignores it), so the Windows branch must use

@@ -26,7 +26,6 @@ import os
 import platform
 import re
 import shutil
-import signal
 import subprocess
 import sys
 import threading
@@ -500,8 +499,8 @@ class TailingJobRunner:
         self._tail_thread.start()
 
     def stop(self) -> None:
-        with contextlib.suppress(ProcessLookupError):
-            os.kill(self._pid, signal.SIGTERM)
+        with contextlib.suppress(psutil.NoSuchProcess):
+            psutil.Process(self._pid).terminate()
         self._stop_event.set()
 
     def is_running(self) -> bool:
