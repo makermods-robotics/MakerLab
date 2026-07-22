@@ -1160,6 +1160,60 @@ def test_delete_refusal_wording_is_action_neutral(tmp_lerobot_home, monkeypatch:
     assert result["message"].endswith("Stop it first.")
 
 
+def _stub_recording_request():
+    import makerlab.record as record
+
+    return record.RecordingRequest(
+        leader_port="/dev/leader",
+        follower_port="/dev/follower",
+        leader_config="leader",
+        follower_config="follower",
+        dataset_repo_id="tester/ds",
+        single_task="pick",
+    )
+
+
+def test_start_recording_blocked_when_calibration_active(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Recording must refuse to start while manual calibration owns the same
+    serial bus, rather than opening a second connection on a live port."""
+    import makerlab.record as record
+
+    monkeypatch.setattr(record, "recording_active", False)
+    monkeypatch.setattr("makerlab.calibrate.calibration_manager.status.calibration_active", True)
+
+    result = record.handle_start_recording(_stub_recording_request())
+    assert result == {
+        "success": False,
+        "message": "Calibration is currently active. Stop it first.",
+    }
+
+
+def test_start_recording_blocked_when_auto_calibration_active(monkeypatch: pytest.MonkeyPatch) -> None:
+    import makerlab.record as record
+
+    monkeypatch.setattr(record, "recording_active", False)
+    monkeypatch.setattr("makerlab.auto_calibrate.auto_calibration_manager.status.active", True)
+
+    result = record.handle_start_recording(_stub_recording_request())
+    assert result == {
+        "success": False,
+        "message": "Auto-calibration is currently active. Stop it first.",
+    }
+
+
+def test_start_recording_blocked_when_wiggle_active(monkeypatch: pytest.MonkeyPatch) -> None:
+    import makerlab.record as record
+
+    monkeypatch.setattr(record, "recording_active", False)
+    monkeypatch.setattr("makerlab.wiggle.wiggle_active", True)
+
+    result = record.handle_start_recording(_stub_recording_request())
+    assert result == {
+        "success": False,
+        "message": "A gripper wiggle is currently in progress. Wait for it to finish.",
+    }
+
+
 def test_start_recording_resume_skips_timestamp_stamp(monkeypatch: pytest.MonkeyPatch) -> None:
     """Resume must append to the EXISTING directory: the repo_id is used
     verbatim (no '_<timestamp>' suffix), unlike a fresh session which stamps

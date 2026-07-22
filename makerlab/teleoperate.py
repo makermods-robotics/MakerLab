@@ -556,7 +556,13 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
     global teleoperation_active, teleoperation_thread, current_robot, current_teleop, last_cleanup_error
     global releasing, last_session_outcome, last_session_error
 
-    from . import record as _record, rollout as _rollout
+    from . import (
+        auto_calibrate as _auto_calibrate,
+        calibrate as _calibrate,
+        record as _record,
+        rollout as _rollout,
+        wiggle as _wiggle,
+    )
 
     # A previous session (teleop or recording) may still be holding torque for
     # its release grace — cut it short so this start doesn't fail on a busy
@@ -579,6 +585,15 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
             return {"success": False, "message": "Recording is currently active. Stop it first."}
         if _rollout.inference_active:
             return {"success": False, "message": "Inference is currently active. Stop it first."}
+        if _calibrate.calibration_is_active():
+            return {"success": False, "message": "Calibration is currently active. Stop it first."}
+        if _auto_calibrate.auto_calibration_is_active():
+            return {"success": False, "message": "Auto-calibration is currently active. Stop it first."}
+        if _wiggle.wiggle_active:
+            return {
+                "success": False,
+                "message": "A gripper wiggle is currently in progress. Wait for it to finish.",
+            }
         # Per-session state reset, under the same lock that claims the active
         # flag: a stale _release_now from a previous session's double-stop
         # would otherwise cut EVERY later grace/return short until the server

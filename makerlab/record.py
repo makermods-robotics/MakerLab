@@ -439,7 +439,13 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
         identity_warnings, \
         discard_requested
 
-    from . import rollout as _rollout, teleoperate as _teleoperate
+    from . import (
+        auto_calibrate as _auto_calibrate,
+        calibrate as _calibrate,
+        rollout as _rollout,
+        teleoperate as _teleoperate,
+        wiggle as _wiggle,
+    )
 
     # Claim the active flag under the lock so two concurrent starts can't both
     # pass the precondition check.
@@ -471,6 +477,15 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
             return {"success": False, "message": "Teleoperation is currently active. Stop it first."}
         if _rollout.inference_active:
             return {"success": False, "message": "Inference is currently active. Stop it first."}
+        if _calibrate.calibration_is_active():
+            return {"success": False, "message": "Calibration is currently active. Stop it first."}
+        if _auto_calibrate.auto_calibration_is_active():
+            return {"success": False, "message": "Auto-calibration is currently active. Stop it first."}
+        if _wiggle.wiggle_active:
+            return {
+                "success": False,
+                "message": "A gripper wiggle is currently in progress. Wait for it to finish.",
+            }
         # Refuse a malformed dataset name up front (before claiming the flag or
         # touching hardware). Rejecting beats silent sanitization: "whoo/" used to
         # smuggle in a namespace and land the dataset at "user/whoo/".
