@@ -55,9 +55,19 @@ interface UrdfViewerElement extends HTMLElement {
 interface UrdfViewerProps {
   /** Which joint stream to follow — "joints" (default) or "joints_right" (bimanual). */
   jointsKey?: string;
+  /** Scene/background palette. The teleop page uses the default dark scene;
+   * light fits the studio's white surfaces. */
+  variant?: "dark" | "light";
+  /** Small-tile mode (e.g. the studio's corner PIP): shrinks the connection
+   * pill to a status dot and the joint label to fit a ~300px card. */
+  compact?: boolean;
 }
 
-const UrdfViewer: React.FC<UrdfViewerProps> = ({ jointsKey = "joints" }) => {
+const UrdfViewer: React.FC<UrdfViewerProps> = ({
+  jointsKey = "joints",
+  variant = "dark",
+  compact = false,
+}) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const [highlightedJoint, setHighlightedJoint] = useState<string | null>(null);
   const webglOk = isWebglSupported();
@@ -160,7 +170,7 @@ const UrdfViewer: React.FC<UrdfViewerProps> = ({ jointsKey = "joints" }) => {
     if (!webglOk || !containerRef.current) return;
 
     // Create and configure the URDF viewer element
-    const viewer = createUrdfViewer(containerRef.current, true);
+    const viewer = createUrdfViewer(containerRef.current, variant === "dark");
     viewerRef.current = viewer; // Store reference to the viewer
 
     // Setup mesh loading function with appropriate URL modifier
@@ -286,6 +296,7 @@ const UrdfViewer: React.FC<UrdfViewerProps> = ({ jointsKey = "joints" }) => {
     };
   }, [
     webglOk,
+    variant,
     isDefaultModel,
     customUrdfPath,
     urlModifierFunc,
@@ -317,37 +328,54 @@ const UrdfViewer: React.FC<UrdfViewerProps> = ({ jointsKey = "joints" }) => {
     <div
       className={cn(
         "w-full h-full transition-all duration-300 ease-in-out relative",
-        "bg-gradient-to-br from-gray-900 to-gray-800"
+        variant === "dark"
+          ? "bg-gradient-to-br from-gray-900 to-gray-800"
+          : "bg-muted"
       )}
     >
       <div ref={containerRef} className="w-full h-full" />
 
       {/* Joint highlight indicator */}
       {highlightedJoint && (
-        <div className="absolute bottom-4 right-4 bg-black/70 text-white px-3 py-2 rounded-md text-sm font-mono z-10">
+        <div
+          className={cn(
+            "absolute z-10 rounded-md bg-black/70 font-mono text-white",
+            compact
+              ? "bottom-2 right-2 px-2 py-1 text-xs"
+              : "bottom-4 right-4 px-3 py-2 text-sm"
+          )}
+        >
           Joint: {highlightedJoint}
         </div>
       )}
 
-      {/* WebSocket connection status */}
-      {isDefaultModel && (
-        <div className="absolute top-4 right-4 z-10">
+      {/* WebSocket connection status — a bare dot in compact mode. */}
+      {isDefaultModel &&
+        (compact ? (
           <div
-            className={`flex items-center gap-2 px-3 py-2 rounded-md text-sm font-mono ${
-              isWebSocketConnected
-                ? "bg-ok/20 text-ok"
-                : "bg-destructive/20 text-destructive"
+            className={`absolute right-2 top-2 z-10 h-2 w-2 rounded-full ${
+              isWebSocketConnected ? "bg-ok" : "bg-destructive"
             }`}
-          >
+            title={isWebSocketConnected ? "Live robot data" : "Disconnected"}
+          />
+        ) : (
+          <div className="absolute top-4 right-4 z-10">
             <div
-              className={`w-2 h-2 rounded-full ${
-                isWebSocketConnected ? "bg-ok" : "bg-destructive"
+              className={`flex items-center gap-2 px-3 py-2 rounded-md text-sm font-mono ${
+                isWebSocketConnected
+                  ? "bg-ok/20 text-ok"
+                  : "bg-destructive/20 text-destructive"
               }`}
-            />
-            {isWebSocketConnected ? "Live Robot Data" : "Disconnected"}
+            >
+              <div
+                className={`w-2 h-2 rounded-full ${
+                  isWebSocketConnected ? "bg-ok" : "bg-destructive"
+                }`}
+              />
+              {isWebSocketConnected ? "Live Robot Data" : "Disconnected"}
+            </div>
           </div>
-        </div>
-      )}
+        ))}
     </div>
   );
 };

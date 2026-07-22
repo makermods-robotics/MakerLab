@@ -39,6 +39,7 @@ def _reset_rollout_globals(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(rollout, "_inference_rollout_started_at", None)
     monkeypatch.setattr(rollout, "_inference_meta", {})
     monkeypatch.setattr(rollout, "_inference_cancel", None)
+    monkeypatch.setattr(rollout, "_last_result", None)
 
 
 class _SyncThread:
@@ -870,6 +871,58 @@ def test_status_finalisation_reports_error_on_nonzero_exit(monkeypatch) -> None:
     result = rollout.handle_inference_status()
     assert result["exited"] is True
     assert result["phase"] == rollout.PHASE_ERROR
+
+
+def test_terminal_status_is_idempotent_across_polls(monkeypatch) -> None:
+    """The terminal payload must survive repeated polls, not report-once.
+
+    Several surfaces poll /inference-status concurrently (session dialog +
+    Deploy panel); with a consume-once payload, whichever poll lands first
+    after the subprocess dies swallows the outcome/error/hint and the dialog
+    misreports a crash as a clean finish. A new start clears the stored
+    result so the next session's first poll reflects THAT session."""
+    from makerlab import rollout
+
+    class _CrashedProc:
+        returncode = 1
+
+        def poll(self):
+            return 1
+
+    monkeypatch.setattr(rollout, "inference_active", True)
+    monkeypatch.setattr(rollout, "_inference_proc", _CrashedProc())
+    monkeypatch.setattr(rollout, "_inference_started_at", 0.0)
+    monkeypatch.setattr(rollout, "_inference_meta", {"phase": rollout.PHASE_RUNNING})
+
+    first = rollout.handle_inference_status()  # finalises the exit
+    second = rollout.handle_inference_status()  # a second poller must see the same
+    assert first["exited"] is True and first["outcome"] == "failed"
+    assert second == first
+
+    # A new start supersedes the stored result.
+    monkeypatch.setattr(
+        rollout.threading, "Thread", lambda *a, **k: type("_T", (), {"start": lambda self: None})()
+    )
+    assert rollout.handle_start_inference(_stub_request())["success"] is True
+    status = rollout.handle_inference_status()
+    assert status["inference_active"] is True
+    assert "outcome" not in status
+
+
+def test_fail_startup_result_is_idempotent_across_polls(monkeypatch) -> None:
+    """A pre-subprocess failure (download/preflight) persists the same way."""
+    from makerlab import rollout
+
+    monkeypatch.setattr(rollout, "inference_active", True)
+    monkeypatch.setattr(rollout, "_inference_meta", {"policy_ref": "user/repo@root"})
+    rollout._fail_startup("Failed to download the model: boom")
+
+    first = rollout.handle_inference_status()
+    second = rollout.handle_inference_status()
+    assert first["exited"] is True and first["outcome"] == "failed"
+    assert first["error"] == "Failed to download the model: boom"
+    assert first["policy_ref"] == "user/repo@root"
+    assert second == first
 
 
 def test_classify_outcome_ok_warns_and_fails() -> None:

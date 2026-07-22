@@ -228,8 +228,12 @@ const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
     >
       <Tooltip>
         <TooltipTrigger asChild>
+          {/* First run (no robots yet): the very first action in the app lives
+              in this cluster, and studio copy points here — render it filled
+              primary so "add a robot in the top-right corner" is findable at a
+              glance instead of a ghost button to hunt for. */}
           <Button
-            variant="ghost"
+            variant={hasRobots ? "ghost" : "default"}
             size="sm"
             onClick={() => setCreateOpen(true)}
             className="h-7 gap-1.5 rounded-full px-2.5"

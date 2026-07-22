@@ -16,24 +16,33 @@ MakerLab is a fork of Hugging Face's **[LeLab](https://github.com/huggingface/le
 
 ## Quick Start
 
-Requires Python ≥ 3.12 and [uv](https://docs.astral.sh/uv/). Just want to run it? One line, no clone:
+Requires Python ≥ 3.12 and [uv](https://docs.astral.sh/uv/).
+
+**Just want to use it?** One line, no clone:
 
 ```bash
 uv tool install "git+https://github.com/makermods-robotics/MakerLab"
 makerlab            # serves the UI + API on :8000, opens your browser
 ```
 
-Working on the code? Clone and do an editable install instead:
+**Want to change the code?** Clone and install editable — your edits take effect on the next run, no reinstall needed:
 
 ```bash
 git clone https://github.com/makermods-robotics/MakerLab
 cd MakerLab
 uv venv --python 3.12
 uv pip install -e .
-.venv/bin/makerlab            # serves the UI + API on :8000, opens your browser
+.venv/bin/makerlab            # first launch also links `makerlab` onto your PATH
 ```
 
-The package and CLI are named `makerlab`. See [INSTALL.md](INSTALL.md) for platform-specific setup (macOS, Jetson) and network tips.
+That first launch symlinks the command into `~/.local/bin`, so from then on you can run it from anywhere:
+
+```bash
+makerlab            # run the app: built UI + API on :8000
+makerlab --dev      # hack on it: Vite hot reload on :8080 + auto-reloading API on :8000
+```
+
+See [INSTALL.md](INSTALL.md) for platform-specific setup (macOS, Jetson) and network tips.
 
 ## What you can do
 
@@ -108,13 +117,13 @@ The core LeRobot workflow, inherited from LeLab and extended throughout:
 
 ## Contribute
 
-PRs welcome. Hot-reload mode for working on the code:
+PRs welcome. Do the editable install from [Quick Start](#quick-start), then work in hot-reload mode:
 
 ```bash
 makerlab --dev
 ```
 
-Vite on `:8080`, uvicorn `--reload` on `:8000`.
+Vite on `:8080`, uvicorn `--reload` on `:8000` — frontend and backend edits reload live.
 
 <div align="center">
 <sub>MakerLab is maintained by <a href="https://github.com/makermods-robotics">makermods-robotics</a>. Forked with ❤️ from <a href="https://github.com/huggingface/leLab">LeLab</a>, originally hacked together by <a href="https://www.linkedin.com/posts/nicolas-rabault-_lerobot-hackathon-lerobot-ugcPost-7341065019368828930-jTnl/">Team LeLab at the 2025 LeRobot Worldwide Hackathon 🏆</a>.</sub>

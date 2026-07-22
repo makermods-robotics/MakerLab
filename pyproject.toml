@@ -9,7 +9,11 @@ description = "LeRobot Lab - A web interface for robotics with lerobot integrati
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
-requires-python = ">=3.12"
+# <3.14: the pinned lerobot/draccus stack crashes at CLI-parser construction on
+# Python 3.14 (argparse validates type= is callable; draccus 0.8.0 passes raw
+# annotations), killing every subprocess flow (rollout/training). Lift the cap
+# once a draccus release supports 3.14 and the lerobot pin picks it up.
+requires-python = ">=3.12,<3.14"
 dependencies = [
     "fastapi[standard]>=0.115.12",
     "websockets>=15.0.1",

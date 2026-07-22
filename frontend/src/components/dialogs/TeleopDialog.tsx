@@ -1,12 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import VisualizerPanel from "@/components/control/VisualizerPanel";
-import TeleopCameraPanel from "@/components/control/TeleopCameraPanel";
+import { Button } from "@/components/ui/button";
+import UrdfViewer from "@/components/UrdfViewer";
 import { useToast } from "@/hooks/use-toast";
 import { useApi } from "@/contexts/ApiContext";
 import { useRobots } from "@/hooks/useRobots";
@@ -17,11 +11,11 @@ export interface TeleopDialogProps {
 }
 
 /**
- * Live teleoperation in a dialog (not a fullscreen page): the URDF
- * visualizer(s) + camera panel over the launchpad. The session state machine
- * is ported verbatim from pages/Teleoperation.tsx — every exit path (Done,
- * ESC/overlay close, unmount, browser-level leave) stops the session exactly
- * once, and a mid-loop death surfaces as an inline banner.
+ * Live teleoperation as a centered floating viewer — not a window dialog: a
+ * big URDF visualizer card in the middle of the screen. The session state
+ * machine is ported verbatim from pages/Teleoperation.tsx — every exit path
+ * (Done, ESC, unmount, browser-level leave) stops the session exactly once,
+ * and a mid-loop death surfaces as an inline banner.
  */
 const TeleopDialog: React.FC<TeleopDialogProps> = ({ open, onOpenChange }) => {
   const { toast } = useToast();
@@ -183,6 +177,21 @@ const TeleopDialog: React.FC<TeleopDialogProps> = ({ open, onOpenChange }) => {
     };
   }, [open, baseUrl, stopTeleoperation]);
 
+  // ESC ends the session (the Radix dialog used to own this). Capture phase +
+  // preventDefault so StudioOverlay's own ESC handler (bubble, gated on
+  // defaultPrevented) doesn't also close the studio underneath.
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      stopTeleoperation();
+      onOpenChange(false);
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [open, stopTeleoperation, onOpenChange]);
+
   const handleDone = async () => {
     await stopTeleoperation();
     onOpenChange(false);
@@ -190,24 +199,31 @@ const TeleopDialog: React.FC<TeleopDialogProps> = ({ open, onOpenChange }) => {
 
   const finishedWarn = finished?.outcome === "ran_with_warning";
 
-  return (
-    <Dialog
-      open={open}
-      onOpenChange={(o) => {
-        // ESC / overlay / ✕ — the open-scoped effect's cleanup fires the stop.
-        if (!o) stopTeleoperation();
-        onOpenChange(o);
-      }}
-    >
-      <DialogContent className="flex h-[85vh] max-w-5xl flex-col gap-3 p-4 sm:p-5">
-        {/* Visually the VisualizerPanel's own header titles the dialog; keep an
-            sr-only title for the dialog's accessible name. */}
-        <DialogHeader className="sr-only">
-          <DialogTitle>
-            Teleoperation{selectedRecord ? ` — ${selectedRecord.name}` : ""}
-          </DialogTitle>
-        </DialogHeader>
+  if (!open) return null;
 
+  return (
+    <div
+      role="dialog"
+      aria-label={`Teleoperation${selectedRecord ? ` — ${selectedRecord.name}` : ""}`}
+      className={`fixed left-1/2 top-1/2 z-50 flex -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-lg border border-border bg-background shadow-2xl ${
+        bimanual ? "w-[min(94vw,1000px)]" : "w-[min(92vw,640px)]"
+      }`}
+    >
+      <div className="flex items-center gap-2 border-b border-border px-4 py-2">
+        <span className="h-2 w-2 animate-pulse rounded-full bg-destructive" />
+        <span className="text-sm font-semibold text-foreground">
+          Teleoperation{selectedRecord ? ` — ${selectedRecord.name}` : ""}
+        </span>
+        <Button
+          size="sm"
+          onClick={handleDone}
+          className="ml-auto bg-destructive text-destructive-foreground hover:bg-destructive/90"
+        >
+          Done
+        </Button>
+      </div>
+
+      <div className="flex flex-col gap-3 p-3">
         {finished && (
           <div
             className={`shrink-0 rounded-lg border p-4 ${
@@ -247,16 +263,32 @@ const TeleopDialog: React.FC<TeleopDialogProps> = ({ open, onOpenChange }) => {
           </div>
         )}
 
-        <div className="flex min-h-0 flex-1">
-          <VisualizerPanel
-            onGoBack={handleDone}
-            className="w-full"
-            bimanual={bimanual}
-            rightSlot={<TeleopCameraPanel />}
-          />
-        </div>
-      </DialogContent>
-    </Dialog>
+        {bimanual ? (
+          <div className="flex gap-3">
+            <div className="flex-1">
+              <span className="mb-1 block text-xs text-muted-foreground">
+                Left arm
+              </span>
+              <div className="h-[400px] overflow-hidden rounded-md border border-border">
+                <UrdfViewer jointsKey="joints" variant="light" compact />
+              </div>
+            </div>
+            <div className="flex-1">
+              <span className="mb-1 block text-xs text-muted-foreground">
+                Right arm
+              </span>
+              <div className="h-[400px] overflow-hidden rounded-md border border-border">
+                <UrdfViewer jointsKey="joints_right" variant="light" compact />
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className="h-[440px] overflow-hidden rounded-md border border-border">
+            <UrdfViewer variant="light" compact />
+          </div>
+        )}
+      </div>
+    </div>
   );
 };
 

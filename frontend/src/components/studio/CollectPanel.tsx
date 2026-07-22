@@ -143,7 +143,8 @@ const CollectPanel: React.FC = () => {
     if (!selectedRecord) {
       toast({
         title: "No robot selected",
-        description: "Select or create a robot from the corner menu first.",
+        description:
+          "Select or create a robot first — use the robot menu in the top-right corner.",
         variant: "destructive",
       });
       return;

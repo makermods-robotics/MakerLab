@@ -25,27 +25,40 @@ export interface RobotRecord {
   // skill runs) use stock LeRobot torque and ignore this value.
   motor_power: number;
   is_clean: boolean;
+  // Follower-side readiness only (ports + calibrations for the follower arm(s)).
+  // Follower-only activities (inference, replay) gate on this instead of
+  // is_clean so a missing LEADER setup — which they never touch — can't block
+  // them. Mirrors the backend's is_robot_record_clean(record, arms="follower").
+  follower_ready: boolean;
 }
 
-// Human-readable diagnosis for a record with `is_clean === false`. The backend
-// folds ports, calibration assignments, and on-disk calibration files into one
-// boolean, so warning surfaces can't tell WHAT is missing from the flag alone —
-// and blaming "missing a calibration" when only a port is unassigned sends the
-// user to recalibrate an arm that's already calibrated. Returns a predicate to
-// append after the robot's name, e.g. "has no port assigned for the follower arm".
-export const robotSetupGap = (robot: RobotRecord): string => {
-  const arms =
+// Human-readable diagnosis for a record with `is_clean === false` (or, with
+// scope "follower", `follower_ready === false`). The backend folds ports,
+// calibration assignments, and on-disk calibration files into one boolean, so
+// warning surfaces can't tell WHAT is missing from the flag alone — and blaming
+// "missing a calibration" when only a port is unassigned sends the user to
+// recalibrate an arm that's already calibrated. Returns a predicate to append
+// after the robot's name, e.g. "has no port assigned for the follower arm".
+// `scope` must match the flag being diagnosed: follower-only surfaces
+// (inference/replay) pass "follower" so the message never blames leader-arm
+// gaps their activity doesn't care about.
+export const robotSetupGap = (
+  robot: RobotRecord,
+  scope: "all" | "follower" = "all",
+): string => {
+  const allArms =
     robot.mode === "bimanual"
       ? [
-          { label: "left leader", port: robot.leader_port, config: robot.leader_config },
-          { label: "left follower", port: robot.follower_port, config: robot.follower_config },
-          { label: "right leader", port: robot.right_leader_port, config: robot.right_leader_config },
-          { label: "right follower", port: robot.right_follower_port, config: robot.right_follower_config },
+          { label: "left leader", port: robot.leader_port, config: robot.leader_config, follower: false },
+          { label: "left follower", port: robot.follower_port, config: robot.follower_config, follower: true },
+          { label: "right leader", port: robot.right_leader_port, config: robot.right_leader_config, follower: false },
+          { label: "right follower", port: robot.right_follower_port, config: robot.right_follower_config, follower: true },
         ]
       : [
-          { label: "leader", port: robot.leader_port, config: robot.leader_config },
-          { label: "follower", port: robot.follower_port, config: robot.follower_config },
+          { label: "leader", port: robot.leader_port, config: robot.leader_config, follower: false },
+          { label: "follower", port: robot.follower_port, config: robot.follower_config, follower: true },
         ];
+  const arms = scope === "follower" ? allArms.filter((a) => a.follower) : allArms;
   const armList = (labels: string[]) =>
     `${labels.join(" and ")} arm${labels.length > 1 ? "s" : ""}`;
   const noConfig = arms.filter((a) => !a.config?.trim()).map((a) => a.label);
