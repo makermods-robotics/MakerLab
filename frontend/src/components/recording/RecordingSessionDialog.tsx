@@ -506,13 +506,19 @@ const RecordingSessionDialog: React.FC<{
     });
   }, [backendStatus, recordingConfig]);
 
-  // "Discard & exit" from an ENDED failed/warning session that kept episodes on
-  // disk: the session is already over (no active-session stop to issue), so
-  // delete the dataset directory outright, then close.
+  // "Discard & exit" from an ENDED failed/warning session that kept episodes
+  // on disk: the session is already over (no active-session stop to issue).
+  // A FRESH session's dataset is this session's own creation, so deleting it
+  // outright is safe. A RESUME session appends into a PRE-EXISTING dataset —
+  // deleting it here would remove episodes saved before this session ever
+  // started, not just the ones this session kept (the same guard the
+  // backend's own quit path applies; see _discard_session_dataset). lerobot
+  // commits episodes as they save, so for a resume there is nothing of THIS
+  // session's own to discard — the pre-existing dataset is simply left alone.
   const discardAndExit = useCallback(async () => {
     const repoId =
       backendStatus?.dataset_repo_id || recordingConfig?.dataset_repo_id;
-    if (repoId) {
+    if (repoId && !resume) {
       try {
         await fetchWithHeaders(`${baseUrl}/delete-dataset`, {
           method: "POST",
@@ -522,9 +528,16 @@ const RecordingSessionDialog: React.FC<{
       } catch {
         /* best-effort — we're leaving regardless */
       }
+    } else if (repoId && resume) {
+      toast({
+        title: "Episodes kept",
+        description:
+          "This session resumed an existing dataset, so its episodes stay saved " +
+          "— only a fresh session's own dataset can be discarded outright.",
+      });
     }
     onExitRef.current();
-  }, [backendStatus, recordingConfig, baseUrl, fetchWithHeaders]);
+  }, [backendStatus, recordingConfig, baseUrl, fetchWithHeaders, resume, toast]);
 
   // Re-record is keyboard-driven again, on BACKSPACE (explicit user request;
   // the old ArrowLeft binding was removed because a back-gesture keystroke
