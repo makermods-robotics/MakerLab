@@ -89,6 +89,9 @@ function configToRequest(c: TrainingConfig): TrainingRequest {
   return {
     target: c.target,
     dataset_repo_id: c.dataset_repo_id,
+    // Only meaningful for a cloud run; harmless otherwise (the backend only
+    // consults it if it ends up needing to push the dataset itself).
+    dataset_private: c.dataset_private,
     policy_type: c.policy_type,
     job_name: c.job_name,
     steps: c.steps,
@@ -164,6 +167,9 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
         : { runner: "local" },
     // Controlled fields — overlaid from props below; placeholders here.
     dataset_repo_id: "",
+    // MakerLab's default dataset-visibility policy (public); the user can
+    // flip this via LocalDatasetCloudNotice's toggle when it's shown.
+    dataset_private: false,
     policy_type: "act",
     job_name: "",
     // On resume, everything but steps is inherited from the checkpoint's
@@ -429,7 +435,10 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
     if (needsUpload) {
       setUploadError(null);
       setIsStarting(true);
-      const err = await startUpload([], false /* public: MakerLab uploads are public by default */);
+      // Honor whatever the user picked in LocalDatasetCloudNotice's visibility
+      // toggle (defaults to public — MakerLab's default policy — but the
+      // choice is the user's to make, not a hardcoded literal).
+      const err = await startUpload([], config.dataset_private);
       if (err) {
         setUploadError(err);
         setIsStarting(false);
@@ -544,6 +553,8 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
             offline={offline}
             uploading={uploading}
             errorMessage={uploadError}
+            isPrivate={config.dataset_private}
+            onIsPrivateChange={(v) => updateConfig("dataset_private", v)}
           />
         </div>
       ) : null}

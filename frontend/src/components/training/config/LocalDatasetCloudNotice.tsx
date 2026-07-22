@@ -1,5 +1,6 @@
 import React from "react";
 import { AlertTriangle, Loader2, UploadCloud, WifiOff } from "lucide-react";
+import VisibilityToggle from "@/components/landing/VisibilityToggle";
 
 interface LocalDatasetCloudNoticeProps {
   /** The local-only dataset the cloud run would train on. */
@@ -14,6 +15,14 @@ interface LocalDatasetCloudNoticeProps {
   uploading: boolean;
   /** Last upload error, shown in-place so the user doesn't lose it to a toast. */
   errorMessage?: string | null;
+  /** The visibility this upload will actually use — the user's real, in-flow
+   * choice, not a hardcoded claim. Defaults to public (MakerLab's default
+   * policy), matching the same toggle UploadDatasetDialog offers for the
+   * dataset-library upload flow. */
+  isPrivate: boolean;
+  /** Flips `isPrivate`. Disabled while `uploading`, same as
+   * UploadDatasetDialog's identical toggle. */
+  onIsPrivateChange: (isPrivate: boolean) => void;
 }
 
 const formatSize = (bytes: number): string => {
@@ -33,8 +42,17 @@ const formatSize = (bytes: number): string => {
  * targeted at a dataset that exists only on this machine. HF Jobs trains from
  * the Hub, so the dataset must be uploaded first — the Start button becomes
  * "Upload & start training" and the upload is chained before the job launches
- * (see Training.tsx). In offline mode the upload is impossible, so this turns
- * into a hard block instead.
+ * (see TrainingConfigurator's handleStart). In offline mode the upload is
+ * impossible, so this turns into a hard block instead.
+ *
+ * Visibility is a real choice made HERE, not an assertion about a hardcoded
+ * backend literal: the toggle drives both the explicit upload
+ * (useDatasetUpload's `start(tags, isPrivate)`) and, via
+ * TrainingConfig.dataset_private / TrainingRequest.dataset_private, the
+ * backend's belt-and-braces re-upload fallback in
+ * HfCloudJobRunner._ensure_dataset_on_hub — so whichever push site actually
+ * fires, it uses what the user picked, not an independently-hardcoded
+ * default.
  */
 const LocalDatasetCloudNotice: React.FC<LocalDatasetCloudNoticeProps> = ({
   repoId,
@@ -42,6 +60,8 @@ const LocalDatasetCloudNotice: React.FC<LocalDatasetCloudNoticeProps> = ({
   offline,
   uploading,
   errorMessage,
+  isPrivate,
+  onIsPrivateChange,
 }) => {
   const sizeLabel = sizeBytes != null ? formatSize(sizeBytes) : null;
 
@@ -77,12 +97,24 @@ const LocalDatasetCloudNotice: React.FC<LocalDatasetCloudNoticeProps> = ({
           <p className="mt-1 text-amber-700/80 dark:text-amber-200/80">
             Hugging Face Cloud trains from the Hub, so{" "}
             <span className="font-medium">{repoId}</span>
-            {sizeLabel ? ` (~${sizeLabel})` : ""} will be uploaded as a{" "}
-            <span className="font-medium">public</span> dataset before training
-            starts — including any camera footage it contains. You can make it
-            private afterward from the dataset's "Visibility &amp; tags"
-            settings.
+            {sizeLabel ? ` (~${sizeLabel})` : ""} will be uploaded to the Hub
+            before training starts.
           </p>
+          <div className="mt-3 space-y-1.5">
+            <VisibilityToggle
+              value={isPrivate}
+              onChange={onIsPrivateChange}
+              idBase={`cloud-upload-visibility-${repoId}`}
+              disabled={uploading}
+            />
+            <p className="text-amber-700/80 dark:text-amber-200/80">
+              {isPrivate
+                ? "Only you will be able to see this dataset."
+                : "Anyone will be able to see this dataset — including any camera footage it contains."}{" "}
+              You can change this later from the dataset's "Visibility &amp;
+              tags" settings.
+            </p>
+          </div>
           {uploading ? (
             <p className="mt-2 flex items-center gap-2 text-amber-700 dark:text-amber-100">
               <Loader2 className="w-4 h-4 animate-spin" />

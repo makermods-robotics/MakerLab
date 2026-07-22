@@ -793,6 +793,16 @@ def test_with_makerlab_tag_always_includes_makermods_and_openbooth() -> None:
         assert "openbooth" in out
 
 
+def test_dataset_default_private_is_the_public_policy_literal() -> None:
+    """DATASET_DEFAULT_PRIVATE is MakerLab's single source of truth for
+    dataset-visibility policy (public by default) -- record.py's
+    UploadRequest.private and runners/hf_cloud.py's resolve_dataset_private
+    both read this constant instead of hardcoding the literal independently."""
+    from makerlab.utils.config import DATASET_DEFAULT_PRIVATE
+
+    assert DATASET_DEFAULT_PRIVATE is False
+
+
 def test_clear_config_references_unassigns_matching_records(tmp_lerobot_home: Path) -> None:
     """Deleting a config unassigns every robot that pointed at it — on the
     right side (device_type) only — and reports which fields were cleared."""

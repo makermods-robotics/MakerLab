@@ -90,6 +90,17 @@ MAKERLAB_TAG = "MakerLab"
 # truth — add to it here rather than sprinkling literals at push sites.
 REQUIRED_HUB_TAGS = ["makermods", "openbooth", MAKERLAB_TAG]
 
+# MakerLab's default Hub-visibility policy for datasets it pushes: PUBLIC
+# unless the uploader explicitly opts into private. This is a deliberate
+# product decision (datasets should be discoverable by default), not an
+# oversight -- but it must be applied from exactly one place. Every push site
+# that decides visibility on the uploader's behalf (record.py's UploadManager,
+# runners/hf_cloud.py's implicit pre-cloud-job upload) reads this constant
+# instead of hardcoding the literal, and any explicit choice a user makes in
+# the UI (e.g. TrainingRequest.dataset_private, UploadRequest.private) always
+# overrides it. Change the policy here and every push site follows.
+DATASET_DEFAULT_PRIVATE = False
+
 
 def with_makerlab_tag(tags: list[str] | None) -> list[str]:
     """Return `tags` with the REQUIRED_HUB_TAGS appended (deduped, order preserved).
