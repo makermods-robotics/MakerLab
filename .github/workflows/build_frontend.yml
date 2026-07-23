@@ -17,10 +17,22 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+      # Mint a short-lived token from the dist-bot GitHub App. The default
+      # GITHUB_TOKEN / github-actions[bot] cannot be granted PR-bypass on a
+      # protected branch (GitHub blocks the first-party token), so it can't
+      # push the rebuilt dist back to `main`. A real GitHub App can be added to
+      # the branch's PR-bypass list, and its token expires when the job ends.
+      - uses: actions/create-github-app-token@v2
+        id: app-token
+        with:
+          app-id: ${{ secrets.DIST_BOT_APP_ID }}
+          private-key: ${{ secrets.DIST_BOT_PRIVATE_KEY }}
       - uses: actions/checkout@v7.0.0
         with:
           lfs: true
-          persist-credentials: false
+          # Check out with the App token; persist-credentials defaults to true
+          # so the final `git push` reuses it on the origin remote.
+          token: ${{ steps.app-token.outputs.token }}
       - uses: actions/setup-node@v6
         with:
           # Vite 8 requires ^20.19.0 or >=22.12.0; on Node 18 `npm run build`
@@ -35,15 +47,17 @@ jobs:
         working-directory: frontend
         run: npm run build
       - name: Commit dist if changed
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git config user.name "github-actions[bot]"
+          git config user.name  "${{ steps.app-token.outputs.app-slug }}[bot]"
+          git config user.email "${{ steps.app-token.outputs.app-slug }}[bot]@users.noreply.github.com"
           if [[ -n "$(git status --porcelain frontend/dist)" ]]; then
             git add frontend/dist
             git commit -m "ci: rebuild frontend/dist [skip ci]"
-            git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:${GITHUB_REF_NAME}"
+            # Pushes as the App (credentials persisted by checkout above), which
+            # is on main's PR-bypass list. dist is path-excluded from this
+            # workflow's triggers and the message carries [skip ci], so this push
+            # does not start another run.
+            git push origin "HEAD:${GITHUB_REF_NAME}"
           else
             echo "frontend/dist already up to date"
           fi
