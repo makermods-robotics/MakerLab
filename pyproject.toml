@@ -19,7 +19,7 @@ dependencies = [
     "websockets>=15.0.1",
     "uvicorn>=0.24.0",
     "psutil>=5.9.0",
-    "lerobot[core_scripts,feetech,training] @ git+https://github.com/huggingface/lerobot.git@82dffde7fad11cba91f7916b050fbe7d7eea35ab",
+    "lerobot[core_scripts,feetech,training] @ git+https://github.com/huggingface/lerobot.git@v0.6.0",
     # Windows-only: real DirectShow camera names for /available-cameras so the
     # frontend can match a camera to its browser deviceId (issues #12, #16).
     # Guarded by try/except at the call site, so its absence degrades gracefully.
@@ -57,6 +57,8 @@ frontend = ["dist/**/*"]
 target-version = "py312"
 line-length = 110
 exclude = ["tests/artifacts/**/*.safetensors", "*_pb2.py", "*_pb2_grpc.py"]
+# Vendored third-party code (feetech_autocal): kept verbatim, not linted.
+extend-exclude = ["makerlab/vendor"]
 
 [tool.ruff.lint]
 # E, W: pycodestyle errors and warnings

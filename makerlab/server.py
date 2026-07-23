@@ -425,7 +425,7 @@ _POLICY_TYPE_TO_LEROBOT = {
     "tdmpc": "tdmpc",
     "vqbet": "vqbet",
     "pi0_fast": "pi0_fast",
-    "sac": "sac",
+    "gaussian_actor": "gaussian_actor",
     "reward_classifier": "reward_classifier",
 }
 
