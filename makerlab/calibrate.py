@@ -152,7 +152,11 @@ class CalibrationManager:
         self.device: Robot | Teleoperator | None = None
         self.calibration_thread: threading.Thread | None = None
         self.stop_calibration = False
-        self._status_lock = threading.Lock()
+        # RLock (not Lock): start_calibration holds this across its whole
+        # check-and-claim critical section, which itself calls
+        # _update_status — a plain Lock would deadlock on that reentrant
+        # acquisition from the same thread.
+        self._status_lock = threading.RLock()
         self._step_complete = threading.Event()
         self._recording_active = False
         self._start_positions = {}
@@ -232,48 +236,58 @@ class CalibrationManager:
     def start_calibration(self, request: CalibrationRequest) -> dict[str, Any]:
         """Start calibration process"""
         try:
-            if self.status.calibration_active:
-                return {"success": False, "message": "Calibration already active"}
+            # The "already active?" check and the claim (calibration_active =
+            # True below) must be atomic: held under one lock acquisition, not
+            # two separate ones. Without this, two concurrent callers can both
+            # read calibration_active as False before either sets it True, and
+            # both spawn a worker thread against the same arm.
+            with self._status_lock:
+                if self.status.calibration_active:
+                    return {"success": False, "message": "Calibration already active"}
 
-            # Refuse to silently overwrite an existing config file. Completing a
-            # calibration saves "<config_file>.json"; if that name is taken, the
-            # caller must pass overwrite=True (after confirming) or pick another
-            # name. Lets the frontend warn before any data is clobbered.
-            config_dir = calibration_dir_for_device(request.device_type)
-            if config_dir is not None and not request.overwrite:
-                stem = request.config_file[:-5] if request.config_file.endswith(".json") else request.config_file
-                if os.path.exists(os.path.join(config_dir, f"{stem}.json")):
-                    return {
-                        "success": False,
-                        "code": "name_taken",
-                        "message": f"A calibration named '{stem}' already exists. Overwrite it or choose a different name.",
-                    }
+                # Refuse to silently overwrite an existing config file. Completing a
+                # calibration saves "<config_file>.json"; if that name is taken, the
+                # caller must pass overwrite=True (after confirming) or pick another
+                # name. Lets the frontend warn before any data is clobbered.
+                config_dir = calibration_dir_for_device(request.device_type)
+                if config_dir is not None and not request.overwrite:
+                    stem = (
+                        request.config_file[:-5]
+                        if request.config_file.endswith(".json")
+                        else request.config_file
+                    )
+                    if os.path.exists(os.path.join(config_dir, f"{stem}.json")):
+                        return {
+                            "success": False,
+                            "code": "name_taken",
+                            "message": f"A calibration named '{stem}' already exists. Overwrite it or choose a different name.",
+                        }
 
-            # Reset status and clear any previous calibration data
-            self._start_positions = {}
-            self._mins = {}
-            self._maxes = {}
-            self._homing_offsets = {}
+                # Reset status and clear any previous calibration data
+                self._start_positions = {}
+                self._mins = {}
+                self._maxes = {}
+                self._homing_offsets = {}
 
-            self._update_status(
-                calibration_active=True,
-                status="connecting",
-                device_type=request.device_type,
-                error=None,
-                message=f"Starting calibration for {request.device_type}",
-                step=0,
-                current_positions=None,
-                recorded_ranges=None,
-            )
-            self._current_request = request
+                self._update_status(
+                    calibration_active=True,
+                    status="connecting",
+                    device_type=request.device_type,
+                    error=None,
+                    message=f"Starting calibration for {request.device_type}",
+                    step=0,
+                    current_positions=None,
+                    recorded_ranges=None,
+                )
+                self._current_request = request
 
-            # Start calibration in a separate thread
-            self.calibration_thread = threading.Thread(
-                target=self._calibration_worker, args=(request,), daemon=True
-            )
-            self.stop_calibration = False
-            self._step_complete.clear()
-            self.calibration_thread.start()
+                # Start calibration in a separate thread
+                self.calibration_thread = threading.Thread(
+                    target=self._calibration_worker, args=(request,), daemon=True
+                )
+                self.stop_calibration = False
+                self._step_complete.clear()
+                self.calibration_thread.start()
 
             return {"success": True, "message": "Calibration started"}
 

@@ -16,6 +16,10 @@ post-recording centering guard."""
 
 from __future__ import annotations
 
+import time
+
+import pytest
+
 from makerlab.calibrate import final_motor_ranges, find_off_center_joints
 
 
@@ -95,6 +99,64 @@ def test_start_calibration_refuses_existing_config_without_overwrite(tmp_lerobot
     # The guard returns before activating or spawning the worker thread.
     assert mgr.status.calibration_active is False
     assert mgr.calibration_thread is None
+
+
+def test_start_calibration_check_and_claim_is_atomic(
+    monkeypatch: pytest.MonkeyPatch, tmp_lerobot_home
+) -> None:
+    """Two callers racing start_calibration must not both win.
+
+    `calibration_active` is read (the "already active?" guard) and later
+    written (claiming the slot) as two separate, unguarded steps — a second
+    caller landing in between sees the same False the first one saw, and both
+    proceed to spawn a worker thread against the same arm. This stalls a real
+    thread between the read and the write (at `calibration_dir_for_device`,
+    already on that path) so the test controls the exact interleaving a lock
+    around the whole check-and-claim must prevent."""
+    import threading
+
+    from makerlab.calibrate import CalibrationManager, CalibrationRequest
+
+    mgr = CalibrationManager()
+    # Avoid spawning the real hardware-touching worker; only start_calibration
+    # (the check-and-claim path) is under test here.
+    monkeypatch.setattr(mgr, "_calibration_worker", lambda request: None)
+
+    reached_stall = threading.Event()
+    release_stall = threading.Event()
+
+    def _stalling_calibration_dir_for_device(device_type: str) -> str | None:
+        reached_stall.set()
+        assert release_stall.wait(timeout=5), "test setup: release never signalled"
+        return None
+
+    monkeypatch.setattr("makerlab.calibrate.calibration_dir_for_device", _stalling_calibration_dir_for_device)
+
+    request = CalibrationRequest(device_type="robot", port="/dev/null", config_file="race", overwrite=True)
+    results: dict[str, dict] = {}
+
+    def _call(key: str) -> None:
+        results[key] = mgr.start_calibration(request)
+
+    t1 = threading.Thread(target=_call, args=("t1",))
+    t1.start()
+    assert reached_stall.wait(timeout=5), "t1 never reached the stall point"
+
+    t2 = threading.Thread(target=_call, args=("t2",))
+    t2.start()
+    # Give t2 a chance to reach (and, if the bug is present, race past) the
+    # same unguarded check t1 already passed.
+    time.sleep(0.05)
+
+    release_stall.set()
+    t1.join(timeout=5)
+    t2.join(timeout=5)
+    assert not t1.is_alive() and not t2.is_alive()
+
+    outcomes = sorted(r["success"] for r in results.values())
+    assert outcomes == [False, True], (
+        f"expected exactly one of the two concurrent starts to win, got {results}"
+    )
 
 
 def test_find_off_center_joints_passes_centered_ranges() -> None:
