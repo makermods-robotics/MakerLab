@@ -82,18 +82,7 @@ const EssentialsCard: React.FC<
           <SelectContent>
             {POLICY_TYPE_OPTIONS.map((policy) => (
               <SelectItem key={policy.value} value={policy.value}>
-                <span className="flex items-center gap-2">
-                  <span>{policy.display}</span>
-                  <span
-                    className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${
-                      policy.stable
-                        ? "bg-ok/15 text-ok"
-                        : "bg-muted text-muted-foreground"
-                    }`}
-                  >
-                    {policy.stable ? "tested" : "untested"}
-                  </span>
-                </span>
+                {policy.display}
               </SelectItem>
             ))}
           </SelectContent>
@@ -101,7 +90,7 @@ const EssentialsCard: React.FC<
         <p className="text-xs text-muted-foreground">
           {policyLocked
             ? "Set by the base skill — the run trains the same architecture as its source checkpoint."
-            : "The model architecture this run trains. Untested types run at your own risk."}
+            : "The model architecture this run trains."}
         </p>
       </div>
 
