@@ -3,6 +3,8 @@ import { ChevronLeft, ChevronRight } from "lucide-react";
 import { useModels } from "@/hooks/useModels";
 import { ModelItem } from "@/lib/modelsApi";
 import SkillCard, {
+  SkillBadge,
+  WIP_SKILL_ID,
   skillNamespace,
   skillTitle,
 } from "@/components/launchpad/SkillCard";
@@ -13,7 +15,7 @@ export interface SkillSliderProps {
   search: string;
 }
 
-/** The one curated skill shown on the launchpad. */
+/** The one curated, fully-trained skill shown on the launchpad. */
 const FEATURED_SKILL_ID =
   "makermods/act_makermods_sock_2_only_more_orange_2026-07-16_22-14-55";
 
@@ -31,6 +33,21 @@ const FEATURED_FALLBACK: ModelItem = {
   source: "hub",
 };
 
+/** Static preview card for a skill that hasn't been trained yet — never comes
+ * from /models, so it's a plain client-side entry (never enriched, never
+ * runnable). */
+const WIP_SKILL: ModelItem = {
+  id: WIP_SKILL_ID,
+  name: WIP_SKILL_ID,
+  policy_type: null,
+  dataset: null,
+  steps: null,
+  path: null,
+  last_modified: null,
+  hf_repo_id: null,
+  source: "hub",
+};
+
 /** A single loading skeleton shaped like a SkillCard. */
 const CardSkeleton: React.FC = () => (
   <div className="flex w-64 shrink-0 flex-col overflow-hidden rounded-lg border border-border bg-card shadow-1">
@@ -43,11 +60,17 @@ const CardSkeleton: React.FC = () => (
   </div>
 );
 
+/** "wip" for the not-yet-trained preview card, "makermods" for every other
+ * curated card on the launchpad. */
+const badgeFor = (m: ModelItem): SkillBadge =>
+  m.id === WIP_SKILL_ID ? "wip" : "makermods";
+
 /**
- * Horizontal skill slider — the launchpad shows only the curated
- * MakerMods-supported skill (real /models row when available, static fallback
- * otherwise). Scroll-snap track with ‹ › arrow buttons; the hero search box
- * filters live by name/author. Card click opens the skill detail dialog.
+ * Horizontal skill slider — the launchpad shows the curated MakerMods-
+ * supported skill (real /models row when available, static fallback
+ * otherwise) plus a static WIP preview card for skills still in training.
+ * Scroll-snap track with ‹ › arrow buttons; the hero search box filters live
+ * by name/author. Card click opens the skill detail dialog.
  */
 const SkillSlider: React.FC<SkillSliderProps> = ({ search }) => {
   const { models, loading } = useModels();
@@ -59,9 +82,10 @@ const SkillSlider: React.FC<SkillSliderProps> = ({ search }) => {
     const featured =
       models.find((m) => (m.hf_repo_id ?? m.id) === FEATURED_SKILL_ID) ??
       FEATURED_FALLBACK;
+    const curated = [featured, WIP_SKILL];
     const q = search.trim().toLowerCase();
-    if (!q) return [featured];
-    return [featured].filter((m) => {
+    if (!q) return curated;
+    return curated.filter((m) => {
       const ns = skillNamespace(m) ?? "";
       return (
         skillTitle(m).toLowerCase().includes(q) ||
@@ -109,7 +133,7 @@ const SkillSlider: React.FC<SkillSliderProps> = ({ search }) => {
               <SkillCard
                 key={model.id}
                 model={model}
-                badge="makermods"
+                badge={badgeFor(model)}
                 onOpen={openDetail}
               />
             ))

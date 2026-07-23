@@ -2,11 +2,18 @@ import React from "react";
 import { ModelItem } from "@/lib/modelsApi";
 import { policyTypeDisplayName } from "@/components/training/types";
 import sockThumb from "@/assets/skill-sock-orange.jpg";
+import bottleThumb from "@/assets/skill-bottle.jpg";
+
+/** Synthetic id for the not-yet-trained bottle-cap skill preview — no Hub repo
+ * or job backs it, so it never comes from `/models`. See WIP handling in
+ * SkillSlider/SkillDetailDialog. */
+export const WIP_SKILL_ID = "wip/bottle-cap-removal";
 
 /** Curated preview media for featured skills, keyed by Hub repo id. */
 const SKILL_THUMBNAILS: Record<string, string> = {
   "makermods/act_makermods_sock_2_only_more_orange_2026-07-16_22-14-55":
     sockThumb,
+  [WIP_SKILL_ID]: bottleThumb,
 };
 
 /** The curated preview image for a skill, or undefined when it has none. */
@@ -19,10 +26,12 @@ export function skillThumbnail(m: ModelItem): string | undefined {
 const SKILL_DISPLAY_NAMES: Record<string, string> = {
   "makermods/act_makermods_sock_2_only_more_orange_2026-07-16_22-14-55":
     "Sorting socks",
+  [WIP_SKILL_ID]: "Opening bottle caps",
 };
 
-/** The marketplace provenance of a skill card. */
-export type SkillBadge = "mine" | "makermods" | "community";
+/** The marketplace provenance of a skill card. "wip" marks a preview card for
+ * a skill that hasn't been trained yet — no repo/job backs it. */
+export type SkillBadge = "mine" | "makermods" | "community" | "wip";
 
 /** 16000 -> "16k", 950 -> "950" — matches the models card's compact form. */
 export const formatCount = (n: number): string => {
@@ -73,12 +82,14 @@ const BADGE_LABEL: Record<SkillBadge, string> = {
   mine: "MINE",
   makermods: "MAKERMODS SUPPORTED",
   community: "COMMUNITY",
+  wip: "WIP",
 };
 
 const BADGE_CLASS: Record<SkillBadge, string> = {
   mine: "border-transparent bg-primary text-primary-foreground",
   makermods: "border-ring bg-transparent text-foreground",
   community: "border-border bg-transparent text-muted-foreground",
+  wip: "border-warn/40 bg-transparent text-warn",
 };
 
 /** Provenance pill (MINE / MAKERMODS / COMMUNITY) — token-styled, works in both

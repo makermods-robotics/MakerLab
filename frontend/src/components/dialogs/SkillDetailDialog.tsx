@@ -15,6 +15,7 @@ import { policyTypeDisplayName } from "@/components/training/types";
 import { ModelInfo, ModelItem, getModelInfo } from "@/lib/modelsApi";
 import {
   SkillBadgePill,
+  WIP_SKILL_ID,
   classifySkill,
   formatCount,
   skillNamespace,
@@ -79,7 +80,8 @@ const SkillDetailDialog: React.FC<SkillDetailDialogProps> = ({
 
   if (!model) return null;
 
-  const badge = classifySkill(model, username);
+  const isWip = model.id === WIP_SKILL_ID;
+  const badge = isWip ? "wip" : classifySkill(model, username);
   const ns = skillNamespace(model);
   const policyType = info?.policy_type ?? model.policy_type;
   const policy = policyType ? policyTypeDisplayName(policyType) : null;
@@ -167,18 +169,26 @@ const SkillDetailDialog: React.FC<SkillDetailDialogProps> = ({
             )}
 
             <div className="mt-auto flex flex-col gap-2 pt-2">
-              <Button onClick={handleRun} className="w-full gap-2">
-                <Play className="h-4 w-4" />
-                Run on {robotName}
-              </Button>
-              <Button
-                variant="outline"
-                onClick={handleFineTune}
-                className="w-full gap-2"
-              >
-                <Sparkles className="h-4 w-4" />
-                Fine-tune this skill
-              </Button>
+              {isWip ? (
+                <p className="rounded-md border border-warn/40 px-3 py-2 text-sm text-warn">
+                  Not trained yet — this skill is still in development.
+                </p>
+              ) : (
+                <>
+                  <Button onClick={handleRun} className="w-full gap-2">
+                    <Play className="h-4 w-4" />
+                    Run on {robotName}
+                  </Button>
+                  <Button
+                    variant="outline"
+                    onClick={handleFineTune}
+                    className="w-full gap-2"
+                  >
+                    <Sparkles className="h-4 w-4" />
+                    Fine-tune this skill
+                  </Button>
+                </>
+              )}
               <div className="flex gap-2">
                 <span className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-md border border-border px-3 py-2 text-sm text-muted-foreground">
                   <Heart className="h-4 w-4" />
