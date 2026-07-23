@@ -203,9 +203,14 @@ const RecordingForm: React.FC<RecordingFormProps> = ({
 
       {/* Advanced */}
       <Collapsible className="group space-y-3">
-        <CollapsibleTrigger className="flex w-full items-center justify-between border-b border-border pb-2 text-sm font-semibold text-foreground">
-          <span>Advanced parameters</span>
-          <ChevronDown className="h-4 w-4 transition-transform group-data-[state=open]:rotate-180" />
+        <CollapsibleTrigger className="flex w-full items-start justify-between border-b border-border pb-2 text-sm font-semibold text-foreground">
+          <span className="text-left">
+            <span className="block">Advanced parameters</span>
+            <span className="block text-xs font-normal text-muted-foreground">
+              Streaming encoding, push to Hub
+            </span>
+          </span>
+          <ChevronDown className="mt-0.5 h-4 w-4 shrink-0 transition-transform group-data-[state=open]:rotate-180" />
         </CollapsibleTrigger>
         <CollapsibleContent className="space-y-3">
           <div className="flex items-start gap-3">
