@@ -106,6 +106,13 @@ const EpisodeViewer: React.FC<{
   const episode = episodes.find((e) => e.episode_index === selectedEpisode) ?? null;
   const videoRefs = useRef<Record<string, HTMLVideoElement | null>>({});
   const primaryCamera = cameras[0];
+  // v3.0 packs consecutive episodes into the same physical mp4 per camera —
+  // this episode's slice starts at `from` within that (possibly shared)
+  // file, not at 0. Every seek/play/boundary check goes through this.
+  const offsetFor = useCallback(
+    (camera: string) => episode?.video_offsets?.[camera]?.from ?? 0,
+    [episode],
+  );
 
   useEffect(() => {
     const controller = new AbortController();
@@ -140,11 +147,26 @@ const EpisodeViewer: React.FC<{
     }
   };
 
+  // Drives currentTime/scrubber from the primary camera's raw (file-relative)
+  // playback position, and is the one place that notices the episode's own
+  // slice has ended — native `ended` never fires here since the underlying
+  // file usually keeps going into the next episode's frames.
+  const handlePrimaryTimeUpdate = (rawTime: number) => {
+    if (!episode) return;
+    const offset = offsetFor(primaryCamera);
+    const t = Math.max(0, Math.min(episode.duration, rawTime - offset));
+    setCurrentTime(t);
+    if (rawTime >= offset + episode.duration - 0.02) {
+      forEachVideo((v) => v.pause());
+      setPlaying(false);
+    }
+  };
+
   const handleSeek = (t: number) => {
     const clamped = Math.max(0, Math.min(episode?.duration ?? 0, t));
-    forEachVideo((v) => {
-      v.currentTime = clamped;
-    });
+    for (const [camera, v] of Object.entries(videoRefs.current)) {
+      if (v) v.currentTime = offsetFor(camera) + clamped;
+    }
     setCurrentTime(clamped);
   };
 
@@ -248,12 +270,14 @@ const EpisodeViewer: React.FC<{
                   className="h-full w-full object-cover"
                   muted
                   playsInline
+                  onLoadedMetadata={(e) => {
+                    e.currentTarget.currentTime = offsetFor(camera);
+                  }}
                   onTimeUpdate={
                     camera === primaryCamera
-                      ? (e) => setCurrentTime(e.currentTarget.currentTime)
+                      ? (e) => handlePrimaryTimeUpdate(e.currentTarget.currentTime)
                       : undefined
                   }
-                  onEnded={camera === primaryCamera ? () => setPlaying(false) : undefined}
                   onError={() =>
                     setVideoErrors((prev) => ({ ...prev, [camera]: true }))
                   }

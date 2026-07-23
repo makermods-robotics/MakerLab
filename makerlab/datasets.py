@@ -651,8 +651,18 @@ def _read_episode_rows(meta_dir: Path, columns: list[str] | None = None) -> list
 
 
 def list_episode_summaries(repo_id: str) -> list[dict[str, Any]] | None:
-    """Per-episode index/length/duration/tasks for the dataset viewer's episode
-    list. None if `repo_id` isn't a local dataset in the v3.0 parquet layout.
+    """Per-episode index/length/duration/tasks/video_offsets for the dataset
+    viewer's episode list. None if `repo_id` isn't a local dataset in the
+    v3.0 parquet layout.
+
+    ``video_offsets`` matters because v3.0 packs MULTIPLE consecutive
+    episodes into the same physical mp4 per camera (confirmed on real data:
+    episode 0 and 1 of a 2-episode recording share ``chunk-000/file-000.mp4``,
+    distinguished only by ``from_timestamp``/``to_timestamp``) — a naive
+    "serve the episode's video file" playing it start-to-finish runs straight
+    into whatever episode comes next in that file. The viewer needs each
+    camera's slice boundaries to seek to the right start and stop at the
+    right end within the shared file.
     """
     path = _resolve_local_dataset_path(repo_id)
     if path is None:
@@ -662,19 +672,38 @@ def list_episode_summaries(repo_id: str) -> list[dict[str, Any]] | None:
     except (OSError, ValueError):
         return None
     fps = info.get("fps") or 1
+    features = info.get("features") or {}
+    cameras = [key[len(CAMERA_FEATURE_PREFIX) :] for key in features if key.startswith(CAMERA_FEATURE_PREFIX)]
 
-    rows = _read_episode_rows(path / "meta", columns=["episode_index", "tasks", "length"])
+    video_cols: list[str] = []
+    col_to_camera: dict[str, tuple[str, str]] = {}
+    for camera in cameras:
+        video_key = f"{CAMERA_FEATURE_PREFIX}{camera}"
+        from_col, to_col = f"videos/{video_key}/from_timestamp", f"videos/{video_key}/to_timestamp"
+        video_cols += [from_col, to_col]
+        col_to_camera[from_col] = (camera, "from")
+        col_to_camera[to_col] = (camera, "to")
+
+    rows = _read_episode_rows(path / "meta", columns=["episode_index", "tasks", "length", *video_cols])
     if rows is None:
         return None
-    out = [
-        {
-            "episode_index": int(row["episode_index"]),
-            "length": int(row["length"]),
-            "duration": round(int(row["length"]) / fps, 3),
-            "tasks": [str(t) for t in (row.get("tasks") or [])],
-        }
-        for row in rows
-    ]
+    out = []
+    for row in rows:
+        video_offsets: dict[str, dict[str, float]] = {}
+        for col, (camera, which) in col_to_camera.items():
+            value = row.get(col)
+            if value is None:
+                continue
+            video_offsets.setdefault(camera, {})[which] = float(value)
+        out.append(
+            {
+                "episode_index": int(row["episode_index"]),
+                "length": int(row["length"]),
+                "duration": round(int(row["length"]) / fps, 3),
+                "tasks": [str(t) for t in (row.get("tasks") or [])],
+                "video_offsets": video_offsets,
+            }
+        )
     out.sort(key=lambda e: e["episode_index"])
     return out
 

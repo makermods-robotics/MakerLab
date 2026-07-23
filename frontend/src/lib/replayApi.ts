@@ -173,6 +173,11 @@ export interface EpisodeSummary {
   length: number;
   duration: number;
   tasks: string[];
+  /** Per-camera {from, to} seconds locating this episode's slice WITHIN its
+   * (possibly shared) video file — v3.0 packs consecutive episodes into the
+   * same mp4 per camera, so playback must seek to `from` and stop at `to`
+   * rather than assume the file starts/ends at this episode's boundaries. */
+  video_offsets: Record<string, { from: number; to: number }>;
 }
 
 /** Per-episode index/length/duration/tasks, for the dataset viewer window's
