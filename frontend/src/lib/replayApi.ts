@@ -168,6 +168,72 @@ export async function getDatasetInfo(
   );
 }
 
+export interface EpisodeSummary {
+  episode_index: number;
+  length: number;
+  duration: number;
+  tasks: string[];
+}
+
+/** Per-episode index/length/duration/tasks, for the dataset viewer window's
+ * episode list. 404 when the dataset isn't local, or predates the v3.0
+ * parquet episode layout the viewer reads (older jsonl-metadata datasets
+ * aren't viewable — see makerlab/datasets.py `_read_episode_rows`). */
+export async function listEpisodes(
+  baseUrl: string,
+  fetcher: Fetcher,
+  repoId: string,
+  signal?: AbortSignal,
+): Promise<EpisodeSummary[]> {
+  return apiRequest<EpisodeSummary[]>(
+    baseUrl,
+    fetcher,
+    `/datasets/episodes?repo_id=${encodeURIComponent(repoId)}`,
+    { signal, action: "List episodes" },
+  );
+}
+
+export interface EpisodeJointSeries {
+  joint_names: string[];
+  timestamps: number[];
+  values: number[][];
+}
+
+/** Per-frame timestamp + joint (observation.state) values for one episode,
+ * for the viewer's joint-position chart. */
+export async function getEpisodeJoints(
+  baseUrl: string,
+  fetcher: Fetcher,
+  repoId: string,
+  episodeIndex: number,
+  signal?: AbortSignal,
+): Promise<EpisodeJointSeries> {
+  return apiRequest<EpisodeJointSeries>(
+    baseUrl,
+    fetcher,
+    `/datasets/episode-joints?repo_id=${encodeURIComponent(repoId)}&episode_index=${episodeIndex}`,
+    { signal, action: "Load episode joint data" },
+  );
+}
+
+/** URL for one camera's mp4 for one episode — used directly as a <video> src
+ * (the endpoint supports Range requests, so seeking doesn't need the whole
+ * file). Not routed through `fetchWithHeaders`/apiRequest since a <video> tag
+ * can't attach custom headers to its own request. */
+export function episodeVideoUrl(
+  baseUrl: string,
+  repoId: string,
+  episodeIndex: number,
+  camera: string,
+): string {
+  const params = new URLSearchParams({
+    repo_id: repoId,
+    episode_index: String(episodeIndex),
+    camera,
+  });
+  return `${baseUrl}/datasets/episode-video?${params.toString()}`;
+}
+
 /** Where a dataset with this id lives. "local_only" = a local copy exists but
  * it's not on the Hub (offer upload); "absent" = neither on the Hub nor local
  * (a stale pin / deleted / renamed selection); "unknown" is the
