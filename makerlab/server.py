@@ -2553,6 +2553,15 @@ async def shutdown_event():
 
     # Stop any active recording - handled by recording module cleanup
 
+    # An in-flight inference run's `lerobot-rollout` subprocess is a real
+    # child process, independent of this one — it keeps driving the follower
+    # under its policy even after we exit unless we terminate it ourselves.
+    # This fires on a graceful SIGTERM (a plain `kill <pid>`, or uvicorn
+    # `--reload` tearing down the worker process on a file change), which is
+    # exactly when nothing else is left to stop it. handle_stop_inference()
+    # is a no-op (409) when idle, so this is safe to call unconditionally.
+    handle_stop_inference()
+
     if manager:
         manager.stop_broadcast_thread()
     logger.info("✅ Cleanup completed")

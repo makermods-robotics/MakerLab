@@ -61,6 +61,43 @@ def test_app_exposes_required_endpoints() -> None:
     assert not missing, f"missing routes: {missing}"
 
 
+def test_shutdown_stops_active_inference(monkeypatch: pytest.MonkeyPatch) -> None:
+    """FastAPI's shutdown handler must terminate an in-flight inference
+    subprocess, not just the broadcast thread.
+
+    Without this, `--reload` (uvicorn kills and respawns the worker process
+    on a file change) or a plain PID kill leaves the `lerobot-rollout` child
+    — which is actively driving the follower under a policy — orphaned and
+    running with nobody supervising it, since the parent that would have
+    stopped it is already gone.
+
+    Calls shutdown_event() directly (matches the asyncio.run(mgr.connect(...))
+    pattern already used in this file) instead of relying on TestClient's
+    lifespan + monkeypatch fixture teardown ordering, which isn't guaranteed
+    to leave the patched state in place by the time the shutdown fires."""
+    from makerlab import rollout
+
+    terminate_calls: list[bool] = []
+
+    class _FakeProc:
+        def terminate(self) -> None:
+            terminate_calls.append(True)
+
+        def wait(self, timeout: float | None = None) -> int:
+            return 0
+
+    monkeypatch.setattr(rollout, "inference_active", True)
+    monkeypatch.setattr(rollout, "_inference_proc", _FakeProc())
+    monkeypatch.setattr(rollout, "_inference_meta", {"phase": rollout.PHASE_RUNNING})
+    # Broadcast-thread cleanup isn't under test here.
+    monkeypatch.setattr(server_mod, "manager", None)
+
+    asyncio.run(server_mod.shutdown_event())
+
+    assert terminate_calls, "shutdown did not terminate the in-flight inference subprocess"
+    assert rollout.inference_active is False
+
+
 def test_health_endpoint_returns_200_with_json_object(client: TestClient) -> None:
     response = client.get("/health")
     assert response.status_code == 200
