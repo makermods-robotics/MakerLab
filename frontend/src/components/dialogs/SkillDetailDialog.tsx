@@ -15,9 +15,9 @@ import { policyTypeDisplayName } from "@/components/training/types";
 import { ModelInfo, ModelItem, getModelInfo } from "@/lib/modelsApi";
 import {
   SkillBadgePill,
-  WIP_SKILL_ID,
   classifySkill,
   formatCount,
+  isWipSkillId,
   skillNamespace,
   skillThumbnail,
   skillTitle,
@@ -80,7 +80,7 @@ const SkillDetailDialog: React.FC<SkillDetailDialogProps> = ({
 
   if (!model) return null;
 
-  const isWip = model.id === WIP_SKILL_ID;
+  const isWip = isWipSkillId(model.id);
   const badge = isWip ? "wip" : classifySkill(model, username);
   const ns = skillNamespace(model);
   const policyType = info?.policy_type ?? model.policy_type;

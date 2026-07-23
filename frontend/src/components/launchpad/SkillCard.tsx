@@ -3,17 +3,34 @@ import { ModelItem } from "@/lib/modelsApi";
 import { policyTypeDisplayName } from "@/components/training/types";
 import sockThumb from "@/assets/skill-sock-orange.jpg";
 import bottleThumb from "@/assets/skill-bottle.jpg";
+import towelThumb from "@/assets/skill-towel.jpg";
+import stackCubesThumb from "@/assets/skill-stack-cubes.jpg";
 
-/** Synthetic id for the not-yet-trained bottle-cap skill preview — no Hub repo
- * or job backs it, so it never comes from `/models`. See WIP handling in
- * SkillSlider/SkillDetailDialog. */
-export const WIP_SKILL_ID = "wip/bottle-cap-removal";
+/** Synthetic ids for skill previews that haven't been trained yet — no Hub
+ * repo or job backs any of these, so none ever comes from `/models`. See WIP
+ * handling in SkillSlider/SkillDetailDialog. */
+export const WIP_SKILL_IDS = {
+  bottleCap: "wip/bottle-cap-removal",
+  towelFold: "wip/towel-fold",
+  stackCubes: "wip/stack-cubes",
+} as const;
+
+const WIP_SKILL_ID_SET: ReadonlySet<string> = new Set(
+  Object.values(WIP_SKILL_IDS),
+);
+
+/** True when `id` is one of the not-yet-trained WIP preview cards. */
+export function isWipSkillId(id: string): boolean {
+  return WIP_SKILL_ID_SET.has(id);
+}
 
 /** Curated preview media for featured skills, keyed by Hub repo id. */
 const SKILL_THUMBNAILS: Record<string, string> = {
   "makermods/act_makermods_sock_2_only_more_orange_2026-07-16_22-14-55":
     sockThumb,
-  [WIP_SKILL_ID]: bottleThumb,
+  [WIP_SKILL_IDS.bottleCap]: bottleThumb,
+  [WIP_SKILL_IDS.towelFold]: towelThumb,
+  [WIP_SKILL_IDS.stackCubes]: stackCubesThumb,
 };
 
 /** The curated preview image for a skill, or undefined when it has none. */
@@ -26,7 +43,9 @@ export function skillThumbnail(m: ModelItem): string | undefined {
 const SKILL_DISPLAY_NAMES: Record<string, string> = {
   "makermods/act_makermods_sock_2_only_more_orange_2026-07-16_22-14-55":
     "Sorting socks",
-  [WIP_SKILL_ID]: "Opening bottle caps",
+  [WIP_SKILL_IDS.bottleCap]: "Opening bottle caps",
+  [WIP_SKILL_IDS.towelFold]: "Folding towels",
+  [WIP_SKILL_IDS.stackCubes]: "Stacking cubes",
 };
 
 /** The marketplace provenance of a skill card. "wip" marks a preview card for

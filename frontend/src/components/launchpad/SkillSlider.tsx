@@ -4,7 +4,8 @@ import { useModels } from "@/hooks/useModels";
 import { ModelItem } from "@/lib/modelsApi";
 import SkillCard, {
   SkillBadge,
-  WIP_SKILL_ID,
+  WIP_SKILL_IDS,
+  isWipSkillId,
   skillNamespace,
   skillTitle,
 } from "@/components/launchpad/SkillCard";
@@ -36,9 +37,9 @@ const FEATURED_FALLBACK: ModelItem = {
 /** Static preview card for a skill that hasn't been trained yet — never comes
  * from /models, so it's a plain client-side entry (never enriched, never
  * runnable). */
-const WIP_SKILL: ModelItem = {
-  id: WIP_SKILL_ID,
-  name: WIP_SKILL_ID,
+const wipSkill = (id: string): ModelItem => ({
+  id,
+  name: id,
   policy_type: null,
   dataset: null,
   steps: null,
@@ -46,7 +47,10 @@ const WIP_SKILL: ModelItem = {
   last_modified: null,
   hf_repo_id: null,
   source: "hub",
-};
+});
+
+/** Static WIP preview cards shown alongside the real featured skill. */
+const WIP_SKILLS: ModelItem[] = Object.values(WIP_SKILL_IDS).map(wipSkill);
 
 /** A single loading skeleton shaped like a SkillCard. */
 const CardSkeleton: React.FC = () => (
@@ -60,15 +64,15 @@ const CardSkeleton: React.FC = () => (
   </div>
 );
 
-/** "wip" for the not-yet-trained preview card, "makermods" for every other
+/** "wip" for a not-yet-trained preview card, "makermods" for every other
  * curated card on the launchpad. */
 const badgeFor = (m: ModelItem): SkillBadge =>
-  m.id === WIP_SKILL_ID ? "wip" : "makermods";
+  isWipSkillId(m.id) ? "wip" : "makermods";
 
 /**
  * Horizontal skill slider — the launchpad shows the curated MakerMods-
  * supported skill (real /models row when available, static fallback
- * otherwise) plus a static WIP preview card for skills still in training.
+ * otherwise) plus static WIP preview cards for skills still in training.
  * Scroll-snap track with ‹ › arrow buttons; the hero search box filters live
  * by name/author. Card click opens the skill detail dialog.
  */
@@ -82,7 +86,7 @@ const SkillSlider: React.FC<SkillSliderProps> = ({ search }) => {
     const featured =
       models.find((m) => (m.hf_repo_id ?? m.id) === FEATURED_SKILL_ID) ??
       FEATURED_FALLBACK;
-    const curated = [featured, WIP_SKILL];
+    const curated = [featured, ...WIP_SKILLS];
     const q = search.trim().toLowerCase();
     if (!q) return curated;
     return curated.filter((m) => {
