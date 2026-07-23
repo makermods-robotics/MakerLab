@@ -82,7 +82,12 @@ export const POLICY_TYPE_OPTIONS: {
   { value: "tdmpc", label: "TD-MPC", display: "TD-MPC", stable: false },
   { value: "vqbet", label: "VQ-BeT", display: "VQ-BeT", stable: false },
   { value: "pi0_fast", label: "PI0 Fast", display: "PI0 Fast", stable: false },
-  { value: "sac", label: "SAC", display: "SAC", stable: false },
+  {
+    value: "gaussian_actor",
+    label: "Gaussian Actor",
+    display: "Gaussian Actor",
+    stable: false,
+  },
   // reward_classifier deliberately absent: it isn't a policy in the pinned
   // lerobot (separate RewardModelConfig registry — scores outcomes, doesn't
   // output actions) so lerobot-train can never construct it. Re-add alongside

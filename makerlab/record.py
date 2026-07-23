@@ -25,6 +25,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from lerobot.configs.dataset import DatasetRecordConfig
+from lerobot.configs.video import RGBEncoderConfig
 from lerobot.datasets import LeRobotDataset
 from lerobot.motors.motors_bus import MotorsBus
 
@@ -404,6 +405,17 @@ def create_record_config(request: RecordingRequest) -> RecordConfig:
         tags=with_makerlab_tag(request.tags) if request.push_to_hub else None,
         private=request.private,
         streaming_encoding=request.streaming_encoding,
+        # lerobot 0.6.0 shim: vcodec moved off DatasetRecordConfig into the
+        # nested RGBEncoderConfig. "auto" resolves a hardware encoder on this
+        # machine (RGBEncoderConfig.__post_init__ probes the local FFmpeg) —
+        # h264_videotoolbox on macOS, h264_nvenc/hevc_nvenc on Jetson/Linux-
+        # NVIDIA — falling back to software libsvtav1 (a logged warning, no
+        # error) when none exists. This matters because streaming_encoding is on
+        # by default: on Jetson-class CPUs, software SVT-AV1 can run below
+        # realtime, fill the encoder queue, and block the capture loop — the
+        # suspected cause of record-lag. Hardware encoding keeps encode off the
+        # capture thread's critical path.
+        rgb_encoder=RGBEncoderConfig(vcodec="auto"),
     )
 
     # Create the main record config
@@ -1199,7 +1211,10 @@ def record_with_web_events(
             cfg.dataset.repo_id,
             root=cfg.dataset.root,
             batch_encoding_size=cfg.dataset.video_encoding_batch_size,
-            vcodec=cfg.dataset.vcodec,
+            # lerobot 0.6.0: vcodec moved off DatasetRecordConfig into the nested
+            # rgb_encoder/depth_encoder configs; resume/create now take those.
+            rgb_encoder=cfg.dataset.rgb_encoder,
+            depth_encoder=cfg.dataset.depth_encoder,
             streaming_encoding=cfg.dataset.streaming_encoding,
             encoder_queue_maxsize=cfg.dataset.encoder_queue_maxsize,
             encoder_threads=cfg.dataset.encoder_threads,
@@ -1229,7 +1244,10 @@ def record_with_web_events(
             image_writer_processes=cfg.dataset.num_image_writer_processes,
             image_writer_threads=cfg.dataset.num_image_writer_threads_per_camera * len(robot.cameras),
             batch_encoding_size=cfg.dataset.video_encoding_batch_size,
-            vcodec=cfg.dataset.vcodec,
+            # lerobot 0.6.0: vcodec moved off DatasetRecordConfig into the nested
+            # rgb_encoder/depth_encoder configs; resume/create now take those.
+            rgb_encoder=cfg.dataset.rgb_encoder,
+            depth_encoder=cfg.dataset.depth_encoder,
             streaming_encoding=cfg.dataset.streaming_encoding,
             encoder_queue_maxsize=cfg.dataset.encoder_queue_maxsize,
             encoder_threads=cfg.dataset.encoder_threads,
