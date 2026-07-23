@@ -90,8 +90,3 @@ The UI is verified in **light mode only** and is a desktop tool driven from a la
 ## Hardware target
 
 SO-101 leader/follower arms, single or **bimanual** (two leader/follower pairs via `BiSOLeaderConfig`/`BiSOFollowerConfig`). Robot config construction is centralized in [utils/robot_factory.py](makerlab/utils/robot_factory.py) — adding a robot type means extending the factory, plus calibrate.py and rollout.py which build their configs/args themselves.
-
-## Gotchas from past sessions
-
-- **HF dataset upload needs a version tag**: publishing a LeRobot dataset with `HfApi.upload_folder` must be followed by `create_tag(repo_id, tag="v3.0", repo_type="dataset")` (match `meta/info.json`'s `codebase_version`) — without it, fresh downloads fail with `FileNotFoundError: meta/info.json` while cached copies hide the bug. `push_to_hub()` (what merge.py uses) tags automatically.
-- **macOS cameras must be enumerated out-of-process**: AVFoundation's in-process device list never refreshes in the long-lived server (no NSRunLoop under uvicorn), so cv2 indices silently rebind after a replug. `/available-cameras` spawns a fresh Python subprocess (`_avfoundation_cameras_in_cv2_order` in server.py) and returns each camera's stable `unique_id`. Never enumerate AVFoundation in-process in the server, and never "fix" a camera bug by index arithmetic alone.
