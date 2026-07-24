@@ -21,7 +21,6 @@ import {
   EpisodeJointSeries,
   EpisodeSummary,
   episodeVideoUrl,
-  getDatasetHubSettings,
   getDatasetInfo,
   getEpisodeJoints,
   listEpisodes,
@@ -466,35 +465,6 @@ const EpisodeViewer: React.FC<{
   );
 };
 
-// Hugging Face's own hosted dataset viewer (the same Space linked from every
-// dataset's Hub page). Its `*.hf.space` subdomain runs with no viewer auth
-// context and sends no framing-blocking headers, so it can embed a PUBLIC
-// repo directly by path. The `huggingface.co/spaces/...` wrapper URL that
-// *does* carry the viewer's own Hub login (needed for a private repo) sends
-// `X-Frame-Options: DENY` and cannot be framed at all — confirmed against
-// live response headers, not assumed. So this is only ever rendered for a
-// Hub dataset already confirmed public; a private one keeps the existing
-// "download to view" message instead of a broken/blank iframe.
-const HUB_SPACE_BASE_URL = "https://lerobot-visualize-dataset.hf.space";
-
-const HubSpaceViewer: React.FC<{ repoId: string }> = ({ repoId }) => (
-  <div className="flex min-h-0 flex-1 flex-col gap-2">
-    <div className="flex-1 overflow-hidden rounded-md border border-border bg-[#0c0f14]">
-      <iframe
-        key={repoId}
-        src={`${HUB_SPACE_BASE_URL}/${repoId}`}
-        className="h-full w-full border-0"
-        allow="autoplay; fullscreen"
-        title={`Hugging Face dataset viewer — ${repoId}`}
-      />
-    </div>
-    <p className="shrink-0 text-center text-[10.5px] text-muted-foreground">
-      Viewing via Hugging Face's hosted dataset viewer — download this dataset
-      to view it here with joint traces.
-    </p>
-  </div>
-);
-
 const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
   repoId,
   open,
@@ -510,14 +480,6 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
   const [cameras, setCameras] = useState<string[]>([]);
   const [selectedEpisode, setSelectedEpisode] = useState<number | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
-  const [datasetSource, setDatasetSource] = useState<"local" | "hub" | undefined>(undefined);
-  // null = not yet known (still checking, or the check hasn't run because it
-  // isn't needed) — only used to gate the Hub Space iframe fallback below.
-  const [hubPrivate, setHubPrivate] = useState<boolean | null>(null);
-  // Set on a failed privacy check (offline, or a private repo we have no read
-  // access to at all) so the "checking…" state has a terminal fallback
-  // instead of hanging forever when hubPrivate can never resolve.
-  const [hubPrivateCheckFailed, setHubPrivateCheckFailed] = useState(false);
 
   useEffect(() => {
     if (!repoId || !open) return;
@@ -525,9 +487,6 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
     setEpisodesLoading(true);
     setEpisodes(null);
     setCameras([]);
-    setDatasetSource(undefined);
-    setHubPrivate(null);
-    setHubPrivateCheckFailed(false);
     Promise.all([
       listEpisodes(baseUrl, fetchWithHeaders, repoId, controller.signal).catch(() => null),
       getDatasetInfo(baseUrl, fetchWithHeaders, repoId, controller.signal).catch(() => null),
@@ -535,31 +494,11 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
       if (controller.signal.aborted) return;
       setEpisodes(eps);
       setCameras(info?.cameras ?? []);
-      setDatasetSource(info?.source);
       setSelectedEpisode(eps && eps.length > 0 ? eps[0].episode_index : null);
       setEpisodesLoading(false);
     });
     return () => controller.abort();
   }, [repoId, open, baseUrl, fetchWithHeaders, reloadKey]);
-
-  // Only relevant to the Hub Space iframe fallback: when /datasets/episodes
-  // failed (episodes === null) for a dataset that IS on the Hub, find out
-  // whether it's private before offering the embed — a private repo can't be
-  // fetched by the Space's anonymous browser (see HubSpaceViewer above).
-  useEffect(() => {
-    if (!repoId || episodesLoading || episodes !== null || datasetSource !== "hub") return;
-    let cancelled = false;
-    getDatasetHubSettings(baseUrl, fetchWithHeaders, repoId)
-      .then((settings) => {
-        if (!cancelled) setHubPrivate(settings.private);
-      })
-      .catch(() => {
-        if (!cancelled) setHubPrivateCheckFailed(true);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [repoId, episodesLoading, episodes, datasetSource, baseUrl, fetchWithHeaders]);
 
   if (!repoId) return null;
 
@@ -594,15 +533,6 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
                 selectedEpisode={selectedEpisode}
                 onSelectEpisode={setSelectedEpisode}
               />
-            ) : episodes === null && datasetSource === "hub" && hubPrivate === false ? (
-              <HubSpaceViewer repoId={repoId} />
-            ) : episodes === null &&
-              datasetSource === "hub" &&
-              hubPrivate === null &&
-              !hubPrivateCheckFailed ? (
-              <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
-                Checking Hub visibility…
-              </div>
             ) : (
               <div className="flex flex-1 flex-col items-center justify-center gap-2 rounded-md border border-dashed border-border bg-muted/30 px-6 text-center">
                 <VideoOff className="h-6 w-6 text-muted-foreground" />
@@ -614,7 +544,7 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
                 <p className="max-w-sm text-xs text-muted-foreground">
                   {episodes && episodes.length === 0
                     ? "Record at least one episode into this dataset to view its camera footage here."
-                    : "This dataset isn't downloaded to this machine yet, or predates the format this viewer reads. Downloading it below (if it's on the Hub) may make it viewable."}
+                    : "A Hub dataset with video streams on demand here — a first-time view of a new episode may take a moment to fetch. This message means the dataset predates the viewer's format, or has no video to show."}
                 </p>
               </div>
             )}
