@@ -328,6 +328,19 @@ def test_datasets_info_endpoint(client: TestClient, tmp_lerobot_home: Path) -> N
     assert missing.status_code == 404
 
 
+def test_video_camera_names_filters_by_dtype() -> None:
+    from makerlab.datasets import _video_camera_names
+
+    features = {
+        "observation.images.front": {"dtype": "video"},
+        "observation.images.raw": {"dtype": "image"},
+        "observation.images.wrist": {"dtype": "video"},
+        "observation.state": {"dtype": "float32"},
+        "action": {"dtype": "float32"},
+    }
+    assert _video_camera_names(features) == ["front", "wrist"]
+
+
 # --- Hub sync status --------------------------------------------------------
 
 
@@ -1281,9 +1294,9 @@ def test_get_hub_dataset_info_maps_meta(tmp_path: Path) -> None:
             "fps": 30,
             "robot_type": "so101_follower",
             "features": {
-                "observation.images.front": {},
-                "observation.images.wrist": {},
-                "observation.state": {},
+                "observation.images.front": {"dtype": "video"},
+                "observation.images.wrist": {"dtype": "video"},
+                "observation.state": {"dtype": "float32"},
             },
         },
     )
@@ -1305,6 +1318,36 @@ def test_get_hub_dataset_info_maps_meta(tmp_path: Path) -> None:
         "size_bytes": None,
         "source": "hub",
     }
+
+
+def test_get_hub_dataset_info_excludes_non_video_camera_features(tmp_path: Path) -> None:
+    """A camera-prefixed feature that isn't dtype == "video" (e.g. raw stored
+    images) has no mp4 chunk for this app's video pipeline to serve, so it's
+    excluded from `cameras` — the same field the Hub listing filter and viewer
+    gate both key off."""
+    from makerlab import datasets as ds
+
+    _clear_hub_dataset_info_cache()
+    meta = _write_hub_meta(
+        tmp_path,
+        {
+            "total_episodes": 4,
+            "total_frames": 100,
+            "fps": 30,
+            "features": {
+                "observation.images.front": {"dtype": "image"},
+                "observation.state": {"dtype": "float32"},
+            },
+        },
+    )
+    with (
+        patch("makerlab.datasets.hf_hub_offline", return_value=False),
+        patch("makerlab.datasets.hf_hub_download", return_value=str(meta)),
+    ):
+        row = ds.get_hub_dataset_info("alice/image_only")
+
+    assert row is not None
+    assert row["cameras"] == []
 
 
 def test_get_hub_dataset_info_offline_returns_none() -> None:
@@ -1382,6 +1425,331 @@ def test_get_local_dataset_info_marks_source_local(tmp_lerobot_home: Path) -> No
 
 
 # ---------------------------------------------------------------------------
+# On-demand Hub episode-metadata fetch — the foundation the viewer's Hub
+# fallback (Tasks 3-5) builds on. Downloads meta/info.json + the small
+# meta/episodes/**/*.parquet chunks (never video/data chunks themselves) into
+# huggingface_hub's own cache, so the existing local-path parsing code can run
+# against that snapshot dir unmodified.
+# ---------------------------------------------------------------------------
+
+
+def test_hub_dataset_has_video_true_and_false() -> None:
+    from makerlab import datasets as ds
+
+    with patch("makerlab.datasets.get_hub_dataset_info", return_value={"cameras": ["front"]}):
+        assert ds._hub_dataset_has_video("alice/pick") is True
+    with patch("makerlab.datasets.get_hub_dataset_info", return_value={"cameras": []}):
+        assert ds._hub_dataset_has_video("alice/pick") is False
+    with patch("makerlab.datasets.get_hub_dataset_info", return_value=None):
+        assert ds._hub_dataset_has_video("alice/pick") is False
+
+
+def test_ensure_hub_episodes_root_returns_none_offline() -> None:
+    from makerlab import datasets as ds
+
+    with (
+        patch("makerlab.datasets.hf_hub_offline", return_value=True),
+        patch("makerlab.datasets.get_hub_dataset_info") as info,
+    ):
+        assert ds._ensure_hub_episodes_root("alice/pick") is None
+    info.assert_not_called()
+
+
+def test_ensure_hub_episodes_root_returns_none_when_no_video() -> None:
+    from makerlab import datasets as ds
+
+    with (
+        patch("makerlab.datasets.hf_hub_offline", return_value=False),
+        patch("makerlab.datasets.get_hub_dataset_info", return_value={"cameras": []}),
+        patch("makerlab.datasets.hf_hub_download") as dl,
+    ):
+        assert ds._ensure_hub_episodes_root("alice/no_video") is None
+    dl.assert_not_called()
+
+
+def test_ensure_hub_episodes_root_downloads_info_and_episode_chunks(tmp_path: Path) -> None:
+    from makerlab import datasets as ds
+
+    snapshot = tmp_path / "snapshot"
+    (snapshot / "meta").mkdir(parents=True)
+    (snapshot / "meta" / "info.json").write_text("{}")
+
+    fake_api = MagicMock()
+    fake_api.list_repo_files.return_value = [
+        "meta/info.json",
+        "meta/episodes/chunk-000/file-000.parquet",
+        "meta/episodes/chunk-000/file-001.parquet",
+        "meta/stats.json",  # not an episodes parquet — must be skipped
+        "videos/observation.images.front/chunk-000/file-000.mp4",  # not fetched here
+    ]
+    downloaded: list[str] = []
+
+    def _fake_download(repo_id, filename, repo_type):  # noqa: ARG001
+        downloaded.append(filename)
+        return str(snapshot / filename)
+
+    with (
+        patch("makerlab.datasets.hf_hub_offline", return_value=False),
+        patch("makerlab.datasets.get_hub_dataset_info", return_value={"cameras": ["front"]}),
+        patch("makerlab.datasets.shared_hf_api", return_value=fake_api),
+        patch("makerlab.datasets.hf_hub_download", side_effect=_fake_download),
+    ):
+        root = ds._ensure_hub_episodes_root("alice/pick")
+
+    assert root == snapshot
+    assert downloaded == [
+        "meta/info.json",
+        "meta/episodes/chunk-000/file-000.parquet",
+        "meta/episodes/chunk-000/file-001.parquet",
+    ]
+
+
+def test_ensure_hub_episodes_root_degrades_on_fetch_failure() -> None:
+    from makerlab import datasets as ds
+
+    with (
+        patch("makerlab.datasets.hf_hub_offline", return_value=False),
+        patch("makerlab.datasets.get_hub_dataset_info", return_value={"cameras": ["front"]}),
+        patch("makerlab.datasets.hf_hub_download", side_effect=RuntimeError("hub down")),
+    ):
+        assert ds._ensure_hub_episodes_root("alice/pick") is None
+
+
+# ---------------------------------------------------------------------------
+# list_episode_summaries — Hub fallback for episode metadata (Task 3).
+# ---------------------------------------------------------------------------
+
+
+def test_list_episode_summaries_local_unchanged(tmp_lerobot_home: Path) -> None:
+    """Existing local behavior is untouched: a local dataset never touches the
+    Hub fallback."""
+    from makerlab import datasets as ds
+
+    d = _write_info(
+        tmp_lerobot_home,
+        "alice/local",
+        {"fps": 30, "features": {"observation.images.front": {"dtype": "video"}}},
+    )
+    episodes_dir = d / "meta" / "episodes" / "chunk-000"
+    episodes_dir.mkdir(parents=True)
+    pq.write_table(
+        pa.table(
+            {
+                "episode_index": [0],
+                "tasks": [["task"]],
+                "length": [30],
+                "videos/observation.images.front/from_timestamp": [0.0],
+                "videos/observation.images.front/to_timestamp": [1.0],
+            }
+        ),
+        episodes_dir / "file-000.parquet",
+    )
+
+    with patch("makerlab.datasets._ensure_hub_episodes_root") as hub_fetch:
+        result = ds.list_episode_summaries("alice/local")
+
+    hub_fetch.assert_not_called()
+    assert result is not None
+    assert result[0]["episode_index"] == 0
+
+
+def test_list_episode_summaries_hub_fallback(tmp_lerobot_home: Path, tmp_path: Path) -> None:
+    """No local copy: falls back to reading the Hub-fetched snapshot root."""
+    from makerlab import datasets as ds
+
+    snapshot = tmp_path / "snapshot"
+    (snapshot / "meta").mkdir(parents=True)
+    (snapshot / "meta" / "info.json").write_text(
+        json.dumps({"fps": 30, "features": {"observation.images.front": {"dtype": "video"}}})
+    )
+    episodes_dir = snapshot / "meta" / "episodes" / "chunk-000"
+    episodes_dir.mkdir(parents=True)
+    pq.write_table(
+        pa.table(
+            {
+                "episode_index": [0, 1],
+                "tasks": [["task"], ["task"]],
+                "length": [30, 60],
+                "videos/observation.images.front/from_timestamp": [0.0, 1.0],
+                "videos/observation.images.front/to_timestamp": [1.0, 3.0],
+            }
+        ),
+        episodes_dir / "file-000.parquet",
+    )
+
+    with patch("makerlab.datasets._ensure_hub_episodes_root", return_value=snapshot) as hub_fetch:
+        result = ds.list_episode_summaries("alice/hub_only")
+
+    hub_fetch.assert_called_once_with("alice/hub_only")
+    assert result is not None
+    assert [e["episode_index"] for e in result] == [0, 1]
+    assert result[1]["duration"] == 2.0  # 60 frames / 30 fps
+
+
+def test_list_episode_summaries_returns_none_when_hub_fetch_fails(tmp_lerobot_home: Path) -> None:
+    from makerlab import datasets as ds
+
+    with patch("makerlab.datasets._ensure_hub_episodes_root", return_value=None):
+        assert ds.list_episode_summaries("alice/no_video") is None
+
+
+def test_list_episode_summaries_hub_fallback_filters_non_video_cameras(
+    tmp_lerobot_home: Path, tmp_path: Path
+) -> None:
+    """Hub fallback: dataset with both dtype=='video' and dtype=='image' cameras
+    correctly reads only the video camera's columns, not the image camera's."""
+    from makerlab import datasets as ds
+
+    snapshot = tmp_path / "snapshot"
+    (snapshot / "meta").mkdir(parents=True)
+    # Dataset has one video camera and one image camera
+    (snapshot / "meta" / "info.json").write_text(
+        json.dumps(
+            {
+                "fps": 30,
+                "features": {
+                    "observation.images.front": {"dtype": "video"},
+                    "observation.images.raw": {"dtype": "image"},
+                },
+            }
+        )
+    )
+    # Parquet contains only the video camera's columns, not the image camera's
+    episodes_dir = snapshot / "meta" / "episodes" / "chunk-000"
+    episodes_dir.mkdir(parents=True)
+    pq.write_table(
+        pa.table(
+            {
+                "episode_index": [0, 1],
+                "tasks": [["task"], ["task"]],
+                "length": [30, 60],
+                "videos/observation.images.front/from_timestamp": [0.0, 1.0],
+                "videos/observation.images.front/to_timestamp": [1.0, 3.0],
+            }
+        ),
+        episodes_dir / "file-000.parquet",
+    )
+
+    with patch("makerlab.datasets._ensure_hub_episodes_root", return_value=snapshot) as hub_fetch:
+        result = ds.list_episode_summaries("alice/mixed_cameras")
+
+    hub_fetch.assert_called_once_with("alice/mixed_cameras")
+    assert result is not None
+    assert len(result) == 2
+    assert [e["episode_index"] for e in result] == [0, 1]
+    # Verify video_offsets only contains the video camera, not the image camera
+    assert result[0]["video_offsets"] == {
+        "front": {"from": 0.0, "to": 1.0},
+    }
+    assert result[1]["video_offsets"] == {
+        "front": {"from": 1.0, "to": 3.0},
+    }
+
+
+def test_get_episode_video_path_local_unchanged(tmp_lerobot_home: Path) -> None:
+    from makerlab import datasets as ds
+
+    d = _write_info(
+        tmp_lerobot_home,
+        "alice/local",
+        {"features": {"observation.images.front": {"dtype": "video"}}},
+    )
+    episodes_dir = d / "meta" / "episodes" / "chunk-000"
+    episodes_dir.mkdir(parents=True)
+    pq.write_table(
+        pa.table(
+            {
+                "episode_index": [0],
+                "videos/observation.images.front/chunk_index": [0],
+                "videos/observation.images.front/file_index": [0],
+            }
+        ),
+        episodes_dir / "file-000.parquet",
+    )
+    video_dir = d / "videos" / "observation.images.front" / "chunk-000"
+    video_dir.mkdir(parents=True)
+    (video_dir / "file-000.mp4").write_bytes(b"fake mp4")
+
+    with patch("makerlab.datasets._ensure_hub_episodes_root") as hub_fetch:
+        result = ds.get_episode_video_path("alice/local", 0, "front")
+
+    hub_fetch.assert_not_called()
+    assert result == video_dir / "file-000.mp4"
+
+
+def test_get_episode_video_path_hub_fallback_downloads_one_chunk(
+    tmp_lerobot_home: Path, tmp_path: Path
+) -> None:
+    """No local copy: fetches ONLY the one video chunk file the episode/camera
+    needs, via hf_hub_download — not the whole dataset."""
+    from makerlab import datasets as ds
+
+    snapshot = tmp_path / "snapshot"
+    (snapshot / "meta").mkdir(parents=True)
+    (snapshot / "meta" / "info.json").write_text(
+        json.dumps({"features": {"observation.images.front": {"dtype": "video"}}})
+    )
+    episodes_dir = snapshot / "meta" / "episodes" / "chunk-000"
+    episodes_dir.mkdir(parents=True)
+    pq.write_table(
+        pa.table(
+            {
+                "episode_index": [0],
+                "videos/observation.images.front/chunk_index": [0],
+                "videos/observation.images.front/file_index": [0],
+            }
+        ),
+        episodes_dir / "file-000.parquet",
+    )
+    downloaded_video = snapshot / "videos" / "observation.images.front" / "chunk-000" / "file-000.mp4"
+    downloaded_video.parent.mkdir(parents=True)
+    downloaded_video.write_bytes(b"fake mp4")
+
+    with (
+        patch("makerlab.datasets._ensure_hub_episodes_root", return_value=snapshot),
+        patch("makerlab.datasets.hf_hub_download", return_value=str(downloaded_video)) as dl,
+    ):
+        result = ds.get_episode_video_path("alice/hub_only", 0, "front")
+
+    dl.assert_called_once_with(
+        "alice/hub_only",
+        filename="videos/observation.images.front/chunk-000/file-000.mp4",
+        repo_type="dataset",
+    )
+    assert result == downloaded_video
+
+
+def test_get_episode_video_path_hub_fallback_degrades_on_download_failure(
+    tmp_lerobot_home: Path, tmp_path: Path
+) -> None:
+    from makerlab import datasets as ds
+
+    snapshot = tmp_path / "snapshot"
+    (snapshot / "meta").mkdir(parents=True)
+    (snapshot / "meta" / "info.json").write_text(
+        json.dumps({"features": {"observation.images.front": {"dtype": "video"}}})
+    )
+    episodes_dir = snapshot / "meta" / "episodes" / "chunk-000"
+    episodes_dir.mkdir(parents=True)
+    pq.write_table(
+        pa.table(
+            {
+                "episode_index": [0],
+                "videos/observation.images.front/chunk_index": [0],
+                "videos/observation.images.front/file_index": [0],
+            }
+        ),
+        episodes_dir / "file-000.parquet",
+    )
+
+    with (
+        patch("makerlab.datasets._ensure_hub_episodes_root", return_value=snapshot),
+        patch("makerlab.datasets.hf_hub_download", side_effect=RuntimeError("network")),
+    ):
+        assert ds.get_episode_video_path("alice/hub_only", 0, "front") is None
+
+
+# ---------------------------------------------------------------------------
 # _fan_out_hub_authors — the OVERALL fan-out deadline actually bounds a hung
 # author. The shared HfApi httpx client has timeout=None, so this budget is the
 # ONLY timeout in the stack: a blackholed connection must be abandoned (and
@@ -1438,3 +1806,201 @@ def test_fan_out_hub_authors_no_timeout_when_all_finish(
     monkeypatch.setattr(ds, "_HUB_FANOUT_TIMEOUT_S", 0.5)
     result = ds._fan_out_hub_authors(["a", "b", "c"], lambda author: author.upper())
     assert result == ["A", "B", "C"]
+
+
+def test_get_episode_joint_series_local_unchanged(tmp_lerobot_home: Path) -> None:
+    from makerlab import datasets as ds
+
+    d = _write_info(
+        tmp_lerobot_home,
+        "alice/local",
+        {"features": {"observation.state": {"names": ["shoulder", "elbow"]}}},
+    )
+    episodes_dir = d / "meta" / "episodes" / "chunk-000"
+    episodes_dir.mkdir(parents=True)
+    pq.write_table(
+        pa.table({"episode_index": [0], "data/chunk_index": [0], "data/file_index": [0]}),
+        episodes_dir / "file-000.parquet",
+    )
+    data_dir = d / "data" / "chunk-000"
+    data_dir.mkdir(parents=True)
+    pq.write_table(
+        pa.table(
+            {
+                "episode_index": [0, 0],
+                "timestamp": [0.0, 0.033],
+                "observation.state": [[0.1, 0.2], [0.15, 0.25]],
+            }
+        ),
+        data_dir / "file-000.parquet",
+    )
+
+    with patch("makerlab.datasets._ensure_hub_episodes_root") as hub_fetch:
+        result = ds.get_episode_joint_series("alice/local", 0)
+
+    hub_fetch.assert_not_called()
+    assert result is not None
+    assert result["joint_names"] == ["shoulder", "elbow"]
+    assert result["timestamps"] == [0.0, 0.033]
+
+
+def test_get_episode_joint_series_hub_fallback_downloads_one_chunk(
+    tmp_lerobot_home: Path, tmp_path: Path
+) -> None:
+    from makerlab import datasets as ds
+
+    snapshot = tmp_path / "snapshot"
+    (snapshot / "meta").mkdir(parents=True)
+    (snapshot / "meta" / "info.json").write_text(
+        json.dumps({"features": {"observation.state": {"names": ["shoulder"]}}})
+    )
+    episodes_dir = snapshot / "meta" / "episodes" / "chunk-000"
+    episodes_dir.mkdir(parents=True)
+    pq.write_table(
+        pa.table({"episode_index": [0], "data/chunk_index": [0], "data/file_index": [0]}),
+        episodes_dir / "file-000.parquet",
+    )
+    downloaded_data = snapshot / "data" / "chunk-000" / "file-000.parquet"
+    downloaded_data.parent.mkdir(parents=True)
+    pq.write_table(
+        pa.table({"episode_index": [0], "timestamp": [0.0], "observation.state": [[0.5]]}),
+        downloaded_data,
+    )
+
+    with (
+        patch("makerlab.datasets._ensure_hub_episodes_root", return_value=snapshot),
+        patch("makerlab.datasets.hf_hub_download", return_value=str(downloaded_data)) as dl,
+    ):
+        result = ds.get_episode_joint_series("alice/hub_only", 0)
+
+    dl.assert_called_once_with(
+        "alice/hub_only", filename="data/chunk-000/file-000.parquet", repo_type="dataset"
+    )
+    assert result is not None
+    assert result["joint_names"] == ["shoulder"]
+    assert result["values"] == [[0.5]]
+
+
+def test_get_episode_joint_series_hub_fallback_degrades_on_download_failure(
+    tmp_lerobot_home: Path, tmp_path: Path
+) -> None:
+    from makerlab import datasets as ds
+
+    snapshot = tmp_path / "snapshot"
+    (snapshot / "meta").mkdir(parents=True)
+    (snapshot / "meta" / "info.json").write_text(json.dumps({"features": {}}))
+    episodes_dir = snapshot / "meta" / "episodes" / "chunk-000"
+    episodes_dir.mkdir(parents=True)
+    pq.write_table(
+        pa.table({"episode_index": [0], "data/chunk_index": [0], "data/file_index": [0]}),
+        episodes_dir / "file-000.parquet",
+    )
+
+    with (
+        patch("makerlab.datasets._ensure_hub_episodes_root", return_value=snapshot),
+        patch("makerlab.datasets.hf_hub_download", side_effect=RuntimeError("network")),
+    ):
+        assert ds.get_episode_joint_series("alice/hub_only", 0) is None
+
+
+# ---------------------------------------------------------------------------
+# End-to-end route coverage for Hub dataset viewer — Tasks 1–5 integrated
+# through the real FastAPI routes without production code changes.
+# ---------------------------------------------------------------------------
+
+
+def test_hub_dataset_viewer_endpoints_end_to_end(
+    client: TestClient, tmp_lerobot_home: Path, tmp_path: Path
+) -> None:
+    """A Hub-only dataset with video is viewable through all three viewer
+    routes without ever being downloaded locally."""
+    _clear_hub_dataset_info_cache()
+    snapshot = tmp_path / "snapshot"
+    (snapshot / "meta").mkdir(parents=True)
+    info = {
+        "fps": 30,
+        "total_episodes": 1,
+        "total_frames": 2,
+        "features": {
+            "observation.images.front": {"dtype": "video"},
+            "observation.state": {"names": ["shoulder"]},
+        },
+    }
+    (snapshot / "meta" / "info.json").write_text(json.dumps(info))
+    episodes_dir = snapshot / "meta" / "episodes" / "chunk-000"
+    episodes_dir.mkdir(parents=True)
+    pq.write_table(
+        pa.table(
+            {
+                "episode_index": [0],
+                "tasks": [["pick"]],
+                "length": [2],
+                "videos/observation.images.front/chunk_index": [0],
+                "videos/observation.images.front/file_index": [0],
+                "videos/observation.images.front/from_timestamp": [0.0],
+                "videos/observation.images.front/to_timestamp": [0.066],
+                "data/chunk_index": [0],
+                "data/file_index": [0],
+            }
+        ),
+        episodes_dir / "file-000.parquet",
+    )
+    video_file = snapshot / "videos" / "observation.images.front" / "chunk-000" / "file-000.mp4"
+    video_file.parent.mkdir(parents=True)
+    video_file.write_bytes(b"fake mp4 bytes")
+    data_file = snapshot / "data" / "chunk-000" / "file-000.parquet"
+    data_file.parent.mkdir(parents=True)
+    pq.write_table(
+        pa.table({"episode_index": [0, 0], "timestamp": [0.0, 0.033], "observation.state": [[0.1], [0.2]]}),
+        data_file,
+    )
+
+    def _fake_download(repo_id, filename, repo_type):  # noqa: ARG001
+        return str(snapshot / filename)
+
+    fake_api = MagicMock()
+    fake_api.list_repo_files.return_value = [
+        "meta/info.json",
+        "meta/episodes/chunk-000/file-000.parquet",
+    ]
+
+    with (
+        patch("makerlab.datasets.hf_hub_offline", return_value=False),
+        patch("makerlab.datasets.shared_hf_api", return_value=fake_api),
+        patch("makerlab.datasets.hf_hub_download", side_effect=_fake_download),
+    ):
+        episodes = client.get("/datasets/episodes", params={"repo_id": "alice/hub_only"})
+        assert episodes.status_code == 200
+        assert episodes.json()[0]["episode_index"] == 0
+
+        joints = client.get(
+            "/datasets/episode-joints", params={"repo_id": "alice/hub_only", "episode_index": 0}
+        )
+        assert joints.status_code == 200
+        assert joints.json()["joint_names"] == ["shoulder"]
+
+        video = client.get(
+            "/datasets/episode-video",
+            params={"repo_id": "alice/hub_only", "episode_index": 0, "camera": "front"},
+        )
+        assert video.status_code == 200
+        assert video.content == b"fake mp4 bytes"
+
+
+def test_hub_dataset_viewer_endpoints_404_without_video(
+    client: TestClient, tmp_lerobot_home: Path, tmp_path: Path
+) -> None:
+    """A Hub-only dataset with no dtype=="video" feature never triggers a chunk
+    fetch — /datasets/episodes 404s after only the cheap meta/info.json probe."""
+    _clear_hub_dataset_info_cache()
+    meta = tmp_path / "info.json"
+    meta.write_text(json.dumps({"features": {"observation.images.front": {"dtype": "image"}}}))
+
+    with (
+        patch("makerlab.datasets.hf_hub_offline", return_value=False),
+        patch("makerlab.datasets.hf_hub_download", return_value=str(meta)) as dl,
+    ):
+        resp = client.get("/datasets/episodes", params={"repo_id": "alice/no_video"})
+
+    assert resp.status_code == 404
+    dl.assert_called_once()  # only the meta/info.json probe inside get_hub_dataset_info

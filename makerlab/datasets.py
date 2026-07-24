@@ -47,6 +47,19 @@ logger = logging.getLogger(__name__)
 
 CAMERA_FEATURE_PREFIX = "observation.images."
 
+
+def _video_camera_names(features: dict[str, Any]) -> list[str]:
+    """Camera feature names actually backed by an mp4 (dtype == "video"), not
+    just any observation.images.* key. A raw-image (dtype == "image") camera
+    feature has no video chunk file for this app's video-serving pipeline to
+    point a <video> tag at, so it doesn't count as "viewable"."""
+    return [
+        key[len(CAMERA_FEATURE_PREFIX) :]
+        for key, spec in features.items()
+        if key.startswith(CAMERA_FEATURE_PREFIX) and isinstance(spec, dict) and spec.get("dtype") == "video"
+    ]
+
+
 # Errors a per-author / per-listing Hub call may raise that must NOT bubble up
 # and 500 the endpoint. HfHubHTTPError covers HTTP-status failures; httpx.HTTPError
 # is the base of ConnectError / TimeoutException / TransportError, which is what a
@@ -568,14 +581,10 @@ def _dir_size_bytes(path: Path) -> int:
     return total
 
 
-def get_local_dataset_info(repo_id: str) -> dict[str, Any] | None:
-    """Detail view of one locally-cached dataset, for the selection info card.
-
-    Reads ``meta/info.json`` + task metadata and walks the directory for its
-    size on disk — per-dataset on demand, so the cheap ``/datasets`` listing
-    stays cheap. Returns None if `repo_id` escapes the cache root or isn't a
-    local dataset (e.g. it only exists on the Hub).
-    """
+def _resolve_local_dataset_path(repo_id: str) -> Path | None:
+    """Resolve `repo_id` to its local cache directory. None if it escapes the
+    cache root (path traversal) or isn't a local dataset dir (e.g. it only
+    exists on the Hub). Shared by every local-only dataset reader below."""
     root = _lerobot_cache_root().resolve()
     try:
         path = (root / repo_id).resolve()
@@ -585,6 +594,20 @@ def get_local_dataset_info(repo_id: str) -> dict[str, Any] | None:
     if path == root or root not in path.parents:
         return None
     if not _is_dataset_dir(path):
+        return None
+    return path
+
+
+def get_local_dataset_info(repo_id: str) -> dict[str, Any] | None:
+    """Detail view of one locally-cached dataset, for the selection info card.
+
+    Reads ``meta/info.json`` + task metadata and walks the directory for its
+    size on disk — per-dataset on demand, so the cheap ``/datasets`` listing
+    stays cheap. Returns None if `repo_id` escapes the cache root or isn't a
+    local dataset (e.g. it only exists on the Hub).
+    """
+    path = _resolve_local_dataset_path(repo_id)
+    if path is None:
         return None
 
     try:
@@ -614,6 +637,256 @@ def get_local_dataset_info(repo_id: str) -> dict[str, Any] | None:
         # Hub dataset — see get_hub_dataset_info). The card gates its local-only
         # affordances (rename, size, task counts) on this.
         "source": "local",
+    }
+
+
+def _read_episode_rows(meta_dir: Path, columns: list[str] | None = None) -> list[dict[str, Any]] | None:
+    """Every row of ``meta/episodes/chunk-*/file-*.parquet``, column-pruned.
+
+    v3.0-only: older v2.x datasets keep episodes in ``meta/episodes.jsonl``,
+    which has no per-camera video chunk/file-index columns, so the dataset
+    viewer (episode list, video, joint chart) isn't offered for them — callers
+    treat a None return as "not viewable", not an error. Returns None if the
+    directory is absent or nothing could be read.
+    """
+    episodes_dir = meta_dir / "episodes"
+    if not episodes_dir.is_dir():
+        return None
+    rows: list[dict[str, Any]] = []
+    for parquet_path in sorted(episodes_dir.glob("**/*.parquet")):
+        try:
+            table = pq.read_table(parquet_path, columns=columns)
+        except Exception as e:
+            logger.warning(f"Could not read {parquet_path}: {e}")
+            continue
+        rows.extend(table.to_pylist())
+    return rows or None
+
+
+def _hub_dataset_has_video(repo_id: str) -> bool:
+    """Whether `repo_id` (assumed to exist on the Hub) has at least one
+    dtype == "video" camera feature, via the same cached summary /datasets/info
+    already uses — no extra network call beyond what get_hub_dataset_info
+    itself needs."""
+    info = get_hub_dataset_info(repo_id)
+    return bool(info and info["cameras"])
+
+
+def _ensure_hub_episodes_root(repo_id: str) -> Path | None:
+    """Download meta/info.json + every meta/episodes/**/*.parquet chunk for a
+    Hub dataset confirmed to have video, into huggingface_hub's own on-disk
+    cache (~/.cache/huggingface/hub by default) — NOT MakerLab's
+    ~/.cache/huggingface/lerobot dataset cache, and NOT a full dataset
+    snapshot. Returns the snapshot root directory so the existing local-path
+    reading code (_read_episode_rows, etc.) can run against it exactly like a
+    local dataset dir; None if the dataset isn't viewable this way (offline,
+    no video, or the fetch failed).
+
+    The episode-metadata parquet files are small regardless of how large the
+    dataset's actual video is — this never pulls video/data chunks themselves;
+    those are fetched one at a time by get_episode_video_path /
+    get_episode_joint_series only when a specific episode is actually opened.
+    No caching layer beyond hf_hub_download's own: a repeat call re-lists repo
+    files and re-touches already-cached files, which is fast (etag-checked
+    cache hits), not a re-download.
+    """
+    if hf_hub_offline():
+        return None
+    if not _hub_dataset_has_video(repo_id):
+        return None
+    try:
+        info_path = hf_hub_download(repo_id, filename="meta/info.json", repo_type="dataset")
+        root = Path(info_path).parents[1]  # strip "meta/info.json"'s 2 path parts
+        files = shared_hf_api().list_repo_files(repo_id, repo_type="dataset")
+        for f in files:
+            if f.startswith("meta/episodes/") and f.endswith(".parquet"):
+                hf_hub_download(repo_id, filename=f, repo_type="dataset")
+    except Exception as exc:
+        logger.info("hub episode metadata fetch for %s failed: %s", repo_id, exc)
+        return None
+    return root
+
+
+def list_episode_summaries(repo_id: str) -> list[dict[str, Any]] | None:
+    """Per-episode index/length/duration/tasks/video_offsets for the dataset
+    viewer's episode list. None if `repo_id` isn't a local dataset in the
+    v3.0 parquet layout.
+
+    ``video_offsets`` matters because v3.0 packs MULTIPLE consecutive
+    episodes into the same physical mp4 per camera (confirmed on real data:
+    episode 0 and 1 of a 2-episode recording share ``chunk-000/file-000.mp4``,
+    distinguished only by ``from_timestamp``/``to_timestamp``) — a naive
+    "serve the episode's video file" playing it start-to-finish runs straight
+    into whatever episode comes next in that file. The viewer needs each
+    camera's slice boundaries to seek to the right start and stop at the
+    right end within the shared file.
+
+    A dataset with no local copy falls back to fetching just its episode metadata from the Hub (see _ensure_hub_episodes_root) — None only when neither resolves, or the dataset has no video.
+    """
+    path = _resolve_local_dataset_path(repo_id)
+    if path is None:
+        path = _ensure_hub_episodes_root(repo_id)
+    if path is None:
+        return None
+    try:
+        info = json.loads((path / "meta" / "info.json").read_text())
+    except (OSError, ValueError):
+        return None
+    fps = info.get("fps") or 1
+    features = info.get("features") or {}
+    cameras = _video_camera_names(features)
+
+    video_cols: list[str] = []
+    col_to_camera: dict[str, tuple[str, str]] = {}
+    for camera in cameras:
+        video_key = f"{CAMERA_FEATURE_PREFIX}{camera}"
+        from_col, to_col = f"videos/{video_key}/from_timestamp", f"videos/{video_key}/to_timestamp"
+        video_cols += [from_col, to_col]
+        col_to_camera[from_col] = (camera, "from")
+        col_to_camera[to_col] = (camera, "to")
+
+    rows = _read_episode_rows(path / "meta", columns=["episode_index", "tasks", "length", *video_cols])
+    if rows is None:
+        return None
+    out = []
+    for row in rows:
+        video_offsets: dict[str, dict[str, float]] = {}
+        for col, (camera, which) in col_to_camera.items():
+            value = row.get(col)
+            if value is None:
+                continue
+            video_offsets.setdefault(camera, {})[which] = float(value)
+        out.append(
+            {
+                "episode_index": int(row["episode_index"]),
+                "length": int(row["length"]),
+                "duration": round(int(row["length"]) / fps, 3),
+                "tasks": [str(t) for t in (row.get("tasks") or [])],
+                "video_offsets": video_offsets,
+            }
+        )
+    out.sort(key=lambda e: e["episode_index"])
+    return out
+
+
+def get_episode_video_path(repo_id: str, episode_index: int, camera: str) -> Path | None:
+    """The mp4 file backing one camera's footage for one episode.
+
+    None if `repo_id`/`episode_index`/`camera` doesn't resolve, the dataset
+    isn't the v3.0 parquet layout, or the file is missing/unfetchable.
+    `camera` is checked against the dataset's own camera list (from
+    meta/info.json) before it's used to build a path, so it can never point
+    outside the videos dir. A repo with no local copy falls back to
+    downloading just this one video chunk from the Hub (see
+    _ensure_hub_episodes_root) when the dataset is confirmed to have video.
+    """
+    path = _resolve_local_dataset_path(repo_id)
+    is_hub = path is None
+    if is_hub:
+        path = _ensure_hub_episodes_root(repo_id)
+    if path is None:
+        return None
+    try:
+        info = json.loads((path / "meta" / "info.json").read_text())
+    except (OSError, ValueError):
+        return None
+    features = info.get("features") or {}
+    cameras = _video_camera_names(features)
+    if camera not in cameras:
+        return None
+
+    video_key = f"{CAMERA_FEATURE_PREFIX}{camera}"
+    chunk_col, file_col = f"videos/{video_key}/chunk_index", f"videos/{video_key}/file_index"
+    rows = _read_episode_rows(path / "meta", columns=["episode_index", chunk_col, file_col])
+    if rows is None:
+        return None
+    row = next((r for r in rows if int(r["episode_index"]) == episode_index), None)
+    if row is None or row.get(chunk_col) is None or row.get(file_col) is None:
+        return None
+
+    rel_video_path = (
+        Path("videos") / video_key / f"chunk-{int(row[chunk_col]):03d}" / f"file-{int(row[file_col]):03d}.mp4"
+    )
+    if is_hub:
+        try:
+            return Path(hf_hub_download(repo_id, filename=str(rel_video_path), repo_type="dataset"))
+        except Exception as exc:
+            logger.info("hub video chunk fetch for %s failed: %s", repo_id, exc)
+            return None
+
+    video_path = path / rel_video_path
+    return video_path if video_path.is_file() else None
+
+
+def get_episode_joint_series(repo_id: str, episode_index: int) -> dict[str, Any] | None:
+    """Per-frame timestamp + ``observation.state`` for one episode, for the
+    dataset viewer's joint-position chart. None if it can't be resolved/read
+    (not local, not the v3.0 parquet layout, or the episode doesn't exist). A
+    repo with no local copy falls back to downloading just this one data chunk
+    from the Hub (see _ensure_hub_episodes_root) when the dataset is confirmed
+    to have video.
+    """
+    path = _resolve_local_dataset_path(repo_id)
+    is_hub = path is None
+    if is_hub:
+        path = _ensure_hub_episodes_root(repo_id)
+    if path is None:
+        return None
+    try:
+        info = json.loads((path / "meta" / "info.json").read_text())
+    except (OSError, ValueError):
+        return None
+    joint_names = ((info.get("features") or {}).get("observation.state") or {}).get("names") or []
+
+    episode_rows = _read_episode_rows(
+        path / "meta", columns=["episode_index", "data/chunk_index", "data/file_index"]
+    )
+    if episode_rows is None:
+        return None
+    row = next((r for r in episode_rows if int(r["episode_index"]) == episode_index), None)
+    if row is None or row.get("data/chunk_index") is None or row.get("data/file_index") is None:
+        return None
+
+    rel_data_path = (
+        Path("data")
+        / f"chunk-{int(row['data/chunk_index']):03d}"
+        / f"file-{int(row['data/file_index']):03d}.parquet"
+    )
+    if is_hub:
+        try:
+            data_path = Path(hf_hub_download(repo_id, filename=str(rel_data_path), repo_type="dataset"))
+        except Exception as exc:
+            logger.info("hub data chunk fetch for %s failed: %s", repo_id, exc)
+            return None
+    else:
+        data_path = path / rel_data_path
+        if not data_path.is_file():
+            return None
+    try:
+        table = pq.read_table(data_path, columns=["episode_index", "timestamp", "observation.state"])
+    except Exception as e:
+        logger.warning(f"Could not read {data_path}: {e}")
+        return None
+
+    frames = sorted(
+        (
+            (float(ts), [float(v) for v in state])
+            for ep, ts, state in zip(
+                table.column("episode_index").to_pylist(),
+                table.column("timestamp").to_pylist(),
+                table.column("observation.state").to_pylist(),
+                strict=True,
+            )
+            if int(ep) == episode_index
+        ),
+        key=lambda pair: pair[0],
+    )
+    if not frames:
+        return None
+    return {
+        "joint_names": [str(n) for n in joint_names],
+        "timestamps": [t for t, _ in frames],
+        "values": [v for _, v in frames],
     }
 
 
@@ -663,7 +936,7 @@ def get_hub_dataset_info(repo_id: str) -> dict[str, Any] | None:
         return None
 
     features = info.get("features") or {}
-    cameras = [key[len(CAMERA_FEATURE_PREFIX) :] for key in features if key.startswith(CAMERA_FEATURE_PREFIX)]
+    cameras = _video_camera_names(features)
 
     row: dict[str, Any] = {
         "repo_id": repo_id,

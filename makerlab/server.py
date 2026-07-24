@@ -33,7 +33,7 @@ from typing import Any, Literal
 import httpx
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from huggingface_hub.errors import HfHubHTTPError
 from pydantic import BaseModel
@@ -602,6 +602,43 @@ def datasets_info(repo_id: str):
     if info is None:
         raise HTTPException(status_code=404, detail=f"Dataset '{repo_id}' not found in the local cache")
     return info
+
+
+@app.get("/datasets/episodes")
+def datasets_episodes(repo_id: str):
+    """Per-episode index/length/duration/tasks for the dataset viewer window.
+    404 when the dataset isn't local or predates the v3.0 parquet episode
+    layout (meta/episodes/chunk-*/file-*.parquet) the viewer reads."""
+    episodes = dataset_browser.list_episode_summaries(repo_id)
+    if episodes is None:
+        raise HTTPException(status_code=404, detail=f"No viewable episode list for '{repo_id}'")
+    return episodes
+
+
+@app.get("/datasets/episode-joints")
+def datasets_episode_joints(repo_id: str, episode_index: int):
+    """Per-frame timestamp + joint (observation.state) values for one episode,
+    for the dataset viewer's joint-position chart."""
+    series = dataset_browser.get_episode_joint_series(repo_id, episode_index)
+    if series is None:
+        raise HTTPException(
+            status_code=404, detail=f"No joint data for episode {episode_index} of '{repo_id}'"
+        )
+    return series
+
+
+@app.get("/datasets/episode-video")
+def datasets_episode_video(repo_id: str, episode_index: int, camera: str):
+    """The mp4 backing one camera's footage for one episode, served straight
+    off disk. FileResponse handles Range requests, so the <video> element can
+    seek without downloading the whole file first."""
+    video_path = dataset_browser.get_episode_video_path(repo_id, episode_index, camera)
+    if video_path is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No video for camera '{camera}', episode {episode_index} of '{repo_id}'",
+        )
+    return FileResponse(video_path, media_type="video/mp4")
 
 
 @app.get("/datasets/hub-status")

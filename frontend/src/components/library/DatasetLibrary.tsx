@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { Check, Globe, HardDrive, Lock } from "lucide-react";
+import { Check, Eye, Globe, HardDrive, Lock } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import LibraryToolbar from "@/components/library/LibraryToolbar";
 import CappedGrid, { GRID_MIN_H } from "@/components/library/CappedGrid";
@@ -8,6 +8,7 @@ import { cn } from "@/lib/utils";
 import { useApi } from "@/contexts/ApiContext";
 import { DatasetInfo, DatasetItem, getDatasetInfo } from "@/lib/replayApi";
 import { formatBytes, formatCount, formatDuration } from "@/lib/datasetFormat";
+import { useHubVideoFilter } from "@/hooks/useHubVideoFilter";
 
 /** Where a dataset lives: local cache, the Hub, or both. Styled like the job
  * card's status chip (icon + muted bold text, no pill) so the dataset, job,
@@ -121,7 +122,11 @@ const DatasetCard: React.FC<{
   item: DatasetItem;
   selected: boolean;
   onSelect: () => void;
-}> = ({ item, selected, onSelect }) => (
+  /** Opens the episode viewer for this dataset — separate from select, so it
+   * must stop propagation before the card's own onClick fires. Optional: only
+   * wired up where the viewer dialog is actually rendered. */
+  onView?: (item: DatasetItem) => void;
+}> = ({ item, selected, onSelect, onView }) => (
   <div
     onClick={onSelect}
     className={cn(
@@ -144,12 +149,28 @@ const DatasetCard: React.FC<{
           </span>
         )}
       </div>
-      <Check
-        className={cn(
-          "h-4 w-4 shrink-0 text-primary",
-          selected ? "opacity-100" : "opacity-0",
+      <div className="flex shrink-0 items-center gap-0.5">
+        {onView && (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onView(item);
+            }}
+            aria-label="View episodes"
+            title="View episodes"
+            className="rounded p-1 text-muted-foreground hover:text-foreground"
+          >
+            <Eye className="h-3.5 w-3.5" />
+          </button>
         )}
-      />
+        <Check
+          className={cn(
+            "h-4 w-4 shrink-0 text-primary",
+            selected ? "opacity-100" : "opacity-0",
+          )}
+        />
+      </div>
     </div>
     <div className="w-full">
       <div
@@ -212,20 +233,28 @@ export const DatasetLibraryList: React.FC<{
   loading: boolean;
   selectedRepoId: string | null;
   onSelect: (item: DatasetItem) => void;
-}> = ({ datasets, loading, selectedRepoId, onSelect }) => {
+  /** Opens the episode viewer dialog for a dataset; omit where the caller
+   * doesn't render that dialog. */
+  onView?: (item: DatasetItem) => void;
+}> = ({ datasets, loading, selectedRepoId, onSelect, onView }) => {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<LibraryFilter>("all");
+  // Hides a Hub-only row once it's confirmed to have no video — this surface
+  // wires onView (opens the episode viewer), so a row without video would
+  // just open to an empty state. See useHubVideoFilter for why the Train
+  // picker (which doesn't use this component) must NOT do the same.
+  const videoFilteredDatasets = useHubVideoFilter(datasets);
 
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
-    return datasets.filter((d) => {
+    return videoFilteredDatasets.filter((d) => {
       if (filter === "local" && d.source === "hub") return false;
       if (filter === "hub" && d.source === "local") return false;
       return q === "" || d.repo_id.toLowerCase().includes(q);
     });
-  }, [datasets, query, filter]);
+  }, [videoFilteredDatasets, query, filter]);
 
-  if (loading && datasets.length === 0) {
+  if (loading && videoFilteredDatasets.length === 0) {
     return (
       <div
         className={cn(
@@ -241,7 +270,7 @@ export const DatasetLibraryList: React.FC<{
     );
   }
 
-  if (datasets.length === 0) {
+  if (videoFilteredDatasets.length === 0) {
     return (
       <div
         className={cn(
@@ -284,6 +313,7 @@ export const DatasetLibraryList: React.FC<{
               item={item}
               selected={item.repo_id === selectedRepoId}
               onSelect={() => onSelect(item)}
+              onView={onView}
             />
           ))}
         />
