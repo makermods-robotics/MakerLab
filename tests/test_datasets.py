@@ -1753,3 +1753,98 @@ def test_fan_out_hub_authors_no_timeout_when_all_finish(
     monkeypatch.setattr(ds, "_HUB_FANOUT_TIMEOUT_S", 0.5)
     result = ds._fan_out_hub_authors(["a", "b", "c"], lambda author: author.upper())
     assert result == ["A", "B", "C"]
+
+
+def test_get_episode_joint_series_local_unchanged(tmp_lerobot_home: Path) -> None:
+    from makerlab import datasets as ds
+
+    d = _write_info(
+        tmp_lerobot_home,
+        "alice/local",
+        {"features": {"observation.state": {"names": ["shoulder", "elbow"]}}},
+    )
+    episodes_dir = d / "meta" / "episodes" / "chunk-000"
+    episodes_dir.mkdir(parents=True)
+    pq.write_table(
+        pa.table({"episode_index": [0], "data/chunk_index": [0], "data/file_index": [0]}),
+        episodes_dir / "file-000.parquet",
+    )
+    data_dir = d / "data" / "chunk-000"
+    data_dir.mkdir(parents=True)
+    pq.write_table(
+        pa.table(
+            {
+                "episode_index": [0, 0],
+                "timestamp": [0.0, 0.033],
+                "observation.state": [[0.1, 0.2], [0.15, 0.25]],
+            }
+        ),
+        data_dir / "file-000.parquet",
+    )
+
+    with patch("makerlab.datasets._ensure_hub_episodes_root") as hub_fetch:
+        result = ds.get_episode_joint_series("alice/local", 0)
+
+    hub_fetch.assert_not_called()
+    assert result is not None
+    assert result["joint_names"] == ["shoulder", "elbow"]
+    assert result["timestamps"] == [0.0, 0.033]
+
+
+def test_get_episode_joint_series_hub_fallback_downloads_one_chunk(
+    tmp_lerobot_home: Path, tmp_path: Path
+) -> None:
+    from makerlab import datasets as ds
+
+    snapshot = tmp_path / "snapshot"
+    (snapshot / "meta").mkdir(parents=True)
+    (snapshot / "meta" / "info.json").write_text(
+        json.dumps({"features": {"observation.state": {"names": ["shoulder"]}}})
+    )
+    episodes_dir = snapshot / "meta" / "episodes" / "chunk-000"
+    episodes_dir.mkdir(parents=True)
+    pq.write_table(
+        pa.table({"episode_index": [0], "data/chunk_index": [0], "data/file_index": [0]}),
+        episodes_dir / "file-000.parquet",
+    )
+    downloaded_data = snapshot / "data" / "chunk-000" / "file-000.parquet"
+    downloaded_data.parent.mkdir(parents=True)
+    pq.write_table(
+        pa.table({"episode_index": [0], "timestamp": [0.0], "observation.state": [[0.5]]}),
+        downloaded_data,
+    )
+
+    with (
+        patch("makerlab.datasets._ensure_hub_episodes_root", return_value=snapshot),
+        patch("makerlab.datasets.hf_hub_download", return_value=str(downloaded_data)) as dl,
+    ):
+        result = ds.get_episode_joint_series("alice/hub_only", 0)
+
+    dl.assert_called_once_with(
+        "alice/hub_only", filename="data/chunk-000/file-000.parquet", repo_type="dataset"
+    )
+    assert result is not None
+    assert result["joint_names"] == ["shoulder"]
+    assert result["values"] == [[0.5]]
+
+
+def test_get_episode_joint_series_hub_fallback_degrades_on_download_failure(
+    tmp_lerobot_home: Path, tmp_path: Path
+) -> None:
+    from makerlab import datasets as ds
+
+    snapshot = tmp_path / "snapshot"
+    (snapshot / "meta").mkdir(parents=True)
+    (snapshot / "meta" / "info.json").write_text(json.dumps({"features": {}}))
+    episodes_dir = snapshot / "meta" / "episodes" / "chunk-000"
+    episodes_dir.mkdir(parents=True)
+    pq.write_table(
+        pa.table({"episode_index": [0], "data/chunk_index": [0], "data/file_index": [0]}),
+        episodes_dir / "file-000.parquet",
+    )
+
+    with (
+        patch("makerlab.datasets._ensure_hub_episodes_root", return_value=snapshot),
+        patch("makerlab.datasets.hf_hub_download", side_effect=RuntimeError("network")),
+    ):
+        assert ds.get_episode_joint_series("alice/hub_only", 0) is None

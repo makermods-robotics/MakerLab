@@ -821,9 +821,15 @@ def get_episode_video_path(repo_id: str, episode_index: int, camera: str) -> Pat
 def get_episode_joint_series(repo_id: str, episode_index: int) -> dict[str, Any] | None:
     """Per-frame timestamp + ``observation.state`` for one episode, for the
     dataset viewer's joint-position chart. None if it can't be resolved/read
-    (not local, not the v3.0 parquet layout, or the episode doesn't exist).
+    (not local, not the v3.0 parquet layout, or the episode doesn't exist). A
+    repo with no local copy falls back to downloading just this one data chunk
+    from the Hub (see _ensure_hub_episodes_root) when the dataset is confirmed
+    to have video.
     """
     path = _resolve_local_dataset_path(repo_id)
+    is_hub = path is None
+    if is_hub:
+        path = _ensure_hub_episodes_root(repo_id)
     if path is None:
         return None
     try:
@@ -841,14 +847,21 @@ def get_episode_joint_series(repo_id: str, episode_index: int) -> dict[str, Any]
     if row is None or row.get("data/chunk_index") is None or row.get("data/file_index") is None:
         return None
 
-    data_path = (
-        path
-        / "data"
+    rel_data_path = (
+        Path("data")
         / f"chunk-{int(row['data/chunk_index']):03d}"
         / f"file-{int(row['data/file_index']):03d}.parquet"
     )
-    if not data_path.is_file():
-        return None
+    if is_hub:
+        try:
+            data_path = Path(hf_hub_download(repo_id, filename=str(rel_data_path), repo_type="dataset"))
+        except Exception as exc:
+            logger.info("hub data chunk fetch for %s failed: %s", repo_id, exc)
+            return None
+    else:
+        data_path = path / rel_data_path
+        if not data_path.is_file():
+            return None
     try:
         table = pq.read_table(data_path, columns=["episode_index", "timestamp", "observation.state"])
     except Exception as e:
