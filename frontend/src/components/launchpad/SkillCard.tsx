@@ -2,11 +2,35 @@ import React from "react";
 import { ModelItem } from "@/lib/modelsApi";
 import { policyTypeDisplayName } from "@/components/training/types";
 import sockThumb from "@/assets/skill-sock-orange.jpg";
+import bottleThumb from "@/assets/skill-bottle.jpg";
+import towelThumb from "@/assets/skill-towel.jpg";
+import stackCubesThumb from "@/assets/skill-stack-cubes.jpg";
+
+/** Synthetic ids for skill previews that haven't been trained yet — no Hub
+ * repo or job backs any of these, so none ever comes from `/models`. See WIP
+ * handling in SkillSlider/SkillDetailDialog. */
+export const WIP_SKILL_IDS = {
+  bottleCap: "wip/bottle-cap-removal",
+  towelFold: "wip/towel-fold",
+  stackCubes: "wip/stack-cubes",
+} as const;
+
+const WIP_SKILL_ID_SET: ReadonlySet<string> = new Set(
+  Object.values(WIP_SKILL_IDS),
+);
+
+/** True when `id` is one of the not-yet-trained WIP preview cards. */
+export function isWipSkillId(id: string): boolean {
+  return WIP_SKILL_ID_SET.has(id);
+}
 
 /** Curated preview media for featured skills, keyed by Hub repo id. */
 const SKILL_THUMBNAILS: Record<string, string> = {
   "makermods/act_makermods_sock_2_only_more_orange_2026-07-16_22-14-55":
     sockThumb,
+  [WIP_SKILL_IDS.bottleCap]: bottleThumb,
+  [WIP_SKILL_IDS.towelFold]: towelThumb,
+  [WIP_SKILL_IDS.stackCubes]: stackCubesThumb,
 };
 
 /** The curated preview image for a skill, or undefined when it has none. */
@@ -19,10 +43,14 @@ export function skillThumbnail(m: ModelItem): string | undefined {
 const SKILL_DISPLAY_NAMES: Record<string, string> = {
   "makermods/act_makermods_sock_2_only_more_orange_2026-07-16_22-14-55":
     "Sorting socks",
+  [WIP_SKILL_IDS.bottleCap]: "Opening bottle caps",
+  [WIP_SKILL_IDS.towelFold]: "Folding towels",
+  [WIP_SKILL_IDS.stackCubes]: "Stacking cubes",
 };
 
-/** The marketplace provenance of a skill card. */
-export type SkillBadge = "mine" | "makermods" | "community";
+/** The marketplace provenance of a skill card. "wip" marks a preview card for
+ * a skill that hasn't been trained yet — no repo/job backs it. */
+export type SkillBadge = "mine" | "makermods" | "community" | "wip";
 
 /** 16000 -> "16k", 950 -> "950" — matches the models card's compact form. */
 export const formatCount = (n: number): string => {
@@ -36,6 +64,14 @@ export const formatCount = (n: number): string => {
 export function skillNamespace(m: ModelItem): string | null {
   const src = m.hf_repo_id ?? m.id;
   return src.includes("/") ? src.split("/")[0] : null;
+}
+
+/** The byline shown under a skill's title. A WIP preview has no author — its id
+ * is synthetic, so the "wip/" prefix is a keying device and not an org, and
+ * `skillNamespace` would otherwise surface it as one. */
+export function skillAuthorLabel(m: ModelItem): string {
+  if (isWipSkillId(m.id)) return "Coming soon";
+  return skillNamespace(m) ?? "local checkpoint";
 }
 
 /** MINE when the skill is in the user's namespace (or a bare local run they own);
@@ -73,12 +109,14 @@ const BADGE_LABEL: Record<SkillBadge, string> = {
   mine: "MINE",
   makermods: "MAKERMODS SUPPORTED",
   community: "COMMUNITY",
+  wip: "WIP",
 };
 
 const BADGE_CLASS: Record<SkillBadge, string> = {
   mine: "border-transparent bg-primary text-primary-foreground",
   makermods: "border-ring bg-transparent text-foreground",
   community: "border-border bg-transparent text-muted-foreground",
+  wip: "border-warn/40 bg-transparent text-warn",
 };
 
 /** Provenance pill (MINE / MAKERMODS / COMMUNITY) — token-styled, works in both
@@ -118,7 +156,7 @@ export interface SkillCardProps {
  * Click opens the skill detail dialog.
  */
 const SkillCard: React.FC<SkillCardProps> = ({ model, badge, onOpen }) => {
-  const ns = skillNamespace(model);
+  const author = skillAuthorLabel(model);
   const policy = model.policy_type
     ? policyTypeDisplayName(model.policy_type)
     : null;
@@ -151,7 +189,7 @@ const SkillCard: React.FC<SkillCardProps> = ({ model, badge, onOpen }) => {
           <SkillBadgePill badge={badge} />
         </div>
         <span className="truncate font-mono text-[11px] text-muted-foreground">
-          {ns ?? "local checkpoint"}
+          {author}
         </span>
         <div className="mt-auto flex flex-wrap gap-1.5 pt-1">
           {policy && <Stat>{policy}</Stat>}
