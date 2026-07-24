@@ -391,3 +391,24 @@ def test_resolve_job_timeout_uses_request_value_normalised_to_seconds() -> None:
     assert resolve_job_timeout(TrainingRequest(dataset_repo_id="x", hf_job_timeout="45m")) == 2700
     assert resolve_job_timeout(TrainingRequest(dataset_repo_id="x", hf_job_timeout="3h30m")) == 12600
     assert resolve_job_timeout(TrainingRequest(dataset_repo_id="x", hf_job_timeout="2h")) == 7200
+
+
+def test_resolve_dataset_private_falls_back_to_shared_default_when_unset() -> None:
+    """No explicit choice (local run, older client, or a cloud run whose
+    dataset the frontend believed was already on the Hub) defers to
+    DATASET_DEFAULT_PRIVATE -- the SAME constant record.py's
+    UploadRequest.private defaults to, so both push sites agree absent an
+    explicit user choice."""
+    from makerlab.runners.hf_cloud import resolve_dataset_private
+    from makerlab.utils.config import DATASET_DEFAULT_PRIVATE
+
+    assert resolve_dataset_private(None) is DATASET_DEFAULT_PRIVATE
+
+
+def test_resolve_dataset_private_honors_explicit_choice_either_way() -> None:
+    """An explicit choice (the frontend's pre-upload visibility toggle) always
+    wins over the default policy, in both directions."""
+    from makerlab.runners.hf_cloud import resolve_dataset_private
+
+    assert resolve_dataset_private(True) is True
+    assert resolve_dataset_private(False) is False

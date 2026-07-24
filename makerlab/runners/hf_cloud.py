@@ -44,7 +44,7 @@ from packaging.requirements import Requirement
 
 from ..jobs import LogLine, TrainingMetrics, extract_wandb_run_url, parse_metrics_into
 from ..train import TrainingRequest, build_training_command, parse_hf_duration
-from ..utils.config import with_makerlab_tag
+from ..utils.config import DATASET_DEFAULT_PRIVATE, with_makerlab_tag
 from ..utils.hf_auth import cached_whoami, shared_hf_api
 
 logger = logging.getLogger(__name__)
@@ -414,6 +414,22 @@ def resolve_job_timeout(config: TrainingRequest) -> int | str:
         return parse_hf_duration(config.hf_job_timeout)
     return HF_JOB_TIMEOUT
 
+
+def resolve_dataset_private(explicit: bool | None) -> bool:
+    """The Hub visibility to use if `_ensure_dataset_on_hub` has to push a
+    local-only dataset itself.
+
+    Precedence: an explicit choice (TrainingRequest.dataset_private, set from
+    the frontend's pre-upload visibility toggle when it showed the "this
+    dataset is only on this machine" notice) always wins. `None` -- a local
+    run, an older client, or a cloud run whose dataset the frontend believed
+    was already on the Hub (so it never offered the choice) -- falls back to
+    DATASET_DEFAULT_PRIVATE, the same policy record.py's UploadRequest.private
+    defaults to.
+    """
+    return DATASET_DEFAULT_PRIVATE if explicit is None else explicit
+
+
 # Cadence at which the status poller hits inspect_job. inspect_job is the
 # authoritative source for job liveness; the log stream is best-effort and
 # may drop during long runs (NAT eviction, laptop sleep, proxy idle timeout)
@@ -522,7 +538,7 @@ class HfCloudJobRunner:
 
         # Cloud pods can't see the host's LeRobot cache. If the dataset
         # only exists locally, push it to the Hub before submitting.
-        self._ensure_dataset_on_hub(config.dataset_repo_id)
+        self._ensure_dataset_on_hub(config.dataset_repo_id, resolve_dataset_private(config.dataset_private))
 
         # Mutate the config so build_training_command emits the right flags.
         # The mutated config is what gets persisted in JobRecord.config, so
@@ -638,13 +654,20 @@ class HfCloudJobRunner:
         except Exception as exc:
             logger.warning("Could not write upload log line: %s", exc)
 
-    def _ensure_dataset_on_hub(self, repo_id: str) -> None:
+    def _ensure_dataset_on_hub(self, repo_id: str, private: bool) -> None:
         """If the dataset is local-only, push it to the Hub.
 
         The cloud pod resolves the dataset by repo_id; it can't see the
         host's `~/.cache/huggingface/lerobot`. We push synchronously and
         let any failure bubble up — JobRegistry.start marks the record
         as failed with the exception message.
+
+        `private` is the caller-resolved visibility (see
+        resolve_dataset_private): MakerLab's default is public (datasets it
+        pushes carry the required org/product tags -- see with_makerlab_tag /
+        REQUIRED_HUB_TAGS -- so they're discoverable), but this honors an
+        explicit user choice from the frontend's pre-upload notice when one
+        was made, rather than silently re-deciding visibility on its own.
         """
         try:
             self._api.dataset_info(repo_id)
@@ -658,22 +681,17 @@ class HfCloudJobRunner:
             # — same behaviour as before.
             return
 
-        self._log_line(f"[upload] dataset {repo_id} not on Hub; pushing local copy (public)...")
+        visibility = "private" if private else "public"
+        self._log_line(f"[upload] dataset {repo_id} not on Hub; pushing local copy ({visibility})...")
         from lerobot.datasets import LeRobotDataset
 
         try:
-            # Public by default: MakerLab's global policy is that datasets it pushes
-            # to the Hub are public and carry the required org/product tags (see
-            # with_makerlab_tag / REQUIRED_HUB_TAGS). This implicit cloud-run upload
-            # follows that same default so all MakerLab-produced datasets are
-            # discoverable. (This intentionally reverses the earlier private
-            # default — an implicit upload of a local-only dataset is now public.)
-            LeRobotDataset(repo_id).push_to_hub(tags=with_makerlab_tag(None), private=False)
+            LeRobotDataset(repo_id).push_to_hub(tags=with_makerlab_tag(None), private=private)
         except Exception as exc:
             msg = f"Failed to upload local dataset {repo_id} to Hub: {exc}"
             self._log_line(f"[upload] {msg}")
             raise RuntimeError(msg) from exc
-        self._log_line(f"[upload] dataset {repo_id} uploaded.")
+        self._log_line(f"[upload] dataset {repo_id} uploaded ({visibility}).")
 
     def _tail_loop(self) -> None:
         """Stream HfApi.fetch_job_logs, teeing each line to disk and the

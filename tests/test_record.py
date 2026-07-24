@@ -922,6 +922,17 @@ def _join_upload(mgr, timeout: float = 5.0) -> None:
         thread.join(timeout=timeout)
 
 
+def test_upload_request_private_defaults_to_shared_dataset_visibility_policy() -> None:
+    """UploadRequest.private isn't its own independently-hardcoded literal --
+    it defers to DATASET_DEFAULT_PRIVATE, the same constant
+    runners/hf_cloud.py's resolve_dataset_private falls back to. This is the
+    single source of truth both push sites share."""
+    from makerlab.record import UploadRequest
+    from makerlab.utils.config import DATASET_DEFAULT_PRIVATE
+
+    assert UploadRequest(dataset_repo_id="tester/ds").private is DATASET_DEFAULT_PRIVATE
+
+
 def test_upload_manager_start_runs_and_completes(monkeypatch: pytest.MonkeyPatch) -> None:
     """A start pushes in a worker thread and lands in state "done" with the
     dataset_url, invalidating the cached hub status."""

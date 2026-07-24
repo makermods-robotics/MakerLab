@@ -3,6 +3,11 @@ export interface TrainingConfig {
 
   // Dataset configuration
   dataset_repo_id: string;
+  // Visibility to upload dataset_repo_id with, when a cloud run needs to push
+  // it first (see LocalDatasetCloudNotice's visibility toggle). Only shown /
+  // meaningful while that notice is up; defaults to public (MakerLab's
+  // default policy — see DATASET_DEFAULT_PRIVATE on the backend).
+  dataset_private: boolean;
 
   // Policy configuration
   policy_type: string;

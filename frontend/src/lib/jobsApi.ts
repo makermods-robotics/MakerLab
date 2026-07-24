@@ -27,6 +27,14 @@ export type MetricsHistoryPoint = {
 // these; defaults on the server fill in the rest.
 export interface TrainingRequest {
   dataset_repo_id: string;
+  // Cloud only. The user's explicit visibility choice from the pre-upload
+  // notice shown when a cloud run targets a local-only dataset (see
+  // LocalDatasetCloudNotice's visibility toggle) -- honored by the backend's
+  // belt-and-braces upload fallback (HfCloudJobRunner._ensure_dataset_on_hub)
+  // in case the explicit "Upload & start training" pre-step didn't already
+  // put the dataset on the Hub. Undefined defers to the backend's default
+  // visibility policy.
+  dataset_private?: boolean;
   policy_type: string;
   // Optional user-supplied display name; blank ⇒ backend auto-names the run.
   job_name?: string;
