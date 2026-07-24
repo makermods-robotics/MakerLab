@@ -195,6 +195,16 @@ const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
           });
         }
         setTeleopOpen(true);
+      } else if (data.warning) {
+        // Setup failed after a device was already armed — the backend force-
+        // disabled torque and is reporting whether that succeeded. Surface it
+        // alongside the failure reason instead of dropping it silently.
+        toast({
+          title: "Couldn't start teleoperation — check the arm",
+          description: `${data.message || "Failed to start."} ${data.warning}`,
+          variant: "destructive",
+          duration: 10000,
+        });
       } else {
         toast({
           title: "Couldn't start teleoperation",
