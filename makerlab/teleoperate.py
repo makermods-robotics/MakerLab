@@ -418,10 +418,8 @@ def force_disable_torque(device, label: str = "device") -> list[str]:
         # to disable motors one by one.
         port_handler = getattr(bus, "port_handler", None)
         if port_handler is not None:
-            try:
+            with contextlib.suppress(Exception):
                 port_handler.clearPort()
-            except Exception:
-                pass
             with contextlib.suppress(Exception):
                 port_handler.is_using = False
         failed: list[str] = []
