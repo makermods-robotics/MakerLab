@@ -33,7 +33,6 @@ import {
   SLIDE,
 } from "@/components/studio/panel/primitives";
 import DatasetDetailDialog from "@/components/dialogs/DatasetDetailDialog";
-import type { DatasetItem } from "@/lib/replayApi";
 
 /**
  * Studio panel 1 · Collect. Stacked sections (the shared studio anatomy):
@@ -79,14 +78,15 @@ const CollectPanel: React.FC = () => {
   const [libraryOpen, setLibraryOpen] = useState(!formOpen);
   const [mergeOpen, setMergeOpen] = useState(false);
 
-  // The episode viewer — opened by a dataset card's "view" button, separate
-  // from selecting the card for recording.
+  // The episode viewer dialog stays wired up (below), but its trigger on the
+  // dataset card is held back pending the card/job/skill redesign — no room
+  // confirmed yet for another icon in that layout. To bring it back: restore
+  // an openDatasetDetail(item: DatasetItem) helper that calls
+  // setViewRepo(item.repo_id) + setViewOpen(true), and pass it as
+  // DatasetLibraryList's onView prop below (see git history prior to this
+  // commit for the exact removed code, or the `eye-icon-full-feature` tag).
   const [viewRepo, setViewRepo] = useState<string | null>(null);
   const [viewOpen, setViewOpen] = useState(false);
-  const openDatasetDetail = (item: DatasetItem) => {
-    setViewRepo(item.repo_id);
-    setViewOpen(true);
-  };
 
   // A live session renders as a modal dialog over the studio (the old
   // /recording page). While it runs, the form below stays mounted with its
@@ -420,7 +420,6 @@ const CollectPanel: React.FC = () => {
                   item.repo_id === selectedDataset ? null : item.repo_id,
                 )
               }
-              onView={openDatasetDetail}
             />
           </CollapsibleContent>
         </Collapsible>
