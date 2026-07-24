@@ -8,6 +8,7 @@ import { cn } from "@/lib/utils";
 import { useApi } from "@/contexts/ApiContext";
 import { DatasetInfo, DatasetItem, getDatasetInfo } from "@/lib/replayApi";
 import { formatBytes, formatCount, formatDuration } from "@/lib/datasetFormat";
+import { useHubVideoFilter } from "@/hooks/useHubVideoFilter";
 
 /** Where a dataset lives: local cache, the Hub, or both. Styled like the job
  * card's status chip (icon + muted bold text, no pill) so the dataset, job,
@@ -238,17 +239,22 @@ export const DatasetLibraryList: React.FC<{
 }> = ({ datasets, loading, selectedRepoId, onSelect, onView }) => {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<LibraryFilter>("all");
+  // Hides a Hub-only row once it's confirmed to have no video — this surface
+  // wires onView (opens the episode viewer), so a row without video would
+  // just open to an empty state. See useHubVideoFilter for why the Train
+  // picker (which doesn't use this component) must NOT do the same.
+  const videoFilteredDatasets = useHubVideoFilter(datasets);
 
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
-    return datasets.filter((d) => {
+    return videoFilteredDatasets.filter((d) => {
       if (filter === "local" && d.source === "hub") return false;
       if (filter === "hub" && d.source === "local") return false;
       return q === "" || d.repo_id.toLowerCase().includes(q);
     });
-  }, [datasets, query, filter]);
+  }, [videoFilteredDatasets, query, filter]);
 
-  if (loading && datasets.length === 0) {
+  if (loading && videoFilteredDatasets.length === 0) {
     return (
       <div
         className={cn(
@@ -264,7 +270,7 @@ export const DatasetLibraryList: React.FC<{
     );
   }
 
-  if (datasets.length === 0) {
+  if (videoFilteredDatasets.length === 0) {
     return (
       <div
         className={cn(
