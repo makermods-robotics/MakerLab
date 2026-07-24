@@ -720,8 +720,12 @@ def list_episode_summaries(repo_id: str) -> list[dict[str, Any]] | None:
     into whatever episode comes next in that file. The viewer needs each
     camera's slice boundaries to seek to the right start and stop at the
     right end within the shared file.
+
+    A dataset with no local copy falls back to fetching just its episode metadata from the Hub (see _ensure_hub_episodes_root) — None only when neither resolves, or the dataset has no video.
     """
     path = _resolve_local_dataset_path(repo_id)
+    if path is None:
+        path = _ensure_hub_episodes_root(repo_id)
     if path is None:
         return None
     try:

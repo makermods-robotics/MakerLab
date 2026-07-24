@@ -1516,6 +1516,84 @@ def test_ensure_hub_episodes_root_degrades_on_fetch_failure() -> None:
 
 
 # ---------------------------------------------------------------------------
+# list_episode_summaries — Hub fallback for episode metadata (Task 3).
+# ---------------------------------------------------------------------------
+
+
+def test_list_episode_summaries_local_unchanged(tmp_lerobot_home: Path) -> None:
+    """Existing local behavior is untouched: a local dataset never touches the
+    Hub fallback."""
+    from makerlab import datasets as ds
+
+    d = _write_info(
+        tmp_lerobot_home,
+        "alice/local",
+        {"fps": 30, "features": {"observation.images.front": {"dtype": "video"}}},
+    )
+    episodes_dir = d / "meta" / "episodes" / "chunk-000"
+    episodes_dir.mkdir(parents=True)
+    pq.write_table(
+        pa.table(
+            {
+                "episode_index": [0],
+                "tasks": [["task"]],
+                "length": [30],
+                "videos/observation.images.front/from_timestamp": [0.0],
+                "videos/observation.images.front/to_timestamp": [1.0],
+            }
+        ),
+        episodes_dir / "file-000.parquet",
+    )
+
+    with patch("makerlab.datasets._ensure_hub_episodes_root") as hub_fetch:
+        result = ds.list_episode_summaries("alice/local")
+
+    hub_fetch.assert_not_called()
+    assert result is not None
+    assert result[0]["episode_index"] == 0
+
+
+def test_list_episode_summaries_hub_fallback(tmp_lerobot_home: Path, tmp_path: Path) -> None:
+    """No local copy: falls back to reading the Hub-fetched snapshot root."""
+    from makerlab import datasets as ds
+
+    snapshot = tmp_path / "snapshot"
+    (snapshot / "meta").mkdir(parents=True)
+    (snapshot / "meta" / "info.json").write_text(
+        json.dumps({"fps": 30, "features": {"observation.images.front": {"dtype": "video"}}})
+    )
+    episodes_dir = snapshot / "meta" / "episodes" / "chunk-000"
+    episodes_dir.mkdir(parents=True)
+    pq.write_table(
+        pa.table(
+            {
+                "episode_index": [0, 1],
+                "tasks": [["task"], ["task"]],
+                "length": [30, 60],
+                "videos/observation.images.front/from_timestamp": [0.0, 1.0],
+                "videos/observation.images.front/to_timestamp": [1.0, 3.0],
+            }
+        ),
+        episodes_dir / "file-000.parquet",
+    )
+
+    with patch("makerlab.datasets._ensure_hub_episodes_root", return_value=snapshot) as hub_fetch:
+        result = ds.list_episode_summaries("alice/hub_only")
+
+    hub_fetch.assert_called_once_with("alice/hub_only")
+    assert result is not None
+    assert [e["episode_index"] for e in result] == [0, 1]
+    assert result[1]["duration"] == 2.0  # 60 frames / 30 fps
+
+
+def test_list_episode_summaries_returns_none_when_hub_fetch_fails(tmp_lerobot_home: Path) -> None:
+    from makerlab import datasets as ds
+
+    with patch("makerlab.datasets._ensure_hub_episodes_root", return_value=None):
+        assert ds.list_episode_summaries("alice/no_video") is None
+
+
+# ---------------------------------------------------------------------------
 # _fan_out_hub_authors — the OVERALL fan-out deadline actually bounds a hung
 # author. The shared HfApi httpx client has timeout=None, so this budget is the
 # ONLY timeout in the stack: a blackholed connection must be abandoned (and
