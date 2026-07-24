@@ -125,6 +125,31 @@ const EpisodeViewer: React.FC<{
     return () => controller.abort();
   }, [baseUrl, fetchWithHeaders, repoId, selectedEpisode]);
 
+  // Warm the backend's cache for the NEXT episode while this one plays, so
+  // advancing often lands on an already-fetched chunk instead of repeating
+  // the same first-time delay (see docs/superpowers/specs/2026-07-24-episode-
+  // prefetch-design.md). A 1-byte Range request drives get_episode_video_path
+  // all the way through — including a Hub hf_hub_download fetch for a
+  // not-yet-cached chunk — without downloading video the user hasn't asked
+  // for yet; FileResponse already supports Range requests (it's how the real
+  // <video> tag seeks). The joints response is discarded — its fetch alone is
+  // what warms the data chunk server-side. Best-effort: any failure here has
+  // zero effect on the real fetch that runs when the user actually navigates
+  // there, so errors are silently swallowed.
+  useEffect(() => {
+    const next = episodes[episodes.findIndex((e) => e.episode_index === selectedEpisode) + 1];
+    if (!next) return;
+    const controller = new AbortController();
+    for (const camera of cameras) {
+      fetchWithHeaders(episodeVideoUrl(baseUrl, repoId, next.episode_index, camera), {
+        headers: { Range: "bytes=0-0" },
+        signal: controller.signal,
+      }).catch(() => {});
+    }
+    getEpisodeJoints(baseUrl, fetchWithHeaders, repoId, next.episode_index, controller.signal).catch(() => {});
+    return () => controller.abort();
+  }, [baseUrl, fetchWithHeaders, repoId, episodes, cameras, selectedEpisode]);
+
   useEffect(() => {
     setPlaying(false);
     setCurrentTime(0);
