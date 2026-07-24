@@ -3,9 +3,12 @@ import { Search } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 
-/** Shared 3-up grid for every studio library (datasets, jobs, models) so the
- * three panels read as one system. Cards stretch to their row's height. */
-export const LIBRARY_GRID = "grid grid-cols-3 items-stretch gap-2";
+/** Shared 2-up grid for every studio library (datasets, jobs, models) so the
+ * three panels read as one system. Two cards per row at every width: each
+ * library sits in a narrow studio column (one-third of the viewport), so three
+ * cards squeeze the card icons/buttons past their card edges even on a
+ * full-screen MacBook. Cards stretch to their row's height. */
+export const LIBRARY_GRID = "grid grid-cols-2 items-stretch gap-2";
 
 export interface LibraryFilterOption<K extends string> {
   key: K;

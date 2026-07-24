@@ -3,8 +3,11 @@ import { ChevronDown } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { LIBRARY_GRID } from "./LibraryToolbar";
 
-/** One row of the shared 3-up library grid. */
-const CAP = 3;
+/** One row of the shared 2-up library grid — how many cards show before the
+ * "Show all" toggle. Exported so a caller (jobs) can tell whether its active
+ * grid overflows, and thus whether to fold its Untracked toggle under "Show
+ * all" instead of stacking a second footer button. */
+export const LIBRARY_ROW_CAP = 2;
 
 /** Total height of the reserved grid block: the 16.5rem row + the 1.875rem
  * footer slot ("Show all" / Untracked / spacer) and its gutter. Empty/no-match
@@ -15,7 +18,7 @@ export const GRID_MIN_H = "min-h-[18.875rem]";
 
 /**
  * The shared library grid, capped at one row. Every studio library (datasets,
- * training jobs, models) renders at most three cards by default; anything past
+ * training jobs, models) renders one row of two cards by default; anything past
  * that stays hidden behind a "Show all" toggle. The row is always reserved
  * (fixed row height, blank cells when there aren't enough cards) so the three
  * panels' libraries keep one uniform height however large a collection grows.
@@ -31,10 +34,27 @@ const CappedGrid: React.FC<{
    * "Show all" — keeps every library's total height identical. False when
    * the caller renders its own footer row in that slot (jobs' Untracked). */
   footerSpacer?: boolean;
-}> = ({ items, reserveRows = true, footerSpacer = true }) => {
-  const [expanded, setExpanded] = useState(false);
-  const overflow = items.length - CAP;
-  const shown = expanded || overflow <= 0 ? items : items.slice(0, CAP);
+  /** Optionally control the expanded state from the parent (jobs lifts it so
+   * its Untracked toggle can appear only once "Show all" is open). Omit for
+   * the self-managed default used by datasets and models. */
+  expanded?: boolean;
+  onExpandedChange?: (expanded: boolean) => void;
+}> = ({
+  items,
+  reserveRows = true,
+  footerSpacer = true,
+  expanded: expandedProp,
+  onExpandedChange,
+}) => {
+  const [expandedState, setExpandedState] = useState(false);
+  const expanded = expandedProp ?? expandedState;
+  const setExpanded = (value: boolean) => {
+    onExpandedChange?.(value);
+    if (expandedProp === undefined) setExpandedState(value);
+  };
+  const overflow = items.length - LIBRARY_ROW_CAP;
+  const shown =
+    expanded || overflow <= 0 ? items : items.slice(0, LIBRARY_ROW_CAP);
   return (
     <div className="space-y-2">
       <div
@@ -49,7 +69,7 @@ const CappedGrid: React.FC<{
       {overflow > 0 ? (
         <button
           type="button"
-          onClick={() => setExpanded((v) => !v)}
+          onClick={() => setExpanded(!expanded)}
           className="flex h-[1.875rem] w-full items-center justify-center gap-1 rounded-md border border-dashed border-border text-xs font-medium text-muted-foreground transition-colors hover:border-muted-foreground/40 hover:text-foreground"
         >
           <ChevronDown
