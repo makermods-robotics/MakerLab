@@ -1848,3 +1848,106 @@ def test_get_episode_joint_series_hub_fallback_degrades_on_download_failure(
         patch("makerlab.datasets.hf_hub_download", side_effect=RuntimeError("network")),
     ):
         assert ds.get_episode_joint_series("alice/hub_only", 0) is None
+
+
+# ---------------------------------------------------------------------------
+# End-to-end route coverage for Hub dataset viewer — Tasks 1–5 integrated
+# through the real FastAPI routes without production code changes.
+# ---------------------------------------------------------------------------
+
+
+def test_hub_dataset_viewer_endpoints_end_to_end(
+    client: TestClient, tmp_lerobot_home: Path, tmp_path: Path
+) -> None:
+    """A Hub-only dataset with video is viewable through all three viewer
+    routes without ever being downloaded locally."""
+    _clear_hub_dataset_info_cache()
+    snapshot = tmp_path / "snapshot"
+    (snapshot / "meta").mkdir(parents=True)
+    info = {
+        "fps": 30,
+        "total_episodes": 1,
+        "total_frames": 2,
+        "features": {
+            "observation.images.front": {"dtype": "video"},
+            "observation.state": {"names": ["shoulder"]},
+        },
+    }
+    (snapshot / "meta" / "info.json").write_text(json.dumps(info))
+    episodes_dir = snapshot / "meta" / "episodes" / "chunk-000"
+    episodes_dir.mkdir(parents=True)
+    pq.write_table(
+        pa.table(
+            {
+                "episode_index": [0],
+                "tasks": [["pick"]],
+                "length": [2],
+                "videos/observation.images.front/chunk_index": [0],
+                "videos/observation.images.front/file_index": [0],
+                "videos/observation.images.front/from_timestamp": [0.0],
+                "videos/observation.images.front/to_timestamp": [0.066],
+                "data/chunk_index": [0],
+                "data/file_index": [0],
+            }
+        ),
+        episodes_dir / "file-000.parquet",
+    )
+    video_file = snapshot / "videos" / "observation.images.front" / "chunk-000" / "file-000.mp4"
+    video_file.parent.mkdir(parents=True)
+    video_file.write_bytes(b"fake mp4 bytes")
+    data_file = snapshot / "data" / "chunk-000" / "file-000.parquet"
+    data_file.parent.mkdir(parents=True)
+    pq.write_table(
+        pa.table({"episode_index": [0, 0], "timestamp": [0.0, 0.033], "observation.state": [[0.1], [0.2]]}),
+        data_file,
+    )
+
+    def _fake_download(repo_id, filename, repo_type):  # noqa: ARG001
+        return str(snapshot / filename)
+
+    fake_api = MagicMock()
+    fake_api.list_repo_files.return_value = [
+        "meta/info.json",
+        "meta/episodes/chunk-000/file-000.parquet",
+    ]
+
+    with (
+        patch("makerlab.datasets.hf_hub_offline", return_value=False),
+        patch("makerlab.datasets.shared_hf_api", return_value=fake_api),
+        patch("makerlab.datasets.hf_hub_download", side_effect=_fake_download),
+    ):
+        episodes = client.get("/datasets/episodes", params={"repo_id": "alice/hub_only"})
+        assert episodes.status_code == 200
+        assert episodes.json()[0]["episode_index"] == 0
+
+        joints = client.get(
+            "/datasets/episode-joints", params={"repo_id": "alice/hub_only", "episode_index": 0}
+        )
+        assert joints.status_code == 200
+        assert joints.json()["joint_names"] == ["shoulder"]
+
+        video = client.get(
+            "/datasets/episode-video",
+            params={"repo_id": "alice/hub_only", "episode_index": 0, "camera": "front"},
+        )
+        assert video.status_code == 200
+        assert video.content == b"fake mp4 bytes"
+
+
+def test_hub_dataset_viewer_endpoints_404_without_video(
+    client: TestClient, tmp_lerobot_home: Path, tmp_path: Path
+) -> None:
+    """A Hub-only dataset with no dtype=="video" feature never triggers a chunk
+    fetch — /datasets/episodes 404s after only the cheap meta/info.json probe."""
+    _clear_hub_dataset_info_cache()
+    meta = tmp_path / "info.json"
+    meta.write_text(json.dumps({"features": {"observation.images.front": {"dtype": "image"}}}))
+
+    with (
+        patch("makerlab.datasets.hf_hub_offline", return_value=False),
+        patch("makerlab.datasets.hf_hub_download", return_value=str(meta)) as dl,
+    ):
+        resp = client.get("/datasets/episodes", params={"repo_id": "alice/no_video"})
+
+    assert resp.status_code == 404
+    dl.assert_called_once()  # only the meta/info.json probe inside get_hub_dataset_info
