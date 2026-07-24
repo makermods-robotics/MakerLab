@@ -663,6 +663,50 @@ def _read_episode_rows(meta_dir: Path, columns: list[str] | None = None) -> list
     return rows or None
 
 
+def _hub_dataset_has_video(repo_id: str) -> bool:
+    """Whether `repo_id` (assumed to exist on the Hub) has at least one
+    dtype == "video" camera feature, via the same cached summary /datasets/info
+    already uses — no extra network call beyond what get_hub_dataset_info
+    itself needs."""
+    info = get_hub_dataset_info(repo_id)
+    return bool(info and info["cameras"])
+
+
+def _ensure_hub_episodes_root(repo_id: str) -> Path | None:
+    """Download meta/info.json + every meta/episodes/**/*.parquet chunk for a
+    Hub dataset confirmed to have video, into huggingface_hub's own on-disk
+    cache (~/.cache/huggingface/hub by default) — NOT MakerLab's
+    ~/.cache/huggingface/lerobot dataset cache, and NOT a full dataset
+    snapshot. Returns the snapshot root directory so the existing local-path
+    reading code (_read_episode_rows, etc.) can run against it exactly like a
+    local dataset dir; None if the dataset isn't viewable this way (offline,
+    no video, or the fetch failed).
+
+    The episode-metadata parquet files are small regardless of how large the
+    dataset's actual video is — this never pulls video/data chunks themselves;
+    those are fetched one at a time by get_episode_video_path /
+    get_episode_joint_series only when a specific episode is actually opened.
+    No caching layer beyond hf_hub_download's own: a repeat call re-lists repo
+    files and re-touches already-cached files, which is fast (etag-checked
+    cache hits), not a re-download.
+    """
+    if hf_hub_offline():
+        return None
+    if not _hub_dataset_has_video(repo_id):
+        return None
+    try:
+        info_path = hf_hub_download(repo_id, filename="meta/info.json", repo_type="dataset")
+        root = Path(info_path).parents[1]  # strip "meta/info.json"'s 2 path parts
+        files = shared_hf_api().list_repo_files(repo_id, repo_type="dataset")
+        for f in files:
+            if f.startswith("meta/episodes/") and f.endswith(".parquet"):
+                hf_hub_download(repo_id, filename=f, repo_type="dataset")
+    except Exception as exc:
+        logger.info("hub episode metadata fetch for %s failed: %s", repo_id, exc)
+        return None
+    return root
+
+
 def list_episode_summaries(repo_id: str) -> list[dict[str, Any]] | None:
     """Per-episode index/length/duration/tasks/video_offsets for the dataset
     viewer's episode list. None if `repo_id` isn't a local dataset in the

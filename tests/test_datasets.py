@@ -1425,6 +1425,97 @@ def test_get_local_dataset_info_marks_source_local(tmp_lerobot_home: Path) -> No
 
 
 # ---------------------------------------------------------------------------
+# On-demand Hub episode-metadata fetch — the foundation the viewer's Hub
+# fallback (Tasks 3-5) builds on. Downloads meta/info.json + the small
+# meta/episodes/**/*.parquet chunks (never video/data chunks themselves) into
+# huggingface_hub's own cache, so the existing local-path parsing code can run
+# against that snapshot dir unmodified.
+# ---------------------------------------------------------------------------
+
+
+def test_hub_dataset_has_video_true_and_false() -> None:
+    from makerlab import datasets as ds
+
+    with patch("makerlab.datasets.get_hub_dataset_info", return_value={"cameras": ["front"]}):
+        assert ds._hub_dataset_has_video("alice/pick") is True
+    with patch("makerlab.datasets.get_hub_dataset_info", return_value={"cameras": []}):
+        assert ds._hub_dataset_has_video("alice/pick") is False
+    with patch("makerlab.datasets.get_hub_dataset_info", return_value=None):
+        assert ds._hub_dataset_has_video("alice/pick") is False
+
+
+def test_ensure_hub_episodes_root_returns_none_offline() -> None:
+    from makerlab import datasets as ds
+
+    with (
+        patch("makerlab.datasets.hf_hub_offline", return_value=True),
+        patch("makerlab.datasets.get_hub_dataset_info") as info,
+    ):
+        assert ds._ensure_hub_episodes_root("alice/pick") is None
+    info.assert_not_called()
+
+
+def test_ensure_hub_episodes_root_returns_none_when_no_video() -> None:
+    from makerlab import datasets as ds
+
+    with (
+        patch("makerlab.datasets.hf_hub_offline", return_value=False),
+        patch("makerlab.datasets.get_hub_dataset_info", return_value={"cameras": []}),
+        patch("makerlab.datasets.hf_hub_download") as dl,
+    ):
+        assert ds._ensure_hub_episodes_root("alice/no_video") is None
+    dl.assert_not_called()
+
+
+def test_ensure_hub_episodes_root_downloads_info_and_episode_chunks(tmp_path: Path) -> None:
+    from makerlab import datasets as ds
+
+    snapshot = tmp_path / "snapshot"
+    (snapshot / "meta").mkdir(parents=True)
+    (snapshot / "meta" / "info.json").write_text("{}")
+
+    fake_api = MagicMock()
+    fake_api.list_repo_files.return_value = [
+        "meta/info.json",
+        "meta/episodes/chunk-000/file-000.parquet",
+        "meta/episodes/chunk-000/file-001.parquet",
+        "meta/stats.json",  # not an episodes parquet — must be skipped
+        "videos/observation.images.front/chunk-000/file-000.mp4",  # not fetched here
+    ]
+    downloaded: list[str] = []
+
+    def _fake_download(repo_id, filename, repo_type):  # noqa: ARG001
+        downloaded.append(filename)
+        return str(snapshot / filename)
+
+    with (
+        patch("makerlab.datasets.hf_hub_offline", return_value=False),
+        patch("makerlab.datasets.get_hub_dataset_info", return_value={"cameras": ["front"]}),
+        patch("makerlab.datasets.shared_hf_api", return_value=fake_api),
+        patch("makerlab.datasets.hf_hub_download", side_effect=_fake_download),
+    ):
+        root = ds._ensure_hub_episodes_root("alice/pick")
+
+    assert root == snapshot
+    assert downloaded == [
+        "meta/info.json",
+        "meta/episodes/chunk-000/file-000.parquet",
+        "meta/episodes/chunk-000/file-001.parquet",
+    ]
+
+
+def test_ensure_hub_episodes_root_degrades_on_fetch_failure() -> None:
+    from makerlab import datasets as ds
+
+    with (
+        patch("makerlab.datasets.hf_hub_offline", return_value=False),
+        patch("makerlab.datasets.get_hub_dataset_info", return_value={"cameras": ["front"]}),
+        patch("makerlab.datasets.hf_hub_download", side_effect=RuntimeError("hub down")),
+    ):
+        assert ds._ensure_hub_episodes_root("alice/pick") is None
+
+
+# ---------------------------------------------------------------------------
 # _fan_out_hub_authors — the OVERALL fan-out deadline actually bounds a hung
 # author. The shared HfApi httpx client has timeout=None, so this budget is the
 # ONLY timeout in the stack: a blackholed connection must be abandoned (and
