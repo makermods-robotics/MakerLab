@@ -21,7 +21,13 @@ of two FRESHLY CALIBRATED arms (each arm's EEPROM matched its own file and
 both arms' similarly-centered ranges passed the position check) and hard-
 blocked a CORRECT arm parked past its hand-swept range extremes. v2 decides
 by EEPROM fingerprint against the whole calibration library first; positions
-are only a softened fallback when the fingerprint matches nothing.
+are only supporting detail, never a gate.
+
+v3 makes the guard FAIL CLOSED: only row 1 (fingerprint == assigned config)
+starts a session. Rows 2-4 all refuse, because in each of them the arm about
+to be energized provably is not — or cannot be shown to be — the arm the
+assigned calibration was made on. `skip_identity_check` stays the one explicit
+way past, for the known false positives.
 """
 
 from __future__ import annotations
@@ -369,13 +375,15 @@ def test_row2_extra_slots_cover_arms_not_in_the_session() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Decision table row 3: fingerprint matches some OTHER library file -> warn
+# Decision table row 3: fingerprint matches some OTHER library file -> BLOCK
 # ---------------------------------------------------------------------------
 
 
-def test_row3_other_library_file_starts_with_a_named_warning() -> None:
-    """Assign-without-recalibrate: the arm's EEPROM still carries its previous
-    calibration ('follower_old'). Start, but name both files."""
+def test_row3_other_library_file_is_blocked_naming_the_matched_calibration() -> None:
+    """Assign-without-recalibrate: the arm's EEPROM carries a DIFFERENT saved
+    calibration ('follower_old'). Whatever the story, this is not the arm
+    'follower_a' was calibrated on — refuse, and name both files plus the
+    remedy so the user can fix the assignment in one step."""
     bus = _GuardBus(RESTING_POSITIONS, _offsets(OLD_FOLLOWER_CAL))
     refusal, warning = verify_arm(
         bus,
@@ -386,35 +394,40 @@ def test_row3_other_library_file_starts_with_a_named_warning() -> None:
         counterparts=[LEADER_SLOT],
         library=LIBRARY,
     )
-    assert refusal is None
-    assert warning is not None
-    assert "'follower_old'" in warning and "'follower_a'" in warning
-    assert "check your ports" in warning
+    assert warning is None
+    assert refusal is not None
+    assert "'follower_old'" in refusal  # the calibration it actually carries
+    assert "'follower_a'" in refusal  # ... and the one it was assigned
+    assert "recalibrate" in refusal.lower()
+    assert "skip_identity_check" in refusal
 
 
-def test_row3_never_position_blocks() -> None:
-    """A fingerprinted (just not assigned) arm parked past its extremes must
-    still start — identity is known, the pose is irrelevant."""
-    bus = _GuardBus(PARKED_PAST_EXTREMES, _offsets(OLD_LEADER_CAL))
-    refusal, warning = verify_arm(
-        bus,
-        LEADER_CAL,
-        "leader",
-        "leader_a",
-        "leader",
-        counterparts=[FOLLOWER_SLOT],
-        library=LIBRARY,
-    )
-    assert refusal is None
-    assert warning is not None and "'old_leader'" in warning
+def test_row3_blocks_on_identity_not_on_pose() -> None:
+    """A fingerprinted (just not assigned) arm is refused whatever its pose:
+    the block is about identity, and the message must not blame the pose."""
+    for positions in (RESTING_POSITIONS, PARKED_PAST_EXTREMES):
+        refusal, warning = verify_arm(
+            _GuardBus(positions, _offsets(OLD_LEADER_CAL)),
+            LEADER_CAL,
+            "leader",
+            "leader_a",
+            "leader",
+            counterparts=[FOLLOWER_SLOT],
+            library=LIBRARY,
+        )
+        assert warning is None
+        assert refusal is not None and "'old_leader'" in refusal
+        assert "out of range" not in refusal and "outside" not in refusal
 
 
 # ---------------------------------------------------------------------------
-# Decision table row 4: fingerprint matches NOTHING -> softened position fallback
+# Decision table row 4: fingerprint matches NOTHING -> BLOCK (unverifiable)
 # ---------------------------------------------------------------------------
 
 
-def test_row4_factory_reset_arm_in_plausible_pose_warns_but_starts() -> None:
+def test_row4_factory_reset_arm_in_plausible_pose_blocks() -> None:
+    """The P0 fix: a plausible pose is NOT evidence of identity. Unrecognized
+    EEPROM alone refuses, even with every joint comfortably in range."""
     bus = _GuardBus(RESTING_POSITIONS, FACTORY_OFFSETS)
     refusal, warning = verify_arm(
         bus,
@@ -425,14 +438,19 @@ def test_row4_factory_reset_arm_in_plausible_pose_warns_but_starts() -> None:
         counterparts=[FOLLOWER_SLOT],
         library=LIBRARY,
     )
-    assert refusal is None
-    assert warning is not None
-    assert "Could not verify" in warning
+    assert warning is None
+    assert refusal is not None
+    assert "Could not confirm" in refusal
+    assert "'leader_a'" in refusal
+    assert "skip_identity_check" in refusal
+    # Nothing was out of range, so the message must not invent pose evidence.
+    assert "pose" not in refusal
 
 
-def test_row4_three_joints_far_out_of_range_blocks() -> None:
+def test_row4_three_joints_far_out_of_range_still_blocks_and_names_them() -> None:
     """Unrecognized EEPROM AND a majority of joints >15% of their range width
-    outside the assigned ranges: refuse."""
+    outside the assigned ranges: still a refusal, and the joints are named as
+    supporting detail."""
     bus = _GuardBus(PARKED_PAST_EXTREMES, FACTORY_OFFSETS)
     refusal, warning = verify_arm(
         bus,
@@ -449,7 +467,9 @@ def test_row4_three_joints_far_out_of_range_blocks() -> None:
     assert "'leader_a'" in refusal
 
 
-def test_row4_two_far_out_joints_warn_instead_of_blocking() -> None:
+def test_row4_two_far_out_joints_block_on_identity_with_softer_pose_detail() -> None:
+    """Below the majority threshold the pose no longer even sharpens the
+    wording — but the arm is still refused, because it is still unidentified."""
     positions = dict(PARKED_PAST_EXTREMES, gripper=1450)  # back in range: only 2 far out
     finding = check_arm_identity(positions, FACTORY_OFFSETS, LEADER_CAL)
     assert finding.out_of_range_joints == ["shoulder_lift", "elbow_flex"]
@@ -463,7 +483,11 @@ def test_row4_two_far_out_joints_warn_instead_of_blocking() -> None:
         "leader",
         library=LIBRARY,
     )
-    assert refusal is None and warning is not None
+    assert warning is None
+    assert refusal is not None
+    assert "Could not confirm" in refusal
+    # Pose is reported, but hedged — it is detail, not the reason for the block.
+    assert "legitimately" in refusal
 
 
 def test_row4_margin_boundary_is_15_percent_of_range_width() -> None:
@@ -527,25 +551,56 @@ def test_verify_devices_skip_bypasses_without_reading() -> None:
     assert device.bus.guard_reads == 0
 
 
-def test_verify_devices_returns_warnings_for_allowed_starts() -> None:
+@pytest.mark.parametrize(
+    ("row", "offsets"),
+    [
+        ("row2 swapped counterpart", LEADER_OFFSETS),
+        ("row3 other library file", _offsets(OLD_FOLLOWER_CAL)),
+        ("row4 unidentifiable", FACTORY_OFFSETS),
+    ],
+)
+def test_verify_devices_skip_bypasses_every_blocking_row(row: str, offsets: dict) -> None:
+    """The escape hatch must clear ALL of rows 2-4, not just the soft ones —
+    it is the only way past the now fail-closed guard."""
+    device = _GuardDevice(_GuardBus(RESTING_POSITIONS, offsets), FOLLOWER_CAL, "follower_a")
+    passed = verify_devices(((device, "follower"),), skip=True, extra_slots=[LEADER_SLOT], library=LIBRARY)
+    assert passed == [], row
+    assert device.bus.guard_reads == 0
+
+    # ... and without skip, the very same arm is refused.
+    device2 = _GuardDevice(_GuardBus(RESTING_POSITIONS, offsets), FOLLOWER_CAL, "follower_a")
+    with pytest.raises(ArmIdentityError):
+        verify_devices(((device2, "follower"),), extra_slots=[LEADER_SLOT], library=LIBRARY)
+
+
+def test_verify_devices_refuses_an_unidentifiable_arm() -> None:
+    """Row 4 at session level: no warn-and-start path is left."""
     device = _GuardDevice(_GuardBus(RESTING_POSITIONS, FACTORY_OFFSETS), LEADER_CAL, "leader_a")
-    warnings = verify_devices(((device, "leader"),), library=LIBRARY)
-    assert len(warnings) == 1 and "Could not verify" in warnings[0]
+    with pytest.raises(ArmIdentityError) as excinfo:
+        verify_devices(((device, "leader"),), library=LIBRARY)
+    assert "Could not confirm" in str(excinfo.value)
+
+
+def test_verify_devices_returns_no_warnings_for_a_verified_start() -> None:
+    """The only start left is the clean one: fingerprint == assigned config."""
+    device = _GuardDevice(_leader_arm_bus(), LEADER_CAL, "leader_a")
+    assert verify_devices(((device, "leader"),), library=LIBRARY) == []
 
 
 def test_verify_devices_config_names_override_staging_alias_ids() -> None:
     """Bimanual staging gives sub-arms alias ids ("<base>_left"), but the library
     is keyed by real stems. Passing config_names lets the guard compare against
-    the library and PASS (Row 1) instead of spuriously warning (Row 3)."""
+    the library and PASS (Row 1) instead of spuriously REFUSING (Row 3) — which
+    now hard-blocks the start, so the override is load-bearing."""
     # Device id is the staging alias; the servos carry the real "leader_a"
     # fingerprint present in LIBRARY under its real stem.
     device = _GuardDevice(_leader_arm_bus(), LEADER_CAL, "biman_left")
 
-    # Without the override, id "biman_left" isn't in the library -> Row 3 warning
+    # Without the override, id "biman_left" isn't in the library -> Row 3 refusal
     # ("carries calibration 'leader_a', not the assigned 'biman_left'").
-    warnings = verify_devices(((device, "leader"),), library=LIBRARY)
-    assert len(warnings) == 1
-    assert "'leader_a'" in warnings[0] and "'biman_left'" in warnings[0]
+    with pytest.raises(ArmIdentityError) as excinfo:
+        verify_devices(((device, "leader"),), library=LIBRARY)
+    assert "'leader_a'" in str(excinfo.value) and "'biman_left'" in str(excinfo.value)
 
     # With config_names=["leader_a"], Row 1 matches -> clean pass, no warning.
     device2 = _GuardDevice(_leader_arm_bus(), LEADER_CAL, "biman_left")
@@ -644,21 +699,43 @@ def test_start_teleoperation_skip_flag_bypasses_the_guard(monkeypatch: pytest.Mo
     _join_teleop_worker(teleop)
 
 
-def test_start_teleoperation_surfaces_a_row3_warning(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Assign-without-recalibrate starts, with the other file named in the
-    response's `warning` (which the frontend now shows as a toast)."""
+def test_start_teleoperation_refuses_a_row3_wrong_calibration(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Assign-without-recalibrate no longer starts: the follower's servos carry
+    'follower_old', so it is not the arm 'follower_a' was calibrated on. Refuse
+    before any calibration write, naming the matched file and the remedy."""
     follower = _GuardDevice(
-        _GuardBus(RESTING_POSITIONS, _offsets(OLD_FOLLOWER_CAL)), FOLLOWER_CAL, "follower_a"
+        _GuardBus(RESTING_POSITIONS, _offsets(OLD_FOLLOWER_CAL), port="COM_FOLLOWER"),
+        FOLLOWER_CAL,
+        "follower_a",
     )
     leader = _GuardDevice(_GuardBus(RESTING_POSITIONS, LEADER_OFFSETS), LEADER_CAL, "leader_a")
     teleop = _patch_teleop_devices(monkeypatch, follower, leader)
 
     result = teleop.handle_start_teleoperation(_teleop_request())
 
-    assert result["success"] is True
-    assert "'follower_old'" in result["warning"]
-    assert "check your ports" in result["warning"]
-    _join_teleop_worker(teleop)
+    assert result["success"] is False
+    assert "'follower_old'" in result["message"] and "'follower_a'" in result["message"]
+    assert "skip_identity_check" in result["message"]
+    assert follower.bus.calibration_written is False
+    assert leader.bus.calibration_written is False
+    assert teleop.teleoperation_active is False
+
+
+def test_start_teleoperation_refuses_a_row4_unidentifiable_arm(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Factory-reset EEPROM in a perfectly plausible pose: the P0 case that
+    used to energize the arm on a warning. It must now hard-stop."""
+    follower = _GuardDevice(
+        _GuardBus(RESTING_POSITIONS, FACTORY_OFFSETS, port="COM_FOLLOWER"), FOLLOWER_CAL, "follower_a"
+    )
+    leader = _GuardDevice(_GuardBus(RESTING_POSITIONS, LEADER_OFFSETS), LEADER_CAL, "leader_a")
+    teleop = _patch_teleop_devices(monkeypatch, follower, leader)
+
+    result = teleop.handle_start_teleoperation(_teleop_request())
+
+    assert result["success"] is False
+    assert "Could not confirm" in result["message"] and "COM_FOLLOWER" in result["message"]
+    assert follower.bus.calibration_written is False
+    assert teleop.teleoperation_active is False
 
 
 def test_start_teleoperation_verified_arms_pass_without_identity_warnings(

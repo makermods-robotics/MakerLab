@@ -24,22 +24,30 @@ The primary signal is the EEPROM FINGERPRINT: lerobot's write_calibration
 stamps every calibration file's homing_offset values into the servos verbatim,
 so reading each servo's Homing_Offset and comparing against EVERY saved
 calibration file (the "library") identifies which calibration this physical
-arm actually carries. Positions are only a fallback — an arm parked folded or
-at rest legitimately sits at (or, pushed by gravity, slightly past) its
-recorded range extremes, so positions alone can't be trusted to refuse a
-verified arm.
+arm actually carries. Positions are never a gate — an arm parked folded or at
+rest legitimately sits at (or, pushed by gravity, well past) its recorded range
+extremes — they only add detail to a refusal.
+
+The guard FAILS CLOSED: an arm whose identity cannot be positively confirmed
+as its ASSIGNED calibration is not energized. Only row 1 starts the session.
 
 Decision table, per arm (first matching row wins):
 
 1. Fingerprint matches the ASSIGNED config      -> PASS (skip position check).
 2. Fingerprint matches a config assigned to a
    COUNTERPART slot of this same session        -> HARD BLOCK (ports swapped).
-3. Fingerprint matches some OTHER library file  -> START with a named warning.
+3. Fingerprint matches some OTHER library file  -> HARD BLOCK, naming the
+   calibration the arm actually carries (fix the assignment, or recalibrate).
 4. Fingerprint matches NOTHING (factory-reset
-   EEPROM, abandoned calibration)               -> positions decide, softened:
-   hard block only when >= FALLBACK_MIN_OUT_OF_RANGE_JOINTS joints are each
-   more than FALLBACK_MARGIN_FRACTION of their range width outside the
-   assigned ranges; otherwise start with a generic can't-verify warning.
+   EEPROM, abandoned calibration)               -> HARD BLOCK: identity is
+   UNVERIFIABLE. Positions are reported as supporting detail only — how far
+   out of range the arm sits does NOT decide, because a parked/folded arm is
+   legitimately out of range.
+
+The one way past rows 2-4 is the explicit `skip_identity_check` escape hatch on
+the record/teleop/inference requests, for the known false positives: a stale
+duplicate calibration of this same physical arm, or an arm calibrated outside
+MakerLab. Refusal messages spell that out.
 """
 
 import json
@@ -63,13 +71,14 @@ HOMING_OFFSET_TOLERANCE = 2
 # homing offset DOES count for the fingerprint.
 POSITION_EXEMPT_MOTORS = frozenset({"wrist_roll"})
 
-# Position fallback thresholds — used ONLY when the fingerprint matches no
-# library file (row 4). Sized against real SO-101 calibrations: non-exempt
-# range widths run ~1300-2800 ticks, so 15% is ~200-420 ticks (~18-37 deg) —
-# far beyond the tens of ticks gravity pushes a parked joint past its
-# hand-swept limit, and far below the hundreds-to-thousands of ticks a
-# factory-reset homing offset shifts the readings by. Requiring 3 of the 5
-# position-informative joints means a majority must be grossly out; a correct
+# Position thresholds — DETAIL ONLY, never a gate. Row 4 blocks on the
+# unverifiable fingerprint alone; these thresholds merely decide how strongly
+# the refusal describes the pose. Sized against real SO-101 calibrations:
+# non-exempt range widths run ~1300-2800 ticks, so 15% is ~200-420 ticks
+# (~18-37 deg) — far beyond the tens of ticks gravity pushes a parked joint
+# past its hand-swept limit, and far below the hundreds-to-thousands of ticks a
+# factory-reset homing offset shifts the readings by. 3 of the 5
+# position-informative joints out means a majority is grossly out; a correct
 # arm folded at rest can legitimately sit 1-2 joints at/past its extremes.
 FALLBACK_MARGIN_FRACTION = 0.15
 FALLBACK_MIN_OUT_OF_RANGE_JOINTS = 3
@@ -97,14 +106,18 @@ class ArmSlot:
 
 @dataclass
 class ArmIdentityFinding:
-    """Result of the position fallback against the assigned calibration."""
+    """Result of the position comparison against the assigned calibration.
+
+    Supporting detail for a refusal message — never a gate on its own."""
 
     out_of_range_joints: list[str] = field(default_factory=list)
     offset_mismatch_joints: list[str] = field(default_factory=list)
 
     @property
     def positions_mismatch(self) -> bool:
-        """Enough joints grossly out of range to rule out a parked arm."""
+        """Enough joints grossly out of range to rule out a parked arm.
+
+        Sharpens the wording of a row-4 refusal; it does not decide one."""
         return len(self.out_of_range_joints) >= FALLBACK_MIN_OUT_OF_RANGE_JOINTS
 
     @property
@@ -191,7 +204,9 @@ def check_arm_identity(
     `calibration` maps motor name to a MotorCalibration (or the equivalent
     dict). A joint counts as out of range only when it sits more than
     FALLBACK_MARGIN_FRACTION of its range width outside [range_min, range_max].
-    Pure function — the reads happen in `verify_arm`.
+    Pure function — the reads happen in `verify_arm`. The result only enriches
+    a refusal message; it never decides one (a parked arm is legitimately out
+    of range).
     """
     finding = ArmIdentityFinding()
     for motor, cal in calibration.items():
@@ -209,6 +224,14 @@ def check_arm_identity(
     return finding
 
 
+# Every refusal ends with the same escape-hatch sentence: the guard fails
+# closed, so the user must be told the one supported way past a false positive.
+_SKIP_HINT = (
+    "If you're sure this is the right arm, start again with the arm identity check turned off "
+    "(skip_identity_check)."
+)
+
+
 def swapped_port_refusal(label: str, port: str, matched_name: str, counterpart_label: str) -> str:
     """Row 2: the arm carries a calibration assigned to another slot of this session."""
     return (
@@ -218,34 +241,47 @@ def swapped_port_refusal(label: str, port: str, matched_name: str, counterpart_l
     )
 
 
-def wrong_calibration_warning(label: str, port: str, matched_names: list[str], assigned_name: str) -> str:
-    """Row 3: the arm carries some other saved calibration, not the assigned one."""
+def wrong_calibration_refusal(label: str, port: str, matched_names: list[str], assigned_name: str) -> str:
+    """Row 3 hard block: the arm carries some other saved calibration.
+
+    The arm is positively identified — as someone else. Naming the calibration
+    it actually carries is what lets the user fix the assignment in one step.
+    """
     matched = "', '".join(matched_names)
     return (
         f"The {label} arm on {port} carries calibration '{matched}', not the assigned "
-        f"'{assigned_name}' — if you just reassigned configs this is expected; otherwise "
-        "check your ports."
+        f"'{assigned_name}' — this is not the arm '{assigned_name}' was calibrated on, so "
+        f"starting would drive it with the wrong calibration. Fix the port or calibration "
+        f"assignment (assign '{matched}', or plug in the arm '{assigned_name}' belongs to), "
+        f"or recalibrate this arm as '{assigned_name}'. " + _SKIP_HINT
     )
 
 
 def unverified_refusal(label: str, port: str, config_name: str, finding: ArmIdentityFinding) -> str:
-    """Row 4 hard block: unrecognized EEPROM AND most joints grossly out of range."""
-    joints = ", ".join(finding.out_of_range_joints)
-    return (
-        f"The {label} arm on {port} doesn't match calibration '{config_name}' "
-        f"({joints} far out of range, and its servos match no saved calibration) — "
-        "the ports may be swapped, or this arm needs recalibration. Unplug one arm "
-        "at a time to confirm which port is which."
-    )
+    """Row 4 hard block: the servos match NO saved calibration.
 
-
-def unverified_warning(label: str, port: str, config_name: str) -> str:
-    """Row 4 warn: unrecognized EEPROM but positions are plausible."""
+    The block reason is that identity is unverifiable, full stop. Positions are
+    reported as supporting detail — a parked or folded arm sits out of range
+    legitimately, so they can neither convict nor clear the arm.
+    """
+    if finding.positions_mismatch:
+        detail = (
+            f" Its current pose is also far outside that calibration's ranges "
+            f"({', '.join(finding.out_of_range_joints)}), which points at a swapped port."
+        )
+    elif finding.out_of_range_joints:
+        detail = (
+            f" ({', '.join(finding.out_of_range_joints)} also sit outside that calibration's "
+            "ranges, though a parked arm can do that legitimately.)"
+        )
+    else:
+        detail = ""
     return (
-        f"Could not verify the {label} arm on {port}: its servos' homing offsets match no "
-        f"saved calibration (a factory reset or an interrupted calibration leaves them "
-        f"unset). Starting with '{config_name}' anyway — recalibrate this arm if it "
-        "behaves oddly."
+        f"Could not confirm the {label} arm on {port} is the arm calibrated as '{config_name}': "
+        f"its servos' homing offsets match no saved calibration (a factory reset or an "
+        f"interrupted calibration leaves them unset)." + detail + " Recalibrate this arm as "
+        f"'{config_name}', or check that the right arm is on this port — unplug one arm at a "
+        "time to confirm which port is which. " + _SKIP_HINT
     )
 
 
@@ -267,7 +303,9 @@ def verify_arm(
 
     Returns (refusal, warning): `refusal` is a user-facing hard-block message,
     `warning` a proceed-with-caution message; both None when the arm is
-    verified. Reads Present_Position and Homing_Offset only — never writes. A
+    verified. The guard fails closed, so no row currently returns a warning —
+    the channel stays for non-blocking advisories a future row may add.
+    Reads Present_Position and Homing_Offset only — never writes. A
     read failure skips the check (logged) rather than inventing a new failure
     mode: a genuinely dead bus will fail loudly on the first real action anyway.
     """
@@ -302,18 +340,18 @@ def verify_arm(
         if (slot.side, slot.config_name) in matches:
             return swapped_port_refusal(label, port, slot.config_name, slot.label), None
 
-    # Row 3: the servos carry some other saved calibration. Named warning, and
-    # explicitly NO position block — the arm is identified, just reassigned.
+    # Row 3: the servos carry some other saved calibration. The arm is
+    # positively identified as NOT the assigned one — refuse and name it.
+    # Positions are irrelevant here: identity is already settled.
     if matches:
         matched_names = sorted({name for _side, name in matches})
-        return None, wrong_calibration_warning(label, port, matched_names, config_name)
+        return wrong_calibration_refusal(label, port, matched_names, config_name), None
 
     # Row 4: fingerprint inconclusive (factory-reset EEPROM, abandoned
-    # calibration). Fall back to positions, softened.
+    # calibration). Identity is UNVERIFIABLE, so refuse — the positions only
+    # colour the message, they are not the condition.
     finding = check_arm_identity(positions, offsets, calibration)
-    if finding.positions_mismatch:
-        return unverified_refusal(label, port, config_name, finding), None
-    return None, unverified_warning(label, port, config_name)
+    return unverified_refusal(label, port, config_name, finding), None
 
 
 def _device_arms(device, side: str) -> list[tuple[Any, str]]:
@@ -354,9 +392,13 @@ def verify_devices(
     order the arms are iterated (each (device, side) pair yields left then right
     sub-arm, single-arm devices yield one) — to compare against the library.
 
-    Raises ArmIdentityError on a hard mismatch (message covers every failing
-    arm); returns the warn-but-allow messages otherwise (also logged). `skip`
-    is the explicit user escape hatch — the guard is bypassed entirely.
+    Raises ArmIdentityError unless EVERY arm is positively confirmed as its
+    assigned calibration (the message covers every failing arm); returns the
+    warn-but-allow messages otherwise — currently always empty, since the guard
+    fails closed. `skip` is the explicit user escape hatch (skip_identity_check
+    on the record/teleop/inference requests) — the guard is bypassed entirely,
+    for the arm calibrated outside MakerLab or the stale duplicate calibration
+    of this same physical arm.
     """
     if skip:
         logger.warning("Arm identity check SKIPPED by request (skip_identity_check=true)")
