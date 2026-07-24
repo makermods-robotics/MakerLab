@@ -734,7 +734,7 @@ def list_episode_summaries(repo_id: str) -> list[dict[str, Any]] | None:
         return None
     fps = info.get("fps") or 1
     features = info.get("features") or {}
-    cameras = [key[len(CAMERA_FEATURE_PREFIX) :] for key in features if key.startswith(CAMERA_FEATURE_PREFIX)]
+    cameras = _video_camera_names(features)
 
     video_cols: list[str] = []
     col_to_camera: dict[str, tuple[str, str]] = {}
@@ -791,7 +791,7 @@ def get_episode_video_path(repo_id: str, episode_index: int, camera: str) -> Pat
     except (OSError, ValueError):
         return None
     features = info.get("features") or {}
-    cameras = [key[len(CAMERA_FEATURE_PREFIX) :] for key in features if key.startswith(CAMERA_FEATURE_PREFIX)]
+    cameras = _video_camera_names(features)
     if camera not in cameras:
         return None
 

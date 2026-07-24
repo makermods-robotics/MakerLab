@@ -1593,6 +1593,59 @@ def test_list_episode_summaries_returns_none_when_hub_fetch_fails(tmp_lerobot_ho
         assert ds.list_episode_summaries("alice/no_video") is None
 
 
+def test_list_episode_summaries_hub_fallback_filters_non_video_cameras(
+    tmp_lerobot_home: Path, tmp_path: Path
+) -> None:
+    """Hub fallback: dataset with both dtype=='video' and dtype=='image' cameras
+    correctly reads only the video camera's columns, not the image camera's."""
+    from makerlab import datasets as ds
+
+    snapshot = tmp_path / "snapshot"
+    (snapshot / "meta").mkdir(parents=True)
+    # Dataset has one video camera and one image camera
+    (snapshot / "meta" / "info.json").write_text(
+        json.dumps(
+            {
+                "fps": 30,
+                "features": {
+                    "observation.images.front": {"dtype": "video"},
+                    "observation.images.raw": {"dtype": "image"},
+                },
+            }
+        )
+    )
+    # Parquet contains only the video camera's columns, not the image camera's
+    episodes_dir = snapshot / "meta" / "episodes" / "chunk-000"
+    episodes_dir.mkdir(parents=True)
+    pq.write_table(
+        pa.table(
+            {
+                "episode_index": [0, 1],
+                "tasks": [["task"], ["task"]],
+                "length": [30, 60],
+                "videos/observation.images.front/from_timestamp": [0.0, 1.0],
+                "videos/observation.images.front/to_timestamp": [1.0, 3.0],
+            }
+        ),
+        episodes_dir / "file-000.parquet",
+    )
+
+    with patch("makerlab.datasets._ensure_hub_episodes_root", return_value=snapshot) as hub_fetch:
+        result = ds.list_episode_summaries("alice/mixed_cameras")
+
+    hub_fetch.assert_called_once_with("alice/mixed_cameras")
+    assert result is not None
+    assert len(result) == 2
+    assert [e["episode_index"] for e in result] == [0, 1]
+    # Verify video_offsets only contains the video camera, not the image camera
+    assert result[0]["video_offsets"] == {
+        "front": {"from": 0.0, "to": 1.0},
+    }
+    assert result[1]["video_offsets"] == {
+        "front": {"from": 1.0, "to": 3.0},
+    }
+
+
 def test_get_episode_video_path_local_unchanged(tmp_lerobot_home: Path) -> None:
     from makerlab import datasets as ds
 
