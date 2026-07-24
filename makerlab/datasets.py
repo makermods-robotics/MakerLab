@@ -59,6 +59,7 @@ def _video_camera_names(features: dict[str, Any]) -> list[str]:
         if key.startswith(CAMERA_FEATURE_PREFIX) and isinstance(spec, dict) and spec.get("dtype") == "video"
     ]
 
+
 # Errors a per-author / per-listing Hub call may raise that must NOT bubble up
 # and 500 the endpoint. HfHubHTTPError covers HTTP-status failures; httpx.HTTPError
 # is the base of ConnectError / TimeoutException / TransportError, which is what a
