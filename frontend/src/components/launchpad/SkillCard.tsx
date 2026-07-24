@@ -66,6 +66,14 @@ export function skillNamespace(m: ModelItem): string | null {
   return src.includes("/") ? src.split("/")[0] : null;
 }
 
+/** The byline shown under a skill's title. A WIP preview has no author — its id
+ * is synthetic, so the "wip/" prefix is a keying device and not an org, and
+ * `skillNamespace` would otherwise surface it as one. */
+export function skillAuthorLabel(m: ModelItem): string {
+  if (isWipSkillId(m.id)) return "Coming soon";
+  return skillNamespace(m) ?? "local checkpoint";
+}
+
 /** MINE when the skill is in the user's namespace (or a bare local run they own);
  * MAKERMODS for the makermods org; COMMUNITY otherwise. Author == the namespace,
  * matched case-insensitively (mirrors DatasetInfoCard's useCanEditHub). */
@@ -148,7 +156,7 @@ export interface SkillCardProps {
  * Click opens the skill detail dialog.
  */
 const SkillCard: React.FC<SkillCardProps> = ({ model, badge, onOpen }) => {
-  const ns = skillNamespace(model);
+  const author = skillAuthorLabel(model);
   const policy = model.policy_type
     ? policyTypeDisplayName(model.policy_type)
     : null;
@@ -181,7 +189,7 @@ const SkillCard: React.FC<SkillCardProps> = ({ model, badge, onOpen }) => {
           <SkillBadgePill badge={badge} />
         </div>
         <span className="truncate font-mono text-[11px] text-muted-foreground">
-          {ns ?? "local checkpoint"}
+          {author}
         </span>
         <div className="mt-auto flex flex-wrap gap-1.5 pt-1">
           {policy && <Stat>{policy}</Stat>}
