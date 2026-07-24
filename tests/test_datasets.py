@@ -1593,6 +1593,109 @@ def test_list_episode_summaries_returns_none_when_hub_fetch_fails(tmp_lerobot_ho
         assert ds.list_episode_summaries("alice/no_video") is None
 
 
+def test_get_episode_video_path_local_unchanged(tmp_lerobot_home: Path) -> None:
+    from makerlab import datasets as ds
+
+    d = _write_info(
+        tmp_lerobot_home,
+        "alice/local",
+        {"features": {"observation.images.front": {"dtype": "video"}}},
+    )
+    episodes_dir = d / "meta" / "episodes" / "chunk-000"
+    episodes_dir.mkdir(parents=True)
+    pq.write_table(
+        pa.table(
+            {
+                "episode_index": [0],
+                "videos/observation.images.front/chunk_index": [0],
+                "videos/observation.images.front/file_index": [0],
+            }
+        ),
+        episodes_dir / "file-000.parquet",
+    )
+    video_dir = d / "videos" / "observation.images.front" / "chunk-000"
+    video_dir.mkdir(parents=True)
+    (video_dir / "file-000.mp4").write_bytes(b"fake mp4")
+
+    with patch("makerlab.datasets._ensure_hub_episodes_root") as hub_fetch:
+        result = ds.get_episode_video_path("alice/local", 0, "front")
+
+    hub_fetch.assert_not_called()
+    assert result == video_dir / "file-000.mp4"
+
+
+def test_get_episode_video_path_hub_fallback_downloads_one_chunk(
+    tmp_lerobot_home: Path, tmp_path: Path
+) -> None:
+    """No local copy: fetches ONLY the one video chunk file the episode/camera
+    needs, via hf_hub_download — not the whole dataset."""
+    from makerlab import datasets as ds
+
+    snapshot = tmp_path / "snapshot"
+    (snapshot / "meta").mkdir(parents=True)
+    (snapshot / "meta" / "info.json").write_text(
+        json.dumps({"features": {"observation.images.front": {"dtype": "video"}}})
+    )
+    episodes_dir = snapshot / "meta" / "episodes" / "chunk-000"
+    episodes_dir.mkdir(parents=True)
+    pq.write_table(
+        pa.table(
+            {
+                "episode_index": [0],
+                "videos/observation.images.front/chunk_index": [0],
+                "videos/observation.images.front/file_index": [0],
+            }
+        ),
+        episodes_dir / "file-000.parquet",
+    )
+    downloaded_video = snapshot / "videos" / "observation.images.front" / "chunk-000" / "file-000.mp4"
+    downloaded_video.parent.mkdir(parents=True)
+    downloaded_video.write_bytes(b"fake mp4")
+
+    with (
+        patch("makerlab.datasets._ensure_hub_episodes_root", return_value=snapshot),
+        patch("makerlab.datasets.hf_hub_download", return_value=str(downloaded_video)) as dl,
+    ):
+        result = ds.get_episode_video_path("alice/hub_only", 0, "front")
+
+    dl.assert_called_once_with(
+        "alice/hub_only",
+        filename="videos/observation.images.front/chunk-000/file-000.mp4",
+        repo_type="dataset",
+    )
+    assert result == downloaded_video
+
+
+def test_get_episode_video_path_hub_fallback_degrades_on_download_failure(
+    tmp_lerobot_home: Path, tmp_path: Path
+) -> None:
+    from makerlab import datasets as ds
+
+    snapshot = tmp_path / "snapshot"
+    (snapshot / "meta").mkdir(parents=True)
+    (snapshot / "meta" / "info.json").write_text(
+        json.dumps({"features": {"observation.images.front": {"dtype": "video"}}})
+    )
+    episodes_dir = snapshot / "meta" / "episodes" / "chunk-000"
+    episodes_dir.mkdir(parents=True)
+    pq.write_table(
+        pa.table(
+            {
+                "episode_index": [0],
+                "videos/observation.images.front/chunk_index": [0],
+                "videos/observation.images.front/file_index": [0],
+            }
+        ),
+        episodes_dir / "file-000.parquet",
+    )
+
+    with (
+        patch("makerlab.datasets._ensure_hub_episodes_root", return_value=snapshot),
+        patch("makerlab.datasets.hf_hub_download", side_effect=RuntimeError("network")),
+    ):
+        assert ds.get_episode_video_path("alice/hub_only", 0, "front") is None
+
+
 # ---------------------------------------------------------------------------
 # _fan_out_hub_authors — the OVERALL fan-out deadline actually bounds a hung
 # author. The shared HfApi httpx client has timeout=None, so this budget is the

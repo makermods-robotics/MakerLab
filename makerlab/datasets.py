@@ -773,11 +773,17 @@ def get_episode_video_path(repo_id: str, episode_index: int, camera: str) -> Pat
     """The mp4 file backing one camera's footage for one episode.
 
     None if `repo_id`/`episode_index`/`camera` doesn't resolve, the dataset
-    isn't the v3.0 parquet layout, or the file is missing on disk. `camera` is
-    checked against the dataset's own camera list (from meta/info.json) before
-    it's used to build a path, so it can never point outside the videos dir.
+    isn't the v3.0 parquet layout, or the file is missing/unfetchable.
+    `camera` is checked against the dataset's own camera list (from
+    meta/info.json) before it's used to build a path, so it can never point
+    outside the videos dir. A repo with no local copy falls back to
+    downloading just this one video chunk from the Hub (see
+    _ensure_hub_episodes_root) when the dataset is confirmed to have video.
     """
     path = _resolve_local_dataset_path(repo_id)
+    is_hub = path is None
+    if is_hub:
+        path = _ensure_hub_episodes_root(repo_id)
     if path is None:
         return None
     try:
@@ -798,13 +804,17 @@ def get_episode_video_path(repo_id: str, episode_index: int, camera: str) -> Pat
     if row is None or row.get(chunk_col) is None or row.get(file_col) is None:
         return None
 
-    video_path = (
-        path
-        / "videos"
-        / video_key
-        / f"chunk-{int(row[chunk_col]):03d}"
-        / f"file-{int(row[file_col]):03d}.mp4"
+    rel_video_path = (
+        Path("videos") / video_key / f"chunk-{int(row[chunk_col]):03d}" / f"file-{int(row[file_col]):03d}.mp4"
     )
+    if is_hub:
+        try:
+            return Path(hf_hub_download(repo_id, filename=str(rel_video_path), repo_type="dataset"))
+        except Exception as exc:
+            logger.info("hub video chunk fetch for %s failed: %s", repo_id, exc)
+            return None
+
+    video_path = path / rel_video_path
     return video_path if video_path.is_file() else None
 
 
