@@ -328,6 +328,19 @@ def test_datasets_info_endpoint(client: TestClient, tmp_lerobot_home: Path) -> N
     assert missing.status_code == 404
 
 
+def test_video_camera_names_filters_by_dtype() -> None:
+    from makerlab.datasets import _video_camera_names
+
+    features = {
+        "observation.images.front": {"dtype": "video"},
+        "observation.images.raw": {"dtype": "image"},
+        "observation.images.wrist": {"dtype": "video"},
+        "observation.state": {"dtype": "float32"},
+        "action": {"dtype": "float32"},
+    }
+    assert _video_camera_names(features) == ["front", "wrist"]
+
+
 # --- Hub sync status --------------------------------------------------------
 
 
@@ -1281,9 +1294,9 @@ def test_get_hub_dataset_info_maps_meta(tmp_path: Path) -> None:
             "fps": 30,
             "robot_type": "so101_follower",
             "features": {
-                "observation.images.front": {},
-                "observation.images.wrist": {},
-                "observation.state": {},
+                "observation.images.front": {"dtype": "video"},
+                "observation.images.wrist": {"dtype": "video"},
+                "observation.state": {"dtype": "float32"},
             },
         },
     )
@@ -1305,6 +1318,36 @@ def test_get_hub_dataset_info_maps_meta(tmp_path: Path) -> None:
         "size_bytes": None,
         "source": "hub",
     }
+
+
+def test_get_hub_dataset_info_excludes_non_video_camera_features(tmp_path: Path) -> None:
+    """A camera-prefixed feature that isn't dtype == "video" (e.g. raw stored
+    images) has no mp4 chunk for this app's video pipeline to serve, so it's
+    excluded from `cameras` — the same field the Hub listing filter and viewer
+    gate both key off."""
+    from makerlab import datasets as ds
+
+    _clear_hub_dataset_info_cache()
+    meta = _write_hub_meta(
+        tmp_path,
+        {
+            "total_episodes": 4,
+            "total_frames": 100,
+            "fps": 30,
+            "features": {
+                "observation.images.front": {"dtype": "image"},
+                "observation.state": {"dtype": "float32"},
+            },
+        },
+    )
+    with (
+        patch("makerlab.datasets.hf_hub_offline", return_value=False),
+        patch("makerlab.datasets.hf_hub_download", return_value=str(meta)),
+    ):
+        row = ds.get_hub_dataset_info("alice/image_only")
+
+    assert row is not None
+    assert row["cameras"] == []
 
 
 def test_get_hub_dataset_info_offline_returns_none() -> None:

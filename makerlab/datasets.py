@@ -47,6 +47,18 @@ logger = logging.getLogger(__name__)
 
 CAMERA_FEATURE_PREFIX = "observation.images."
 
+
+def _video_camera_names(features: dict[str, Any]) -> list[str]:
+    """Camera feature names actually backed by an mp4 (dtype == "video"), not
+    just any observation.images.* key. A raw-image (dtype == "image") camera
+    feature has no video chunk file for this app's video-serving pipeline to
+    point a <video> tag at, so it doesn't count as "viewable"."""
+    return [
+        key[len(CAMERA_FEATURE_PREFIX) :]
+        for key, spec in features.items()
+        if key.startswith(CAMERA_FEATURE_PREFIX) and isinstance(spec, dict) and spec.get("dtype") == "video"
+    ]
+
 # Errors a per-author / per-listing Hub call may raise that must NOT bubble up
 # and 500 the endpoint. HfHubHTTPError covers HTTP-status failures; httpx.HTTPError
 # is the base of ConnectError / TimeoutException / TransportError, which is what a
@@ -852,7 +864,7 @@ def get_hub_dataset_info(repo_id: str) -> dict[str, Any] | None:
         return None
 
     features = info.get("features") or {}
-    cameras = [key[len(CAMERA_FEATURE_PREFIX) :] for key in features if key.startswith(CAMERA_FEATURE_PREFIX)]
+    cameras = _video_camera_names(features)
 
     row: dict[str, Any] = {
         "repo_id": repo_id,
