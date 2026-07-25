@@ -33,6 +33,9 @@ interface JobsDataValue {
   localJobs: JobRecord[];
   trackedCloudJobs: JobRecord[];
   importedJobs: JobRecord[];
+  /** Successful trainings (local or cloud) with a checkpoint and no resumer —
+   * surfaced in the Models library so a finished run is deployable in place. */
+  deployableModels: JobRecord[];
   /** Hub jobs with no mirroring local record. */
   untrackedHubJobs: HubJob[];
   /** Uploaded hub model repos no job (cloud run or import) tracks. */
@@ -329,12 +332,30 @@ export const JobsDataProvider: React.FC<{ children: React.ReactNode }> = ({
     [byId],
   );
 
+  // Finished trainings that are also deployable models: a successful run
+  // (local or cloud) that produced a checkpoint and hasn't been superseded by
+  // a resumer. The run *is* the model, so its real JobRecord is surfaced in
+  // the Models library; the card gates its affordances off the record's own
+  // runner, so no separate record is minted.
+  const deployableModels = useMemo(
+    () =>
+      jobs.filter(
+        (j) =>
+          (j.runner === "local" || j.runner === "hf_cloud") &&
+          j.state === "done" &&
+          j.checkpoint_count > 0 &&
+          !supersededIds.has(j.id),
+      ),
+    [jobs, supersededIds],
+  );
+
   const value = useMemo(
     () => ({
       jobs,
       localJobs,
       trackedCloudJobs,
       importedJobs,
+      deployableModels,
       untrackedHubJobs,
       untrackedHubModels,
       supersededIds,
@@ -353,6 +374,7 @@ export const JobsDataProvider: React.FC<{ children: React.ReactNode }> = ({
       localJobs,
       trackedCloudJobs,
       importedJobs,
+      deployableModels,
       untrackedHubJobs,
       untrackedHubModels,
       supersededIds,

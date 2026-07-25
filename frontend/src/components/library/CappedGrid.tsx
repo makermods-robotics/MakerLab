@@ -19,9 +19,10 @@ export const GRID_MIN_H = "min-h-[18.875rem]";
 /**
  * The shared library grid, capped at one row. Every studio library (datasets,
  * training jobs, models) renders one row of two cards by default; anything past
- * that stays hidden behind a "Show all" toggle. The row is always reserved
- * (fixed row height, blank cells when there aren't enough cards) so the three
- * panels' libraries keep one uniform height however large a collection grows.
+ * that stays hidden behind a "Show all" toggle. By default the row is reserved
+ * at a fixed height (blank cells when there aren't enough cards) so datasets
+ * and jobs keep one uniform height however large a collection grows. Models
+ * opts into `flexHeight` instead, letting its taller cards size to content.
  */
 const CappedGrid: React.FC<{
   /** Pre-keyed cards, already sorted newest-first by the caller. */
@@ -30,6 +31,13 @@ const CappedGrid: React.FC<{
    * libraries). False for nested grids (e.g. Untracked) that should hug
    * their content. */
   reserveRows?: boolean;
+  /** Size rows to their content instead of the fixed 16.5rem block. Models
+   * opts in because its cards render every affordance and must not clip;
+   * datasets/jobs stay fixed (the default) so their libraries keep a uniform
+   * height. In flexible mode the fixed-height reserve is skipped — each row
+   * grows to its tallest card (items-stretch still equalizes cards within a
+   * row); the footer-slot reserve (spacer/Show-all) is unaffected. */
+  flexHeight?: boolean;
   /** Hold the 30px footer slot with an invisible spacer when there's no
    * "Show all" — keeps every library's total height identical. False when
    * the caller renders its own footer row in that slot (jobs' Untracked). */
@@ -43,6 +51,7 @@ const CappedGrid: React.FC<{
   items,
   reserveRows = true,
   footerSpacer = true,
+  flexHeight = false,
   expanded: expandedProp,
   onExpandedChange,
 }) => {
@@ -58,11 +67,21 @@ const CappedGrid: React.FC<{
   return (
     <div className="space-y-2">
       <div
-        className={cn(
-          LIBRARY_GRID,
-          "auto-rows-[16.5rem]",
-          reserveRows && "grid-rows-[16.5rem]",
-        )}
+        className={LIBRARY_GRID}
+        // Row sizing is a runtime choice, so drive it inline rather than via a
+        // Tailwind arbitrary class. Fixed mode (default) reproduces the former
+        // auto-rows-[16.5rem] / grid-rows-[16.5rem] classes exactly, keeping
+        // the uniform reserved block datasets/jobs share. Flexible mode sizes
+        // rows to content (auto) and skips the fixed reserve so tall cards
+        // never clip — items-stretch still equalizes cards within a row.
+        style={
+          flexHeight
+            ? { gridAutoRows: "auto" }
+            : {
+                gridAutoRows: "16.5rem",
+                ...(reserveRows ? { gridTemplateRows: "16.5rem" } : {}),
+              }
+        }
       >
         {shown}
       </div>
