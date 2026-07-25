@@ -259,8 +259,9 @@ export const JobsDataProvider: React.FC<{ children: React.ReactNode }> = ({
     () => jobs.filter((j) => j.runner === "imported"),
     [jobs],
   );
-  // Hub jobs already mirrored by a local JobRecord get their richer card via
-  // trackedCloudJobs; everything else from the hub gets a plain HubJobCard.
+  // Hub jobs already mirrored by a local JobRecord are listed from
+  // trackedCloudJobs (with dataset/progress); everything else from the hub is
+  // a thin Hub-only row in the run history.
   const trackedHfJobIds = useMemo(
     () =>
       new Set(

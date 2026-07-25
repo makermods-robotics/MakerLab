@@ -47,12 +47,7 @@ import { JobRecord, getJob, jobDisplayName, listJobs } from "@/lib/jobsApi";
 import { ModelItem, getModels } from "@/lib/modelsApi";
 import { findJobForModel, importSourceForModel } from "@/lib/inferenceLaunch";
 import CheckpointDropdown from "@/components/jobs/CheckpointDropdown";
-import ModelsLibrary from "@/components/jobs/ModelsLibrary";
-import {
-  LibrarySection,
-  PanelHeader,
-  SLIDE,
-} from "@/components/studio/panel/primitives";
+import { PanelHeader, SLIDE } from "@/components/studio/panel/primitives";
 import {
   AvailableCamera,
   useAvailableCameras,
@@ -860,8 +855,8 @@ const DeployPanel: React.FC = () => {
         </CollapsibleContent>
       </Collapsible>
 
-      {/* Actions — pinned directly above the model library. Side by side so
-          the row sits level with Collect's and Train's single Start. -------- */}
+      {/* Actions — pinned to the panel foot. Side by side so the row sits
+          level with Collect's and Train's single Start. ------------------- */}
       <div className="mt-auto flex gap-2 pt-2">
         <Button
           onClick={handleStart}
@@ -882,19 +877,10 @@ const DeployPanel: React.FC = () => {
         </Button>
       </div>
 
-      {/* Model / policy library — imported models + uploaded Hub repos.
-          Picking a card selects it as the skill above (step null → the
-          checkpoint loader falls back to the latest). mt-0 keeps it glued to
-          the actions block above, which carries the panel's mt-auto. */}
-      <LibrarySection className="mt-0">
-        <ModelsLibrary
-          onPick={(job, step) => {
-            setSelectedStep(step);
-            setSelectedJob(job);
-            setSelectedModelId(job.id);
-          }}
-        />
-      </LibrarySection>
+      {/* No library here: the model library moved to the Train panel (training
+          is what produces models, and a model card carries every follow-up
+          action). Deploy is pick-and-launch — a model card's Run arrives as a
+          deploy prefill, which the effect above resolves into the picker. */}
     </div>
   );
 };

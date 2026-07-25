@@ -9,6 +9,7 @@ import { cn } from "@/lib/utils";
 import LibraryToolbar from "@/components/library/LibraryToolbar";
 import CappedGrid, { GRID_MIN_H } from "@/components/library/CappedGrid";
 import LibraryHeader from "@/components/library/LibraryHeader";
+import LibrarySectionHeader from "@/components/library/LibrarySectionHeader";
 import { SLIDE } from "@/components/studio/panel/primitives";
 import { useStudio } from "@/contexts/StudioContext";
 import { useInferenceLaunch } from "@/hooks/useInferenceLaunch";
@@ -18,33 +19,41 @@ import HubModelCard from "./HubModelCard";
 import ImportModelModal from "./ImportModelModal";
 import { useJobsData } from "./JobsDataContext";
 
-/** How a model got here: everything, trained here (a finished in-app run),
- * imported (local folder or Hub pull), or uploaded Hub repos no job tracks. */
-type ModelsFilter = "all" | "trained" | "imported" | "uploaded";
-
-const FILTERS: Array<{ key: ModelsFilter; label: string }> = [
-  { key: "all", label: "All" },
-  { key: "trained", label: "Trained" },
-  { key: "imported", label: "Imported" },
-  { key: "uploaded", label: "Uploaded" },
-];
-
 interface ModelsLibraryProps {
   /** Select this model (job record + optional checkpoint step) as the skill
-   * to deploy — wired to the Deploy panel's picker state. */
+   * to deploy — the Train panel hands it to the Deploy panel as a prefill. */
   onPick: (job: JobRecord, step: number | null) => void;
+  /** Optional controlled fold state, so the hosting panel can collapse the
+   * library while its own form is open (the Train panel does; omit for the
+   * self-managed default). */
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
 }
 
 /**
- * Model/policy library for the studio Deploy panel: search + origin filter
- * over a three-up grid of finished trainings (a successful run is itself a
- * deployable model), imported models, and uploaded hub repos no job tracks
- * (a model artifact, not a run — so it lives here, not under the Train panel's
- * jobs). Owns the Import button; rendered even when empty so the
- * entry point is always visible. Card Run actions select the model in the
- * Deploy panel instead of opening the legacy modal.
+ * Model/policy library for the studio Train panel: a search box over finished
+ * trainings (a successful run is itself a deployable model), imported models,
+ * and uploaded hub repos no job tracks. It sits under Train — training is what
+ * produces models, and a model card carries every follow-up action (Run /
+ * Resume / Fine-tune / Download) — while Deploy stays pick-and-launch. Owns
+ * the Import button; rendered even when empty so the entry point is always
+ * visible. Card Run actions hand the model to the Deploy panel via `onPick`
+ * rather than opening the legacy modal.
+ *
+ * Two independently collapsible sections, split on the seam the data actually
+ * has — the component boundary. "Your models" is everything backed by a job
+ * record (trained here or imported), so every one of them renders a ModelCard
+ * with the full affordance set; "On Hub, not imported" is the Hub repos with
+ * no local record, which render the thinner HubModelCard (its Run/Fine-tune
+ * lazily imports the repo first). Provenance is *not* the split: ModelCard
+ * already prints Local / Cloud / Imported as an origin chip, so filtering on
+ * it would only hide cards by something visible on their faces.
  */
-const ModelsLibrary: React.FC<ModelsLibraryProps> = ({ onPick }) => {
+const ModelsLibrary: React.FC<ModelsLibraryProps> = ({
+  onPick,
+  open,
+  onOpenChange,
+}) => {
   const { openStudio } = useStudio();
   const {
     importedJobs,
@@ -59,10 +68,21 @@ const ModelsLibrary: React.FC<ModelsLibraryProps> = ({ onPick }) => {
   // untracked Hub repo resolves to a pseudo-job exactly as everywhere else.
   const { importSource } = useInferenceLaunch();
 
-  const [libraryOpen, setLibraryOpen] = useState(true);
+  // Uncontrolled by default; a controlled `open` prop wins when the host panel
+  // needs to fold the library (Train does while its form is open).
+  const [libraryOpenState, setLibraryOpenState] = useState(true);
+  const libraryOpen = open ?? libraryOpenState;
+  const setLibraryOpen = (next: boolean) => {
+    onOpenChange?.(next);
+    if (open === undefined) setLibraryOpenState(next);
+  };
   const [importModalOpen, setImportModalOpen] = useState(false);
   const [search, setSearch] = useState("");
-  const [filter, setFilter] = useState<ModelsFilter>("all");
+  // "Your models" holds everything actionable, so it opens by default; the
+  // Hub repos nothing here tracks are the rare bucket and fold away, matching
+  // how the run history hides its untracked Hub jobs.
+  const [ownedOpen, setOwnedOpen] = useState(true);
+  const [hubOpen, setHubOpen] = useState(false);
 
   const query = search.trim().toLowerCase();
   const matchesQuery = (text: string | null | undefined) =>
@@ -71,46 +91,39 @@ const ModelsLibrary: React.FC<ModelsLibraryProps> = ({ onPick }) => {
   // A finished run is findable by the same handles as an import.
   const visibleTrained = useMemo(
     () =>
-      filter === "imported" || filter === "uploaded"
-        ? []
-        : deployableModels.filter(
-            (j) =>
-              matchesQuery(j.name) ||
-              matchesQuery(j.display_name) ||
-              matchesQuery(j.hf_repo_id) ||
-              matchesQuery(j.output_dir),
-          ),
+      deployableModels.filter(
+        (j) =>
+          matchesQuery(j.name) ||
+          matchesQuery(j.display_name) ||
+          matchesQuery(j.hf_repo_id) ||
+          matchesQuery(j.output_dir),
+      ),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [deployableModels, filter, query],
+    [deployableModels, query],
   );
   // A renamed import is findable by alias, original name, repo id, or path.
   const visibleImported = useMemo(
     () =>
-      filter === "trained" || filter === "uploaded"
-        ? []
-        : importedJobs.filter(
-            (j) =>
-              matchesQuery(j.name) ||
-              matchesQuery(j.display_name) ||
-              matchesQuery(j.hf_repo_id) ||
-              matchesQuery(j.output_dir),
-          ),
+      importedJobs.filter(
+        (j) =>
+          matchesQuery(j.name) ||
+          matchesQuery(j.display_name) ||
+          matchesQuery(j.hf_repo_id) ||
+          matchesQuery(j.output_dir),
+      ),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [importedJobs, filter, query],
+    [importedJobs, query],
   );
   const visibleUploaded = useMemo(
-    () =>
-      filter === "trained" || filter === "imported"
-        ? []
-        : untrackedHubModels.filter((m) => matchesQuery(m.repo_id)),
+    () => untrackedHubModels.filter((m) => matchesQuery(m.repo_id)),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [untrackedHubModels, filter, query],
+    [untrackedHubModels, query],
   );
 
   const count =
     deployableModels.length + importedJobs.length + untrackedHubModels.length;
-  const visibleCount =
-    visibleTrained.length + visibleImported.length + visibleUploaded.length;
+  const ownedCount = visibleTrained.length + visibleImported.length;
+  const visibleCount = ownedCount + visibleUploaded.length;
 
   // Untracked hub model actions: register the repo as an imported pseudo-job
   // first (the proven lazy-import path), then either select it for deployment
@@ -166,13 +179,12 @@ const ModelsLibrary: React.FC<ModelsLibraryProps> = ({ onPick }) => {
           </div>
         ) : (
           <div className="space-y-3">
+            {/* Search only — the sections carry the split the filter pills
+                used to, and provenance is already on every card's face. */}
             <LibraryToolbar
               query={search}
               onQueryChange={setSearch}
               searchPlaceholder="Search models"
-              filters={FILTERS}
-              filter={filter}
-              onFilterChange={setFilter}
             />
             {visibleCount === 0 ? (
               <p
@@ -184,60 +196,88 @@ const ModelsLibrary: React.FC<ModelsLibraryProps> = ({ onPick }) => {
                 No models match.
               </p>
             ) : (
-              // Imported and uploaded cards merged newest-first (import time
-              // vs Hub last-modified); two rows by default, rest behind
-              // Show all.
-              <CappedGrid
-                // Model cards render every affordance (Run/Resume/Fine-tune/
-                // Download/step-picker) and must not clip — let rows size to
-                // content rather than the fixed 16.5rem datasets/jobs use.
-                flexHeight
-                items={[
-                  ...visibleTrained.map((job) => ({
-                    time: (job.started_at ?? 0) * 1000,
-                    node: (
-                      <ModelCard
-                        key={job.id}
-                        model={job}
-                        onStop={stop}
-                        onDelete={remove}
-                        onPlay={(j, step) => onPick(j, step)}
-                        onRenamed={refresh}
-                        ancestors={ancestorsOf(job)}
+              // A section with nothing the search matched drops out rather
+              // than showing an empty fold; if both drop out, the "No models
+              // match" line above stands in for the whole library.
+              <div className="space-y-3">
+                {ownedCount > 0 ? (
+                  <Collapsible
+                    open={ownedOpen}
+                    onOpenChange={setOwnedOpen}
+                    className="space-y-1"
+                  >
+                    <LibrarySectionHeader
+                      title="Imported & trained"
+                      count={ownedCount}
+                      open={ownedOpen}
+                    />
+                    <CollapsibleContent className={cn(SLIDE, "space-y-1")}>
+                      {/* Trained and imported cards merged newest-first by
+                          start/import time; one row by default, rest behind
+                          Show all. */}
+                      <CappedGrid
+                        // Model cards render every affordance (Run/Resume/
+                        // Fine-tune/Download/step-picker) and must not clip —
+                        // let rows size to content rather than the fixed
+                        // 16.5rem datasets/jobs use.
+                        flexHeight
+                        items={[...visibleTrained, ...visibleImported]
+                          .sort(
+                            (a, b) => (b.started_at ?? 0) - (a.started_at ?? 0),
+                          )
+                          .map((job) => (
+                            <ModelCard
+                              key={job.id}
+                              model={job}
+                              onStop={stop}
+                              onDelete={remove}
+                              onPlay={(j, step) => onPick(j, step)}
+                              onRenamed={refresh}
+                              ancestors={ancestorsOf(job)}
+                            />
+                          ))}
                       />
-                    ),
-                  })),
-                  ...visibleImported.map((job) => ({
-                    time: (job.started_at ?? 0) * 1000,
-                    node: (
-                      <ModelCard
-                        key={job.id}
-                        model={job}
-                        onStop={stop}
-                        onDelete={remove}
-                        onPlay={(j, step) => onPick(j, step)}
-                        onRenamed={refresh}
-                        ancestors={ancestorsOf(job)}
+                    </CollapsibleContent>
+                  </Collapsible>
+                ) : null}
+
+                {visibleUploaded.length > 0 ? (
+                  <Collapsible
+                    open={hubOpen}
+                    onOpenChange={setHubOpen}
+                    className="space-y-1"
+                  >
+                    <LibrarySectionHeader
+                      title="On Hub, not imported"
+                      count={visibleUploaded.length}
+                      open={hubOpen}
+                    />
+                    <CollapsibleContent className={cn(SLIDE, "space-y-1")}>
+                      <CappedGrid
+                        flexHeight
+                        items={[...visibleUploaded]
+                          .sort(
+                            (a, b) =>
+                              (b.last_modified
+                                ? Date.parse(b.last_modified) || 0
+                                : 0) -
+                              (a.last_modified
+                                ? Date.parse(a.last_modified) || 0
+                                : 0),
+                          )
+                          .map((model) => (
+                            <HubModelCard
+                              key={model.repo_id}
+                              model={model}
+                              onDeleted={refresh}
+                              onAction={handleHubAction}
+                            />
+                          ))}
                       />
-                    ),
-                  })),
-                  ...visibleUploaded.map((model) => ({
-                    time: model.last_modified
-                      ? Date.parse(model.last_modified) || 0
-                      : 0,
-                    node: (
-                      <HubModelCard
-                        key={model.repo_id}
-                        model={model}
-                        onDeleted={refresh}
-                        onAction={handleHubAction}
-                      />
-                    ),
-                  })),
-                ]
-                  .sort((a, b) => b.time - a.time)
-                  .map((e) => e.node)}
-              />
+                    </CollapsibleContent>
+                  </Collapsible>
+                ) : null}
+              </div>
             )}
           </div>
         )}
