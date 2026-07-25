@@ -41,7 +41,8 @@ import TrainingConfigurator, {
   FinetuneSeed,
 } from "@/components/training/TrainingConfigurator";
 import TrainingJobDialog from "@/components/training/TrainingJobDialog";
-import JobsLibrary from "@/components/jobs/JobsLibrary";
+import JobsHistory from "@/components/jobs/JobsHistory";
+import ModelsLibrary from "@/components/jobs/ModelsLibrary";
 import {
   LibrarySection,
   PanelEntryControl,
@@ -104,24 +105,32 @@ const DatasetResultRow: React.FC<{
 /**
  * Studio panel 2 · Train. Mirrors the Collect panel's progressive disclosure:
  * a "Start a new training" button slides the full configuration open in place
- * (base skill → dataset → the shared training configurator), folding the
- * training-jobs library down to its header while the form is open. Policy is
- * chosen inside Run configuration — there is no separate policy grid.
+ * (base skill → dataset → the shared training configurator), folding the panel
+ * foot — the run history and the model library — down to their headers while
+ * the form is open. Policy is chosen inside Run configuration — there is no
+ * separate policy grid.
  */
 const TrainPanel: React.FC = () => {
-  const { trainPrefill, clearTrainPrefill, monitorJobId, closeJobMonitor } =
-    useStudio();
+  const {
+    trainPrefill,
+    clearTrainPrefill,
+    monitorJobId,
+    closeJobMonitor,
+    openStudio,
+  } = useStudio();
   const { baseUrl, fetchWithHeaders } = useApi();
   const { toast } = useToast();
   const { datasets, refresh: refreshDatasets } = useDatasets();
   const { selectedDataset, setSelectedDataset } = useSelectedDataset();
 
-  // The new-training form slides open in place; the jobs library folds to its
-  // header while the form is open (still expandable by hand).
+  // The new-training form slides open in place; the run history and the model
+  // library both fold to their headers while the form is open (still
+  // expandable by hand).
   const [formOpen, setFormOpen] = useState(false);
   const [jobsOpen, setJobsOpen] = useState(true);
+  const [modelsOpen, setModelsOpen] = useState(true);
 
-  // Pinned actions slot above the jobs library. While the form is open the
+  // Pinned actions slot above the panel foot. While the form is open the
   // configurator portals its fully-gated Start button here; closed, a
   // disabled stand-in keeps the action visible at the same spot.
   const [actionsEl, setActionsEl] = useState<HTMLDivElement | null>(null);
@@ -129,6 +138,7 @@ const TrainPanel: React.FC = () => {
   const toggleForm = (open: boolean) => {
     setFormOpen(open);
     setJobsOpen(!open);
+    setModelsOpen(!open);
   };
 
   // ── Base skill (fine-tune) ────────────────────────────────────────────────
@@ -281,6 +291,7 @@ const TrainPanel: React.FC = () => {
     }
     setFormOpen(true);
     setJobsOpen(false);
+    setModelsOpen(false);
     clearTrainPrefill();
   }, [trainPrefill, clearTrainPrefill, resolveFinetune]);
 
@@ -500,11 +511,24 @@ const TrainPanel: React.FC = () => {
         <div ref={setActionsEl} className={formOpen ? undefined : "hidden"} />
       </div>
 
-      {/* Training jobs library — local + online runs as cards, pinned to the
-          panel foot like Collect's datasets and Deploy's models. mt-0 keeps it
-          glued to the actions slot above, which carries the panel's mt-auto. */}
-      <LibrarySection className="mt-0">
-        <JobsLibrary open={jobsOpen} onOpenChange={setJobsOpen} />
+      {/* Panel foot: the run history (events — a compact table) above the
+          model library (artifacts — the actionable cards). mt-0 keeps the
+          block glued to the actions slot above, which carries the panel's
+          mt-auto. */}
+      <LibrarySection className="mt-0 space-y-5">
+        <JobsHistory open={jobsOpen} onOpenChange={setJobsOpen} />
+        {/* Models live under Train because training is what produces them.
+            Running one hands the model to the Deploy panel (same prefill the
+            job cards used), so Deploy stays pick-and-launch. */}
+        <ModelsLibrary
+          open={modelsOpen}
+          onOpenChange={setModelsOpen}
+          onPick={(job, step) =>
+            openStudio("deploy", {
+              deploy: { source: "job", id: job.id, step: step ?? undefined },
+            })
+          }
+        />
       </LibrarySection>
 
       {/* Job monitor as a dialog over the studio (same pattern as Collect's

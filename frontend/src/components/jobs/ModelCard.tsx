@@ -483,12 +483,14 @@ const ModelCard: React.FC<Props> = ({
       ? `${jobDisplayName(entry.job)} · ${stepLabel(entry.ckpt.step)}`
       : stepLabel(entry.ckpt.step);
 
-  // Metadata block (same format as the dataset/job cards). The step counter —
-  // one of the affordances the redesign moves onto the model — is no longer
-  // duplicated here: the checkpoint-selector dropdown below is now the single
-  // step indicator, so Policy / Dataset are the only labelled facts in this
-  // block. (The step target still lives on `model.config.steps`; it's just no
-  // longer rendered as a separate row.)
+  // Metadata block (same format as the dataset/job cards). Steps pairs the
+  // selected checkpoint with the run's step TARGET — the dropdown alone says
+  // where the model stopped but never what it was aiming at, so a card can't
+  // otherwise tell "20,000 of 20,000" from "20,000 of 200,000". Step and target
+  // are read off the run that OWNS the selected checkpoint (which may be an
+  // ancestor), so the two halves of the ratio always belong together.
+  // Imported models carry a step-0 sentinel and no target, so they get no row
+  // rather than a dishonest "0 / 0".
   const metaRows: Array<[string, string]> = [];
   if (model.config?.policy_type)
     metaRows.push(["Policy", model.config.policy_type]);
@@ -497,6 +499,14 @@ const ModelCard: React.FC<Props> = ({
     model.config.dataset_repo_id !== "(imported)"
   )
     metaRows.push(["Dataset", model.config.dataset_repo_id]);
+  const stepTarget = selectedJob.config?.steps ?? 0;
+  if (stepTarget > 0)
+    metaRows.push([
+      "Steps",
+      selectedStep != null && selectedStep > 0
+        ? `${selectedStep.toLocaleString()} / ${stepTarget.toLocaleString()}`
+        : stepTarget.toLocaleString(),
+    ]);
 
   return (
     <Card className="@container bg-card border-border rounded-md transition-colors h-full">
