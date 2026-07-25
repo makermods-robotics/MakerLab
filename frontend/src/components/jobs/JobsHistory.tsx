@@ -314,11 +314,14 @@ interface JobsHistoryProps {
  * recent below, the rest behind "Show all".
  *
  * Two independently collapsible sections, split on the axis the data actually
- * has — "This machine" is every run with a local record (local *and* the cloud
- * runs MakerLab launched: the record lives here, and the row's Where column
- * names the flavor), "Cloud GPU on Hub" is the Hub jobs nothing here tracks —
- * so the two labels describe different things on purpose. They carry
- * genuinely different facts, so each renders its own column set.
+ * has: whether THIS install has a record of the run. "Launched from MakerLab"
+ * is every run with a local JobRecord — local runs *and* cloud runs started
+ * from here, since having launched it is what gives the row a monitor, steps,
+ * and Resume. Where the GPU actually was is orthogonal and lives in the Where
+ * column (`local` / the cloud flavor); naming the section after the machine
+ * would be wrong the moment every tracked run is a cloud run. "Other Hub jobs"
+ * is the Hub jobs nothing here tracks — they carry none of that metadata, so
+ * each section renders its own column set.
  */
 const JobsHistory: React.FC<JobsHistoryProps> = ({ open, onOpenChange }) => {
   const {
@@ -338,7 +341,7 @@ const JobsHistory: React.FC<JobsHistoryProps> = ({ open, onOpenChange }) => {
   const navigate = useNavigate();
 
   const [search, setSearch] = useState("");
-  // "This machine" holds nearly every run, so it opens by default; the
+  // "Launched from MakerLab" holds nearly every run, so it opens by default; the
   // orphan Hub bucket is the rare one and folds away, matching how the studio
   // hides untracked items elsewhere.
   const [localOpen, setLocalOpen] = useState(true);
@@ -399,7 +402,7 @@ const JobsHistory: React.FC<JobsHistoryProps> = ({ open, onOpenChange }) => {
   );
 
   // A section that gains a running job opens itself — otherwise a cloud job
-  // starting would go live inside the closed "Cloud GPU on Hub" fold. Deps
+  // starting would go live inside the closed "Other Hub jobs" fold. Deps
   // are the counts, so this fires when a run appears (including on first
   // mount) and not when the user deliberately folds the section afterwards;
   // the header's running tally keeps the run visible in that case.
@@ -548,7 +551,7 @@ const JobsHistory: React.FC<JobsHistoryProps> = ({ open, onOpenChange }) => {
                   className="space-y-1"
                 >
                   <LibrarySectionHeader
-                    title="This machine"
+                    title="Launched from MakerLab"
                     count={localRows.length}
                     open={localOpen}
                     running={localRunning.length}
@@ -589,7 +592,7 @@ const JobsHistory: React.FC<JobsHistoryProps> = ({ open, onOpenChange }) => {
                   className="space-y-1"
                 >
                   <LibrarySectionHeader
-                    title="Cloud GPU on Hub"
+                    title="Other Hub jobs"
                     count={hubRows.length}
                     open={hubOpen}
                     running={hubRunning.length}
