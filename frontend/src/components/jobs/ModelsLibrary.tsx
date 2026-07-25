@@ -13,17 +13,18 @@ import { SLIDE } from "@/components/studio/panel/primitives";
 import { useStudio } from "@/contexts/StudioContext";
 import { useInferenceLaunch } from "@/hooks/useInferenceLaunch";
 import { JobRecord } from "@/lib/jobsApi";
-import JobCard from "./JobCard";
+import ModelCard from "./ModelCard";
 import HubModelCard from "./HubModelCard";
 import ImportModelModal from "./ImportModelModal";
 import { useJobsData } from "./JobsDataContext";
 
-/** How a model got here: everything, imported (local folder or Hub pull), or
- * uploaded Hub repos no job tracks. */
-type ModelsFilter = "all" | "imported" | "uploaded";
+/** How a model got here: everything, trained here (a finished in-app run),
+ * imported (local folder or Hub pull), or uploaded Hub repos no job tracks. */
+type ModelsFilter = "all" | "trained" | "imported" | "uploaded";
 
 const FILTERS: Array<{ key: ModelsFilter; label: string }> = [
   { key: "all", label: "All" },
+  { key: "trained", label: "Trained" },
   { key: "imported", label: "Imported" },
   { key: "uploaded", label: "Uploaded" },
 ];
@@ -36,9 +37,10 @@ interface ModelsLibraryProps {
 
 /**
  * Model/policy library for the studio Deploy panel: search + origin filter
- * over a three-up grid of imported models plus uploaded hub repos no job
- * tracks (a model artifact, not a run — so it lives here, not under the Train
- * panel's jobs). Owns the Import button; rendered even when empty so the
+ * over a three-up grid of finished trainings (a successful run is itself a
+ * deployable model), imported models, and uploaded hub repos no job tracks
+ * (a model artifact, not a run — so it lives here, not under the Train panel's
+ * jobs). Owns the Import button; rendered even when empty so the
  * entry point is always visible. Card Run actions select the model in the
  * Deploy panel instead of opening the legacy modal.
  */
@@ -46,7 +48,9 @@ const ModelsLibrary: React.FC<ModelsLibraryProps> = ({ onPick }) => {
   const { openStudio } = useStudio();
   const {
     importedJobs,
+    deployableModels,
     untrackedHubModels,
+    ancestorsOf,
     refresh,
     stop,
     remove,
@@ -64,10 +68,25 @@ const ModelsLibrary: React.FC<ModelsLibraryProps> = ({ onPick }) => {
   const matchesQuery = (text: string | null | undefined) =>
     !query || (text ?? "").toLowerCase().includes(query);
 
+  // A finished run is findable by the same handles as an import.
+  const visibleTrained = useMemo(
+    () =>
+      filter === "imported" || filter === "uploaded"
+        ? []
+        : deployableModels.filter(
+            (j) =>
+              matchesQuery(j.name) ||
+              matchesQuery(j.display_name) ||
+              matchesQuery(j.hf_repo_id) ||
+              matchesQuery(j.output_dir),
+          ),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [deployableModels, filter, query],
+  );
   // A renamed import is findable by alias, original name, repo id, or path.
   const visibleImported = useMemo(
     () =>
-      filter === "uploaded"
+      filter === "trained" || filter === "uploaded"
         ? []
         : importedJobs.filter(
             (j) =>
@@ -81,15 +100,17 @@ const ModelsLibrary: React.FC<ModelsLibraryProps> = ({ onPick }) => {
   );
   const visibleUploaded = useMemo(
     () =>
-      filter === "imported"
+      filter === "trained" || filter === "imported"
         ? []
         : untrackedHubModels.filter((m) => matchesQuery(m.repo_id)),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [untrackedHubModels, filter, query],
   );
 
-  const count = importedJobs.length + untrackedHubModels.length;
-  const visibleCount = visibleImported.length + visibleUploaded.length;
+  const count =
+    deployableModels.length + importedJobs.length + untrackedHubModels.length;
+  const visibleCount =
+    visibleTrained.length + visibleImported.length + visibleUploaded.length;
 
   // Untracked hub model actions: register the repo as an imported pseudo-job
   // first (the proven lazy-import path), then either select it for deployment
@@ -167,17 +188,36 @@ const ModelsLibrary: React.FC<ModelsLibraryProps> = ({ onPick }) => {
               // vs Hub last-modified); two rows by default, rest behind
               // Show all.
               <CappedGrid
+                // Model cards render every affordance (Run/Resume/Fine-tune/
+                // Download/step-picker) and must not clip — let rows size to
+                // content rather than the fixed 16.5rem datasets/jobs use.
+                flexHeight
                 items={[
-                  ...visibleImported.map((job) => ({
+                  ...visibleTrained.map((job) => ({
                     time: (job.started_at ?? 0) * 1000,
                     node: (
-                      <JobCard
+                      <ModelCard
                         key={job.id}
-                        job={job}
+                        model={job}
                         onStop={stop}
                         onDelete={remove}
                         onPlay={(j, step) => onPick(j, step)}
                         onRenamed={refresh}
+                        ancestors={ancestorsOf(job)}
+                      />
+                    ),
+                  })),
+                  ...visibleImported.map((job) => ({
+                    time: (job.started_at ?? 0) * 1000,
+                    node: (
+                      <ModelCard
+                        key={job.id}
+                        model={job}
+                        onStop={stop}
+                        onDelete={remove}
+                        onPlay={(j, step) => onPick(j, step)}
+                        onRenamed={refresh}
+                        ancestors={ancestorsOf(job)}
                       />
                     ),
                   })),
