@@ -268,6 +268,12 @@ const EpisodeViewer: React.FC<{
         e.preventDefault();
         gotoEpisode(1);
       } else if (e.key === " " || e.code === "Space") {
+        // A focused button already activates on Space natively, and its
+        // onClick calls the same handler we'd call here (Prev/Play/Next/
+        // episode rows) — don't hijack that, or tabbing to any button in
+        // this dialog would silently turn Space into a play/pause toggle
+        // instead of activating the focused control.
+        if (target && target.tagName === "BUTTON") return;
         e.preventDefault();
         handlePlayPause();
       }
