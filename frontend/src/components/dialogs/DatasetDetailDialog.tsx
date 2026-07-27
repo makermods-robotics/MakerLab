@@ -134,14 +134,27 @@ const EpisodeViewer: React.FC<{
     const next = episodes[episodes.findIndex((e) => e.episode_index === selectedEpisode) + 1];
     if (!next) return;
     const controller = new AbortController();
-    for (const camera of cameras) {
-      fetchWithHeaders(episodeVideoUrl(baseUrl, repoId, next.episode_index, camera), {
-        headers: { Range: "bytes=0-0" },
-        signal: controller.signal,
-      }).catch(() => {});
-    }
-    getEpisodeJoints(baseUrl, fetchWithHeaders, repoId, next.episode_index, controller.signal).catch(() => {});
-    return () => controller.abort();
+    // Debounced: don't kick off a prefetch until the user has settled on
+    // this episode for a moment. Without this, rapid navigation (arrow-key
+    // taps, clicking through the list) fires — and immediately abandons via
+    // the abort below — a prefetch for every episode passed through on the
+    // way to wherever the user actually stops. The frontend abort doesn't
+    // necessarily cancel an in-flight Hub download the backend already
+    // started, so an unthrottled burst can leave several abandoned
+    // hf_hub_download calls running server-side.
+    const timer = window.setTimeout(() => {
+      for (const camera of cameras) {
+        fetchWithHeaders(episodeVideoUrl(baseUrl, repoId, next.episode_index, camera), {
+          headers: { Range: "bytes=0-0" },
+          signal: controller.signal,
+        }).catch(() => {});
+      }
+      getEpisodeJoints(baseUrl, fetchWithHeaders, repoId, next.episode_index, controller.signal).catch(() => {});
+    }, 400);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
   }, [baseUrl, fetchWithHeaders, repoId, episodes, cameras, selectedEpisode]);
 
   useEffect(() => {
