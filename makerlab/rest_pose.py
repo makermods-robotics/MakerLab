@@ -56,6 +56,37 @@ RETURN_CEILING_S = 10.0
 # the auto-calibration mixin's POSITION_TOLERANCE).
 RETURN_ARRIVE_TOLERANCE = 20
 
+# Defense in depth, independent of how the return above ended (returned /
+# settled / stalled / ceiling / cut-short): rather than an instant
+# full-torque-to-zero cut, step Torque_Limit down through several low levels
+# first. capture_rest_pose has no way to confirm the pose it snapshotted is
+# actually a physically-supported rest position — it just records wherever
+# the arm was at session start. If that assumption is ever wrong (e.g. a
+# session started mid-flight from an interrupted return), the low-torque hold
+# means an unsupported pose settles/falls slowly under gravity during it
+# instead of dropping the instant Torque_Enable flips off.
+#
+# Bench trials on one SO-101 arm joint, deliberately posed gravity-unstable:
+# a flat hold at 15% showed ZERO Present_Position drift over 10s (fully
+# rigid); an 8-level sweep (15%/10%/7%/5%/3%/2%/1%/0%, 2s each) on a
+# differently-posed trial then localized the give-way band to 3%-1%; a
+# 10s-per-level rerun of just that band showed the arm settles TWICE, not a
+# continuous fall: 3% eased it from 2667->2986 ticks then went fully rigid
+# for the remaining ~6s (new equilibrium found), 2% did NOTHING (that
+# position's required holding torque had already dropped below what even 2%
+# removes), and 1% eased it once more, 2986->3200, then rock-solid for the
+# final ~7s. 2% never contributed any movement in that trial, so it's
+# dropped — the useful band is 3% and 1%. Still a starting range from a
+# handful of hand-posed trials, not a measured physical constant — keep
+# reading Present_Position off the log to refine it further (e.g. the hold
+# duration has visible slack: both levels above plateaued well before their
+# 10s were up), and expect this to eventually collapse to one flat value
+# once confirmed across enough poses/joints.
+_TORQUE_LIMIT_REGISTER = "Torque_Limit"
+RELEASE_TAPER_SWEEP_FRACTIONS = [0.03, 0.01]
+RELEASE_TAPER_SWEEP_HOLD_S = 10.0  # per level
+RELEASE_TAPER_SAMPLE_S = 1.0  # position-log cadence within each level's hold
+
 
 def capture_rest_pose(bus) -> dict[str, int]:
     """Raw Present_Position (ticks) of every motor on one bus, or {} on failure.
@@ -144,6 +175,65 @@ def _restore_goal_velocity(bus, targets: dict[str, int], label: str = "arm") -> 
         bus.sync_write("Goal_Velocity", dict.fromkeys(targets, 0), normalize=False)
     except Exception as e:
         logger.warning(f"Could not reset the return speed cap (Goal_Velocity) for the {label}: {e}")
+
+
+def taper_torque_release(bus, label: str = "arm") -> None:
+    """Step Torque_Limit down through RELEASE_TAPER_SWEEP_FRACTIONS, holding
+    and logging Present_Position at each level.
+
+    Call right after a return_to_rest_pose attempt (any outcome) and BEFORE
+    force_disable_torque/disconnect — torque must still be enabled for the
+    sweep to mean anything. Deliberately does NOT restore Torque_Limit
+    afterward (unlike the Goal_Velocity cap _restore_goal_velocity resets
+    above): restoring it here would hand the caller's torque cut a
+    full-strength motor again, undoing the softening right before the moment
+    it exists for. A leftover low value is safe to leave — every path that
+    re-enables torque (teleoperation/recording start, rollout's preflight)
+    re-seeds Torque_Limit from Max_Torque_Limit before it matters (see
+    makerlab/motor_power.reset_torque_limit); Torque_Enable being off makes
+    Torque_Limit moot until then.
+
+    Best-effort: a bus that can't be read (already gone, comm error) skips
+    the whole sweep; a level whose write fails is logged and skipped, moving
+    on to the next (lower) level rather than aborting the sweep — the
+    caller's unconditional force_disable_torque still runs right after
+    either way. Never raises. Logs at INFO throughout (start, every level's
+    target, a Present_Position sample every RELEASE_TAPER_SAMPLE_S within
+    each level's hold, and completion) — TEMP while
+    RELEASE_TAPER_SWEEP_FRACTIONS is under bench tuning; drop to DEBUG once a
+    working range is confirmed and this collapses to one flat level.
+    """
+    motors = getattr(bus, "motors", None) or {}
+    if not motors:
+        return
+    try:
+        stock = {m: int(v) for m, v in bus.sync_read(_TORQUE_LIMIT_REGISTER, normalize=False).items()}
+    except Exception as e:
+        logger.info(f"Torque taper skipped for the {label} (could not read Torque_Limit): {e}")
+        return
+    logger.info(f"Torque taper sweep starting for the {label}: stock={stock}")
+    for fraction in RELEASE_TAPER_SWEEP_FRACTIONS:
+        targets = {m: round(limit * fraction) for m, limit in stock.items()}
+        try:
+            bus.sync_write(_TORQUE_LIMIT_REGISTER, targets, normalize=False)
+        except Exception as e:
+            logger.info(f"Torque taper sweep write failed for the {label} at {fraction:.0%} ({targets}): {e}")
+            continue
+        logger.info(f"Torque taper sweep level for the {label}: {fraction:.0%} -> Torque_Limit={targets}")
+        elapsed = 0.0
+        while elapsed < RELEASE_TAPER_SWEEP_HOLD_S:
+            step_s = min(RELEASE_TAPER_SAMPLE_S, RELEASE_TAPER_SWEEP_HOLD_S - elapsed)
+            time.sleep(step_s)
+            elapsed += step_s
+            try:
+                positions = {m: int(v) for m, v in bus.sync_read("Present_Position", normalize=False).items()}
+                logger.info(
+                    f"Torque taper sweep position for the {label} at {fraction:.0%} (+{elapsed:.1f}s): "
+                    f"{positions}"
+                )
+            except Exception as e:
+                logger.info(f"Torque taper sweep position read failed for the {label} at {fraction:.0%}: {e}")
+    logger.info(f"Torque taper sweep finished for the {label}")
 
 
 def _run_return_loop(

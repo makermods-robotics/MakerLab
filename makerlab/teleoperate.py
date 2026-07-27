@@ -28,7 +28,7 @@ from lerobot.teleoperators.so_leader import SO101Leader
 
 from .arm_identity import verify_devices
 from .motor_power import clear_goal_velocity, reset_torque_limit
-from .rest_pose import capture_rest_pose, return_to_rest_pose
+from .rest_pose import capture_rest_pose, return_to_rest_pose, taper_torque_release
 from .utils.devices import _force_close_device_resources
 from .utils.errors import classify_outcome, format_exception, friendly_hint
 from .utils.robot_factory import build_bimanual_configs, build_single_configs
@@ -238,6 +238,12 @@ def _return_one_follower_to_rest(bus, pose: dict, abort_event: threading.Event) 
     the two bimanual followers return concurrently. return_to_rest_pose never
     raises, but guard anyway so one arm's failure can never take down the
     thread (and thus block its join) before the outcome is logged.
+
+    Regardless of how the return above ended, tapers Torque_Limit down before
+    returning (see rest_pose.taper_torque_release) — defense in depth for a
+    captured pose that might not actually be a physically-supported rest
+    position, so the caller's unconditional torque-disable that follows is
+    never the very first thing to remove support from the arm.
     """
     port = getattr(bus, "port", None) or "unknown port"
     label = f"follower arm on {port}"
@@ -250,6 +256,12 @@ def _return_one_follower_to_rest(bus, pose: dict, abort_event: threading.Event) 
         # so a surprise failure on one arm can't prevent the other's thread from
         # being joined or the wrapper from returning to run the torque release.
         logger.warning(f"Rest-pose return errored for the {label}: {e}")
+    try:
+        taper_torque_release(bus, label)
+    except Exception as e:
+        # taper_torque_release is documented never-raises; same belt-and-braces
+        # reasoning as above.
+        logger.warning(f"Torque taper errored for the {label}: {e}")
 
 
 def _return_followers_to_rest(rest_poses: list[tuple], abort_event: threading.Event) -> None:

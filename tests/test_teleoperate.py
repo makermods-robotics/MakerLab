@@ -519,16 +519,26 @@ class _RestBus:
 
     _MOTORS = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"]
 
-    def __init__(self, positions=None, moving: int = 1, port: str = "COM_FOLLOWER") -> None:
+    def __init__(
+        self, positions=None, moving: int = 1, port: str = "COM_FOLLOWER", torque_limit: int = 1000
+    ) -> None:
         self.port = port
         self.motors = dict.fromkeys(self._MOTORS)
         self.positions = dict.fromkeys(self._MOTORS, 1000) if positions is None else dict(positions)
+        self.torque_limit = dict.fromkeys(self._MOTORS, torque_limit)
         self.moving = moving
         self.fail_reads = False
+        self.fail_torque_reads = False
         self.writes: list[tuple] = []
         self.sync_writes: list[tuple] = []
+        self.sync_reads: list[str] = []
 
     def sync_read(self, reg: str, normalize: bool = True) -> dict:
+        self.sync_reads.append(reg)
+        if reg == "Torque_Limit":
+            if self.fail_torque_reads:
+                raise ConnectionError("bus gone")
+            return dict(self.torque_limit)
         if self.fail_reads:
             raise ConnectionError("bus gone")
         if reg == "Present_Position":
@@ -542,6 +552,8 @@ class _RestBus:
 
     def sync_write(self, reg: str, values: dict, normalize: bool = True) -> None:
         self.sync_writes.append((reg, dict(values)))
+        if reg == "Torque_Limit":
+            self.torque_limit.update(values)
 
 
 class _RestClock:
@@ -767,6 +779,88 @@ def test_return_speed_cap_restore_failure_never_raises(rest_clock: _RestClock) -
 
     assert arrived is True  # the return itself still completed and reported
     assert reason.startswith("returned")
+
+
+# ---------------------------------------------------------------------------
+# Torque taper (makerlab.rest_pose.taper_torque_release) — defense in depth
+# ---------------------------------------------------------------------------
+
+
+def test_taper_torque_release_sweeps_every_level_and_holds(rest_clock: _RestClock) -> None:
+    """Every fraction in RELEASE_TAPER_SWEEP_FRACTIONS must be written, in
+    order, NOT restored back to full afterward (an earlier version undid its
+    own softening right before the caller's torque cut). Present_Position
+    must be sampled at each level so a single bench trial can read the
+    give-way threshold off the log instead of guessing a flat value blind
+    (two earlier flat-value bench trials on the same joint disagreed, most
+    likely because the hand-posed test setup isn't reproducible between
+    trials — a sweep sidesteps that by characterizing one trial's pose fully
+    in a single release)."""
+    from makerlab.rest_pose import (
+        RELEASE_TAPER_SAMPLE_S,
+        RELEASE_TAPER_SWEEP_FRACTIONS,
+        RELEASE_TAPER_SWEEP_HOLD_S,
+        taper_torque_release,
+    )
+
+    bus = _RestBus(torque_limit=1000)
+
+    taper_torque_release(bus, "test arm")
+
+    torque_writes = [values for reg, values in bus.sync_writes if reg == "Torque_Limit"]
+    assert len(torque_writes) == len(RELEASE_TAPER_SWEEP_FRACTIONS)
+    levels = [step["shoulder_pan"] for step in torque_writes]
+    expected_levels = [round(1000 * f) for f in RELEASE_TAPER_SWEEP_FRACTIONS]
+    assert levels == expected_levels
+    # Lands on the sweep's last configured level (not necessarily 0 — the
+    # range itself is bench-tuned) and is NOT restored back to full afterward.
+    assert bus.torque_limit == dict.fromkeys(bus.motors, expected_levels[-1])
+
+    position_reads = [reg for reg in bus.sync_reads if reg == "Present_Position"]
+    samples_per_level = round(RELEASE_TAPER_SWEEP_HOLD_S / RELEASE_TAPER_SAMPLE_S)
+    assert len(position_reads) == samples_per_level * len(RELEASE_TAPER_SWEEP_FRACTIONS)
+
+
+def test_taper_torque_release_skipped_when_bus_unreadable(rest_clock: _RestClock) -> None:
+    """A bus that can't even be read (already gone) must not raise — the
+    caller's unconditional force_disable_torque still has to run right after."""
+    from makerlab.rest_pose import taper_torque_release
+
+    bus = _RestBus()
+    bus.fail_torque_reads = True
+
+    taper_torque_release(bus, "test arm")  # must not raise
+
+    assert not any(reg == "Torque_Limit" for reg, _ in bus.sync_writes)
+
+
+def test_taper_torque_release_skips_level_on_write_failure_and_continues(
+    rest_clock: _RestClock,
+) -> None:
+    """A level whose write fails must not raise, must be skipped (no position
+    sampling for it), and must not abort the rest of the sweep."""
+    from makerlab.rest_pose import RELEASE_TAPER_SWEEP_FRACTIONS, taper_torque_release
+
+    bus = _RestBus(torque_limit=1000)
+    original_sync_write = bus.sync_write
+    calls = {"n": 0}
+
+    def _flaky_sync_write(reg: str, values: dict, normalize: bool = True) -> None:
+        calls["n"] += 1
+        if reg == "Torque_Limit" and calls["n"] == 1:
+            raise ConnectionError("bus gone")
+        original_sync_write(reg, values, normalize)
+
+    bus.sync_write = _flaky_sync_write
+
+    taper_torque_release(bus, "test arm")  # must not raise
+
+    torque_writes = [values for reg, values in bus.sync_writes if reg == "Torque_Limit"]
+    # The first level's write raised (recorded before raising is skipped by
+    # the test double itself); every level after that still ran.
+    assert len(torque_writes) == len(RELEASE_TAPER_SWEEP_FRACTIONS) - 1
+    expected_last_level = round(1000 * RELEASE_TAPER_SWEEP_FRACTIONS[-1])
+    assert bus.torque_limit == dict.fromkeys(bus.motors, expected_last_level)  # sweep still finished
 
 
 def test_return_followers_to_rest_covers_every_follower_bus(
