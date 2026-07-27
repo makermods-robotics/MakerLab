@@ -92,7 +92,14 @@ const EpisodeViewer: React.FC<{
 
   const episode = episodes.find((e) => e.episode_index === selectedEpisode) ?? null;
   const videoRefs = useRef<Record<string, HTMLVideoElement | null>>({});
-  const primaryCamera = cameras[0];
+  // The camera whose onTimeUpdate drives currentTime/the end-of-episode
+  // boundary check. Falls back off cameras[0] onto the next camera that
+  // hasn't errored — if the "primary" camera fails to decode, its <video>
+  // element is replaced by an error placeholder and never fires
+  // onTimeUpdate, so pinning this to a fixed index would silently stall
+  // playback tracking (auto-pause, the loop-to-start fix, the scrubber)
+  // for the rest of the session.
+  const primaryCamera = cameras.find((c) => !videoErrors[c]) ?? cameras[0];
   // v3.0 packs consecutive episodes into the same physical mp4 per camera —
   // this episode's slice starts at `from` within that (possibly shared)
   // file, not at 0. Every seek/play/boundary check goes through this.
