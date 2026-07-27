@@ -981,6 +981,89 @@ def test_stopped_startup_worker_blocks_a_new_session_from_starting(monkeypatch) 
             t.join(timeout=5)
 
 
+# ---------------------------------------------------------------------------
+# I6: I1 added the is_alive() guard that refuses a NEW session while a
+# stopped session's startup worker is still alive, but gave the operator no
+# way to see that from /inference-status (idle looks identical either way)
+# and no way to force/confirm it from a second stop-inference call (unlike
+# teleoperate.py's second-stop, which joins the worker with a timeout and
+# reports honestly). These tests cover that gap.
+# ---------------------------------------------------------------------------
+
+
+class _FakeStartupWorker:
+    """Thread double for the orphaned inference-startup worker.
+
+    ``dies_on_join`` controls whether ``join()`` simulates the worker actually
+    finishing (mirrors teleoperate.py's test double) or simulates a worker
+    still stuck inside the unjoinable ``_prepare_robot`` call (stays alive no
+    matter how long the caller waits)."""
+
+    def __init__(self, dies_on_join: bool) -> None:
+        self._alive = True
+        self._dies_on_join = dies_on_join
+        self.joined_with_timeout: float | None = None
+
+    def is_alive(self) -> bool:
+        return self._alive
+
+    def join(self, timeout: float | None = None) -> None:
+        self.joined_with_timeout = timeout
+        if self._dies_on_join:
+            self._alive = False
+
+
+def test_inference_status_reports_shutting_down_when_startup_worker_orphaned(monkeypatch) -> None:
+    """A stopped session whose startup worker hasn't exited yet must be
+    visible on /inference-status — not indistinguishable from true idle."""
+    from makerlab import rollout
+
+    monkeypatch.setattr(rollout, "_inference_startup_thread", _FakeStartupWorker(dies_on_join=False))
+
+    status = rollout.handle_inference_status()
+
+    assert status["shutting_down"] is True
+
+
+def test_inference_status_not_shutting_down_when_truly_idle() -> None:
+    from makerlab.rollout import handle_inference_status
+
+    status = handle_inference_status()
+
+    assert status["shutting_down"] is False
+
+
+def test_second_stop_while_startup_worker_alive_joins_with_timeout_and_reports(monkeypatch) -> None:
+    """Pressing Stop again while the orphaned startup worker is still alive
+    must actually wait (bounded) for it, not just repeat a blanket 409 —
+    mirrors teleoperate.py's second-stop-during-grace behavior, adapted for a
+    worker with no cooperative cancellation checkpoint to force through."""
+    from makerlab import rollout
+
+    worker = _FakeStartupWorker(dies_on_join=False)
+    monkeypatch.setattr(rollout, "_inference_startup_thread", worker)
+
+    result = rollout.handle_stop_inference()
+
+    assert result["success"] is True
+    assert worker.joined_with_timeout is not None, "second stop must join() the orphaned worker"
+    assert result["shutting_down"] is True
+    assert "shutting down" in result["message"].lower()
+
+
+def test_second_stop_while_startup_worker_exits_during_join_reports_finished(monkeypatch) -> None:
+    from makerlab import rollout
+
+    worker = _FakeStartupWorker(dies_on_join=True)
+    monkeypatch.setattr(rollout, "_inference_startup_thread", worker)
+
+    result = rollout.handle_stop_inference()
+
+    assert result["success"] is True
+    assert result.get("shutting_down") is not True
+    assert "finished" in result["message"].lower()
+
+
 def test_fail_startup_result_is_idempotent_across_polls(monkeypatch) -> None:
     """A pre-subprocess failure (download/preflight) persists the same way."""
     from makerlab import rollout
