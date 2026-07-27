@@ -109,49 +109,62 @@ def test_stop_recording_mentions_rest_pose_return(monkeypatch: pytest.MonkeyPatc
     assert "Stop again" in result["message"]
 
 
-def test_record_finish_pending_release_cuts_grace_short(
+def test_start_recording_refuses_while_own_return_in_progress(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import threading
-
+    """`recording_active` stays True through recording's own rest-pose return
+    (only the worker's very last step flips it False), so a restart during
+    that window must be refused, not silently abort the return — aborting it
+    would hand the new session a mid-flight pose to (wrongly) treat as its own
+    rest pose (see rest_pose.py / makerlab issue: arm falls after a
+    restart-during-return)."""
     import makerlab.record as record
 
-    worker = _FakeWorker()
-    release_now = threading.Event()
-    monkeypatch.setattr(record, "recording_thread", worker)
+    monkeypatch.setattr(record, "recording_active", True)
     monkeypatch.setattr(record, "releasing", True)
-    monkeypatch.setattr(record, "_release_now", release_now)
 
-    assert record.finish_pending_release() is True
-    assert release_now.is_set()
-    assert worker.joined is True
+    result = record.handle_start_recording(
+        record.RecordingRequest(
+            leader_port="COM_LEADER",
+            follower_port="COM_FOLLOWER",
+            leader_config="leader",
+            follower_config="follower",
+            dataset_repo_id="user/test",
+            single_task="test",
+        )
+    )
+
+    assert result["success"] is False
+    assert "releasing" in result["message"].lower()
 
 
-def test_record_finish_pending_release_leaves_live_session_alone(
+def test_start_recording_refuses_while_teleoperation_releasing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import threading
-
+    """Teleoperation's `teleoperation_active` flips False as soon as its
+    control loop exits, well before its own rest-pose return finishes, so a
+    recording start during that window needs the separate thread-liveness
+    check to catch it."""
     import makerlab.record as record
+    import makerlab.teleoperate as teleop
 
-    worker = _FakeWorker()
-    release_now = threading.Event()
-    monkeypatch.setattr(record, "recording_thread", worker)
-    monkeypatch.setattr(record, "releasing", False)
-    monkeypatch.setattr(record, "_release_now", release_now)
+    monkeypatch.setattr(record, "recording_active", False)
+    monkeypatch.setattr(teleop, "teleoperation_active", False)
+    monkeypatch.setattr(teleop, "teleoperation_thread", _FakeWorker(alive=True))
 
-    assert record.finish_pending_release() is False
-    assert not release_now.is_set()
-    assert worker.joined is False
+    result = record.handle_start_recording(
+        record.RecordingRequest(
+            leader_port="COM_LEADER",
+            follower_port="COM_FOLLOWER",
+            leader_config="leader",
+            follower_config="follower",
+            dataset_repo_id="user/test",
+            single_task="test",
+        )
+    )
 
-
-def test_record_finish_pending_release_noop_when_idle(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import makerlab.record as record
-
-    monkeypatch.setattr(record, "recording_thread", None)
-    assert record.finish_pending_release() is True
+    assert result["success"] is False
+    assert "returning" in result["message"].lower()
 
 
 def test_recording_status_reports_releasing(monkeypatch: pytest.MonkeyPatch) -> None:

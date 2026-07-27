@@ -444,52 +444,61 @@ def test_second_stop_during_grace_surfaces_cleanup_error(
     assert "TORQUE MAY STILL BE ENABLED" in result["warning"]
 
 
-def test_finish_pending_release_cuts_grace_short(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A start arriving during the grace hold must release the arms and free
-    the ports instead of failing port-busy for the rest of the grace.
-    """
-    import threading
-
-    import makerlab.teleoperate as teleop
-
-    worker = _FakeWorker()
-    release_now = threading.Event()
-    monkeypatch.setattr(teleop, "teleoperation_active", False)
-    monkeypatch.setattr(teleop, "teleoperation_thread", worker)
-    monkeypatch.setattr(teleop, "_release_now", release_now)
-
-    assert teleop.finish_pending_release() is True
-    assert release_now.is_set()
-    assert worker.joined is True
-    assert teleop.teleoperation_thread is None
-
-
-def test_finish_pending_release_leaves_live_session_alone(
+def test_start_teleoperation_refuses_while_own_return_in_progress(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A live session (active flag still set) is not a pending release: the
-    caller's mutex check reports it, and torque must stay untouched.
-    """
+    """A start arriving while the previous teleop session is still returning
+    the follower to rest must be refused, not silently abort that return —
+    aborting it would hand the new session a mid-flight pose to (wrongly)
+    treat as its own rest pose (see rest_pose.py / makerlab issue: arm falls
+    after a restart-during-return)."""
     import threading
 
     import makerlab.teleoperate as teleop
 
-    worker = _FakeWorker()
-    release_now = threading.Event()
-    monkeypatch.setattr(teleop, "teleoperation_active", True)
-    monkeypatch.setattr(teleop, "teleoperation_thread", worker)
-    monkeypatch.setattr(teleop, "_release_now", release_now)
+    monkeypatch.setattr(teleop, "teleoperation_active", False)
+    monkeypatch.setattr(teleop, "teleoperation_thread", _FakeWorker(alive=True))
+    monkeypatch.setattr(teleop, "_release_now", threading.Event())
 
-    assert teleop.finish_pending_release() is False
-    assert not release_now.is_set()
-    assert worker.joined is False
+    result = teleop.handle_start_teleoperation(
+        teleop.TeleoperateRequest(
+            leader_port="COM_LEADER",
+            follower_port="COM_FOLLOWER",
+            leader_config="leader",
+            follower_config="follower",
+        )
+    )
+
+    assert result["success"] is False
+    assert "returning" in result["message"].lower()
+    assert not teleop._release_now.is_set()
 
 
-def test_finish_pending_release_noop_when_idle(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_start_teleoperation_refuses_while_recording_releasing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Recording's `recording_active` stays True through its own rest-pose
+    return, so a teleop start during that window must be refused with a
+    message that names it as still releasing, not "recording in progress"."""
+    import makerlab.record as record
     import makerlab.teleoperate as teleop
 
+    monkeypatch.setattr(teleop, "teleoperation_active", False)
     monkeypatch.setattr(teleop, "teleoperation_thread", None)
-    assert teleop.finish_pending_release() is True
+    monkeypatch.setattr(record, "recording_active", True)
+    monkeypatch.setattr(record, "releasing", True)
+
+    result = teleop.handle_start_teleoperation(
+        teleop.TeleoperateRequest(
+            leader_port="COM_LEADER",
+            follower_port="COM_FOLLOWER",
+            leader_config="leader",
+            follower_config="follower",
+        )
+    )
+
+    assert result["success"] is False
+    assert "releasing" in result["message"].lower()
 
 
 def test_teleoperation_status_reports_releasing(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -240,27 +240,6 @@ _release_now = threading.Event()
 discard_requested = False
 
 
-def finish_pending_release(timeout: float = 10.0) -> bool:
-    """Cut a pending torque-release grace short and wait for its cleanup.
-
-    Called by start paths (recording and teleoperation) so a start arriving
-    during the grace window releases the arms and frees the serial ports
-    immediately instead of failing port-busy for the rest of the grace.
-    Returns True when no recording worker is running afterwards; False when a
-    live session is still recording or the worker did not exit in time.
-    """
-    worker = recording_thread
-    if worker is None or not worker.is_alive():
-        return True
-    if not releasing:
-        # A live recording session, not a pending release — the caller's
-        # mutex check will report "already active".
-        return False
-    _release_now.set()
-    worker.join(timeout=timeout)
-    return not worker.is_alive()
-
-
 class RecordingRequest(BaseModel):
     leader_port: str
     follower_port: str
@@ -463,24 +442,39 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
         getattr(request, "mode", "single"),
     )
 
-    # A previous session (recording or teleop) may still be holding torque for
-    # its release grace — cut it short so this start doesn't fail on a busy
-    # serial port. Best effort: failures are surfaced by the checks below.
-    finish_pending_release()
-    _teleoperate.finish_pending_release()
-
     with _state_lock:
         if recording_active:
+            # `recording_active` stays True for this session's entire
+            # lifetime, including its post-stop rest-pose return and torque
+            # release (only the worker's very last step flips it False) — so
+            # this also catches a restart while THIS session is releasing.
+            # Never silently abort that release here to grab the port: a
+            # session that starts mid-return would capture ITS rest pose from
+            # wherever the abort left the arm, not a genuinely safe position
+            # (see rest_pose.py).
             return {
                 "success": False,
                 "message": (
-                    "The previous session is still releasing the arms. Try again in a few seconds."
+                    "The previous recording session is still releasing the arms. Press Stop "
+                    "again on that session to release now, or wait a few seconds."
                     if releasing
                     else "Recording is already active"
                 ),
             }
         if _teleoperate.teleoperation_active:
             return {"success": False, "message": "Teleoperation is currently active. Stop it first."}
+        if _teleoperate.teleoperation_thread is not None and _teleoperate.teleoperation_thread.is_alive():
+            # Teleoperation's active flag flips False as soon as its control
+            # loop exits — well before its own rest-pose return finishes — so
+            # it needs this separate thread-liveness check (recording_active
+            # above already covers the equivalent case for recording, whose
+            # active flag stays True through its own release).
+            return {
+                "success": False,
+                "message": "The arm from the previous teleoperation session is still returning "
+                "to rest. Press Stop again on that session to release it now, or wait a few "
+                "seconds.",
+            }
         if _rollout.inference_active:
             return {"success": False, "message": "Inference is currently active. Stop it first."}
         # Refuse a malformed dataset name up front (before claiming the flag or

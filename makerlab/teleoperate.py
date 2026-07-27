@@ -204,33 +204,6 @@ def hold_torque_release_grace(
     return cut_short
 
 
-def finish_pending_release(timeout: float = 10.0) -> bool:
-    """Cut a pending torque-release grace short and wait for its cleanup.
-
-    Called by start paths (teleoperation and recording) so a start arriving
-    during the grace window releases the arms and frees the serial ports
-    immediately instead of failing port-busy for the rest of the grace.
-    Returns True when no teleoperation worker is running afterwards (the ports
-    are free as far as teleoperation is concerned); False when a live session
-    is running or the worker did not exit in time.
-    """
-    global teleoperation_thread
-
-    worker = teleoperation_thread
-    if worker is None or not worker.is_alive():
-        return True
-    if teleoperation_active:
-        # A live session, not a pending release — the caller's mutex check
-        # will report "already active".
-        return False
-    _release_now.set()
-    worker.join(timeout=timeout)
-    if worker.is_alive():
-        return False
-    teleoperation_thread = None
-    return True
-
-
 def _return_one_follower_to_rest(bus, pose: dict, abort_event: threading.Event) -> None:
     """Drive one follower bus back to its captured pose; log start and outcome.
 
@@ -556,25 +529,32 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
 
     from . import record as _record, rollout as _rollout
 
-    # A previous session (teleop or recording) may still be holding torque for
-    # its release grace — cut it short so this start doesn't fail on a busy
-    # serial port. Best effort: failures are surfaced by the checks below.
-    finish_pending_release()
-    _record.finish_pending_release()
-
     with _state_lock:
         if teleoperation_active:
             return {"success": False, "message": "Teleoperation is already active"}
         if teleoperation_thread is not None and teleoperation_thread.is_alive():
-            # A stopped session's worker is still releasing the arms (grace was
-            # cut short above but the cleanup hasn't finished yet).
+            # The previous session's worker is still driving the follower(s)
+            # back to rest (or finishing the torque release). Never silently
+            # abort that here to grab the port — a session that starts mid
+            # return would capture ITS rest pose from wherever the abort left
+            # the arm, not a genuinely safe position (see rest_pose.py). Let
+            # it finish on its own, or press Stop again on that session for
+            # an immediate release.
             return {
                 "success": False,
-                "message": "The arms from the previous session are still being released. "
-                "Try again in a few seconds.",
+                "message": "The arm from the previous teleoperation session is still returning "
+                "to rest. Press Stop again to release it now, or wait a few seconds and try again.",
             }
         if _record.recording_active:
-            return {"success": False, "message": "Recording is currently active. Stop it first."}
+            return {
+                "success": False,
+                "message": (
+                    "The previous recording session is still releasing the arms. Press Stop "
+                    "again on that session to release now, or wait a few seconds."
+                    if _record.releasing
+                    else "Recording is currently active. Stop it first."
+                ),
+            }
         if _rollout.inference_active:
             return {"success": False, "message": "Inference is currently active. Stop it first."}
         # Per-session state reset, under the same lock that claims the active
