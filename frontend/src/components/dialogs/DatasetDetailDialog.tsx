@@ -147,7 +147,7 @@ const EpisodeViewer: React.FC<{
     Object.values(videoRefs.current).forEach((v) => v && fn(v));
   }, []);
 
-  const handlePlayPause = () => {
+  const handlePlayPause = useCallback(() => {
     if (playing) {
       forEachVideo((v) => v.pause());
       setPlaying(false);
@@ -157,7 +157,7 @@ const EpisodeViewer: React.FC<{
       });
       setPlaying(true);
     }
-  };
+  }, [playing, forEachVideo]);
 
   // Drives currentTime/scrubber from the primary camera's raw (file-relative)
   // playback position, and is the one place that notices the episode's own
@@ -226,11 +226,43 @@ const EpisodeViewer: React.FC<{
     handleSeek(frac * episode.duration);
   };
 
-  const gotoEpisode = (delta: number) => {
-    const i = episodes.findIndex((e) => e.episode_index === selectedEpisode);
-    const next = episodes[i + delta];
-    if (next) onSelectEpisode(next.episode_index);
-  };
+  const gotoEpisode = useCallback(
+    (delta: number) => {
+      const i = episodes.findIndex((e) => e.episode_index === selectedEpisode);
+      const next = episodes[i + delta];
+      if (next) onSelectEpisode(next.episode_index);
+    },
+    [episodes, selectedEpisode, onSelectEpisode],
+  );
+
+  const currentIndex = episodes.findIndex((e) => e.episode_index === selectedEpisode);
+  const hasPrev = currentIndex > 0;
+  const hasNext = currentIndex >= 0 && currentIndex < episodes.length - 1;
+
+  // Mirrors the guarded-window-listener convention in RecordingSessionDialog:
+  // skip when a text field has focus (the info-card tag input in the side
+  // panel), preventDefault on the keys we do handle so Space doesn't scroll
+  // the page or double-fire a focused button's native click.
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) {
+        return;
+      }
+      if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        gotoEpisode(-1);
+      } else if (e.key === "ArrowRight") {
+        e.preventDefault();
+        gotoEpisode(1);
+      } else if (e.key === " " || e.code === "Space") {
+        e.preventDefault();
+        handlePlayPause();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [gotoEpisode, handlePlayPause]);
 
   if (cameras.length === 0) {
     return (
@@ -303,7 +335,7 @@ const EpisodeViewer: React.FC<{
           size="icon"
           className="h-8 w-8 shrink-0"
           onClick={() => gotoEpisode(-1)}
-          disabled={!episode}
+          disabled={!episode || !hasPrev}
           aria-label="Previous episode"
         >
           <SkipBack className="h-3.5 w-3.5" />
@@ -322,7 +354,7 @@ const EpisodeViewer: React.FC<{
           size="icon"
           className="h-8 w-8 shrink-0"
           onClick={() => gotoEpisode(1)}
-          disabled={!episode}
+          disabled={!episode || !hasNext}
           aria-label="Next episode"
         >
           <SkipForward className="h-3.5 w-3.5" />
