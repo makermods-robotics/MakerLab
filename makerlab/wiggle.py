@@ -153,11 +153,17 @@ async def wiggle_gripper(port: str) -> dict:
     wiggle_active = True
     try:
         await asyncio.wait_for(
-            asyncio.to_thread(_wiggle_gripper_sync, port.strip()),
+            asyncio.to_thread(_run_wiggle_and_clear_flag, port.strip()),
             timeout=_WIGGLE_TIMEOUT_S,
         )
         return {"success": True, "message": f"Wiggled the gripper on {port}."}
     except TimeoutError:
+        # `wait_for` timing out only stops US from waiting — it does NOT stop
+        # the thread `to_thread` submitted, which keeps driving the gripper
+        # (and holding the port) in the background for however long it
+        # actually takes to unwind. Do NOT clear wiggle_active here: that's
+        # `_run_wiggle_and_clear_flag`'s job, tied to the thread's real exit,
+        # so the mutex stays honest for other features' start checks.
         return {
             "success": False,
             "message": "Wiggle timed out after 15s — is the arm powered on and the port correct?",
@@ -165,5 +171,16 @@ async def wiggle_gripper(port: str) -> dict:
     except Exception as e:
         logger.exception("Wiggle failed")
         return {"success": False, "message": f"Failed to wiggle the gripper: {e}"}
+
+
+def _run_wiggle_and_clear_flag(port: str) -> None:
+    """Run the blocking wiggle, then clear ``wiggle_active`` — from inside the
+    worker thread, so the flag reflects the thread's REAL exit rather than
+    `wiggle_gripper`'s async wrapper giving up on a `wait_for` timeout (see the
+    comment at that timeout's except clause).
+    """
+    global wiggle_active
+    try:
+        _wiggle_gripper_sync(port)
     finally:
         wiggle_active = False

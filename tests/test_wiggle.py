@@ -115,6 +115,52 @@ async def test_wiggle_gripper_clears_wiggle_active_after_failure(
     assert wiggle.wiggle_active is False
 
 
+async def test_wiggle_gripper_timeout_keeps_flag_set_until_thread_finishes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: `asyncio.wait_for` timing out does NOT stop the underlying
+    thread (asyncio.to_thread work keeps running after the wrapper gives up on
+    it) — the same orphaned-worker shape as the teleoperation bug in
+    tests/test_teleoperate.py::test_second_stop_timeout_keeps_thread_reference.
+    If wiggle_active clears the instant the 15s wait_for times out, a later
+    start (teleop/calibration/etc.) can open a second connection on the same
+    port a still-running wiggle thread is still driving.
+    """
+    import threading
+    import time
+
+    import makerlab.wiggle as wiggle
+
+    thread_still_running = threading.Event()
+    thread_finished = threading.Event()
+
+    def slow_wiggle(port: str) -> None:
+        thread_still_running.set()
+        time.sleep(0.2)  # outlives the shortened timeout below
+        thread_finished.set()
+
+    monkeypatch.setattr(wiggle, "_wiggle_gripper_sync", slow_wiggle)
+    monkeypatch.setattr(wiggle, "_WIGGLE_TIMEOUT_S", 0.05)
+
+    result = await wiggle.wiggle_gripper("/dev/fake")
+
+    assert result["success"] is False
+    assert "timed out" in result["message"]
+    # The key regression assertion: the background thread is still actually
+    # running (it just started sleeping), so the flag must still be set.
+    assert thread_still_running.is_set()
+    assert not thread_finished.is_set()
+    assert wiggle.wiggle_active is True
+
+    # Once the real thread actually finishes, the flag must clear.
+    assert thread_finished.wait(timeout=2.0)
+    for _ in range(100):
+        if not wiggle.wiggle_active:
+            break
+        time.sleep(0.01)
+    assert wiggle.wiggle_active is False
+
+
 def test_wiggle_endpoint_success(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     # Stub the blocking hardware call so the happy path runs without a device.
     monkeypatch.setattr("makerlab.wiggle._wiggle_gripper_sync", lambda port: None)
