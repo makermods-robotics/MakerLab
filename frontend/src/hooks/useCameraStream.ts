@@ -15,6 +15,14 @@ import { useEffect, useRef, useState } from "react";
  *     device-exposure change (timing isn't guaranteed) — so we re-attempt on
  *     that event instead. Without this the hook would otherwise stay stuck on
  *     the error state until a full page reload.
+ *
+ * A stream that's already attached can also go bad mid-session: a flaky USB
+ * camera that stalls under sustained load stops delivering frames without
+ * closing the track, so the browser marks it `muted` rather than `ended` —
+ * the `<video>` element then renders blank (not a frozen last frame) with no
+ * error surfaced anywhere. We give a mute a grace period to self-clear (a
+ * genuinely brief hiccup fires `unmute`), then force a clean reconnect. An
+ * outright `ended` track reconnects immediately.
  */
 const MAX_RETRIES = 4;
 const BASE_DELAY_MS = 300;
@@ -22,6 +30,8 @@ const BASE_DELAY_MS = 300;
 // device (NotFoundError) and unsatisfiable constraints (OverconstrainedError)
 // won't fix themselves on a retimed retry — those recover via `devicechange`.
 const TRANSIENT_ERRORS = new Set(["NotReadableError", "AbortError"]);
+// How long a muted track is given to self-recover before we force a reconnect.
+const MUTE_GRACE_MS = 3000;
 
 export function useCameraStream(deviceId: string, paused: boolean) {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -53,7 +63,32 @@ export function useCameraStream(deviceId: string, paused: boolean) {
     let cancelled = false;
     let stream: MediaStream | null = null;
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    let muteTimer: ReturnType<typeof setTimeout> | null = null;
+    let track: MediaStreamTrack | null = null;
     setHasError(false);
+
+    const clearMuteTimer = () => {
+      if (muteTimer) {
+        clearTimeout(muteTimer);
+        muteTimer = null;
+      }
+    };
+    // Force a full teardown + fresh getUserMedia rather than trying to revive
+    // the existing track — a stalled device generally needs to be re-acquired.
+    const reconnect = () => {
+      if (cancelled) return;
+      clearMuteTimer();
+      track?.removeEventListener("mute", onMute);
+      track?.removeEventListener("unmute", onUnmute);
+      track?.removeEventListener("ended", onEnded);
+      setRetryKey((k) => k + 1);
+    };
+    const onMute = () => {
+      clearMuteTimer();
+      muteTimer = setTimeout(reconnect, MUTE_GRACE_MS);
+    };
+    const onUnmute = () => clearMuteTimer();
+    const onEnded = () => reconnect();
 
     const start = async (attempt: number) => {
       try {
@@ -82,6 +117,13 @@ export function useCameraStream(deviceId: string, paused: boolean) {
           videoRef.current.srcObject = stream;
           await videoRef.current.play().catch(() => {});
         }
+        track = stream.getVideoTracks()[0] ?? null;
+        if (track) {
+          if (track.muted) onMute();
+          track.addEventListener("mute", onMute);
+          track.addEventListener("unmute", onUnmute);
+          track.addEventListener("ended", onEnded);
+        }
       } catch (err) {
         if (cancelled) return;
         const name = err instanceof DOMException ? err.name : "";
@@ -101,6 +143,10 @@ export function useCameraStream(deviceId: string, paused: boolean) {
     return () => {
       cancelled = true;
       if (retryTimer) clearTimeout(retryTimer);
+      clearMuteTimer();
+      track?.removeEventListener("mute", onMute);
+      track?.removeEventListener("unmute", onUnmute);
+      track?.removeEventListener("ended", onEnded);
       if (stream) stream.getTracks().forEach((t) => t.stop());
     };
   }, [deviceId, paused, retryKey]);
