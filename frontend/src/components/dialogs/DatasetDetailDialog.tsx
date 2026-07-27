@@ -152,12 +152,24 @@ const EpisodeViewer: React.FC<{
       forEachVideo((v) => v.pause());
       setPlaying(false);
     } else {
+      // Parked at (or past) the episode's own end: the underlying mp4 keeps
+      // going into the next episode's frames past this point (see the
+      // v3.0-packing note on offsetFor above), so resuming here would spill
+      // into that footage before the boundary check in
+      // handlePrimaryTimeUpdate catches up. Loop back to this episode's
+      // start instead.
+      if (episode && currentTime >= episode.duration - 0.02) {
+        for (const [camera, v] of Object.entries(videoRefs.current)) {
+          if (v) v.currentTime = offsetFor(camera);
+        }
+        setCurrentTime(0);
+      }
       forEachVideo((v) => {
         v.play().catch(() => {});
       });
       setPlaying(true);
     }
-  }, [playing, forEachVideo]);
+  }, [playing, forEachVideo, episode, currentTime, offsetFor]);
 
   // Drives currentTime/scrubber from the primary camera's raw (file-relative)
   // playback position, and is the one place that notices the episode's own
