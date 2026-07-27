@@ -256,6 +256,108 @@ def test_start_teleoperation_force_disables_torque_and_warns_when_setup_fails_af
     assert created["leader"].disconnected is True
 
 
+def test_start_teleoperation_bimanual_force_disables_torque_and_warns_when_leader_configure_fails_after_followers_armed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bimanual mirror of the single-arm regression test above.
+
+    _connect_bimanual has its own try/except (it must clean up the four buses
+    it opened before handle_start_teleoperation ever sees a robot/teleop_device
+    to work with) — robot.configure() there energizes both follower sub-arms
+    before teleop_device.configure() (the next setup step) can fail. That
+    except block must run the same force_disable_torque + _safe_disconnect
+    cleanup as the single-arm path, and the resulting warning must reach the
+    handle_start_teleoperation response — not be dropped, and not be
+    overwritten by the outer except's own (no-op, since its local
+    robot/teleop_device are still None here) cleanup pass.
+    """
+    import makerlab.teleoperate as teleop
+
+    monkeypatch.setattr(teleop, "teleoperation_active", False)
+    monkeypatch.setattr(teleop, "build_bimanual_configs", lambda request: ("robot_cfg", "teleop_cfg"))
+    monkeypatch.setattr(teleop, "verify_devices", lambda *a, **k: [])
+    monkeypatch.setattr(teleop, "reset_torque_limit", lambda *a, **k: [])
+    monkeypatch.setattr(teleop, "clear_goal_velocity", lambda *a, **k: [])
+
+    class _SubBus:
+        def __init__(self, port: str, motors: dict, fail_disable: bool = False) -> None:
+            self.port = port
+            self.motors = motors
+            self.fail_disable = fail_disable
+
+        def connect(self) -> None:
+            pass
+
+        def write_calibration(self, calibration) -> None:
+            pass
+
+        def disable_torque(self, motor: str, num_retry: int = 0) -> None:
+            if self.fail_disable:
+                raise ConnectionError(f"no response from {motor}")
+
+    class _SubArm:
+        def __init__(self, bus: _SubBus) -> None:
+            self.bus = bus
+            self.calibration: dict = {}
+
+    class _BiFollower:
+        def __init__(self, config) -> None:
+            # Once armed, neither follower sub-arm's motors release.
+            self.left_arm = _SubArm(_SubBus("COM_LFOLLOWER", {"shoulder_pan": 1}, fail_disable=True))
+            self.right_arm = _SubArm(_SubBus("COM_RFOLLOWER", {"shoulder_pan": 1}, fail_disable=True))
+            self.configured = False
+            self.disconnected = False
+
+        def configure(self) -> None:
+            # This is the real write that energizes the follower servos.
+            self.configured = True
+
+        def disconnect(self) -> None:
+            self.disconnected = True
+
+    class _BiLeader:
+        def __init__(self, config) -> None:
+            self.left_arm = _SubArm(_SubBus("COM_LLEADER", {"shoulder_pan": 1}))
+            self.right_arm = _SubArm(_SubBus("COM_RLEADER", {"shoulder_pan": 1}))
+            self.disconnected = False
+
+        def configure(self) -> None:
+            # Fails AFTER the followers have already configured (armed).
+            raise RuntimeError("leader configure failed")
+
+        def disconnect(self) -> None:
+            self.disconnected = True
+
+    created: dict = {}
+    monkeypatch.setattr(
+        teleop, "BiSOFollower", lambda config: created.setdefault("follower", _BiFollower(config))
+    )
+    monkeypatch.setattr(teleop, "BiSOLeader", lambda config: created.setdefault("leader", _BiLeader(config)))
+
+    request = teleop.TeleoperateRequest(
+        leader_port="COM_LLEADER",
+        follower_port="COM_LFOLLOWER",
+        leader_config="leader",
+        follower_config="follower",
+        mode="bimanual",
+        right_leader_port="COM_RLEADER",
+        right_follower_port="COM_RFOLLOWER",
+        right_leader_config="rleader",
+        right_follower_config="rfollower",
+    )
+    result = teleop.handle_start_teleoperation(request)
+
+    assert result["success"] is False
+    # The followers really were configured (torque enabled) before the failure.
+    assert created["follower"].configured is True
+    assert teleop.last_cleanup_error is not None
+    assert "TORQUE MAY STILL BE ENABLED" in teleop.last_cleanup_error
+    assert "warning" in result
+    assert "TORQUE MAY STILL BE ENABLED" in result["warning"]
+    assert created["follower"].disconnected is True
+    assert created["leader"].disconnected is True
+
+
 # ---------------------------------------------------------------------------
 # Teleop opens no cameras: it consumes no frames (only motor positions drive the
 # URDF viewer). The follower config it builds therefore carries an empty camera
