@@ -257,6 +257,10 @@ const EpisodeViewer: React.FC<{
   // the page or double-fire a focused button's native click.
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
+      // Ignore OS auto-repeat from a held key — holding Space shouldn't
+      // rapid-toggle play/pause, and holding an arrow shouldn't blow through
+      // the episode list faster than an actual keypress.
+      if (e.repeat) return;
       const target = e.target as HTMLElement | null;
       if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) {
         return;
