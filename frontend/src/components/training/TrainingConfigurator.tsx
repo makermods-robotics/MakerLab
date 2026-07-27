@@ -89,6 +89,9 @@ function configToRequest(c: TrainingConfig): TrainingRequest {
   return {
     target: c.target,
     dataset_repo_id: c.dataset_repo_id,
+    // Only meaningful for a cloud run; harmless otherwise (the backend only
+    // consults it if it ends up needing to push the dataset itself).
+    dataset_private: c.dataset_private,
     policy_type: c.policy_type,
     job_name: c.job_name,
     steps: c.steps,
@@ -164,6 +167,12 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
         : { runner: "local" },
     // Controlled fields — overlaid from props below; placeholders here.
     dataset_repo_id: "",
+    // Left undefined until the user actually touches LocalDatasetCloudNotice's
+    // visibility toggle (see updateConfig("dataset_private", v) below) — a
+    // hardcoded literal here would defeat the backend's None-means-no-explicit-
+    // choice fallback to DATASET_DEFAULT_PRIVATE for the belt-and-braces
+    // re-upload path (HfCloudJobRunner._ensure_dataset_on_hub), which can fire
+    // even when this notice never rendered for the user to see.
     policy_type: "act",
     job_name: "",
     // On resume, everything but steps is inherited from the checkpoint's
@@ -429,7 +438,11 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
     if (needsUpload) {
       setUploadError(null);
       setIsStarting(true);
-      const err = await startUpload([], false /* public: MakerLab uploads are public by default */);
+      // Honor whatever the user picked in LocalDatasetCloudNotice's visibility
+      // toggle. This path only runs while that notice is showing, so the
+      // toggle was on-screen; ?? false only covers the case where the user
+      // left it untouched at its displayed default (public).
+      const err = await startUpload([], config.dataset_private ?? false);
       if (err) {
         setUploadError(err);
         setIsStarting(false);
@@ -544,6 +557,12 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
             offline={offline}
             uploading={uploading}
             errorMessage={uploadError}
+            // LocalDatasetCloudNotice needs a concrete boolean to drive the
+            // toggle's active side; ?? false just picks the displayed default
+            // (public) — it isn't persisted as an explicit choice unless/until
+            // onIsPrivateChange actually fires.
+            isPrivate={config.dataset_private ?? false}
+            onIsPrivateChange={(v) => updateConfig("dataset_private", v)}
           />
         </div>
       ) : null}

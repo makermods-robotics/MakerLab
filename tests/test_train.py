@@ -275,6 +275,25 @@ def test_hf_job_timeout_defaults_to_none_and_round_trips() -> None:
     assert TrainingRequest.model_validate_json(req.model_dump_json()).hf_job_timeout == "3h30m"
 
 
+def test_dataset_private_defaults_to_none_and_round_trips() -> None:
+    """Absent (older persisted JobRecord.config JSON, or a local run that never
+    showed the cloud pre-upload notice) loads as None -- the signal for
+    "no explicit user choice" that runners/hf_cloud.py's resolve_dataset_private
+    falls back on. An explicit choice survives a JSON round-trip untouched."""
+    from makerlab.train import TrainingRequest
+
+    assert TrainingRequest(dataset_repo_id="x").dataset_private is None
+
+    legacy = TrainingRequest.model_validate({"dataset_repo_id": "x", "policy_type": "act"})
+    assert legacy.dataset_private is None
+
+    private_req = TrainingRequest(dataset_repo_id="x", dataset_private=True)
+    assert TrainingRequest.model_validate_json(private_req.model_dump_json()).dataset_private is True
+
+    public_req = TrainingRequest(dataset_repo_id="x", dataset_private=False)
+    assert TrainingRequest.model_validate_json(public_req.model_dump_json()).dataset_private is False
+
+
 @pytest.mark.parametrize(
     "value,stored",
     [("2h", "2h"), ("3h30m", "3h30m"), ("  45m  ", "45m"), (None, None), ("", None), ("   ", None)],

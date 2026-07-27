@@ -3,6 +3,15 @@ export interface TrainingConfig {
 
   // Dataset configuration
   dataset_repo_id: string;
+  // Visibility to upload dataset_repo_id with, when a cloud run needs to push
+  // it first (see LocalDatasetCloudNotice's visibility toggle). undefined
+  // means the user never saw/touched the toggle — let the backend apply its
+  // own default policy (DATASET_DEFAULT_PRIVATE / resolve_dataset_private in
+  // makerlab/runners/hf_cloud.py) rather than us silently asserting a value
+  // on their behalf. Only ever set to a concrete boolean once the user
+  // actually interacts with the toggle. Mirrors TrainingRequest.dataset_private
+  // (jobsApi.ts) and train.py's `dataset_private: bool | None = None`.
+  dataset_private?: boolean;
 
   // Policy configuration
   policy_type: string;

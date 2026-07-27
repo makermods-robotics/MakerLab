@@ -107,6 +107,17 @@ class TrainingRequest(BaseModel):
     dataset_revision: str | None = None
     dataset_root: str | None = None
     dataset_episodes: list[int] | None = None
+    # Cloud only. HfCloudJobRunner may need to push `dataset_repo_id` to the
+    # Hub itself before training (see runners/hf_cloud.py's
+    # _ensure_dataset_on_hub) if it turns out not to be there yet -- e.g. the
+    # frontend's own pre-upload step (TrainingConfigurator's "Upload & start
+    # training") was skipped because the dataset was believed to already be on
+    # the Hub. When the frontend DID show that pre-upload notice, this carries
+    # the user's actual choice from its visibility toggle so the same choice
+    # governs both the explicit upload and this belt-and-braces fallback.
+    # None (local runs, older clients, or a cloud run that never showed the
+    # notice) defers to DATASET_DEFAULT_PRIVATE.
+    dataset_private: bool | None = None
 
     # Policy configuration
     policy_type: str = "act"

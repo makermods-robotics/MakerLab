@@ -42,6 +42,7 @@ from .motor_power import clear_goal_velocity, reset_torque_limit
 from .rest_pose import capture_rest_pose
 from .teleoperate import _device_buses, _return_followers_to_rest, force_disable_torque
 from .utils.config import (
+    DATASET_DEFAULT_PRIVATE,
     validate_dataset_repo_id,
     with_makerlab_tag,
 )
@@ -284,7 +285,11 @@ class RecordingRequest(BaseModel):
     video: bool = True
     push_to_hub: bool = False
     tags: list[str] = []
-    private: bool = False
+    # MakerLab's default dataset-visibility policy (see DATASET_DEFAULT_PRIVATE)
+    # -- same fallback UploadRequest.private uses; no frontend toggle exists
+    # for this push-at-end-of-recording path yet, so this is the only value
+    # that ever reaches lerobot's push_to_hub here.
+    private: bool = DATASET_DEFAULT_PRIVATE
     resume: bool = False
     streaming_encoding: bool = True
     cameras: dict = {}
@@ -297,7 +302,10 @@ class RecordingRequest(BaseModel):
 class UploadRequest(BaseModel):
     dataset_repo_id: str
     tags: list[str] = []
-    private: bool = False
+    # MakerLab's default dataset-visibility policy (see DATASET_DEFAULT_PRIVATE)
+    # -- callers that let the user choose (UploadDatasetDialog's visibility
+    # toggle) send an explicit value; this is just the fallback.
+    private: bool = DATASET_DEFAULT_PRIVATE
 
 
 class DatasetInfoRequest(BaseModel):
