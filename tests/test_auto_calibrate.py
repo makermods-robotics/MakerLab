@@ -1118,6 +1118,67 @@ def test_batch_stop_and_wait_when_idle_is_a_no_op() -> None:
     assert mgr.get_status()["active"] is False
 
 
+def test_batch_stop_and_wait_races_manual_batch_stop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A manual 'Stop batch' button click and server shutdown's stop_and_wait()
+    can hit the same batch manager at nearly the same instant — the frontend
+    poll loop isn't gated on shutdown. Each arm's own lock must still let only
+    one of the two callers actually start that arm's stop escalation; the
+    loser must not terminate the process a second time or release its torque
+    a second time, and stop_and_wait() must still block until every arm's
+    escalation has genuinely finished, whichever caller started it."""
+    terminate_calls = {"/dev/a": 0, "/dev/b": 0}
+    released: list[str] = []
+
+    class CountingProc(StoppableFakeProc):
+        def __init__(self, port: str) -> None:
+            super().__init__()
+            self._port = port
+
+        def terminate(self) -> None:
+            terminate_calls[self._port] += 1
+            super().terminate()
+
+    monkeypatch.setattr(auto_calibrate, "_calibration_name_taken", lambda dt, stem: False)
+    monkeypatch.setattr(
+        auto_calibrate,
+        "_release_arm_torque",
+        lambda port: (released.append(port), [])[1],
+    )
+    monkeypatch.setattr(auto_calibrate, "_STOP_GRACE_S", 0.2)
+    monkeypatch.setattr(auto_calibrate, "_STOP_KILL_WAIT_S", 0.2)
+
+    procs = {"/dev/a": CountingProc("/dev/a"), "/dev/b": CountingProc("/dev/b")}
+    monkeypatch.setattr(auto_calibrate.subprocess, "Popen", lambda *a, **k: procs[_port_of(a)])
+
+    mgr = auto_calibrate.AutoCalibrationBatchManager()
+    arms = [_arm(port="/dev/a", name="a"), _arm(port="/dev/b", name="b")]
+    assert mgr.start(auto_calibrate.AutoCalibrationBatchRequest(arms=arms))["success"] is True
+
+    start_barrier = threading.Barrier(2)
+
+    def _manual_stop() -> None:
+        start_barrier.wait()
+        mgr.stop()  # the frontend "Stop" button
+
+    def _shutdown_stop() -> None:
+        start_barrier.wait()
+        mgr.stop_and_wait(timeout=5)  # server shutdown_event()
+
+    manual_thread = threading.Thread(target=_manual_stop)
+    shutdown_thread = threading.Thread(target=_shutdown_stop)
+    manual_thread.start()
+    shutdown_thread.start()
+    manual_thread.join(timeout=5)
+    shutdown_thread.join(timeout=5)
+    assert not manual_thread.is_alive() and not shutdown_thread.is_alive()
+
+    status = mgr.get_status()
+    assert status["active"] is False
+    assert {a["status"] for a in status["arms"]} == {"stopped"}
+    assert terminate_calls == {"/dev/a": 1, "/dev/b": 1}
+    assert sorted(released) == ["/dev/a", "/dev/b"]
+
+
 def test_batch_stop_when_idle_is_rejected() -> None:
     mgr = auto_calibrate.AutoCalibrationBatchManager()
     assert mgr.stop()["success"] is False
