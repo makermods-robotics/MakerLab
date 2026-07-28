@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## I10: real SIGTERM does not appear to gracefully stop a live, real-hardware teleoperation session
 
-**Status: RESOLVED — false alarm caused by a test-setup bug, not a real defect. I8's fix works correctly against real hardware under a real SIGTERM. See "Corrected re-test" below; the original finding above it is kept for the record but should not be trusted on its own.**
+**Status: RESOLVED for the scope actually tested — false alarm caused by a test-setup bug, not a real defect. A plain `kill -TERM` against a prod-mode, single-arm, actively-driving teleoperation session correctly runs I8's graceful stop. `uvicorn --reload`, bimanual, and a signal landing mid-release are all still untested — see "What was NOT tested" below before assuming those are covered too.**
 
 PR #29 (I8) added `stop_and_wait()` to `teleoperate.py`/`record.py` and wired both into `shutdown_event()` so that a `SIGTERM` (plain `kill <pid>`, or a `uvicorn --reload` restart) gracefully stops an active teleoperation/recording session — return-to-rest, torque release, disconnect — before the process exits, instead of orphaning the in-process control-loop thread. All of I8's automated tests pass, but they only ever invoke `shutdown_event()` directly via `asyncio.run(...)`; none of them go through a real OS signal delivered to a live process that's actually driving hardware.
 
@@ -23,7 +23,16 @@ Repeated the identical real-hardware procedure (start teleoperation, never call 
 - **First run** (pre-merge, unfixed code, instrumentation only): every `[I10] enter`/`exit` pair matched — no call was ever stuck. `shutdown_event()` ran (`Cleanup completed` logged) but with no trace of `stop_teleoperation_and_wait()`, exactly reproducing (and confirming the cause of) the original finding.
 - **Second run** (post-merge, I8's fix actually present): the log shows the full graceful path firing under the real signal — `Stop teleoperation triggered from web interface` → power-telemetry summary → `Rest-pose return starting`/`finished` (~4s, matching normal-stop timing) → both devices disconnected → `Teleoperation stopped` → `Broadcast thread stop requested` → `Cleanup completed`. One `[I10] enter teleop_device.get_action` line was in flight when the signal landed (interleaved with the shutdown log lines from the concurrent async handler) and still exited normally at 1.0ms — no hang, no interrupted call. `/teleoperation-status` confirmed `teleoperation_active: false` afterward with no cleanup error.
 
-I8 protects the arm during a real `kill <pid>` exactly as designed, once its own commits are actually part of the running code. There is no signal-vs-Feetech-call mechanism to chase.
+Within the scope actually tested (below), I8 protects the arm during a real `kill <pid>` exactly as designed, once its own commits are actually part of the running code. There is no signal-vs-Feetech-call mechanism to chase.
+
+### What was NOT tested — do not assume these are fine
+
+- **`uvicorn --reload` restarts.** Both this investigation's two runs used a real `kill -TERM` against a **prod-mode** process (`_run_prod()`, no `--reload`). `--reload` goes through uvicorn's separate file-watcher/reloader supervisor process, which is a different signal-delivery path (parent forwards the signal to a child worker, on its own timing) — not exercised here at all, despite being named as one of the two triggers this whole investigation (and I8 itself) is meant to cover.
+- **Bimanual mode.** Both runs used a single-arm rig. `teleoperation_worker()` has a separate `is_bimanual` path (`BiSOFollower`/`BiSOLeader`, two buses, two rest poses, `asyncio.gather`-free sequential-looking bimanual bus access) that was never driven under a real signal.
+- **A SIGTERM landing mid-release** (i.e. while a previous stop's rest-pose return/torque-release is already in flight — the `releasing` state and its "second stop forces immediate release" path). Only a SIGTERM against an actively-driving, not-yet-stopped session was tested.
+- Recording's side of the same I8 mechanism (`stop_recording_and_wait`) — see below, blocked separately.
+
+Treat the resolution above as "plain `kill -TERM` against a prod-mode, single-arm, actively-driving teleoperation session is fine" — not as "the whole real-world SIGTERM/`--reload` risk is closed."
 
 ### Still open (unrelated to the above, not blocking)
 
@@ -32,7 +41,7 @@ I8 protects the arm during a real `kill <pid>` exactly as designed, once its own
 
 ### Recommendation
 
-Close I10. Merge this branch's instrumentation-removal (or just drop the branch — the instrumentation was diagnostic only, not meant to ship) and treat I8 (PR #29) as validated on real hardware. PR #29 can reasonably move out of draft once the author double-checks the diff — this investigation found no defect in it, only in how I10 was tested against it.
+Close this specific finding — the original SIGTERM-does-nothing report was a test-setup artifact, not a defect, for the scope actually tested. Don't broaden that to "I8 is fully validated on real hardware": `--reload`, bimanual, and mid-release SIGTERM are all still open and worth a real-hardware pass before treating those specifically as safe. PR #29's own diff was not found to have any defect by this investigation.
 
 ## Repository purpose
 
