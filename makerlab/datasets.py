@@ -48,6 +48,19 @@ logger = logging.getLogger(__name__)
 CAMERA_FEATURE_PREFIX = "observation.images."
 
 
+def _safe_int(value: Any) -> int | None:
+    """`int(value)`, or None on a value that can't convert (e.g. a malformed
+    episode_index/chunk_index/file_index in a Hub dataset's own parquet
+    metadata — content this app doesn't control once the dataset isn't ours).
+    Callers treat None as "this row/episode isn't usable," matching the
+    graceful-404 pattern used everywhere else in the episode viewer, instead
+    of letting a bad third-party dataset raise an unhandled ValueError."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _video_camera_names(features: dict[str, Any]) -> list[str]:
     """Camera feature names actually backed by an mp4 (dtype == "video"), not
     just any observation.images.* key. A raw-image (dtype == "image") camera
@@ -750,17 +763,25 @@ def list_episode_summaries(repo_id: str) -> list[dict[str, Any]] | None:
         return None
     out = []
     for row in rows:
+        episode_index = _safe_int(row.get("episode_index"))
+        length = _safe_int(row.get("length"))
+        if episode_index is None or length is None:
+            logger.warning("Skipping episode row with malformed episode_index/length for %s", repo_id)
+            continue
         video_offsets: dict[str, dict[str, float]] = {}
         for col, (camera, which) in col_to_camera.items():
             value = row.get(col)
             if value is None:
                 continue
-            video_offsets.setdefault(camera, {})[which] = float(value)
+            try:
+                video_offsets.setdefault(camera, {})[which] = float(value)
+            except (TypeError, ValueError):
+                continue
         out.append(
             {
-                "episode_index": int(row["episode_index"]),
-                "length": int(row["length"]),
-                "duration": round(int(row["length"]) / fps, 3),
+                "episode_index": episode_index,
+                "length": length,
+                "duration": round(length / fps, 3),
                 "tasks": [str(t) for t in (row.get("tasks") or [])],
                 "video_offsets": video_offsets,
             }
@@ -800,13 +821,17 @@ def get_episode_video_path(repo_id: str, episode_index: int, camera: str) -> Pat
     rows = _read_episode_rows(path / "meta", columns=["episode_index", chunk_col, file_col])
     if rows is None:
         return None
-    row = next((r for r in rows if int(r["episode_index"]) == episode_index), None)
+    row = next((r for r in rows if _safe_int(r.get("episode_index")) == episode_index), None)
     if row is None or row.get(chunk_col) is None or row.get(file_col) is None:
         return None
+    chunk_index, file_index = _safe_int(row[chunk_col]), _safe_int(row[file_col])
+    if chunk_index is None or file_index is None:
+        logger.warning(
+            "Malformed chunk/file index for %s episode %d camera %s", repo_id, episode_index, camera
+        )
+        return None
 
-    rel_video_path = (
-        Path("videos") / video_key / f"chunk-{int(row[chunk_col]):03d}" / f"file-{int(row[file_col]):03d}.mp4"
-    )
+    rel_video_path = Path("videos") / video_key / f"chunk-{chunk_index:03d}" / f"file-{file_index:03d}.mp4"
     if is_hub:
         try:
             return Path(hf_hub_download(repo_id, filename=str(rel_video_path), repo_type="dataset"))
@@ -843,15 +868,15 @@ def get_episode_joint_series(repo_id: str, episode_index: int) -> dict[str, Any]
     )
     if episode_rows is None:
         return None
-    row = next((r for r in episode_rows if int(r["episode_index"]) == episode_index), None)
+    row = next((r for r in episode_rows if _safe_int(r.get("episode_index")) == episode_index), None)
     if row is None or row.get("data/chunk_index") is None or row.get("data/file_index") is None:
         return None
+    chunk_index, file_index = _safe_int(row["data/chunk_index"]), _safe_int(row["data/file_index"])
+    if chunk_index is None or file_index is None:
+        logger.warning("Malformed data chunk/file index for %s episode %d", repo_id, episode_index)
+        return None
 
-    rel_data_path = (
-        Path("data")
-        / f"chunk-{int(row['data/chunk_index']):03d}"
-        / f"file-{int(row['data/file_index']):03d}.parquet"
-    )
+    rel_data_path = Path("data") / f"chunk-{chunk_index:03d}" / f"file-{file_index:03d}.parquet"
     if is_hub:
         try:
             data_path = Path(hf_hub_download(repo_id, filename=str(rel_data_path), repo_type="dataset"))

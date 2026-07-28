@@ -1646,6 +1646,38 @@ def test_list_episode_summaries_hub_fallback_filters_non_video_cameras(
     }
 
 
+def test_list_episode_summaries_skips_malformed_episode_row(tmp_lerobot_home: Path) -> None:
+    """A malformed episode_index (e.g. a NaN from a third-party Hub dataset
+    with corrupt metadata) is skipped, not a raised exception that 500s the
+    whole endpoint — the good rows still come back."""
+    from makerlab import datasets as ds
+
+    d = _write_info(
+        tmp_lerobot_home,
+        "alice/local",
+        {"fps": 30, "features": {"observation.images.front": {"dtype": "video"}}},
+    )
+    episodes_dir = d / "meta" / "episodes" / "chunk-000"
+    episodes_dir.mkdir(parents=True)
+    pq.write_table(
+        pa.table(
+            {
+                "episode_index": [float("nan"), 1.0],
+                "tasks": [["task"], ["task"]],
+                "length": [30, 60],
+                "videos/observation.images.front/from_timestamp": [0.0, 1.0],
+                "videos/observation.images.front/to_timestamp": [1.0, 3.0],
+            }
+        ),
+        episodes_dir / "file-000.parquet",
+    )
+
+    result = ds.list_episode_summaries("alice/local")
+
+    assert result is not None
+    assert [e["episode_index"] for e in result] == [1]
+
+
 def test_get_episode_video_path_local_unchanged(tmp_lerobot_home: Path) -> None:
     from makerlab import datasets as ds
 
@@ -1675,6 +1707,32 @@ def test_get_episode_video_path_local_unchanged(tmp_lerobot_home: Path) -> None:
 
     hub_fetch.assert_not_called()
     assert result == video_dir / "file-000.mp4"
+
+
+def test_get_episode_video_path_returns_none_on_malformed_chunk_index(tmp_lerobot_home: Path) -> None:
+    """A malformed chunk_index/file_index (e.g. a NaN from a corrupt or
+    adversarial Hub dataset) 404s gracefully instead of raising."""
+    from makerlab import datasets as ds
+
+    d = _write_info(
+        tmp_lerobot_home,
+        "alice/local",
+        {"features": {"observation.images.front": {"dtype": "video"}}},
+    )
+    episodes_dir = d / "meta" / "episodes" / "chunk-000"
+    episodes_dir.mkdir(parents=True)
+    pq.write_table(
+        pa.table(
+            {
+                "episode_index": [0],
+                "videos/observation.images.front/chunk_index": [float("nan")],
+                "videos/observation.images.front/file_index": [0],
+            }
+        ),
+        episodes_dir / "file-000.parquet",
+    )
+
+    assert ds.get_episode_video_path("alice/local", 0, "front") is None
 
 
 def test_get_episode_video_path_hub_fallback_downloads_one_chunk(
@@ -1842,6 +1900,26 @@ def test_get_episode_joint_series_local_unchanged(tmp_lerobot_home: Path) -> Non
     assert result is not None
     assert result["joint_names"] == ["shoulder", "elbow"]
     assert result["timestamps"] == [0.0, 0.033]
+
+
+def test_get_episode_joint_series_returns_none_on_malformed_chunk_index(tmp_lerobot_home: Path) -> None:
+    """A malformed data/chunk_index (e.g. a NaN from a corrupt or adversarial
+    Hub dataset) 404s gracefully instead of raising."""
+    from makerlab import datasets as ds
+
+    d = _write_info(
+        tmp_lerobot_home,
+        "alice/local",
+        {"features": {"observation.state": {"names": ["shoulder"]}}},
+    )
+    episodes_dir = d / "meta" / "episodes" / "chunk-000"
+    episodes_dir.mkdir(parents=True)
+    pq.write_table(
+        pa.table({"episode_index": [0], "data/chunk_index": [float("nan")], "data/file_index": [0]}),
+        episodes_dir / "file-000.parquet",
+    )
+
+    assert ds.get_episode_joint_series("alice/local", 0) is None
 
 
 def test_get_episode_joint_series_hub_fallback_downloads_one_chunk(
