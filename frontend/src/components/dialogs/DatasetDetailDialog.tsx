@@ -174,8 +174,8 @@ const EpisodeViewer: React.FC<{
 
   // Drives currentTime/scrubber from the primary camera's raw (file-relative)
   // playback position, and is the one place that notices the episode's own
-  // slice has ended — native `ended` never fires here since the underlying
-  // file usually keeps going into the next episode's frames.
+  // slice has ended — native `ended` usually doesn't fire here since the
+  // underlying file usually keeps going into the next episode's frames.
   const handlePrimaryTimeUpdate = (rawTime: number) => {
     if (!episode) return;
     const offset = offsetFor(primaryCamera);
@@ -185,6 +185,18 @@ const EpisodeViewer: React.FC<{
       forEachVideo((v) => v.pause());
       setPlaying(false);
     }
+  };
+
+  // Fallback for the (possible) case where this episode's slice is the
+  // physical file's own end — e.g. the last episode in a chunk — and the
+  // video's real duration falls short of `episode.duration` (independently
+  // derived from length/fps, not from the file itself). Native `ended` fires
+  // here before the timeupdate threshold above ever would, and without this
+  // handler `playing` would stay stuck true forever since no further
+  // timeupdate events arrive once playback has actually stopped.
+  const handlePrimaryEnded = () => {
+    forEachVideo((v) => v.pause());
+    setPlaying(false);
   };
 
   const handleSeek = (t: number) => {
@@ -303,6 +315,7 @@ const EpisodeViewer: React.FC<{
                       ? (e) => handlePrimaryTimeUpdate(e.currentTarget.currentTime)
                       : undefined
                   }
+                  onEnded={camera === primaryCamera ? handlePrimaryEnded : undefined}
                   onError={() =>
                     setVideoErrors((prev) => ({ ...prev, [camera]: true }))
                   }
