@@ -2563,8 +2563,12 @@ async def shutdown_event():
     # It can block for several seconds waiting on the subprocess, so it runs
     # in a thread instead of directly on the event loop — otherwise it would
     # freeze all other async work (including this same shutdown sequence)
-    # for however long the wait takes.
-    await asyncio.to_thread(handle_stop_inference)
+    # for however long the wait takes. Any failure here is caught so it can't
+    # stop the broadcast-thread cleanup below from running too.
+    try:
+        await asyncio.to_thread(handle_stop_inference)
+    except Exception:
+        logger.exception("Failed to stop inference during shutdown")
 
     if manager:
         manager.stop_broadcast_thread()
