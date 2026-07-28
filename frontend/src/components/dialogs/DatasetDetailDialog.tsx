@@ -351,6 +351,7 @@ const EpisodeViewer: React.FC<{
           className="relative h-5 flex-1 cursor-pointer"
           onPointerDown={(e) => {
             draggingRef.current = true;
+            e.currentTarget.setPointerCapture(e.pointerId);
             forEachVideo((v) => v.pause());
             setPlaying(false);
             seekFromClientX(e.clientX);
@@ -358,11 +359,9 @@ const EpisodeViewer: React.FC<{
           onPointerMove={(e) => {
             if (draggingRef.current) seekFromClientX(e.clientX);
           }}
-          onPointerUp={() => {
+          onPointerUp={(e) => {
             draggingRef.current = false;
-          }}
-          onPointerLeave={() => {
-            draggingRef.current = false;
+            e.currentTarget.releasePointerCapture(e.pointerId);
           }}
         >
           <div className="absolute inset-y-0 my-auto h-1 w-full rounded-full bg-muted" />
