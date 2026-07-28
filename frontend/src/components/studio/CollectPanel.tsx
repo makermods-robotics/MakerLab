@@ -32,7 +32,6 @@ import {
   PanelHeader,
   SLIDE,
 } from "@/components/studio/panel/primitives";
-import DatasetDetailDialog from "@/components/dialogs/DatasetDetailDialog";
 
 /**
  * Studio panel 1 · Collect. Stacked sections (the shared studio anatomy):
@@ -78,15 +77,13 @@ const CollectPanel: React.FC = () => {
   const [libraryOpen, setLibraryOpen] = useState(!formOpen);
   const [mergeOpen, setMergeOpen] = useState(false);
 
-  // The episode viewer dialog stays wired up (below), but its trigger on the
-  // dataset card is held back pending the card/job/skill redesign — no room
-  // confirmed yet for another icon in that layout. To bring it back: restore
-  // an openDatasetDetail(item: DatasetItem) helper that calls
-  // setViewRepo(item.repo_id) + setViewOpen(true), and pass it as
-  // DatasetLibraryList's onView prop below (see git history prior to this
-  // commit for the exact removed code, or the `eye-icon-full-feature` tag).
-  const [viewRepo, setViewRepo] = useState<string | null>(null);
-  const [viewOpen, setViewOpen] = useState(false);
+  // The episode viewer's trigger on the dataset card is held back pending the
+  // card/job/skill redesign — no room confirmed yet for another icon in that
+  // layout. The dialog itself was dropped from here too since a dialog with
+  // no trigger is dead state; see the `eye-icon-full-feature` tag for the
+  // full removed feature (viewRepo/viewOpen state, the openDatasetDetail
+  // helper, DatasetDetailDialog render, and DatasetLibraryList's onView prop)
+  // to restore it alongside a real trigger.
 
   // A live session renders as a modal dialog over the studio (the old
   // /recording page). While it runs, the form below stays mounted with its
@@ -433,12 +430,6 @@ const CollectPanel: React.FC = () => {
           clearDatasetInfoCache();
           refresh();
         }}
-      />
-
-      <DatasetDetailDialog
-        repoId={viewRepo}
-        open={viewOpen}
-        onOpenChange={setViewOpen}
       />
 
       {/* The live recording session — a modal dialog over the studio instead
