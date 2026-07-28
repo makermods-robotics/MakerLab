@@ -2560,7 +2560,11 @@ async def shutdown_event():
     # `--reload` tearing down the worker process on a file change), which is
     # exactly when nothing else is left to stop it. handle_stop_inference()
     # is a no-op (409) when idle, so this is safe to call unconditionally.
-    handle_stop_inference()
+    # It can block for several seconds waiting on the subprocess, so it runs
+    # in a thread instead of directly on the event loop — otherwise it would
+    # freeze all other async work (including this same shutdown sequence)
+    # for however long the wait takes.
+    await asyncio.to_thread(handle_stop_inference)
 
     if manager:
         manager.stop_broadcast_thread()
