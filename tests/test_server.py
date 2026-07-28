@@ -61,6 +61,61 @@ def test_app_exposes_required_endpoints() -> None:
     assert not missing, f"missing routes: {missing}"
 
 
+def test_shutdown_stops_active_auto_calibration(monkeypatch: pytest.MonkeyPatch) -> None:
+    """FastAPI's shutdown handler must terminate an in-flight auto-calibration
+    subprocess and release the arm's torque, not just clean up the broadcast
+    thread.
+
+    Auto-calibration drives the arm under torque via its own subprocess,
+    independent of this server process, and on success writes servo EEPROM.
+    Without this, `--reload` or a plain PID kill during a run leaves that
+    subprocess orphaned with the arm potentially still energized and nobody
+    able to stop it from the API. Uses a real (fake) Popen so the actual
+    SIGTERM -> wait -> torque-release sequence runs end to end through
+    shutdown_event(), the same way test_shutdown_stops_active_inference
+    exercises the inference path."""
+    from makerlab import auto_calibrate as ac
+
+    class _FakeAutocalProc:
+        def __init__(self) -> None:
+            self._dead = threading.Event()
+            self.terminated = False
+
+        def terminate(self) -> None:
+            self.terminated = True
+            self._dead.set()
+
+        def wait(self, timeout: float | None = None) -> int:
+            if not self._dead.wait(timeout):
+                raise TimeoutError
+            return 0
+
+    proc = _FakeAutocalProc()
+    released: list[str] = []
+    monkeypatch.setattr(ac, "_release_arm_torque", lambda port: (released.append(port), [])[1])
+    monkeypatch.setattr(ac, "_STOP_GRACE_S", 0.2)
+    monkeypatch.setattr(ac, "_STOP_KILL_WAIT_S", 0.2)
+    monkeypatch.setattr(ac, "_READER_JOIN_S", 0.2)
+
+    mgr = ac.auto_calibration_manager
+    monkeypatch.setattr(mgr, "status", ac.AutoCalibrationStatus(active=True, status="running"))
+    monkeypatch.setattr(mgr, "_proc", proc)
+    monkeypatch.setattr(
+        mgr,
+        "_request",
+        ac.AutoCalibrationRequest(device_type="robot", port="/dev/arm", config_file="test_arm"),
+    )
+    monkeypatch.setattr(mgr, "_thread", None)
+    # Broadcast-thread cleanup isn't under test here.
+    monkeypatch.setattr(server_mod, "manager", None)
+
+    asyncio.run(server_mod.shutdown_event())
+
+    assert proc.terminated, "shutdown did not terminate the in-flight auto-calibration subprocess"
+    assert released == ["/dev/arm"], "shutdown did not release the arm's torque"
+    assert mgr.status.active is False
+
+
 def test_health_endpoint_returns_200_with_json_object(client: TestClient) -> None:
     response = client.get("/health")
     assert response.status_code == 200
