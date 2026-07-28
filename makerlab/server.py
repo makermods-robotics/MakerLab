@@ -2553,6 +2553,24 @@ async def shutdown_event():
 
     # Stop any active recording - handled by recording module cleanup
 
+    # Auto-calibration drives the arm under torque, and on success writes
+    # servo EEPROM, via its own subprocess(es) — real, independent child
+    # processes that don't stop just because this one does. A server
+    # shutdown while a calibration is active (a plain `kill <pid>`, or
+    # uvicorn `--reload` restarting on a file change) would otherwise leave
+    # the arm energized under a subprocess nobody can reach from the API
+    # anymore. stop_and_wait() runs the same stop each arm's Stop button
+    # uses, but blocks until the arm is actually confirmed de-energized
+    # instead of just kicking the stop off — this is a one-time shutdown
+    # step, not a UI action waiting on a poll loop, so it's safe to wait
+    # here. Runs in a thread since it can take up to ~30s; a no-op when
+    # nothing is running.
+    try:
+        await asyncio.to_thread(auto_calibration_manager.stop_and_wait)
+        await asyncio.to_thread(auto_calibration_batch_manager.stop_and_wait)
+    except Exception:
+        logger.exception("Failed to stop auto-calibration during shutdown")
+
     if manager:
         manager.stop_broadcast_thread()
     logger.info("✅ Cleanup completed")
