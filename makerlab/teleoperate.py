@@ -579,6 +579,19 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
             return {"success": False, "message": "Recording is currently active. Stop it first."}
         if _rollout.inference_active:
             return {"success": False, "message": "Inference is currently active. Stop it first."}
+        if _rollout._inference_startup_thread is not None and _rollout._inference_startup_thread.is_alive():
+            # A previous inference session was stopped while its startup worker
+            # was inside _prepare_robot (already touching the follower bus) or
+            # still unwinding just after — inference_active is already False,
+            # but the worker itself hasn't exited yet. Starting teleoperation
+            # now would open the same serial port out from under it (confirmed
+            # on real hardware: the concurrent bus.connect() succeeds instead of
+            # erroring). Mirrors rollout.py's own guard against this same
+            # worker for a new inference session.
+            return {
+                "success": False,
+                "message": "The previous inference session is still shutting down. Try again in a few seconds.",
+            }
         # Per-session state reset, under the same lock that claims the active
         # flag: a stale _release_now from a previous session's double-stop
         # would otherwise cut EVERY later grace/return short until the server

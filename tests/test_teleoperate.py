@@ -160,6 +160,43 @@ def test_start_teleoperation_disconnects_follower_when_leader_fails(
     assert teleop.teleoperation_active is False
 
 
+def test_start_teleoperation_refuses_while_inference_startup_worker_alive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stopped inference session's startup worker can still be stuck inside
+    _prepare_robot, genuinely holding the follower's serial bus (I6/I9) --
+    inference_active alone is already False by the time the worker is
+    "orphaned" this way, so it isn't enough to prevent a new teleoperation
+    session from racing it for the same port. Reproduced on real hardware:
+    a concurrent bus.connect() actually succeeds instead of erroring."""
+    import makerlab.record as record
+    import makerlab.rollout as rollout
+    import makerlab.teleoperate as teleop
+
+    monkeypatch.setattr(teleop, "teleoperation_active", False)
+    monkeypatch.setattr(teleop, "teleoperation_thread", None)
+    monkeypatch.setattr(record, "recording_active", False)
+    monkeypatch.setattr(rollout, "inference_active", False)
+
+    class _OrphanedStartupWorker:
+        def is_alive(self) -> bool:
+            return True
+
+    monkeypatch.setattr(rollout, "_inference_startup_thread", _OrphanedStartupWorker())
+
+    request = teleop.TeleoperateRequest(
+        leader_port="COM_LEADER",
+        follower_port="COM_FOLLOWER",
+        leader_config="leader",
+        follower_config="follower",
+    )
+    result = teleop.handle_start_teleoperation(request)
+
+    assert result["success"] is False
+    assert "shutting down" in result["message"].lower() or "inference" in result["message"].lower()
+    assert teleop.teleoperation_active is False
+
+
 # ---------------------------------------------------------------------------
 # Teleop opens no cameras: it consumes no frames (only motor positions drive the
 # URDF viewer). The follower config it builds therefore carries an empty camera
