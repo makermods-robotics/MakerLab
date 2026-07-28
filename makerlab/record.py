@@ -471,6 +471,20 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
             return {"success": False, "message": "Teleoperation is currently active. Stop it first."}
         if _rollout.inference_active:
             return {"success": False, "message": "Inference is currently active. Stop it first."}
+        if _rollout._inference_startup_thread is not None and _rollout._inference_startup_thread.is_alive():
+            # A previous inference session was stopped while its startup worker
+            # was inside _prepare_robot (already touching the follower bus) or
+            # still unwinding just after — inference_active is already False,
+            # but the worker itself hasn't exited yet. Starting recording now
+            # would open the same serial port out from under it (confirmed on
+            # real hardware for the identical teleoperate.py gap: the
+            # concurrent bus.connect() succeeds instead of erroring). Mirrors
+            # rollout.py's own guard against this same worker for a new
+            # inference session, and teleoperate.py's guard for itself.
+            return {
+                "success": False,
+                "message": "The previous inference session is still shutting down. Try again in a few seconds.",
+            }
         # Refuse a malformed dataset name up front (before claiming the flag or
         # touching hardware). Rejecting beats silent sanitization: "whoo/" used to
         # smuggle in a namespace and land the dataset at "user/whoo/".

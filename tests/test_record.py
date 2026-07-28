@@ -1204,6 +1204,46 @@ def test_start_recording_resume_skips_timestamp_stamp(monkeypatch: pytest.Monkey
     assert re.fullmatch(r"tester/existing_ds_\d{8}_\d{6}", _start(resume=False))
 
 
+def test_start_recording_refuses_while_inference_startup_worker_alive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same gap as teleoperate.py (I9): a stopped inference session's startup
+    worker can still be stuck inside _prepare_robot, genuinely holding the
+    follower's serial bus, while inference_active is already False (the
+    worker has no cooperative cancellation checkpoint to be interrupted at).
+    Recording must not be allowed to start and race it for the same port."""
+    import makerlab.record as record
+    import makerlab.rollout as rollout
+    import makerlab.teleoperate as teleop
+
+    monkeypatch.setattr(record, "recording_active", False)
+    monkeypatch.setattr(record, "recording_thread", None)
+    monkeypatch.setattr(record, "releasing", False)
+    monkeypatch.setattr(teleop, "teleoperation_active", False)
+    monkeypatch.setattr(teleop, "teleoperation_thread", None)
+    monkeypatch.setattr(rollout, "inference_active", False)
+
+    class _OrphanedStartupWorker:
+        def is_alive(self) -> bool:
+            return True
+
+    monkeypatch.setattr(rollout, "_inference_startup_thread", _OrphanedStartupWorker())
+
+    request = record.RecordingRequest(
+        leader_port="COM_LEADER",
+        follower_port="COM_FOLLOWER",
+        leader_config="leader",
+        follower_config="follower",
+        dataset_repo_id="tester/some_ds",
+        single_task="pick",
+    )
+    result = record.handle_start_recording(request)
+
+    assert result["success"] is False
+    assert "shutting down" in result["message"].lower()
+    assert record.recording_active is False
+
+
 # ---------------------------------------------------------------------------
 # Session error taxonomy — outcome / error / hint (in-process twin of the
 # rollout exited payload). The worker's catch site holds the actual exception,
