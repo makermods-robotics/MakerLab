@@ -230,9 +230,19 @@ const EpisodeViewer: React.FC<{
 
   const jointRanges = useMemo(() => {
     if (!joints || joints.values.length === 0) return [];
+    // Reduce, not Math.min(...vals)/Math.max(...vals) — spreading a large
+    // array into a function call can throw "Maximum call stack size
+    // exceeded" (engine-dependent, but well within reach of a long episode's
+    // frame count), which would blank the whole chart.
     return joints.joint_names.map((_, j) => {
-      const vals = joints.values.map((frame) => frame[j]);
-      return { min: Math.min(...vals), max: Math.max(...vals) };
+      let min = Infinity;
+      let max = -Infinity;
+      for (const frame of joints.values) {
+        const v = frame[j];
+        if (v < min) min = v;
+        if (v > max) max = v;
+      }
+      return { min, max };
     });
   }, [joints]);
 
