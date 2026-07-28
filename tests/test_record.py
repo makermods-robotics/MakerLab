@@ -1473,3 +1473,46 @@ def test_stop_and_wait_forces_release_if_worker_does_not_finish_in_time(
     assert record._release_now.is_set(), "a worker that outlasts the timeout must be force-released"
     worker.join(timeout=5.0)
     assert not worker.is_alive()
+
+
+def test_stop_and_wait_lets_an_already_in_progress_release_finish_gracefully(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """recording_active stays True for the worker's entire lifetime -- unlike
+    teleoperation_active, which flips False the instant a stop is requested,
+    recording_active only goes False after the worker's finally block has
+    already released and disconnected. So a session that already received its
+    first stop and is mid return-to-rest (releasing=True) still has
+    recording_active=True. stop_and_wait must not mistake this for a
+    not-yet-stopped session and call handle_stop_recording() again --
+    handle_stop_recording treats any call made while releasing is True as a
+    *second* stop and force-releases immediately, which would abort a return
+    that was about to finish gracefully on its own well within the timeout."""
+    import makerlab.record as record
+
+    forced = threading.Event()
+    finished_gracefully = threading.Event()
+
+    def _worker() -> None:
+        # Stands in for the tail of a graceful return-to-rest: finishes on its
+        # own shortly, but would also honor a forced release if one came in.
+        if record._release_now.wait(timeout=0.3):
+            forced.set()
+        else:
+            finished_gracefully.set()
+
+    worker = threading.Thread(target=_worker, daemon=True)
+    monkeypatch.setattr(record, "recording_active", True)
+    monkeypatch.setattr(record, "recording_thread", worker)
+    monkeypatch.setattr(
+        record, "recording_events", {"exit_early": False, "stop_recording": True, "rerecord_episode": False}
+    )
+    monkeypatch.setattr(record, "releasing", True)
+    record._release_now.clear()
+    worker.start()
+
+    record.stop_and_wait(timeout=5.0)
+
+    assert finished_gracefully.is_set(), "an already-in-progress graceful return was aborted early"
+    assert not forced.is_set(), "stop_and_wait force-released a session already mid graceful return"
+    worker.join(timeout=2.0)

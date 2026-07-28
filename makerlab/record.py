@@ -287,7 +287,14 @@ def stop_and_wait(timeout: float = _STOP_AND_WAIT_TIMEOUT_S) -> None:
     Discards nothing: a shutdown mid-session should keep whatever episodes
     were already recorded, not throw them away. A no-op when idle.
     """
-    if recording_active:
+    if recording_active and not releasing:
+        # recording_active stays True for the worker's entire lifetime --
+        # unlike teleoperation_active, which flips False the instant a stop
+        # is requested -- so a session already mid return-to-rest (releasing)
+        # still has recording_active=True. Calling handle_stop_recording()
+        # again in that state would hit its "releasing" branch and
+        # force-release immediately, aborting a return that may finish
+        # gracefully on its own well within the timeout below.
         handle_stop_recording(discard=False)
     worker = recording_thread
     if worker is None or not worker.is_alive():
