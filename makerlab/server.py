@@ -2563,13 +2563,18 @@ async def shutdown_event():
     # uses, but blocks until the arm is actually confirmed de-energized
     # instead of just kicking the stop off — this is a one-time shutdown
     # step, not a UI action waiting on a poll loop, so it's safe to wait
-    # here. Runs in a thread since it can take up to ~30s; a no-op when
-    # nothing is running.
-    try:
-        await asyncio.to_thread(auto_calibration_manager.stop_and_wait)
-        await asyncio.to_thread(auto_calibration_batch_manager.stop_and_wait)
-    except Exception:
-        logger.exception("Failed to stop auto-calibration during shutdown")
+    # here. Single-arm and batch calibration aren't mutually exclusive with
+    # each other, so both can be active at once — stop them concurrently
+    # (each can take up to ~30s) rather than one after the other, or the
+    # worst case doubles for no reason. A no-op when nothing is running.
+    results = await asyncio.gather(
+        asyncio.to_thread(auto_calibration_manager.stop_and_wait),
+        asyncio.to_thread(auto_calibration_batch_manager.stop_and_wait),
+        return_exceptions=True,
+    )
+    for result in results:
+        if isinstance(result, Exception):
+            logger.exception("Failed to stop auto-calibration during shutdown", exc_info=result)
 
     if manager:
         manager.stop_broadcast_thread()
