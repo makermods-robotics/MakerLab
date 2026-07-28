@@ -87,6 +87,7 @@ from .record import (
     handle_stop_recording,
     handle_upload_dataset,
     handle_upload_status,
+    stop_and_wait as stop_recording_and_wait,
 )
 from .rollout import (
     InferenceRequest,
@@ -102,6 +103,7 @@ from .teleoperate import (
     handle_start_teleoperation,
     handle_stop_teleoperation,
     handle_teleoperation_status,
+    stop_and_wait as stop_teleoperation_and_wait,
 )
 
 # Training is now job-based; see app/jobs.py.
@@ -2551,7 +2553,30 @@ async def shutdown_event():
     """Clean up resources when FastAPI shuts down"""
     logger.info("🔄 FastAPI shutting down, cleaning up...")
 
-    # Stop any active recording - handled by recording module cleanup
+    # Teleoperation and recording drive the follower(s) as background threads
+    # INSIDE this process (teleoperation_thread / recording_thread) — unlike
+    # inference's rollout subprocess or auto-calibration's vendored script,
+    # there's no independent child process left running after this one exits;
+    # instead, a plain kill or `--reload` restart kills the thread mid-loop,
+    # with no return-to-rest and no torque release at all, since nothing
+    # signals it to stop first. Each stop_and_wait() triggers the same
+    # graceful stop its own Stop button uses and blocks (bounded) until it's
+    # actually done, instead of the flag-flip-and-return each module's first
+    # stop call does for a UI caller that can poll status or press Stop again.
+    # Teleoperation and recording are mutually exclusive with each other, so
+    # only one is normally live at a time — gathered concurrently anyway, for
+    # the same reason the auto-calibration shutdown fix gathers its two
+    # managers: cheap, consistent with that established pattern, and
+    # defensive if that invariant is ever violated. A no-op on either side
+    # when idle.
+    results = await asyncio.gather(
+        asyncio.to_thread(stop_teleoperation_and_wait),
+        asyncio.to_thread(stop_recording_and_wait),
+        return_exceptions=True,
+    )
+    for result in results:
+        if isinstance(result, Exception):
+            logger.exception("Failed to stop teleoperation/recording during shutdown", exc_info=result)
 
     if manager:
         manager.stop_broadcast_thread()
