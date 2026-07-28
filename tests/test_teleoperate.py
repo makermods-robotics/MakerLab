@@ -15,6 +15,9 @@
 
 from __future__ import annotations
 
+import threading
+import time
+
 import pytest
 
 
@@ -1119,3 +1122,85 @@ def test_teleoperation_status_outcome_none_before_any_session(
     assert status["outcome"] is None
     assert status["error"] is None
     assert status["hint"] is None
+
+
+# ---------------------------------------------------------------------------
+# I8: shutdown_event() has no UI to poll and no "press Stop again" gesture
+# available, but handle_stop_teleoperation()'s first call is deliberately
+# fire-and-forget — it flips teleoperation_active and returns immediately so
+# the request thread isn't blocked on the return-to-rest motion, relying on a
+# status poll or a second Stop press to observe or force completion. Calling
+# it alone from shutdown would let the process exit while the worker is still
+# mid-return, with no return-to-rest and no torque release. stop_and_wait()
+# composes the stop with a bounded join so a caller with no UI can get the
+# same graceful-then-forced guarantee synchronously.
+# ---------------------------------------------------------------------------
+
+
+def test_stop_and_wait_is_a_noop_when_idle(monkeypatch: pytest.MonkeyPatch) -> None:
+    import makerlab.teleoperate as teleop
+
+    monkeypatch.setattr(teleop, "teleoperation_active", False)
+    monkeypatch.setattr(teleop, "teleoperation_thread", None)
+
+    teleop.stop_and_wait(timeout=1.0)  # must return promptly, no exception
+
+
+def test_stop_and_wait_blocks_until_worker_finishes_gracefully(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A real worker that responds to teleoperation_active going False (the
+    normal graceful path: return-to-rest, then release) must be allowed to
+    finish on its own within the timeout -- stop_and_wait must not return
+    before that, and must not force an early release when it didn't need to."""
+    import makerlab.teleoperate as teleop
+
+    released = threading.Event()
+
+    def _worker() -> None:
+        while teleop.teleoperation_active:
+            time.sleep(0.01)
+        released.set()
+
+    worker = threading.Thread(target=_worker, daemon=True)
+    monkeypatch.setattr(teleop, "teleoperation_active", True)
+    monkeypatch.setattr(teleop, "teleoperation_thread", worker)
+    monkeypatch.setattr(teleop, "last_cleanup_error", None)
+    teleop._release_now.clear()
+    worker.start()
+
+    teleop.stop_and_wait(timeout=2.0)
+
+    assert released.is_set(), "stop_and_wait returned before the worker finished releasing"
+    assert teleop.teleoperation_active is False
+    assert not teleop._release_now.is_set(), "a worker that finished gracefully must not be force-released"
+    worker.join(timeout=2.0)
+
+
+def test_stop_and_wait_forces_release_if_worker_does_not_finish_in_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A worker stuck past the graceful-release window (e.g. a stalled
+    return-to-rest) must be force-released via the same "second stop"
+    mechanism the UI's second Stop press uses -- shutdown has no operator to
+    press it, so stop_and_wait must do it automatically once the bound
+    elapses."""
+    import makerlab.teleoperate as teleop
+
+    def _worker() -> None:
+        # Ignores teleoperation_active; only responds to a forced release,
+        # standing in for a stalled/wedged return-to-rest.
+        teleop._release_now.wait(timeout=5.0)
+
+    worker = threading.Thread(target=_worker, daemon=True)
+    monkeypatch.setattr(teleop, "teleoperation_active", True)
+    monkeypatch.setattr(teleop, "teleoperation_thread", worker)
+    monkeypatch.setattr(teleop, "last_cleanup_error", None)
+    teleop._release_now.clear()
+    worker.start()
+
+    teleop.stop_and_wait(timeout=0.2)
+
+    assert teleop._release_now.is_set(), "a worker that outlasts the timeout must be force-released"
+    worker.join(timeout=5.0)
+    assert not worker.is_alive()
