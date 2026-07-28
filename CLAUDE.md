@@ -2,6 +2,39 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## I10: real SIGTERM does not appear to gracefully stop a live, real-hardware teleoperation session
+
+**Status: confirmed on real hardware (SO-101), root cause not found. No fix yet — this branch exists to track the investigation, not to ship a patch.**
+
+PR #29 (I8) added `stop_and_wait()` to `teleoperate.py`/`record.py` and wired both into `shutdown_event()` so that a `SIGTERM` (plain `kill <pid>`, or a `uvicorn --reload` restart) gracefully stops an active teleoperation/recording session — return-to-rest, torque release, disconnect — before the process exits, instead of orphaning the in-process control-loop thread. All of I8's automated tests pass, but they only ever invoke `shutdown_event()` directly via `asyncio.run(...)`; none of them go through a real OS signal delivered to a live process that's actually driving hardware.
+
+Tested that gap directly, against a real, connected SO-101 (single arm, leader `/dev/tty.usbmodem5B140311451` / follower `/dev/tty.usbmodem5B3E0901701`, calibration profile "autocalli robot"):
+
+1. Started a real teleoperation session via `POST /move-arm` (real `SO101Follower`/`SO101Leader`, torque enabled, control loop running) and deliberately never called stop.
+2. Sent a real `kill -TERM` to the running `makerlab` server process (prod mode, `_run_prod()`, no `--reload`).
+
+**Result, twice in a row:** the process exited in ~0.2–0.3s with zero log output from `handle_stop_teleoperation()`/`stop_and_wait()` — no "Stop teleoperation triggered," no rest-pose return, no disconnect. A normal, uninterrupted stop of the same kind of session takes ~4s and logs every step. Both times the arm was left with unknown torque state; recovered by reconnecting and issuing a clean stop, confirmed released (`outcome: "ok"`) before continuing.
+
+### What was ruled out (all via hardware-free repros against the real code, `SIGTERM`-tested each time)
+
+- `teleop.stop_and_wait()` called directly with a fake background-thread worker — correct, full timing.
+- The real `makerlab.server:app` (real `shutdown_event()`, real `asyncio.gather`/`asyncio.to_thread` wiring from I8) with a fake worker — correct, full timing.
+- The real `server:app` with a fake worker doing **real pyserial reads** on the actual connected port at loop-speed cadence (no lerobot classes, no torque) — correct, full timing.
+- Custom signal handlers inside lerobot's motor bus / SO101 robot classes — none exist; ruled out by source inspection.
+- `timeout_graceful_shutdown=2` (set in `scripts/makerlab.py`'s `_run_prod()`) cutting the lifespan shutdown handler short — ruled out: a real 2s+ shutdown handler completes fully when hardware isn't in the loop (matches the existing shutdown-audit's own finding that this setting only bounds in-flight HTTP requests, not the lifespan call).
+
+The only thing that reproduces the failure is the **real, pre-existing `teleoperation_worker()` closure inside `handle_start_teleoperation()`** (code that predates I8) actually driving the real servos. So this is not a logic bug in I8's own diff — `stop_and_wait()` and the `shutdown_event()` wiring both work correctly in isolation. The problem is that I8's fix depends on cooperation from the real hardware-driving loop, and that loop does not appear to respond the same way to a genuine OS-delivered `SIGTERM` as it does when `shutdown_event()` is invoked directly in-process.
+
+### Not yet determined
+
+- The exact mechanism (nothing pinned beyond the ruled-out list above — candidates not yet tested: whether a blocking Feetech-bus read/write syscall in the worker thread is somehow interrupted or left in a bad state by signal delivery, and whether that manifests as a silent exception path not reaching the loop's own `except`/`finally`).
+- Whether recording (`record.py`'s side of the same I8 mechanism) has the same problem — blocked in this environment by an unrelated bug: any real recording session currently fails immediately with `AttributeError: 'DatasetRecordConfig' object has no attribute 'vcodec'` deep in lerobot's dataset/video pipeline (confirmed not caused by `create_record_config()` itself, which builds a valid config in isolation — likely a lerobot pin/version mismatch in this environment). Recording could not be tested end-to-end against real hardware until that's resolved separately.
+- Whether I5 (inference) / I7 (auto-calibration) share this gap. Both use **subprocesses**, not in-process threads, so the shutdown mechanism differs enough that this may or may not generalize — genuinely open, not tested.
+
+### Recommendation
+
+Don't treat I8 as closing the real-world `kill <pid>` / `--reload` risk until this is root-caused and fixed. Next step is probably instrumenting the real worker loop directly (e.g., wrapping the Feetech bus calls to log entry/exit around each real read/write) and repeating the real-SIGTERM test, to catch exactly which call is in flight — or isn't returning normally — at the moment of signal delivery. That needs more live-SIGTERM cycles against real hardware; budget for arm wear/time accordingly and always follow with a clean reconnect-and-stop to confirm the arm ends up released.
+
 ## Repository purpose
 
 MakerLab is a FastAPI + React web interface wrapping the [LeRobot](https://github.com/huggingface/lerobot) framework for the SO-101 leader/follower arm (single or bimanual). It exposes teleoperation, dataset recording, calibration, training, inference, and replay as HTTP/WebSocket endpoints, replacing LeRobot's CLI + keyboard-driven flows. It is a fork of Hugging Face's [leLab](https://github.com/huggingface/leLab), heavily extended by [makermods-robotics](https://github.com/makermods-robotics).
