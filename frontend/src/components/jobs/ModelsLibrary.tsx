@@ -9,7 +9,6 @@ import { cn } from "@/lib/utils";
 import LibraryToolbar from "@/components/library/LibraryToolbar";
 import CappedGrid, { GRID_MIN_H } from "@/components/library/CappedGrid";
 import LibraryHeader from "@/components/library/LibraryHeader";
-import LibrarySectionHeader from "@/components/library/LibrarySectionHeader";
 import { SLIDE } from "@/components/studio/panel/primitives";
 import { useStudio } from "@/contexts/StudioContext";
 import { useLaunchInference } from "@/contexts/InferenceLaunchContext";
@@ -30,6 +29,19 @@ interface ModelsLibraryProps {
   onOpenChange?: (open: boolean) => void;
 }
 
+/** Which shelf of the library to look at. The split is the seam the data
+ * actually has — the component boundary: "yours" is everything backed by a job
+ * record (trained here or imported), which renders a ModelCard with the full
+ * affordance set; "hub" is the Hub repos with no local record, which render
+ * the thinner HubModelCard. */
+type ModelFilter = "all" | "yours" | "hub";
+
+const FILTERS: Array<{ key: ModelFilter; label: string }> = [
+  { key: "all", label: "All" },
+  { key: "yours", label: "Yours" },
+  { key: "hub", label: "On Hub" },
+];
+
 /**
  * Model/policy library for the studio Train panel: a search box over finished
  * trainings (a successful run is itself a deployable model), imported models,
@@ -39,14 +51,15 @@ interface ModelsLibraryProps {
  * empty so the entry point is always visible. Card Run actions hand the model
  * up through `onPick`, which the host routes to the shared inference launch.
  *
- * Two independently collapsible sections, split on the seam the data actually
- * has — the component boundary. "Your models" is everything backed by a job
- * record (trained here or imported), so every one of them renders a ModelCard
- * with the full affordance set; "On Hub, not imported" is the Hub repos with
- * no local record, which render the thinner HubModelCard (its Run/Fine-tune
- * lazily imports the repo first). Provenance is *not* the split: ModelCard
- * already prints Local / Cloud / Imported as an origin chip, so filtering on
- * it would only hide cards by something visible on their faces.
+ * Shaped exactly like the dataset library: title row → one LibraryToolbar
+ * (search + a segmented filter) → one CappedGrid, so the two studio columns
+ * line their first card row up at the same height. The filter carries the
+ * split the two section headers used to. Under "All" the two shelves stay
+ * legible without a header: the actionable ones sort first, and each card's
+ * own top-left origin chip says which shelf it is on — ModelCard prints
+ * Local / Cloud / Imported (+ "from Hub"), HubModelCard prints "Uploaded".
+ * Provenance *within* "yours" is not the split, precisely because that chip
+ * already puts it on the card's face.
  */
 const ModelsLibrary: React.FC<ModelsLibraryProps> = ({
   onPick,
@@ -77,11 +90,9 @@ const ModelsLibrary: React.FC<ModelsLibraryProps> = ({
   };
   const [importModalOpen, setImportModalOpen] = useState(false);
   const [search, setSearch] = useState("");
-  // "Your models" holds everything actionable, so it opens by default; the
-  // Hub repos nothing here tracks are the rare bucket and fold away, matching
-  // how the run history hides its untracked Hub jobs.
-  const [ownedOpen, setOwnedOpen] = useState(true);
-  const [hubOpen, setHubOpen] = useState(false);
+  // Everything by default, like the dataset library — the row cap keeps the
+  // rare untracked-Hub repos behind "Show all" anyway, since they sort last.
+  const [filter, setFilter] = useState<ModelFilter>("all");
 
   const query = search.trim().toLowerCase();
   const matchesQuery = (text: string | null | undefined) =>
@@ -119,10 +130,12 @@ const ModelsLibrary: React.FC<ModelsLibraryProps> = ({
     [untrackedHubModels, query],
   );
 
+  // The title row's badge stays the unfiltered total (the dataset library does
+  // the same with `libraryDatasets.length`); the filter pills carry no counts
+  // of their own, so the per-section counts the sub-headers used to show are
+  // gone rather than moved.
   const count =
     deployableModels.length + importedJobs.length + untrackedHubModels.length;
-  const ownedCount = visibleTrained.length + visibleImported.length;
-  const visibleCount = ownedCount + visibleUploaded.length;
 
   // Untracked hub model actions: register the repo as an imported pseudo-job
   // first (the proven lazy-import path), then either run it right here or hand
@@ -141,6 +154,46 @@ const ModelsLibrary: React.FC<ModelsLibraryProps> = ({
     // step null → the checkpoint loader picks the repo's latest.
     onPick(record, null);
   };
+
+  // One grid, two shelves. Each shelf keeps the sort it always had (job
+  // records newest-started first, Hub repos newest-modified first) and they
+  // are concatenated rather than interleaved, so the actionable models lead
+  // and the untracked Hub repos trail — the reading order the sub-headers
+  // used to impose, minus the headers.
+  const ownedCards =
+    filter === "hub"
+      ? []
+      : [...visibleTrained, ...visibleImported]
+          .sort((a, b) => (b.started_at ?? 0) - (a.started_at ?? 0))
+          .map((job) => (
+            <ModelCard
+              key={job.id}
+              model={job}
+              onStop={stop}
+              onDelete={remove}
+              onPlay={(j, step) => onPick(j, step)}
+              onRenamed={refresh}
+              ancestors={ancestorsOf(job)}
+            />
+          ));
+  const hubCards =
+    filter === "yours"
+      ? []
+      : [...visibleUploaded]
+          .sort(
+            (a, b) =>
+              (b.last_modified ? Date.parse(b.last_modified) || 0 : 0) -
+              (a.last_modified ? Date.parse(a.last_modified) || 0 : 0),
+          )
+          .map((model) => (
+            <HubModelCard
+              key={model.repo_id}
+              model={model}
+              onDeleted={refresh}
+              onAction={handleHubAction}
+            />
+          ));
+  const cards = [...ownedCards, ...hubCards];
 
   return (
     <Collapsible
@@ -178,14 +231,17 @@ const ModelsLibrary: React.FC<ModelsLibraryProps> = ({
           </div>
         ) : (
           <div className="space-y-3">
-            {/* Search only — the sections carry the split the filter pills
-                used to, and provenance is already on every card's face. */}
+            {/* Search + the two-shelf filter, exactly the dataset library's
+                toolbar row — one row above the grid in both columns. */}
             <LibraryToolbar
               query={search}
               onQueryChange={setSearch}
               searchPlaceholder="Search models"
+              filters={FILTERS}
+              filter={filter}
+              onFilterChange={setFilter}
             />
-            {visibleCount === 0 ? (
+            {cards.length === 0 ? (
               <p
                 className={cn(
                   "flex items-center justify-center px-1 py-4 text-center text-sm text-muted-foreground",
@@ -195,88 +251,15 @@ const ModelsLibrary: React.FC<ModelsLibraryProps> = ({
                 No models match.
               </p>
             ) : (
-              // A section with nothing the search matched drops out rather
-              // than showing an empty fold; if both drop out, the "No models
-              // match" line above stands in for the whole library.
-              <div className="space-y-3">
-                {ownedCount > 0 ? (
-                  <Collapsible
-                    open={ownedOpen}
-                    onOpenChange={setOwnedOpen}
-                    className="space-y-1"
-                  >
-                    <LibrarySectionHeader
-                      title="Imported & trained"
-                      count={ownedCount}
-                      open={ownedOpen}
-                    />
-                    <CollapsibleContent className={cn(SLIDE, "space-y-1")}>
-                      {/* Trained and imported cards merged newest-first by
-                          start/import time; one row by default, rest behind
-                          Show all. */}
-                      <CappedGrid
-                        // Model cards render every affordance (Run/Resume/
-                        // Fine-tune/Download/step-picker) and must not clip —
-                        // let rows size to content rather than the fixed
-                        // 16.5rem datasets/jobs use.
-                        flexHeight
-                        items={[...visibleTrained, ...visibleImported]
-                          .sort(
-                            (a, b) => (b.started_at ?? 0) - (a.started_at ?? 0),
-                          )
-                          .map((job) => (
-                            <ModelCard
-                              key={job.id}
-                              model={job}
-                              onStop={stop}
-                              onDelete={remove}
-                              onPlay={(j, step) => onPick(j, step)}
-                              onRenamed={refresh}
-                              ancestors={ancestorsOf(job)}
-                            />
-                          ))}
-                      />
-                    </CollapsibleContent>
-                  </Collapsible>
-                ) : null}
-
-                {visibleUploaded.length > 0 ? (
-                  <Collapsible
-                    open={hubOpen}
-                    onOpenChange={setHubOpen}
-                    className="space-y-1"
-                  >
-                    <LibrarySectionHeader
-                      title="On Hub, not imported"
-                      count={visibleUploaded.length}
-                      open={hubOpen}
-                    />
-                    <CollapsibleContent className={cn(SLIDE, "space-y-1")}>
-                      <CappedGrid
-                        flexHeight
-                        items={[...visibleUploaded]
-                          .sort(
-                            (a, b) =>
-                              (b.last_modified
-                                ? Date.parse(b.last_modified) || 0
-                                : 0) -
-                              (a.last_modified
-                                ? Date.parse(a.last_modified) || 0
-                                : 0),
-                          )
-                          .map((model) => (
-                            <HubModelCard
-                              key={model.repo_id}
-                              model={model}
-                              onDeleted={refresh}
-                              onAction={handleHubAction}
-                            />
-                          ))}
-                      />
-                    </CollapsibleContent>
-                  </Collapsible>
-                ) : null}
-              </div>
+              // One row by default, the rest behind Show all — the datasets
+              // column's grid, with the same props it always had here.
+              <CappedGrid
+                // Model cards render every affordance (Run/Resume/Fine-tune/
+                // Download/step-picker) and must not clip — let rows size to
+                // content rather than the fixed 16.5rem datasets/jobs use.
+                flexHeight
+                items={cards}
+              />
             )}
           </div>
         )}
