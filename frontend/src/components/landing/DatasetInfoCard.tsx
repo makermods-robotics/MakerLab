@@ -38,6 +38,7 @@ import { useApi } from "@/contexts/ApiContext";
 import { useHfAuth } from "@/contexts/HfAuthContext";
 import { ApiError } from "@/lib/apiClient";
 import {
+  displayCameraNames,
   formatBytes,
   formatCount,
   formatDuration,
@@ -1029,7 +1030,15 @@ const DatasetInfoCard: React.FC<DatasetInfoCardProps> = ({
               {(info.cameras.length > 0 || !isHubOnly) && (
                 <Row label="Cameras">
                   {info.cameras.length > 0 ? (
-                    info.cameras.join(", ")
+                    // Bimanual datasets store camera keys with lerobot's
+                    // `left_`/`right_` arm prefix; show the bare name the user
+                    // chose, but keep the REAL key as the tooltip so an
+                    // inference key mismatch stays debuggable from here.
+                    <span title={info.cameras.join(", ")}>
+                      {displayCameraNames(info.cameras, info.robot_type).join(
+                        ", ",
+                      )}
+                    </span>
                   ) : (
                     <WarningBadge>
                       No camera data — unusable for vision training

@@ -64,14 +64,16 @@ export const PanelEntryControl = React.forwardRef<
 ));
 PanelEntryControl.displayName = "PanelEntryControl";
 
-/** Pins a panel's library to the bottom of its column behind a hairline — its
- * mt-auto is what absorbs the panel's free space, so Collect's and Train's
- * libraries sit at the same level across the studio grid. */
+/** A panel's library, set off behind a hairline and anchored to the TOP — it
+ * sits directly under the content above it and the panel's free space falls
+ * below it. Collect's and Train's libraries line up because both measure down
+ * from their panel header through the same fixed stack (header → entry control
+ * → Start slot), not because anything absorbs the slack: an earlier version
+ * used `mt-auto` to bottom-align them, which pinned their feet and let their
+ * differing heights push their headers apart. */
 export const LibrarySection: React.FC<{
   className?: string;
   children: React.ReactNode;
 }> = ({ className, children }) => (
-  <div className={cn("mt-auto border-t border-border pt-5", className)}>
-    {children}
-  </div>
+  <div className={cn("border-t border-border pt-5", className)}>{children}</div>
 );

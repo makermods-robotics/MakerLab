@@ -7,7 +7,12 @@ import MetaRows from "@/components/library/MetaRows";
 import { cn } from "@/lib/utils";
 import { useApi } from "@/contexts/ApiContext";
 import { DatasetInfo, DatasetItem, getDatasetInfo } from "@/lib/replayApi";
-import { formatBytes, formatCount, formatDuration } from "@/lib/datasetFormat";
+import {
+  displayCameraNames,
+  formatBytes,
+  formatCount,
+  formatDuration,
+} from "@/lib/datasetFormat";
 
 /** Where a dataset lives: local cache, the Hub, or both. Styled like the job
  * card's status chip (icon + muted bold text, no pill) so the dataset, job,
@@ -87,8 +92,17 @@ const DatasetCardDetails: React.FC<{ item: DatasetItem }> = ({ item }) => {
   }
 
   const duration = formatDuration(info.total_frames, info.fps);
-  const rows: Array<[string, string]> = [];
-  if (info.cameras.length > 0) rows.push(["Cameras", info.cameras.join(", ")]);
+  const rows: Array<[string, string, string?]> = [];
+  // Bimanual datasets store camera keys with lerobot's `left_`/`right_` arm
+  // prefix; show the bare name the user chose, but keep the REAL key as the
+  // tooltip so an inference key mismatch is still debuggable from this card.
+  if (info.cameras.length > 0) {
+    rows.push([
+      "Cameras",
+      displayCameraNames(info.cameras, info.robot_type).join(", "),
+      info.cameras.join(", "),
+    ]);
+  }
   if (info.robot_type) rows.push(["Robot", info.robot_type]);
   if (info.tasks.length === 1) {
     rows.push(["Task", info.tasks[0].task]);
@@ -100,8 +114,15 @@ const DatasetCardDetails: React.FC<{ item: DatasetItem }> = ({ item }) => {
   return (
     <div className="space-y-1.5">
       {/* Muted one-liner right under the bold name — the dataset's "ended 3h
-          ago": its volume at a glance. */}
-      <p className="text-xs text-muted-foreground">
+          ago": its volume at a glance. Two lines of text-xs (2 × 1rem) are
+          RESERVED rather than fitted: at 3-up this line wraps for a busy
+          dataset ("120 episodes · 40.7k frames · ~23 min") but not for a small
+          one, and without the reserve every MetaRow below it would sit a line
+          higher on the short card than on its neighbour. Reserving is min-h,
+          not h, so the pathological case (a count long enough for a third
+          line) degrades to the old drift instead of clipping. Truncating
+          instead would cost the duration, which is the useful part. */}
+      <p className="min-h-[2rem] text-xs text-muted-foreground">
         {info.total_episodes} episode{info.total_episodes === 1 ? "" : "s"}
         {" · "}
         {formatCount(info.total_frames)} frames
@@ -153,7 +174,7 @@ const DatasetCard: React.FC<{
     </div>
     <div className="w-full">
       <div
-        className="truncate text-sm font-semibold text-foreground"
+        className="truncate text-base font-semibold text-foreground"
         title={item.repo_id}
       >
         {item.repo_id.split("/").pop()}

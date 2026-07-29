@@ -503,10 +503,10 @@ const TrainPanel: React.FC = () => {
         <div ref={setActionsEl} className={formOpen ? undefined : "hidden"} />
       </div>
 
-      {/* Panel foot: the model library — the artifacts training produces. The
-          runs themselves (events, not artifacts) are in "My library" → Runs.
-          LibrarySection's own mt-auto drops it here; the gap that opens between
-          it and the actions above is the accepted cost of top-anchoring them. */}
+      {/* The model library — the artifacts training produces. The runs
+          themselves (events, not artifacts) are in "My library" → Runs.
+          Top-anchored directly under the Start row, level with Collect's
+          dataset library; the panel's free space falls below it. */}
       <LibrarySection className="space-y-5">
         {/* Models live under Train because training is what produces them.
             A card's Run already holds the job record, so it goes straight to
