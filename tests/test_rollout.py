@@ -40,6 +40,7 @@ def _reset_rollout_globals(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(rollout, "_inference_meta", {})
     monkeypatch.setattr(rollout, "_inference_cancel", None)
     monkeypatch.setattr(rollout, "_last_result", None)
+    monkeypatch.setattr(rollout, "_inference_startup_thread", None)
 
 
 class _SyncThread:
@@ -907,6 +908,77 @@ def test_terminal_status_is_idempotent_across_polls(monkeypatch) -> None:
     status = rollout.handle_inference_status()
     assert status["inference_active"] is True
     assert "outcome" not in status
+
+
+# ---------------------------------------------------------------------------
+# I1: a stopped startup worker has no tracked thread handle, so it keeps
+# touching hardware after stop() and a new session can't tell it's still
+# running (unlike teleoperate.py's `teleoperation_thread`, which the start
+# guard checks with `.is_alive()` before claiming the slot).
+# ---------------------------------------------------------------------------
+
+
+def test_stopped_startup_worker_blocks_a_new_session_from_starting(monkeypatch) -> None:
+    """`_inference_cancel` only aborts the worker at coarse boundaries (before
+    entering `_prepare_robot`, after it returns) — nothing checks the cancel
+    flag WHILE `_prepare_robot` itself runs, and nothing tracks a handle to the
+    worker thread. So a stop pressed mid-preflight lets the orphaned worker
+    keep opening the bus / writing motor registers, and — because there is no
+    handle to ask "is that worker still alive" — a brand-new start goes ahead
+    and races it for the same serial port.
+
+    Real thread, real Event: the worker blocks inside a stubbed
+    `_prepare_robot` (standing in for the hardware-touching preflight) until
+    released, letting the test control the exact interleaving stop() must
+    protect against."""
+    from makerlab import rollout
+
+    entered_preflight = threading.Event()
+    release_preflight = threading.Event()
+
+    def _blocking_prepare_robot(request):
+        entered_preflight.set()
+        assert release_preflight.wait(timeout=5), "test setup: preflight release never signalled"
+        return [], []
+
+    monkeypatch.setattr(rollout, "_prepare_robot", _blocking_prepare_robot)
+    monkeypatch.setattr(rollout, "_resolve_policy_path", lambda ref, report=None: ref)
+
+    created_threads: list[threading.Thread] = []
+    real_thread = threading.Thread
+
+    def _tracking_thread(*args, **kwargs):
+        t = real_thread(*args, **kwargs)
+        created_threads.append(t)
+        return t
+
+    monkeypatch.setattr(rollout.threading, "Thread", _tracking_thread)
+
+    try:
+        first = rollout.handle_start_inference(_stub_request())
+        assert first["success"] is True
+        assert entered_preflight.wait(timeout=5), "worker never reached _prepare_robot"
+
+        # Stop while the worker is INSIDE _prepare_robot — hardware is already
+        # being touched, and the worker has no way to be interrupted mid-call.
+        stopped = rollout.handle_stop_inference()
+        assert stopped["success"] is True
+        assert rollout.inference_active is False
+
+        # The orphaned worker from the stopped session is still alive (stuck in
+        # _prepare_robot) and still driving hardware. A new session must be
+        # refused rather than being allowed to open the same serial port out
+        # from under it.
+        second = rollout.handle_start_inference(_stub_request())
+        assert second["success"] is False, (
+            "a new session was allowed to start while a stopped session's "
+            "startup worker was still alive and touching hardware"
+        )
+        assert second["status_code"] == 409
+    finally:
+        release_preflight.set()
+        for t in created_threads:
+            t.join(timeout=5)
 
 
 def test_fail_startup_result_is_idempotent_across_polls(monkeypatch) -> None:
