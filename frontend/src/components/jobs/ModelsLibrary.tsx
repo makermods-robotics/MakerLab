@@ -12,7 +12,7 @@ import LibraryHeader from "@/components/library/LibraryHeader";
 import LibrarySectionHeader from "@/components/library/LibrarySectionHeader";
 import { SLIDE } from "@/components/studio/panel/primitives";
 import { useStudio } from "@/contexts/StudioContext";
-import { useInferenceLaunch } from "@/hooks/useInferenceLaunch";
+import { useLaunchInference } from "@/contexts/InferenceLaunchContext";
 import { JobRecord } from "@/lib/jobsApi";
 import ModelCard from "./ModelCard";
 import HubModelCard from "./HubModelCard";
@@ -20,8 +20,8 @@ import ImportModelModal from "./ImportModelModal";
 import { useJobsData } from "./JobsDataContext";
 
 interface ModelsLibraryProps {
-  /** Select this model (job record + optional checkpoint step) as the skill
-   * to deploy — the Train panel hands it to the Deploy panel as a prefill. */
+  /** Run this model (job record + optional checkpoint step) — the Train panel
+   * hands it to the shared inference launch flow. */
   onPick: (job: JobRecord, step: number | null) => void;
   /** Optional controlled fold state, so the hosting panel can collapse the
    * library while its own form is open (the Train panel does; omit for the
@@ -35,10 +35,9 @@ interface ModelsLibraryProps {
  * trainings (a successful run is itself a deployable model), imported models,
  * and uploaded hub repos no job tracks. It sits under Train — training is what
  * produces models, and a model card carries every follow-up action (Run /
- * Resume / Fine-tune / Download) — while Deploy stays pick-and-launch. Owns
- * the Import button; rendered even when empty so the entry point is always
- * visible. Card Run actions hand the model to the Deploy panel via `onPick`
- * rather than opening the legacy modal.
+ * Resume / Fine-tune / Download). Owns the Import button; rendered even when
+ * empty so the entry point is always visible. Card Run actions hand the model
+ * up through `onPick`, which the host routes to the shared inference launch.
  *
  * Two independently collapsible sections, split on the seam the data actually
  * has — the component boundary. "Your models" is everything backed by a job
@@ -66,7 +65,7 @@ const ModelsLibrary: React.FC<ModelsLibraryProps> = ({
   } = useJobsData();
   // Shared lazy-import (idempotent registration + husk-repo messaging) so an
   // untracked Hub repo resolves to a pseudo-job exactly as everywhere else.
-  const { importSource } = useInferenceLaunch();
+  const { importSource } = useLaunchInference();
 
   // Uncontrolled by default; a controlled `open` prop wins when the host panel
   // needs to fold the library (Train does while its form is open).
@@ -126,8 +125,8 @@ const ModelsLibrary: React.FC<ModelsLibraryProps> = ({
   const visibleCount = ownedCount + visibleUploaded.length;
 
   // Untracked hub model actions: register the repo as an imported pseudo-job
-  // first (the proven lazy-import path), then either select it for deployment
-  // right here or hand it to the Train panel as a fine-tune base.
+  // first (the proven lazy-import path), then either run it right here or hand
+  // it to the Train panel as a fine-tune base.
   const handleHubAction = async (
     repoId: string,
     action: "inference" | "finetune",

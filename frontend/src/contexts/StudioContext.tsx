@@ -7,7 +7,7 @@ import React, {
 } from "react";
 import type { CameraConfig } from "@/components/recording/CameraConfiguration";
 
-export type StudioPanel = "collect" | "train" | "deploy";
+export type StudioPanel = "collect" | "train";
 
 /** The Collect panel's recording-form draft. Lives in this provider (mounted
  * above the router) so filled-in parameters survive navigating to /recording
@@ -44,15 +44,6 @@ const DEFAULT_COLLECT_FORM: CollectFormState = {
   camerasSeededFor: undefined,
 };
 
-/** Pre-fills the Deploy panel when a skill card / job row says "Run on robot".
- * `job` sources resolve through the local job registry (id + optional step);
- * `hub` sources are Hub model repo ids that DeployPanel lazy-imports. */
-export interface DeployPrefill {
-  source: "job" | "hub";
-  id: string;
-  step?: number;
-}
-
 /** Pre-fills the Train panel: fine-tune base and/or a preselected dataset.
  * A local skill's fine-tune base is a job registry id (`baseJobId`); a Hub
  * skill's is a repo id (`baseModelRepoId`) that the panel lazy-imports. Set
@@ -71,15 +62,11 @@ export interface TrainPrefill {
 interface StudioContextValue {
   open: boolean;
   activePanel: StudioPanel;
-  deployPrefill: DeployPrefill | null;
   trainPrefill: TrainPrefill | null;
   /** Open the studio overlay, optionally focusing a panel and seeding
    * prefills. The overlay lives on the Launchpad route — callers on other
    * routes must also navigate("/") after calling this. */
-  openStudio: (
-    panel?: StudioPanel,
-    opts?: { deploy?: DeployPrefill; train?: TrainPrefill },
-  ) => void;
+  openStudio: (panel?: StudioPanel, opts?: { train?: TrainPrefill }) => void;
   closeStudio: () => void;
   /** Training job whose monitor dialog is open over the studio (null = none).
    * The dialog renders in the Train panel — see TrainingJobDialog. */
@@ -90,7 +77,6 @@ interface StudioContextValue {
   openJobMonitor: (jobId: string) => void;
   closeJobMonitor: () => void;
   setActivePanel: (panel: StudioPanel) => void;
-  clearDeployPrefill: () => void;
   clearTrainPrefill: () => void;
   /** Collect's recording-form draft — see CollectFormState. */
   collectForm: CollectFormState;
@@ -104,9 +90,6 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({
 }) => {
   const [open, setOpen] = useState(false);
   const [activePanel, setActivePanel] = useState<StudioPanel>("collect");
-  const [deployPrefill, setDeployPrefill] = useState<DeployPrefill | null>(
-    null,
-  );
   const [trainPrefill, setTrainPrefill] = useState<TrainPrefill | null>(null);
   const [collectForm, setCollectForm] =
     useState<CollectFormState>(DEFAULT_COLLECT_FORM);
@@ -118,11 +101,7 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({
   );
 
   const openStudio = useCallback(
-    (
-      panel: StudioPanel = "collect",
-      opts?: { deploy?: DeployPrefill; train?: TrainPrefill },
-    ) => {
-      if (opts?.deploy) setDeployPrefill(opts.deploy);
+    (panel: StudioPanel = "collect", opts?: { train?: TrainPrefill }) => {
       if (opts?.train) setTrainPrefill(opts.train);
       setActivePanel(panel);
       setOpen(true);
@@ -140,14 +119,12 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({
   }, []);
   const closeJobMonitor = useCallback(() => setMonitorJobId(null), []);
 
-  const clearDeployPrefill = useCallback(() => setDeployPrefill(null), []);
   const clearTrainPrefill = useCallback(() => setTrainPrefill(null), []);
 
   const value = useMemo(
     () => ({
       open,
       activePanel,
-      deployPrefill,
       trainPrefill,
       openStudio,
       closeStudio,
@@ -155,7 +132,6 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({
       openJobMonitor,
       closeJobMonitor,
       setActivePanel,
-      clearDeployPrefill,
       clearTrainPrefill,
       collectForm,
       updateCollectForm,
@@ -163,14 +139,12 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({
     [
       open,
       activePanel,
-      deployPrefill,
       trainPrefill,
       openStudio,
       closeStudio,
       monitorJobId,
       openJobMonitor,
       closeJobMonitor,
-      clearDeployPrefill,
       clearTrainPrefill,
       collectForm,
       updateCollectForm,

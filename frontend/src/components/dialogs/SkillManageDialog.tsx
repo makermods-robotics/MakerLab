@@ -34,7 +34,7 @@ export interface SkillManageDialogProps {
   onOpenChange: (open: boolean) => void;
   /** Refresh the models listing after upload / download / delete. */
   onChanged: () => void;
-  /** Run this skill on the corner robot (→ Deploy panel, prefilled). */
+  /** Run this skill on the corner robot (→ the inference config modal). */
   onRun: (model: ModelItem) => void;
 }
 

@@ -322,11 +322,12 @@ const CollectPanel: React.FC = () => {
         </CollapsibleContent>
       </Collapsible>
 
-      {/* Start recording — pinned directly above the dataset library so the
-          panel's primary action sits at the same level as Train's Start and
-          Deploy's Start/Stop. Disabled until the robot is ready and the
-          required parameters are filled in. */}
-      <div className="mt-auto pt-2">
+      {/* Start recording — anchored to the top of the panel, a fixed offset
+          below the entry control. That is what keeps it level with Train's
+          Start: both measure down from their header rather than up from their
+          library, so neither library's height can shift them apart. Disabled
+          until the robot is ready and the required parameters are filled in. */}
+      <div className="pt-2">
         <Button
           onClick={handleStartRecording}
           disabled={!canStart}
@@ -337,10 +338,10 @@ const CollectPanel: React.FC = () => {
         </Button>
       </div>
 
-      {/* Dataset library — the user's own datasets, pinned to the panel foot
-          like Train's jobs and Deploy's models. The selected-dataset chip
-          lives in the header row, beside Merge. */}
-      <LibrarySection className="mt-0">
+      {/* Dataset library — the user's own datasets, dropped to the panel foot
+          by LibrarySection's own mt-auto, like Train's models. The
+          selected-dataset chip lives in the header row, beside Merge. */}
+      <LibrarySection>
         <Collapsible
           open={libraryOpen}
           onOpenChange={setLibraryOpen}

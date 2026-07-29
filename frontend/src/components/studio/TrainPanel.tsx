@@ -8,6 +8,7 @@ import React, {
 import { Check, Loader2, Play, Plus, X } from "lucide-react";
 
 import { useStudio } from "@/contexts/StudioContext";
+import { useLaunchInference } from "@/contexts/InferenceLaunchContext";
 import { useApi } from "@/contexts/ApiContext";
 import { useToast } from "@/hooks/use-toast";
 import { useDatasets } from "@/hooks/useDatasets";
@@ -41,7 +42,6 @@ import TrainingConfigurator, {
   FinetuneSeed,
 } from "@/components/training/TrainingConfigurator";
 import TrainingJobDialog from "@/components/training/TrainingJobDialog";
-import JobsHistory from "@/components/jobs/JobsHistory";
 import ModelsLibrary from "@/components/jobs/ModelsLibrary";
 import {
   LibrarySection,
@@ -106,28 +106,21 @@ const DatasetResultRow: React.FC<{
  * Studio panel 2 · Train. Mirrors the Collect panel's progressive disclosure:
  * a "Start a new training" button slides the full configuration open in place
  * (base skill → dataset → the shared training configurator), folding the panel
- * foot — the run history and the model library — down to their headers while
- * the form is open. Policy is chosen inside Run configuration — there is no
- * separate policy grid.
+ * foot — the model library — down to its header while the form is open. Policy
+ * is chosen inside Run configuration — there is no separate policy grid.
  */
 const TrainPanel: React.FC = () => {
-  const {
-    trainPrefill,
-    clearTrainPrefill,
-    monitorJobId,
-    closeJobMonitor,
-    openStudio,
-  } = useStudio();
+  const { trainPrefill, clearTrainPrefill, monitorJobId, closeJobMonitor } =
+    useStudio();
+  const { launchJob } = useLaunchInference();
   const { baseUrl, fetchWithHeaders } = useApi();
   const { toast } = useToast();
   const { datasets, refresh: refreshDatasets } = useDatasets();
   const { selectedDataset, setSelectedDataset } = useSelectedDataset();
 
-  // The new-training form slides open in place; the run history and the model
-  // library both fold to their headers while the form is open (still
-  // expandable by hand).
+  // The new-training form slides open in place; the model library folds to its
+  // header while the form is open (still expandable by hand).
   const [formOpen, setFormOpen] = useState(false);
-  const [jobsOpen, setJobsOpen] = useState(true);
   const [modelsOpen, setModelsOpen] = useState(true);
 
   // Pinned actions slot above the panel foot. While the form is open the
@@ -137,7 +130,6 @@ const TrainPanel: React.FC = () => {
 
   const toggleForm = (open: boolean) => {
     setFormOpen(open);
-    setJobsOpen(!open);
     setModelsOpen(!open);
   };
 
@@ -290,7 +282,6 @@ const TrainPanel: React.FC = () => {
       });
     }
     setFormOpen(true);
-    setJobsOpen(false);
     setModelsOpen(false);
     clearTrainPrefill();
   }, [trainPrefill, clearTrainPrefill, resolveFinetune]);
@@ -305,8 +296,8 @@ const TrainPanel: React.FC = () => {
   // Empty keeps the configurator's Start disabled until a dataset is picked.
   const trainingDatasetRepoId = selectedId ?? "";
 
-  // Keep the shared selection (Deploy panel, direct /training route) in step
-  // with the dataset chosen here.
+  // Keep the shared selection (direct /training route) in step with the
+  // dataset chosen here.
   useEffect(() => {
     if (selectedId) setSelectedDataset(selectedId);
   }, [selectedId, setSelectedDataset]);
@@ -377,8 +368,7 @@ const TrainPanel: React.FC = () => {
                   <SelectTrigger className="w-full">
                     {/* A prefilled base (job card's Fine-tune) may not exist as
                         an item in the models listing — render the resolved
-                        seed's name so the trigger is never blank (same pattern
-                        as the Deploy panel's skill picker). */}
+                        seed's name so the trigger is never blank. */}
                     {baseModelId !== NONE && finetuneSeed ? (
                       <span className="truncate">{finetuneSeed.name}</span>
                     ) : (
@@ -490,7 +480,7 @@ const TrainPanel: React.FC = () => {
               finetuneSeed={finetuneSeed}
               // Launch opens the monitor dialog over this panel (via
               // openJobMonitor in the configurator); fold the form back so
-              // closing the dialog lands on the jobs library, not a stale form.
+              // closing the dialog lands on the model library, not a stale form.
               onStarted={() => toggleForm(false)}
               actionsContainer={actionsEl}
             />
@@ -498,10 +488,12 @@ const TrainPanel: React.FC = () => {
         </CollapsibleContent>
       </Collapsible>
 
-      {/* Start training — pinned directly above the jobs library, level with
-          Collect's and Deploy's actions. The configurator portals its real,
-          fully-gated button into the slot while the form is open. */}
-      <div className="mt-auto pt-2">
+      {/* Start training — anchored to the top of the panel, a fixed offset
+          below the entry control, which is what keeps it level with Collect's
+          Start: both measure down from their header rather than up from their
+          library. The configurator portals its real, fully-gated button into
+          the slot while the form is open. */}
+      <div className="pt-2">
         {!formOpen ? (
           <Button disabled className="w-full gap-2">
             <Play className="h-4 w-4" />
@@ -511,23 +503,18 @@ const TrainPanel: React.FC = () => {
         <div ref={setActionsEl} className={formOpen ? undefined : "hidden"} />
       </div>
 
-      {/* Panel foot: the run history (events — a compact table) above the
-          model library (artifacts — the actionable cards). mt-0 keeps the
-          block glued to the actions slot above, which carries the panel's
-          mt-auto. */}
-      <LibrarySection className="mt-0 space-y-5">
-        <JobsHistory open={jobsOpen} onOpenChange={setJobsOpen} />
+      {/* Panel foot: the model library — the artifacts training produces. The
+          runs themselves (events, not artifacts) are in "My library" → Runs.
+          LibrarySection's own mt-auto drops it here; the gap that opens between
+          it and the actions above is the accepted cost of top-anchoring them. */}
+      <LibrarySection className="space-y-5">
         {/* Models live under Train because training is what produces them.
-            Running one hands the model to the Deploy panel (same prefill the
-            job cards used), so Deploy stays pick-and-launch. */}
+            A card's Run already holds the job record, so it goes straight to
+            the inference config modal — no panel in between. */}
         <ModelsLibrary
           open={modelsOpen}
           onOpenChange={setModelsOpen}
-          onPick={(job, step) =>
-            openStudio("deploy", {
-              deploy: { source: "job", id: job.id, step: step ?? undefined },
-            })
-          }
+          onPick={(job, step) => launchJob(job, step)}
         />
       </LibrarySection>
 

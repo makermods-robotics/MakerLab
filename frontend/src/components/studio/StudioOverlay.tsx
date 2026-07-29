@@ -6,14 +6,15 @@ import RobotCorner from "@/components/launchpad/RobotCorner";
 import HfAuthChip from "@/components/landing/HfAuthChip";
 import CollectPanel from "@/components/studio/CollectPanel";
 import TrainPanel from "@/components/studio/TrainPanel";
-import DeployPanel from "@/components/studio/DeployPanel";
-import { JobsDataProvider } from "@/components/jobs/JobsDataContext";
 import { useStudio } from "@/contexts/StudioContext";
 import { cn } from "@/lib/utils";
 
 /**
  * The fullscreen skill studio — slides up over the Launchpad when the
- * "+ New Skill" banner (or any Run-on-robot / Fine-tune action) opens it.
+ * "+ New Skill" banner (or any Fine-tune action) opens it. Two panels:
+ * Collect then Train. Running a skill is NOT a panel — every "run this model"
+ * entry point calls InferenceLaunchProvider, whose modal is hosted above the
+ * router, so Run works the same inside the studio and out on the Launchpad.
  * Stays mounted so panel state survives close/reopen within a visit.
  */
 const StudioOverlay: React.FC = () => {
@@ -83,10 +84,9 @@ const StudioOverlay: React.FC = () => {
         </Button>
       </header>
 
-      {/* Train's jobs library and Deploy's model library share one jobs
-          fetch + WS subscription through this provider. */}
-      <JobsDataProvider>
-      <div className="grid flex-1 grid-cols-1 gap-px overflow-y-auto bg-border lg:grid-cols-3 lg:overflow-hidden">
+      {/* Train's model library reads JobsDataProvider, mounted a level up on
+          the Launchpad — the library drawer's Runs tab needs it too. */}
+      <div className="grid flex-1 grid-cols-1 gap-px overflow-y-auto bg-border lg:grid-cols-2 lg:overflow-hidden">
         <section
           aria-label="Collect dataset"
           className={cn(
@@ -105,17 +105,7 @@ const StudioOverlay: React.FC = () => {
         >
           <TrainPanel />
         </section>
-        <section
-          aria-label="Deploy policy"
-          className={cn(
-            "flex min-h-0 flex-col bg-background lg:overflow-y-auto",
-            activePanel === "deploy" && "ring-1 ring-inset ring-ring/20",
-          )}
-        >
-          <DeployPanel />
-        </section>
       </div>
-      </JobsDataProvider>
     </div>
   );
 };

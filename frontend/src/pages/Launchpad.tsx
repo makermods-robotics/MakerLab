@@ -13,6 +13,7 @@ import LibrarySheet from "@/components/launchpad/LibrarySheet";
 import RobotCorner from "@/components/launchpad/RobotCorner";
 import CollectHandoff from "@/components/studio/CollectHandoff";
 import StudioOverlay from "@/components/studio/StudioOverlay";
+import { JobsDataProvider } from "@/components/jobs/JobsDataContext";
 import { isHostedSpace } from "@/lib/isHostedSpace";
 
 const ON_SPACE = isHostedSpace();
@@ -29,6 +30,12 @@ const Launchpad = () => {
   const [search, setSearch] = useState("");
 
   return (
+    // One jobs fetch + one WS subscription for everything on this route: the
+    // studio's model library and the library drawer's Runs tab. It sits here
+    // rather than in App's stack because the studio (its previous home) is
+    // always mounted on this page anyway — hoisting further would make the
+    // rate-limit-sensitive Hub listing run on the teleop/training routes too.
+    <JobsDataProvider>
     <div className="flex min-h-screen flex-col bg-background text-foreground">
       <header className="flex items-center justify-between gap-3 px-4 py-3 sm:px-6">
         <div className="flex items-center gap-3">
@@ -71,6 +78,7 @@ const Launchpad = () => {
       <LibrarySheet open={libraryOpen} onOpenChange={setLibraryOpen} />
       <StudioOverlay />
     </div>
+    </JobsDataProvider>
   );
 };
 

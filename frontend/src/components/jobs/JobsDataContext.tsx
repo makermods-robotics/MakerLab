@@ -58,9 +58,9 @@ const JobsDataContext = createContext<JobsDataValue | null>(null);
 
 /**
  * Shared job/model registry state for the studio panels. Extracted from the
- * old JobsSection so the Train panel's jobs library and the Deploy panel's
- * model library read one fetch + one WS subscription instead of duplicating
- * the /jobs + Hub round-trips (the Hub listing is rate-limit sensitive).
+ * old JobsSection so the Train panel's run history and its model library read
+ * one fetch + one WS subscription instead of duplicating the /jobs + Hub
+ * round-trips (the Hub listing is rate-limit sensitive).
  */
 export const JobsDataProvider: React.FC<{ children: React.ReactNode }> = ({
   children,

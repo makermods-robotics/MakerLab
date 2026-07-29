@@ -6,6 +6,7 @@ import { DragAndDropProvider } from "@/contexts/DragAndDropContext";
 import { Toaster } from "@/components/ui/toaster";
 import { StudioProvider } from "@/contexts/StudioContext";
 import { InferenceSessionProvider } from "@/contexts/InferenceSessionContext";
+import { InferenceLaunchProvider } from "@/contexts/InferenceLaunchContext";
 import Launchpad from "@/pages/Launchpad";
 import Teleoperation from "@/pages/Teleoperation";
 import Training from "@/pages/Training";
@@ -32,6 +33,10 @@ function App() {
                   <BrowserRouter>
                     <StudioProvider>
                      <InferenceSessionProvider>
+                      {/* Inside the session provider: the launch modal calls
+                          openInferenceSession() once /inference/start
+                          succeeds. */}
+                      <InferenceLaunchProvider>
                       <SingleTabGuard>
                         <TeleopStopNotice />
                         <UpdateNotice />
@@ -46,8 +51,8 @@ function App() {
                           <Route path="/training/:jobId" element={<Training />} />
                           {/* /inference is no longer a route — it's the
                               InferenceSessionDialog window, hosted by
-                              InferenceSessionProvider and opened by the launch
-                              flows (Deploy panel + InferenceModal). */}
+                              InferenceSessionProvider and opened by
+                              InferenceModal once a run actually starts. */}
                           {/* Robot settings is no longer a route — it's the
                               RobotConfigDialog window, opened from the robot
                               corner (Launchpad + studio headers). */}
@@ -55,6 +60,7 @@ function App() {
                           <Route path="*" element={<NotFound />} />
                         </Routes>
                       </SingleTabGuard>
+                      </InferenceLaunchProvider>
                      </InferenceSessionProvider>
                       <Toaster />
                     </StudioProvider>

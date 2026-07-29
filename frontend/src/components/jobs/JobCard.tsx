@@ -423,6 +423,11 @@ const JobCard: React.FC<Props> = ({
   const showProgressBar = isRunning;
   const showInferenceRow =
     lineageCheckpoints.length > 0 && selectedStep != null;
+  // Everything that sits on the action footer's second row. Continue and
+  // Resume are mutually exclusive (local vs cloud runner), so at most one
+  // FastForward ever shows.
+  const hasSecondaryActions =
+    canContinue || canResumeCloud || canFinetune || canDownload;
 
   // Unified metadata rows (same format as the dataset/model cards). Imported
   // models keep their source path in the subtitle; trainings surface what they
@@ -584,81 +589,92 @@ const JobCard: React.FC<Props> = ({
           </div>
         ) : null}
         {showInferenceRow ? (
-          // Single-line action row: the checkpoint dropdown flexes and the
-          // buttons never wrap. Secondary actions (Continue / Resume /
-          // Download) are icon-only so the row fits a narrow grid card.
-          <div className="mt-auto flex items-center gap-1.5 pt-1">
-            {/* A single checkpoint offers no choice — skip the dropdown and
-                free the row for the buttons (imported models are the common
-                case: one "latest" entry). */}
-            {checkpoints.length > 1 ? (
-              <div className="min-w-0 flex-1">
-                <CheckpointDropdown
-                  checkpoints={checkpoints}
-                  selectedStep={selectedStep}
-                  onChange={setSelectedStep}
-                  className="w-full min-w-0"
-                />
+          // Two-row action footer. At the two-up grid width a single row left
+          // the checkpoint dropdown too narrow to show its own label ("s…"),
+          // so the primary pair (checkpoint + Run) gets a row to itself and
+          // the secondary actions (Continue / Resume / Fine-tune / Download)
+          // drop to a second row. Secondary actions stay icon-only.
+          <div className="mt-auto flex flex-col gap-1.5 pt-1">
+            <div className="flex items-center gap-1.5">
+              {/* A single checkpoint offers no choice — skip the dropdown and
+                  free the row for the buttons (imported models are the common
+                  case: one "latest" entry). */}
+              {checkpoints.length > 1 ? (
+                <div className="min-w-0 flex-1">
+                  <CheckpointDropdown
+                    checkpoints={checkpoints}
+                    selectedStep={selectedStep}
+                    onChange={setSelectedStep}
+                    className="w-full min-w-0"
+                  />
+                </div>
+              ) : null}
+              <Button
+                size="sm"
+                onClick={handlePlay}
+                className="h-8 shrink-0 gap-1 bg-primary hover:bg-primary/90 text-primary-foreground"
+                aria-label="Run inference with this checkpoint"
+              >
+                <Play className="w-3.5 h-3.5" /> Run
+              </Button>
+            </div>
+            {/* Only render the second row when it has something in it — an
+                empty div would still cost the flex column a gap. */}
+            {hasSecondaryActions ? (
+              <div className="flex items-center gap-1.5">
+                {canContinue ? (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={handleContinue}
+                    className="h-8 shrink-0 gap-1 border-info/50 text-info hover:bg-info/10"
+                    aria-label="Resume training from this checkpoint"
+                    title="Resume"
+                  >
+                    <FastForward className="w-3.5 h-3.5" /> Resume
+                  </Button>
+                ) : null}
+                {canResumeCloud ? (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={handleResumeCloud}
+                    className="h-8 w-8 shrink-0 p-0 border-info/50 text-info hover:bg-info/10"
+                    aria-label="Resume this cloud run from its last checkpoint"
+                    title="Resume: launch a new cloud job continuing from this checkpoint"
+                  >
+                    <FastForward className="w-3.5 h-3.5" />
+                  </Button>
+                ) : null}
+                {canFinetune ? (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={handleFinetune}
+                    className="h-8 shrink-0 gap-1 border-primary/40 text-primary hover:bg-primary/10"
+                    aria-label="Fine-tune a new run from this model's weights"
+                    title="Fine-tune a new run from this model's weights"
+                  >
+                    <Sparkles className="w-3.5 h-3.5" />
+                    {/* Label only when the card is wide enough for the whole
+                        row to stay on one line; the tooltip covers the narrow
+                        case. */}
+                    <span className="hidden @[13rem]:inline">Fine-tune</span>
+                  </Button>
+                ) : null}
+                {canDownload ? (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={handleDownload}
+                    className="h-8 w-8 shrink-0 p-0 border-border text-muted-foreground hover:bg-muted"
+                    aria-label="Download this checkpoint"
+                    title="Download this checkpoint"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                  </Button>
+                ) : null}
               </div>
-            ) : null}
-            <Button
-              size="sm"
-              onClick={handlePlay}
-              className="h-8 shrink-0 gap-1 bg-primary hover:bg-primary/90 text-primary-foreground"
-              aria-label="Run inference with this checkpoint"
-            >
-              <Play className="w-3.5 h-3.5" /> Run
-            </Button>
-            {canContinue ? (
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={handleContinue}
-                className="h-8 w-8 shrink-0 p-0 border-info/50 text-info hover:bg-info/10"
-                aria-label="Continue training from this checkpoint"
-                title="Continue training from this checkpoint"
-              >
-                <FastForward className="w-3.5 h-3.5" />
-              </Button>
-            ) : null}
-            {canResumeCloud ? (
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={handleResumeCloud}
-                className="h-8 w-8 shrink-0 p-0 border-info/50 text-info hover:bg-info/10"
-                aria-label="Resume this cloud run from its last checkpoint"
-                title="Resume: launch a new cloud job continuing from this checkpoint"
-              >
-                <FastForward className="w-3.5 h-3.5" />
-              </Button>
-            ) : null}
-            {canFinetune ? (
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={handleFinetune}
-                className="h-8 shrink-0 gap-1 border-primary/40 text-primary hover:bg-primary/10"
-                aria-label="Fine-tune a new run from this model's weights"
-                title="Fine-tune a new run from this model's weights"
-              >
-                <Sparkles className="w-3.5 h-3.5" />
-                {/* Label only when the card is wide enough for the whole row
-                    to stay on one line; the tooltip covers the narrow case. */}
-                <span className="hidden @[13rem]:inline">Fine-tune</span>
-              </Button>
-            ) : null}
-            {canDownload ? (
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={handleDownload}
-                className="h-8 w-8 shrink-0 p-0 border-border text-muted-foreground hover:bg-muted"
-                aria-label="Download this checkpoint"
-                title="Download this checkpoint"
-              >
-                <Download className="w-3.5 h-3.5" />
-              </Button>
             ) : null}
           </div>
         ) : null}
