@@ -10,17 +10,18 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { ConfigComponentProps, POLICY_TYPE_OPTIONS } from "../types";
+import { ConfigComponentProps } from "../types";
 import WandbInstallDialog from "../WandbInstallDialog";
 import { useApi } from "@/contexts/ApiContext";
 
-/** Run-configuration section of the training form (flat studio-styled
- * section, one design system with the panel around it). Owns the policy
- * select — the single place a policy type is chosen. `policyLocked` disables
- * it when a base skill / resume seed fixes the architecture. */
-const EssentialsCard: React.FC<
-  ConfigComponentProps & { policyLocked?: boolean }
-> = ({ config, updateConfig, policyLocked }) => {
+/** The run's headline settings — steps, batch size, name, and W&B logging.
+ * Flat: each control carries its own <Label> and the section has no eyebrow
+ * heading, so nothing sits above a single field restating it. The policy
+ * select lives in PolicyField, which renders earlier in the form. */
+const EssentialsCard: React.FC<ConfigComponentProps> = ({
+  config,
+  updateConfig,
+}) => {
   const { baseUrl, fetchWithHeaders } = useApi();
   const [wandbDialogOpen, setWandbDialogOpen] = useState(false);
   const [wandbInstallHint, setWandbInstallHint] = useState("pip install wandb");
@@ -52,59 +53,6 @@ const EssentialsCard: React.FC<
 
   return (
     <section className="space-y-4">
-      <h3 className="eyebrow">Run configuration</h3>
-
-      <div className="space-y-2">
-        <Label htmlFor="job_name">Run name</Label>
-        <Input
-          id="job_name"
-          value={config.job_name || ""}
-          onChange={(e) => updateConfig("job_name", e.target.value)}
-          placeholder={`${(config.policy_type || "policy").toUpperCase()} · ${
-            config.dataset_repo_id || "dataset"
-          }`}
-        />
-        <p className="text-xs text-muted-foreground">
-          Optional — shown on the job card and searchable.
-        </p>
-      </div>
-
-      <div className="space-y-2">
-        <Label htmlFor="policy_type">Policy</Label>
-        <Select
-          value={config.policy_type || undefined}
-          onValueChange={(value) => updateConfig("policy_type", value)}
-          disabled={policyLocked}
-        >
-          <SelectTrigger id="policy_type">
-            <SelectValue placeholder="Select a policy type" />
-          </SelectTrigger>
-          <SelectContent>
-            {POLICY_TYPE_OPTIONS.map((policy) => (
-              <SelectItem key={policy.value} value={policy.value}>
-                <span className="flex items-center gap-2">
-                  <span>{policy.display}</span>
-                  <span
-                    className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${
-                      policy.stable
-                        ? "bg-ok/15 text-ok"
-                        : "bg-muted text-muted-foreground"
-                    }`}
-                  >
-                    {policy.stable ? "tested" : "untested"}
-                  </span>
-                </span>
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        <p className="text-xs text-muted-foreground">
-          {policyLocked
-            ? "Set by the base skill — the run trains the same architecture as its source checkpoint."
-            : "The model architecture this run trains. Untested types run at your own risk."}
-        </p>
-      </div>
-
       <div className="grid grid-cols-2 gap-4">
         <div className="space-y-2">
           <Label htmlFor="steps">Training steps</Label>
@@ -129,6 +77,21 @@ const EssentialsCard: React.FC<
         </div>
       </div>
 
+      <div className="space-y-2">
+        <Label htmlFor="job_name">Run name</Label>
+        <Input
+          id="job_name"
+          value={config.job_name || ""}
+          onChange={(e) => updateConfig("job_name", e.target.value)}
+          placeholder={`${(config.policy_type || "policy").toUpperCase()} · ${
+            config.dataset_repo_id || "dataset"
+          }`}
+        />
+        <p className="text-xs text-muted-foreground">
+          Optional — shown on the job card and searchable.
+        </p>
+      </div>
+
       <div className="flex items-center gap-3">
         <Switch
           id="wandb_enable"
@@ -136,7 +99,7 @@ const EssentialsCard: React.FC<
           onCheckedChange={handleWandbToggle}
           className="data-[state=checked]:bg-primary"
         />
-        <Label htmlFor="wandb_enable">Enable Weights &amp; Biases</Label>
+        <Label htmlFor="wandb_enable">Log to Weights &amp; Biases</Label>
       </div>
 
       <WandbInstallDialog

@@ -241,7 +241,7 @@ def handle_install_wandb_extra_status() -> dict[str, Any]:
 # (or inference) otherwise dies with a buried ImportError once the subprocess is
 # already running. Map each such policy to the module we probe and the
 # ``pip install lerobot[extra]`` target. Policies not listed (act, vqbet, tdmpc,
-# sac, reward_classifier) need nothing extra.
+# gaussian_actor, reward_classifier) need nothing extra.
 POLICY_EXTRAS: dict[str, tuple[str, str]] = {
     # policy_type: (probe_module, install_target)
     "smolvla": ("transformers", "lerobot[smolvla]"),

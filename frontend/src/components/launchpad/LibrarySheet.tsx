@@ -17,6 +17,7 @@ import { useHfAuth } from "@/contexts/HfAuthContext";
 import { useModels } from "@/hooks/useModels";
 import { useDatasets } from "@/hooks/useDatasets";
 import { useSelectedDataset } from "@/hooks/useSelectedDataset";
+import { useHubVideoFilter } from "@/hooks/useHubVideoFilter";
 import { policyTypeDisplayName } from "@/components/training/types";
 import { ModelItem, downloadModel, saveCustomModel } from "@/lib/modelsApi";
 import {
@@ -160,14 +161,19 @@ const LibrarySheet: React.FC<LibrarySheetProps> = ({ open, onOpenChange }) => {
     [models, username],
   );
 
+  // Hides a Hub-only row once it's confirmed to have no video — this tab
+  // opens DatasetDetailDialog on click, so a row without video would just
+  // open to an empty state. See useHubVideoFilter for why the Train picker
+  // must NOT do the same.
+  const videoFilteredDatasets = useHubVideoFilter(datasets);
   const myDatasets = useMemo(
     () =>
-      datasets.filter((d) => {
+      videoFilteredDatasets.filter((d) => {
         if (d.source === "local" || d.source === "both") return true;
         const ns = d.repo_id.includes("/") ? d.repo_id.split("/")[0] : null;
         return !!ns && !!username && ns.toLowerCase() === username.toLowerCase();
       }),
-    [datasets, username],
+    [videoFilteredDatasets, username],
   );
 
   const runSkill = (model: ModelItem) => {
