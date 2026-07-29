@@ -1,7 +1,6 @@
 import React, {
   useCallback,
   useEffect,
-  useMemo,
   useRef,
   useState,
 } from "react";
@@ -17,6 +16,7 @@ import { useStudio } from "@/contexts/StudioContext";
 import { useSelectedDataset } from "@/hooks/useSelectedDataset";
 import { useApi } from "@/contexts/ApiContext";
 import DatasetInfoCard from "@/components/landing/DatasetInfoCard";
+import JointPositionChart from "@/components/dialogs/JointPositionChart";
 import {
   EpisodeJointSeries,
   EpisodeSummary,
@@ -34,18 +34,6 @@ export interface DatasetDetailDialogProps {
    * would otherwise cover the studio (e.g. the library sheet) can close too. */
   onStudioAction?: () => void;
 }
-
-// Six SO-101 joints, in the dataset's fixed column order — a validated
-// categorical set (see dataviz skill palette) so adjacent lines stay
-// distinguishable; cycles defensively if a feature set ever carries more.
-const JOINT_COLORS = [
-  "#2a78d6",
-  "#eb6834",
-  "#1baf7a",
-  "#eda100",
-  "#e87ba4",
-  "#008300",
-];
 
 // Best (cols, tileW, tileH) for `n` tiles inside a box of `boxW` x `boxH`:
 // the search over column counts that a video-gallery layout needs so the
@@ -101,7 +89,6 @@ const EpisodeViewer: React.FC<{
   const [playing, setPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [videoErrors, setVideoErrors] = useState<Record<string, boolean>>({});
-  const [hoverT, setHoverT] = useState<number | null>(null);
 
   const episode = episodes.find((e) => e.episode_index === selectedEpisode) ?? null;
   const videoRefs = useRef<Record<string, HTMLVideoElement | null>>({});
@@ -227,32 +214,6 @@ const EpisodeViewer: React.FC<{
     ro.observe(el);
     return () => ro.disconnect();
   }, [cameras.length]);
-
-  const jointRanges = useMemo(() => {
-    if (!joints || joints.values.length === 0) return [];
-    // Reduce, not Math.min(...vals)/Math.max(...vals) — spreading a large
-    // array into a function call can throw "Maximum call stack size
-    // exceeded" (engine-dependent, but well within reach of a long episode's
-    // frame count), which would blank the whole chart.
-    return joints.joint_names.map((_, j) => {
-      let min = Infinity;
-      let max = -Infinity;
-      for (const frame of joints.values) {
-        const v = frame[j];
-        if (v < min) min = v;
-        if (v > max) max = v;
-      }
-      return { min, max };
-    });
-  }, [joints]);
-
-  const chartRef = useRef<HTMLDivElement>(null);
-  const handleChartHover = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!episode || !joints) return;
-    const rect = e.currentTarget.getBoundingClientRect();
-    const frac = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-    setHoverT(frac * episode.duration);
-  };
 
   const scrubFrac = episode?.duration ? currentTime / episode.duration : 0;
 
@@ -399,115 +360,7 @@ const EpisodeViewer: React.FC<{
         </div>
       </div>
 
-      <div className="rounded-md border border-border bg-muted/40 p-2">
-        <div className="mb-1 flex items-baseline justify-between">
-          <span className="eyebrow">joint positions — synced to playhead</span>
-          <span className="eyebrow">
-            {episode ? `episode ${episode.episode_index}` : "—"}
-          </span>
-        </div>
-        <div
-          ref={chartRef}
-          className="relative h-[72px]"
-          onMouseMove={handleChartHover}
-          onMouseLeave={() => setHoverT(null)}
-        >
-          {joints && episode && episode.duration > 0 ? (
-            <svg viewBox="0 0 600 72" preserveAspectRatio="none" className="h-full w-full">
-              {[0, 1, 2, 3, 4].map((i) => (
-                <line
-                  key={i}
-                  x1={0}
-                  x2={600}
-                  y1={(i / 4) * 72}
-                  y2={(i / 4) * 72}
-                  stroke="hsl(var(--border))"
-                  strokeWidth={1}
-                />
-              ))}
-              {joints.joint_names.map((_, j) => {
-                const range = jointRanges[j];
-                if (!range) return null;
-                const span = range.max - range.min || 1;
-                const points = joints.timestamps
-                  .map((t, i) => {
-                    const x = (t / episode.duration) * 600;
-                    const v = joints.values[i][j];
-                    const y = 72 - ((v - range.min) / span) * 72;
-                    return `${x.toFixed(1)},${y.toFixed(1)}`;
-                  })
-                  .join(" ");
-                return (
-                  <polyline
-                    key={j}
-                    points={points}
-                    fill="none"
-                    stroke={JOINT_COLORS[j % JOINT_COLORS.length]}
-                    strokeWidth={1.5}
-                    strokeLinejoin="round"
-                    strokeLinecap="round"
-                  />
-                );
-              })}
-              <line
-                x1={scrubFrac * 600}
-                x2={scrubFrac * 600}
-                y1={0}
-                y2={72}
-                stroke="hsl(var(--foreground))"
-                strokeWidth={1}
-                opacity={0.55}
-              />
-            </svg>
-          ) : (
-            <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
-              {episode ? "Loading joint data…" : "No episode selected"}
-            </div>
-          )}
-          {hoverT != null && joints && episode && (
-            <div
-              className="pointer-events-none absolute top-1 rounded border border-border bg-popover px-1.5 py-1 text-[10px] shadow"
-              style={{
-                left: Math.min(
-                  Math.max((hoverT / episode.duration) * 100, 0),
-                  85,
-                ) + "%",
-              }}
-            >
-              <div className="mb-0.5 font-semibold">t = {hoverT.toFixed(1)}s</div>
-              {joints.joint_names.map((name, j) => {
-                const idx = joints.timestamps.reduce(
-                  (best, t, i) =>
-                    Math.abs(t - hoverT) < Math.abs(joints.timestamps[best] - hoverT) ? i : best,
-                  0,
-                );
-                return (
-                  <div key={name} className="flex items-center gap-1 tabular-nums">
-                    <span
-                      className="h-1.5 w-1.5 shrink-0 rounded-sm"
-                      style={{ background: JOINT_COLORS[j % JOINT_COLORS.length] }}
-                    />
-                    {name}: {joints.values[idx][j].toFixed(1)}
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </div>
-        {joints && (
-          <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1">
-            {joints.joint_names.map((name, j) => (
-              <span key={name} className="flex items-center gap-1 text-[10px] text-muted-foreground">
-                <span
-                  className="h-2 w-2 shrink-0 rounded-sm"
-                  style={{ background: JOINT_COLORS[j % JOINT_COLORS.length] }}
-                />
-                {name}
-              </span>
-            ))}
-          </div>
-        )}
-      </div>
+      <JointPositionChart joints={joints} episode={episode} scrubFrac={scrubFrac} />
     </div>
   );
 };
