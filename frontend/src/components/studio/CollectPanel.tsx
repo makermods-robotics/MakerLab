@@ -297,7 +297,7 @@ const CollectPanel: React.FC = () => {
 
   return (
     <div className="flex flex-1 flex-col gap-5 p-5">
-      <PanelHeader step="1" title="Collect dataset" />
+      <PanelHeader step="1" title="Collect" />
 
       {/* Record new dataset — the form slides open in place (no dialog). */}
       <Collapsible open={formOpen} onOpenChange={toggleForm} className="space-y-5">
