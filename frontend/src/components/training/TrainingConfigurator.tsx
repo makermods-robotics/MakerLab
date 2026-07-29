@@ -577,13 +577,16 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
               ) : (
                 <>
                   <Play className="w-5 h-5 mr-2" />{" "}
+                  {/* Sentence case, matching the disabled stand-in in
+                      TrainPanel and Collect's / Run's Start buttons — these
+                      used to flip to Title Case the moment the form opened. */}
                   {resumeSeed
-                    ? "Continue Training"
+                    ? "Continue training"
                     : finetuneSeed
-                      ? "Start Fine-tuning"
+                      ? "Start fine-tuning"
                       : needsUpload
                         ? "Upload & start training"
-                        : "Start Training"}
+                        : "Start training"}
                 </>
               )}
             </Button>
