@@ -116,7 +116,7 @@ const ModelsLibrary: React.FC<ModelsLibraryProps> = ({ onPick }) => {
       className="space-y-3"
     >
       <LibraryHeader
-        title="Your models"
+        title="Your skills"
         count={count}
         open={libraryOpen}
         actions={
@@ -127,7 +127,7 @@ const ModelsLibrary: React.FC<ModelsLibraryProps> = ({ onPick }) => {
             className="h-7 shrink-0 gap-1.5 text-xs text-muted-foreground hover:text-foreground"
           >
             <Download className="h-3.5 w-3.5" />
-            Import model
+            Import skill
           </Button>
         }
       />
@@ -140,7 +140,7 @@ const ModelsLibrary: React.FC<ModelsLibraryProps> = ({ onPick }) => {
               GRID_MIN_H,
             )}
           >
-            No models yet. Train one, or use Import model to add one from the
+            No skills yet. Train one, or use Import skill to add one from the
             Hub or a local folder.
           </div>
         ) : (
@@ -148,7 +148,7 @@ const ModelsLibrary: React.FC<ModelsLibraryProps> = ({ onPick }) => {
             <LibraryToolbar
               query={search}
               onQueryChange={setSearch}
-              searchPlaceholder="Search models"
+              searchPlaceholder="Search skills"
               filters={FILTERS}
               filter={filter}
               onFilterChange={setFilter}
