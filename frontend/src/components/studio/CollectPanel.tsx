@@ -338,8 +338,9 @@ const CollectPanel: React.FC = () => {
         </Button>
       </div>
 
-      {/* Dataset library — the user's own datasets, dropped to the panel foot
-          by LibrarySection's own mt-auto, like Train's models. The
+      {/* Dataset library — the user's own datasets, top-anchored right under
+          the Start row like Train's models, so both libraries' headers sit at
+          the same level and the panel's free space falls below them. The
           selected-dataset chip lives in the header row, beside Merge. */}
       <LibrarySection>
         <Collapsible

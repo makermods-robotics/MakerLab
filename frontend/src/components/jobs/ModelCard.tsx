@@ -449,7 +449,7 @@ const ModelCard: React.FC<Props> = ({
 
         <div>
           <div
-            className="text-foreground font-semibold truncate"
+            className="text-foreground text-base font-semibold truncate"
             title={displayName}
           >
             {displayName}
