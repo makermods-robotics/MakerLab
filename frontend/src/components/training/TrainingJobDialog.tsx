@@ -21,7 +21,7 @@ import {
 } from "@/lib/jobsApi";
 import { JobCheckpoint, listJobCheckpoints } from "@/lib/checkpointsApi";
 import CheckpointDropdown from "@/components/jobs/CheckpointDropdown";
-import { useStudio } from "@/contexts/StudioContext";
+import { useLaunchInference } from "@/contexts/InferenceLaunchContext";
 
 const POLL_INTERVAL_MS = 1000;
 const MAX_LOG_LINES = 5000;
@@ -75,7 +75,7 @@ const TrainingJobDialog: React.FC<{
   const { baseUrl, fetchWithHeaders } = useApi();
   const { toast } = useToast();
 
-  const { openStudio } = useStudio();
+  const { launchJob } = useLaunchInference();
   const [job, setJob] = useState<JobRecord | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [logs, setLogs] = useState<LogEntry[]>([]);
@@ -364,19 +364,15 @@ const TrainingJobDialog: React.FC<{
                   />
                   <Button
                     onClick={() => {
-                      // Land on the Deploy panel with this job + checkpoint
-                      // prefilled (DeployPanel consumes the prefill) instead
-                      // of stacking the legacy InferenceModal over the dialog.
-                      openStudio("deploy", {
-                        deploy: {
-                          source: "job",
-                          id: jobId,
-                          step: selectedStep ?? undefined,
-                        },
-                      });
+                      // Launch, then close: the inference config modal is
+                      // hosted above the router by InferenceLaunchProvider, so
+                      // it outlives this dialog rather than stacking on top of
+                      // it — which is what the old Deploy-panel hand-off was
+                      // working around.
+                      if (job) launchJob(job, selectedStep);
                       onExit();
                     }}
-                    disabled={selectedStep == null}
+                    disabled={selectedStep == null || !job}
                     size="sm"
                   >
                     <Play className="mr-2 h-4 w-4" />

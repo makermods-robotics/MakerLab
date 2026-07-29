@@ -69,7 +69,7 @@ function relativeTime(epochSec: number): string {
 }
 
 /**
- * Model-centric card for the Deploy panel's model library. The redesign moves
+ * Model-centric card for the Train panel's model library. The redesign moves
  * the rich affordances — Run, Fine-tune, Download, Resume, and the step
  * counter — onto the *model* (the primary unit), and folds the training runs
  * that produced it into a lightweight dropdown of past runs / checkpoints

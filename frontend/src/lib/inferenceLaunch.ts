@@ -18,6 +18,12 @@ import { ModelItem } from "@/lib/modelsApi";
  * Kept as pure functions (no fetching) per the repo's frontend-testing stance:
  * the logic is inspectable and tsc-checked without a component harness.
  */
+
+/** How deep a `listJobs` page the Run entry points scan before falling back to
+ * a lazy import. The registry is a per-machine training history, so 200 covers
+ * it comfortably while staying one request. */
+export const JOB_SCAN_LIMIT = 200;
+
 export function findJobForModel(
   model: ModelItem,
   jobs: JobRecord[],

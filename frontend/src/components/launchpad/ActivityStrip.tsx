@@ -14,11 +14,12 @@ import { cn } from "@/lib/utils";
 
 /**
  * Compact strip of active (running) training jobs on the Launchpad. Live via
- * the same jobs polling + `useJobsChangedSignal` socket the Train panel's
- * JobsSection uses: `jobs_changed` refetches the list, `job_progress` patches
- * progress in place. Click a job → its monitor dialog over the studio's
- * Train panel. Renders nothing when no
- * job is active — queued/finished jobs live in the Train panel's full section.
+ * the same `useJobsChangedSignal` socket JobsDataProvider uses: `jobs_changed`
+ * refetches the list, `job_progress` patches progress in place. (It keeps its
+ * own fetch rather than reading that provider — it wants a 200-record slice,
+ * not the provider's 10.) Click a job → its monitor dialog over the studio's
+ * Train panel. Renders nothing when no job is active — queued and finished
+ * jobs live in "My library" → Runs.
  */
 const ActivityStrip: React.FC = () => {
   const { baseUrl, fetchWithHeaders } = useApi();

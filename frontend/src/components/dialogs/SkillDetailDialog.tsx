@@ -11,6 +11,7 @@ import { useStudio } from "@/contexts/StudioContext";
 import { useApi } from "@/contexts/ApiContext";
 import { useHfAuth } from "@/contexts/HfAuthContext";
 import { useRobots } from "@/hooks/useRobots";
+import { useLaunchInference } from "@/contexts/InferenceLaunchContext";
 import { policyTypeDisplayName } from "@/components/training/types";
 import { ModelInfo, ModelItem, getModelInfo } from "@/lib/modelsApi";
 import {
@@ -41,8 +42,8 @@ export interface SkillDetailDialogProps {
 /**
  * Skill detail — the marketplace's connective tissue. Shows badges, author, the
  * real stats the payload carries (policy type, steps, base dataset lineage,
- * size), and the three market actions: Run on the corner robot (→ Deploy panel,
- * prefilled), Fine-tune (→ Train panel, base prefilled), and a Hub link. Likes
+ * size), and the three market actions: Run on the corner robot (→ the inference
+ * config modal), Fine-tune (→ Train panel, base prefilled), and a Hub link. Likes
  * are display-only text — the API supports neither a count nor a like action, so
  * nothing is fabricated and there is no Like button.
  */
@@ -55,6 +56,9 @@ const SkillDetailDialog: React.FC<SkillDetailDialogProps> = ({
   const { baseUrl, fetchWithHeaders } = useApi();
   const { auth } = useHfAuth();
   const { selectedRecord } = useRobots();
+  // Run opens the inference config modal, which is hosted above the router —
+  // so this dialog can close itself on the way out without killing it.
+  const { launchModel } = useLaunchInference();
   const [info, setInfo] = useState<ModelInfo | null>(null);
 
   const username = auth.status === "authenticated" ? auth.username : null;
@@ -104,16 +108,17 @@ const SkillDetailDialog: React.FC<SkillDetailDialogProps> = ({
 
   // Only a Hub-ONLY model needs the repo-id (lazy-import) path. A model with a
   // local copy (`local` or `both`) already has a job registry entry — its run
-  // id is the job id — and must deploy/fine-tune through it: importing a
-  // second Hub pseudo-job would duplicate the record and break offline runs.
+  // id is the job id — and must run/fine-tune through it: importing a second
+  // Hub pseudo-job would duplicate the record and break offline runs. Run
+  // enforces that inside `launchModel`; Fine-tune still branches here because
+  // the Train panel takes a repo id and a job id in different prefill fields.
   const hubOnly = model.source === "hub";
 
   const handleRun = () => {
-    if (hubOnly && hubRepoId) {
-      openStudio("deploy", { deploy: { source: "hub", id: hubRepoId } });
-    } else {
-      openStudio("deploy", { deploy: { source: "job", id: model.id } });
-    }
+    // Resolution is async but nothing here awaits it: launchModel owns its own
+    // error toasts, and the modal it opens is hosted above this dialog, so
+    // closing immediately is safe and keeps the click feeling instant.
+    void launchModel(model);
     onOpenChange(false);
   };
 

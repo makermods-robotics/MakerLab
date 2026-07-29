@@ -9,7 +9,7 @@ export const SLIDE =
   "overflow-hidden data-[state=open]:animate-collapsible-down data-[state=closed]:animate-collapsible-up";
 
 /** Numbered studio panel header: mono step digit + title, identical across
- * Collect, Train, and Deploy. */
+ * Collect and Train. */
 export const PanelHeader: React.FC<{
   step: string;
   title: string;
@@ -26,9 +26,9 @@ export const PanelHeader: React.FC<{
 /**
  * The panels' shared entry control — a quiet select-style row (same height,
  * border, and radius as a shadcn SelectTrigger) so Collect's "Record new
- * dataset", Train's "Start a new training", and Deploy's real skill <Select>
- * read as the same control. Used as a CollapsibleTrigger (asChild) that
- * slides the panel's form open in place.
+ * dataset" and Train's "Start a new training" read as the same control. Used
+ * as a CollapsibleTrigger (asChild) that slides the panel's form open in
+ * place.
  */
 export const PanelEntryControl = React.forwardRef<
   HTMLButtonElement,
@@ -64,8 +64,9 @@ export const PanelEntryControl = React.forwardRef<
 ));
 PanelEntryControl.displayName = "PanelEntryControl";
 
-/** Pins a panel's library to the bottom of its column behind a hairline, so
- * the three libraries sit at the same level across the studio grid. */
+/** Pins a panel's library to the bottom of its column behind a hairline — its
+ * mt-auto is what absorbs the panel's free space, so Collect's and Train's
+ * libraries sit at the same level across the studio grid. */
 export const LibrarySection: React.FC<{
   className?: string;
   children: React.ReactNode;

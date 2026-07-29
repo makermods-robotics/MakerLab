@@ -13,6 +13,7 @@ import { Button } from "@/components/ui/button";
 import { useApi } from "@/contexts/ApiContext";
 import { useToast } from "@/hooks/use-toast";
 import { useStudio } from "@/contexts/StudioContext";
+import { useLaunchInference } from "@/contexts/InferenceLaunchContext";
 import { useHfAuth } from "@/contexts/HfAuthContext";
 import { useModels } from "@/hooks/useModels";
 import { useDatasets } from "@/hooks/useDatasets";
@@ -37,13 +38,14 @@ import {
 import MergeDatasetsDialog from "@/components/landing/MergeDatasetsDialog";
 import DatasetDetailDialog from "@/components/dialogs/DatasetDetailDialog";
 import SkillManageDialog from "@/components/dialogs/SkillManageDialog";
+import JobsHistory from "@/components/jobs/JobsHistory";
 
 export interface LibrarySheetProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }
 
-type Tab = "skills" | "datasets";
+type Tab = "skills" | "datasets" | "runs";
 
 const SegButton: React.FC<{
   active: boolean;
@@ -65,13 +67,18 @@ const SegButton: React.FC<{
 
 /**
  * "My library" slide-over — a right-anchored sheet (Radix Dialog primitive) with
- * My skills / My datasets tabs. Skill rows Run on the corner robot (→ Deploy,
- * prefilled); dataset rows open the dataset detail dialog. Footer offers a new
- * skill (→ studio Collect) and Merge datasets (the existing MergeDatasetsDialog,
- * reused unmodified).
+ * Skills / Datasets / Runs tabs. Skill rows Run on the corner robot (→ the
+ * inference config modal); dataset rows open the dataset detail dialog; Runs is
+ * the training history, which lives here rather than in the studio's Train
+ * panel because a run is a past event, not something Train acts on. Labels
+ * dropped their "My " prefix when the third tab landed — three of them share
+ * ~334px, and "Runs" isn't mine-scoped anyway (it lists other Hub jobs too).
+ * Footer offers a new skill (→ studio Collect) and Merge datasets (the existing
+ * MergeDatasetsDialog, reused unmodified).
  */
 const LibrarySheet: React.FC<LibrarySheetProps> = ({ open, onOpenChange }) => {
   const { openStudio } = useStudio();
+  const { launchModel } = useLaunchInference();
   const { auth } = useHfAuth();
   const { baseUrl, fetchWithHeaders } = useApi();
   const { toast } = useToast();
@@ -171,15 +178,11 @@ const LibrarySheet: React.FC<LibrarySheetProps> = ({ open, onOpenChange }) => {
   );
 
   const runSkill = (model: ModelItem) => {
-    // Only a Hub-ONLY model goes through the repo-id lazy-import path; a model
-    // with a local copy (`local`/`both`) deploys through its existing job
-    // registry entry (the run id is its job id) — re-importing would duplicate
-    // the record and break offline runs.
-    if (model.source === "hub" && model.hf_repo_id) {
-      openStudio("deploy", { deploy: { source: "hub", id: model.hf_repo_id } });
-    } else {
-      openStudio("deploy", { deploy: { source: "job", id: model.id } });
-    }
+    // launchModel resolves the skill to a job and opens the inference config
+    // modal — including the hub-only vs local-registry branch this used to do
+    // inline. The modal is hosted above the router, so closing the sheet on
+    // the same tick can't take it down with us.
+    void launchModel(model);
     onOpenChange(false);
   };
 
@@ -212,17 +215,28 @@ const LibrarySheet: React.FC<LibrarySheetProps> = ({ open, onOpenChange }) => {
                   active={tab === "skills"}
                   onClick={() => setTab("skills")}
                 >
-                  My skills
+                  Skills
                 </SegButton>
                 <SegButton
                   active={tab === "datasets"}
                   onClick={() => setTab("datasets")}
                 >
-                  My datasets
+                  Datasets
+                </SegButton>
+                <SegButton
+                  active={tab === "runs"}
+                  onClick={() => setTab("runs")}
+                >
+                  Runs
                 </SegButton>
               </div>
 
-              {tab === "skills" ? (
+              {tab === "runs" ? (
+                // The tab is the history's disclosure, so JobsHistory renders
+                // bare; opening a run's monitor slides the studio up, which
+                // this sheet has to get out of the way of.
+                <JobsHistory onStudioAction={() => onOpenChange(false)} />
+              ) : tab === "skills" ? (
                 <div className="flex flex-col gap-2">
                   {modelsLoading ? (
                     <p className="px-1 py-6 text-center text-sm text-muted-foreground">
@@ -316,6 +330,9 @@ const LibrarySheet: React.FC<LibrarySheetProps> = ({ open, onOpenChange }) => {
               )}
             </div>
 
+            {/* Per-tab import actions above the sheet-wide ones. Runs has
+                none — a run isn't something you add, only something that
+                happened. */}
             <div className="flex flex-col gap-2 border-t border-border p-4">
               {tab === "skills" ? (
                 <div className="flex gap-2">
@@ -338,7 +355,7 @@ const LibrarySheet: React.FC<LibrarySheetProps> = ({ open, onOpenChange }) => {
                     Import from disk
                   </Button>
                 </div>
-              ) : (
+              ) : tab === "datasets" ? (
                 <>
                   <div className="flex gap-2">
                     <Button
@@ -370,7 +387,7 @@ const LibrarySheet: React.FC<LibrarySheetProps> = ({ open, onOpenChange }) => {
                     Manage caches
                   </Button>
                 </>
-              )}
+              ) : null}
               <Button
                 variant="outline"
                 onClick={() => {
