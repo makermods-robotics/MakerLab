@@ -1,6 +1,7 @@
 import React from "react";
 import EssentialsCard from "./config/EssentialsCard";
 import AdvancedCard from "./config/AdvancedCard";
+import PolicyField from "./config/PolicyField";
 import TargetCard from "./config/TargetCard";
 import { ConfigComponentProps } from "./types";
 import { RunnerFlavor } from "@/lib/jobsApi";
@@ -23,7 +24,15 @@ const ConfigurationTab: React.FC<ConfigurationTabProps> = ({
   policyLocked,
 }) => {
   return (
+    // Order matters: Policy answers "what am I training" and so belongs with
+    // the Train panel's Dataset / Starting point above it, before the form
+    // moves on to where the run executes and how long it trains.
     <div className="space-y-6">
+      <PolicyField
+        config={config}
+        updateConfig={updateConfig}
+        policyLocked={policyLocked}
+      />
       <TargetCard
         config={config}
         updateConfig={updateConfig}
@@ -31,11 +40,7 @@ const ConfigurationTab: React.FC<ConfigurationTabProps> = ({
         flavors={flavors}
         loading={hardwareLoading}
       />
-      <EssentialsCard
-        config={config}
-        updateConfig={updateConfig}
-        policyLocked={policyLocked}
-      />
+      <EssentialsCard config={config} updateConfig={updateConfig} />
       <AdvancedCard config={config} updateConfig={updateConfig} />
     </div>
   );
