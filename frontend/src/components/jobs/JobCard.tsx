@@ -2,16 +2,7 @@ import React, { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import { JobRecord, jobDisplayName, renameJob } from "@/lib/jobsApi";
+import { JobRecord, jobDisplayName } from "@/lib/jobsApi";
 import {
   Square,
   Trash2,
@@ -22,7 +13,6 @@ import {
   Loader2,
   XCircle,
   ExternalLink,
-  Pencil,
   Play,
   FastForward,
   Download,
@@ -42,8 +32,6 @@ interface Props {
   onStop: (id: string) => void;
   onDelete: (id: string) => void;
   onPlay: (job: JobRecord, step: number) => void;
-  // Called after a successful rename so the parent can refetch the list.
-  onRenamed?: () => void;
   // Runs this job was resumed from, nearest-parent first. Rendered nested and
   // hidden from the top-level list so a resumed lineage reads as one entry.
   ancestors?: JobRecord[];
@@ -80,7 +68,6 @@ const JobCard: React.FC<Props> = ({
   onStop,
   onDelete,
   onPlay,
-  onRenamed,
   ancestors = [],
 }) => {
   const navigate = useNavigate();
@@ -135,48 +122,6 @@ const JobCard: React.FC<Props> = ({
     installHint: string;
   } | null>(null);
   const [extraDialogOpen, setExtraDialogOpen] = useState(false);
-
-  // Rename dialog (mirrors CalibrationLibrary's rename UI). Sets a display
-  // alias only — the run id / output dir / hub repo id never change.
-  const [renameOpen, setRenameOpen] = useState(false);
-  const [renameValue, setRenameValue] = useState("");
-  const [renameError, setRenameError] = useState<string | null>(null);
-  const [renaming, setRenaming] = useState(false);
-
-  const openRename = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    setRenameValue(displayName);
-    setRenameError(null);
-    setRenameOpen(true);
-  };
-
-  const doRename = async () => {
-    const next = renameValue.trim();
-    if (!next) {
-      setRenameError("Name cannot be empty.");
-      return;
-    }
-    if (next === displayName) {
-      setRenameOpen(false);
-      return;
-    }
-    setRenaming(true);
-    setRenameError(null);
-    try {
-      await renameJob(baseUrl, fetchWithHeaders, job.id, next);
-      toast({
-        title: "Model renamed",
-        description: `"${displayName}" → "${next}".`,
-      });
-      setRenameOpen(false);
-      onRenamed?.();
-    } catch (e) {
-      // 400/404 keep the dialog open with the message for a retry.
-      setRenameError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setRenaming(false);
-    }
-  };
 
   // Key ancestors by id+count so the frequent list refreshes (which hand us new
   // array refs) don't refetch unless the lineage actually changed.
@@ -496,16 +441,6 @@ const JobCard: React.FC<Props> = ({
             ) : null}
           </div>
           <div className="flex items-center gap-0.5">
-            <Button
-              variant="ghost"
-              size="icon"
-              onClick={openRename}
-              className="h-7 w-7 text-muted-foreground hover:text-foreground"
-              aria-label="Rename model"
-              title="Rename"
-            >
-              <Pencil className="w-3.5 h-3.5" />
-            </Button>
             {job.runner === "hf_cloud" && job.hf_job_url ? (
               <Button
                 variant="ghost"
@@ -699,61 +634,6 @@ const JobCard: React.FC<Props> = ({
           </div>
         ) : null}
       </CardContent>
-      <Dialog open={renameOpen} onOpenChange={setRenameOpen}>
-        <DialogContent
-          className="bg-background border-border"
-          onClick={(e) => e.stopPropagation()}
-        >
-          <DialogHeader>
-            <DialogTitle>Rename model</DialogTitle>
-            <DialogDescription className="text-muted-foreground">
-              Sets a display name only — the underlying{" "}
-              {isImported && job.hf_repo_id ? "Hub repo" : "run"} (
-              <span className="font-mono text-muted-foreground">
-                {isImported ? importedSource : job.id}
-              </span>
-              ) is not moved or changed.
-            </DialogDescription>
-          </DialogHeader>
-          <Input
-            value={renameValue}
-            onChange={(e) => {
-              setRenameValue(e.target.value);
-              setRenameError(null);
-            }}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                e.preventDefault();
-                void doRename();
-              }
-            }}
-            autoFocus
-            placeholder="New name"
-            className="bg-background border-input"
-          />
-          {renameError && <p className="text-sm text-destructive">{renameError}</p>}
-          <DialogFooter className="flex gap-2 justify-end">
-            <Button
-              variant="outline"
-              className="border-border text-muted-foreground"
-              onClick={() => setRenameOpen(false)}
-            >
-              Cancel
-            </Button>
-            <Button
-              className="bg-primary hover:bg-primary/90 text-primary-foreground"
-              disabled={
-                renaming ||
-                !renameValue.trim() ||
-                renameValue.trim() === displayName
-              }
-              onClick={doRename}
-            >
-              {renaming ? "Renaming…" : "Rename"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
       {missingExtra ? (
         <PolicyExtraDialog
           open={extraDialogOpen}

@@ -218,21 +218,6 @@ export function jobDisplayName(job: JobRecord): string {
   return job.display_name?.trim() || job.name;
 }
 
-/** Set a job's display alias. Metadata-only — the job id, output dir, and
- * hub repo id are immutable identity and never change on rename. */
-export async function renameJob(
-  baseUrl: string,
-  fetcher: Fetcher,
-  id: string,
-  newName: string,
-): Promise<JobRecord> {
-  return apiRequest<JobRecord>(baseUrl, fetcher, `/jobs/${id}/rename`, {
-    method: "POST",
-    body: { new_name: newName },
-    action: "Rename job",
-  });
-}
-
 export async function stopJob(
   baseUrl: string,
   fetcher: Fetcher,

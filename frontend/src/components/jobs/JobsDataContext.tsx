@@ -14,7 +14,6 @@ import {
   HubModel,
   JobProgressSnapshot,
   JobRecord,
-  deleteJob,
   dismissHubJob,
   getJob,
   listHubJobs,
@@ -50,7 +49,6 @@ interface JobsDataValue {
   hubError: string | null;
   refresh: () => Promise<void>;
   stop: (id: string) => Promise<void>;
-  remove: (id: string) => Promise<void>;
   dismissHub: (id: string) => Promise<void>;
 }
 
@@ -211,23 +209,6 @@ export const JobsDataProvider: React.FC<{ children: React.ReactNode }> = ({
     [baseUrl, fetchWithHeaders, toast, refresh],
   );
 
-  const remove = useCallback(
-    async (id: string) => {
-      try {
-        await deleteJob(baseUrl, fetchWithHeaders, id);
-        toast({ title: "Job removed" });
-        refresh();
-      } catch (e) {
-        toast({
-          title: "Delete failed",
-          description: e instanceof Error ? e.message : String(e),
-          variant: "destructive",
-        });
-      }
-    },
-    [baseUrl, fetchWithHeaders, toast, refresh],
-  );
-
   // Untracked hub jobs aren't deletable on the Hub (the Jobs API has no
   // delete), so "remove" is a persisted backend-side dismissal.
   const dismissHub = useCallback(
@@ -367,7 +348,6 @@ export const JobsDataProvider: React.FC<{ children: React.ReactNode }> = ({
       hubError,
       refresh,
       stop,
-      remove,
       dismissHub,
     }),
     [
@@ -386,7 +366,6 @@ export const JobsDataProvider: React.FC<{ children: React.ReactNode }> = ({
       hubError,
       refresh,
       stop,
-      remove,
       dismissHub,
     ],
   );
