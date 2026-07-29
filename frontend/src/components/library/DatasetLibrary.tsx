@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { Check, Eye, Globe, HardDrive, Lock } from "lucide-react";
+import { Check, Globe, HardDrive, Lock } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import LibraryToolbar from "@/components/library/LibraryToolbar";
 import CappedGrid, { GRID_MIN_H } from "@/components/library/CappedGrid";
@@ -122,13 +122,14 @@ const DatasetCard: React.FC<{
   item: DatasetItem;
   selected: boolean;
   onSelect: () => void;
-  /** Opens the episode viewer for this dataset — separate from select, so it
-   * must stop propagation before the card's own onClick fires. Optional: only
-   * wired up where the viewer dialog is actually rendered. */
+  /** Opens the episode viewer for this dataset. The card itself opens the
+   * viewer on click; selecting is only done via the footer Select button.
+   * Optional: only wired up where the viewer dialog is actually rendered —
+   * falls back to select-on-click if absent. */
   onView?: (item: DatasetItem) => void;
 }> = ({ item, selected, onSelect, onView }) => (
   <div
-    onClick={onSelect}
+    onClick={() => (onView ? onView(item) : onSelect())}
     className={cn(
       "flex w-full cursor-pointer flex-col gap-2 overflow-hidden rounded-md border bg-card p-3 text-left transition-colors",
       selected
@@ -150,20 +151,6 @@ const DatasetCard: React.FC<{
         )}
       </div>
       <div className="flex shrink-0 items-center gap-0.5">
-        {onView && (
-          <button
-            type="button"
-            onClick={(e) => {
-              e.stopPropagation();
-              onView(item);
-            }}
-            aria-label="View episodes"
-            title="View episodes"
-            className="rounded p-1 text-muted-foreground hover:text-foreground"
-          >
-            <Eye className="h-3.5 w-3.5" />
-          </button>
-        )}
         <Check
           className={cn(
             "h-4 w-4 shrink-0 text-primary",
@@ -225,9 +212,9 @@ const FILTERS: Array<{ key: LibraryFilter; label: string }> = [
 ];
 
 /** The library body: search + location filter over a three-up grid of dataset
- * cards. Clicking a card selects it (feeding the Collect panel's header chip +
- * the Train panel via the shared useSelectedDataset store); clicking the
- * selected card deselects. */
+ * cards. Clicking a card opens its episode viewer; the footer Select button
+ * is the only way to select/deselect it (feeding the Collect panel's header
+ * chip + the Train panel via the shared useSelectedDataset store). */
 export const DatasetLibraryList: React.FC<{
   datasets: DatasetItem[];
   loading: boolean;
