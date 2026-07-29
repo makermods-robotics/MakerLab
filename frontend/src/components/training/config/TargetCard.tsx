@@ -27,9 +27,10 @@ const formatFlavorLine = (f: RunnerFlavor): string => {
   return `${f.pretty_name} · ${accel} · ${formatHourly(f.unit_cost_usd, f.unit_label)}`;
 };
 
-/** Compute-target section of the training form (flat studio-styled section —
- * the old boxed Card chrome is gone so it reads as one system with the rest
- * of the panel). */
+/** Where the run executes — the runner toggle plus whichever hardware control
+ * that runner needs. Flat: the controls carry their own <Label>s and there is
+ * no "Compute target" eyebrow above them, which used to restate the "Run
+ * training on" label directly beneath it. */
 const TargetCard: React.FC<TargetCardProps> = ({
   config,
   updateConfig,
@@ -51,10 +52,8 @@ const TargetCard: React.FC<TargetCardProps> = ({
 
   return (
     <section className="space-y-4">
-      <h3 className="eyebrow">Compute target</h3>
-
       <div className="space-y-2">
-        <Label>Run training on</Label>
+        <Label>Compute</Label>
         <div className="grid grid-cols-2 overflow-hidden rounded-md border border-border text-sm">
           {(["local", "hf_cloud"] as const).map((r) => (
             <button
