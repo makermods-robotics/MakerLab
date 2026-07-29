@@ -902,7 +902,7 @@ def get_episode_joint_series(repo_id: str, episode_index: int) -> dict[str, Any]
                 table.column("observation.state").to_pylist(),
                 strict=True,
             )
-            if int(ep) == episode_index
+            if _safe_int(ep) == episode_index
         ),
         key=lambda pair: pair[0],
     )

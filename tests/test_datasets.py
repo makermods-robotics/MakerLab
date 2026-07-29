@@ -1922,6 +1922,44 @@ def test_get_episode_joint_series_returns_none_on_malformed_chunk_index(tmp_lero
     assert ds.get_episode_joint_series("alice/local", 0) is None
 
 
+def test_get_episode_joint_series_skips_malformed_data_row(tmp_lerobot_home: Path) -> None:
+    """A malformed episode_index in the *data* parquet chunk itself (as
+    opposed to the meta/episodes row already covered above) is skipped, not a
+    raised exception that 500s the endpoint — the well-formed frames for the
+    requested episode still come back."""
+    from makerlab import datasets as ds
+
+    d = _write_info(
+        tmp_lerobot_home,
+        "alice/local",
+        {"features": {"observation.state": {"names": ["shoulder", "elbow"]}}},
+    )
+    episodes_dir = d / "meta" / "episodes" / "chunk-000"
+    episodes_dir.mkdir(parents=True)
+    pq.write_table(
+        pa.table({"episode_index": [0], "data/chunk_index": [0], "data/file_index": [0]}),
+        episodes_dir / "file-000.parquet",
+    )
+    data_dir = d / "data" / "chunk-000"
+    data_dir.mkdir(parents=True)
+    pq.write_table(
+        pa.table(
+            {
+                "episode_index": [float("nan"), 0.0],
+                "timestamp": [0.0, 0.033],
+                "observation.state": [[0.1, 0.2], [0.15, 0.25]],
+            }
+        ),
+        data_dir / "file-000.parquet",
+    )
+
+    result = ds.get_episode_joint_series("alice/local", 0)
+
+    assert result is not None
+    assert result["timestamps"] == [0.033]
+    assert result["values"] == [[0.15, 0.25]]
+
+
 def test_get_episode_joint_series_hub_fallback_downloads_one_chunk(
     tmp_lerobot_home: Path, tmp_path: Path
 ) -> None:
