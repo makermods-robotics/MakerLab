@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { Check, Globe, HardDrive, Lock } from "lucide-react";
+import { Check, Eye, Globe, HardDrive, Lock } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import LibraryToolbar from "@/components/library/LibraryToolbar";
 import CappedGrid, { GRID_MIN_H } from "@/components/library/CappedGrid";
@@ -122,7 +122,11 @@ const DatasetCard: React.FC<{
   item: DatasetItem;
   selected: boolean;
   onSelect: () => void;
-}> = ({ item, selected, onSelect }) => (
+  /** Opens the episode viewer for this dataset — separate from select, so it
+   * must stop propagation before the card's own onClick fires. Optional: only
+   * wired up where the viewer dialog is actually rendered. */
+  onView?: (item: DatasetItem) => void;
+}> = ({ item, selected, onSelect, onView }) => (
   <div
     onClick={onSelect}
     className={cn(
@@ -146,6 +150,20 @@ const DatasetCard: React.FC<{
         )}
       </div>
       <div className="flex shrink-0 items-center gap-0.5">
+        {onView && (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onView(item);
+            }}
+            aria-label="View episodes"
+            title="View episodes"
+            className="rounded p-1 text-muted-foreground hover:text-foreground"
+          >
+            <Eye className="h-3.5 w-3.5" />
+          </button>
+        )}
         <Check
           className={cn(
             "h-4 w-4 shrink-0 text-primary",
@@ -215,7 +233,10 @@ export const DatasetLibraryList: React.FC<{
   loading: boolean;
   selectedRepoId: string | null;
   onSelect: (item: DatasetItem) => void;
-}> = ({ datasets, loading, selectedRepoId, onSelect }) => {
+  /** Opens the episode viewer dialog for a dataset; omit where the caller
+   * doesn't render that dialog. */
+  onView?: (item: DatasetItem) => void;
+}> = ({ datasets, loading, selectedRepoId, onSelect, onView }) => {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<LibraryFilter>("all");
   // Hides a Hub-only row once it's confirmed to have no video — this surface
@@ -292,6 +313,7 @@ export const DatasetLibraryList: React.FC<{
               item={item}
               selected={item.repo_id === selectedRepoId}
               onSelect={() => onSelect(item)}
+              onView={onView}
             />
           ))}
         />
