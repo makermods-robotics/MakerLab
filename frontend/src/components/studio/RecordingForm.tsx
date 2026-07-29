@@ -3,15 +3,13 @@ import { Input } from "@/components/ui/input";
 import { NumberInput } from "@/components/ui/number-input";
 import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "@/components/ui/collapsible";
-import { AlertTriangle, CheckCircle, ChevronDown } from "lucide-react";
 import CameraConfiguration, {
   CameraConfig,
 } from "@/components/recording/CameraConfiguration";
+import {
+  AdvancedSection,
+  RobotStatus,
+} from "@/components/studio/panel/primitives";
 import { useHfAuth } from "@/contexts/HfAuthContext";
 import { RobotRecord, robotSetupGap } from "@/hooks/useRobots";
 import { validateDatasetName } from "@/lib/datasetName";
@@ -79,39 +77,28 @@ const RecordingForm: React.FC<RecordingFormProps> = ({
         on the selected robot.
       </p>
 
-      {/* Robot readiness */}
-      <div className="space-y-3">
-        <h3 className="eyebrow">Robot</h3>
+      {/* Robot readiness — a status line, not a parameter, so no eyebrow. */}
+      <RobotStatus ready={!!robot && robot.is_clean}>
         {!robot ? (
-          <div className="flex gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-700 dark:text-amber-200">
-            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-            <span>
-              Select or create a robot before recording — use the robot menu in
-              the top-right corner of this window.
-            </span>
-          </div>
+          <>
+            Select or create a robot before recording — use the robot menu in
+            the top-right corner of this window.
+          </>
         ) : !robot.is_clean ? (
-          <div className="flex gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-700 dark:text-amber-200">
-            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-            <span>
-              <strong>{robot.name}</strong> {robotSetupGap(robot)}. Open Robot
-              settings before recording.
-            </span>
-          </div>
+          <>
+            <strong>{robot.name}</strong> {robotSetupGap(robot)}. Open Robot
+            settings before recording.
+          </>
         ) : (
-          <div className="flex items-center gap-2 text-sm">
-            <CheckCircle className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />
-            <span className="text-foreground">
-              Recording with <strong>{robot.name}</strong>
-            </span>
-          </div>
+          <span className="text-foreground">
+            Recording with <strong>{robot.name}</strong>
+          </span>
         )}
-      </div>
+      </RobotStatus>
 
-      {/* Dataset parameters */}
+      {/* Dataset parameters — flat: every control carries its own <Label>, so
+          no category heading sits above them restating "Dataset". */}
       <div className="space-y-4">
-        <h3 className="eyebrow">Dataset</h3>
-
         <div className="space-y-2">
           <Label htmlFor="datasetName">Dataset name *</Label>
           <Input
@@ -202,17 +189,7 @@ const RecordingForm: React.FC<RecordingFormProps> = ({
       />
 
       {/* Advanced */}
-      <Collapsible className="group space-y-3">
-        <CollapsibleTrigger className="flex w-full items-start justify-between border-b border-border pb-2 text-sm font-semibold text-foreground">
-          <span className="text-left">
-            <span className="block">Advanced parameters</span>
-            <span className="block text-xs font-normal text-muted-foreground">
-              Streaming encoding, push to Hub
-            </span>
-          </span>
-          <ChevronDown className="mt-0.5 h-4 w-4 shrink-0 transition-transform group-data-[state=open]:rotate-180" />
-        </CollapsibleTrigger>
-        <CollapsibleContent className="space-y-3">
+      <AdvancedSection summary="Streaming encoding, push to Hub">
           <div className="flex items-start gap-3">
             <Checkbox
               id="streamingEncoding"
@@ -255,8 +232,7 @@ const RecordingForm: React.FC<RecordingFormProps> = ({
               </p>
             </div>
           </div>
-        </CollapsibleContent>
-      </Collapsible>
+      </AdvancedSection>
     </div>
   );
 };
