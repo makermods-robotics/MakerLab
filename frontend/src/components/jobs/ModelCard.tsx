@@ -2,15 +2,6 @@ import React, { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import {
   Select,
   SelectContent,
@@ -24,13 +15,10 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
-import { JobRecord, jobDisplayName, renameJob } from "@/lib/jobsApi";
+import { JobRecord, jobDisplayName } from "@/lib/jobsApi";
 import {
-  Trash2,
   Globe,
   HardDrive,
-  ExternalLink,
-  Pencil,
   Play,
   FastForward,
   Download,
@@ -50,10 +38,7 @@ interface Props {
    * the parent chooses to surface them — a finished local/cloud training). */
   model: JobRecord;
   onStop: (id: string) => void;
-  onDelete: (id: string) => void;
   onPlay: (job: JobRecord, step: number) => void;
-  /** Called after a successful rename so the parent can refetch the list. */
-  onRenamed?: () => void;
   /** Runs this model was resumed/fine-tuned from, nearest-parent first. Their
    * checkpoints join this model's own in the history dropdown so a resumed
    * lineage reads as one model with a run history behind it. */
@@ -86,9 +71,7 @@ function relativeTime(epochSec: number): string {
 const ModelCard: React.FC<Props> = ({
   model,
   onStop,
-  onDelete,
   onPlay,
-  onRenamed,
   ancestors = [],
 }) => {
   const navigate = useNavigate();
@@ -128,47 +111,6 @@ const ModelCard: React.FC<Props> = ({
     { job: JobRecord; ckpt: JobCheckpoint }[]
   >([]);
   const [selectedStep, setSelectedStep] = useState<number | null>(null);
-
-  // Rename dialog — sets a display alias only; the run id / output dir / hub
-  // repo id are immutable identity and never change.
-  const [renameOpen, setRenameOpen] = useState(false);
-  const [renameValue, setRenameValue] = useState("");
-  const [renameError, setRenameError] = useState<string | null>(null);
-  const [renaming, setRenaming] = useState(false);
-
-  const openRename = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    setRenameValue(displayName);
-    setRenameError(null);
-    setRenameOpen(true);
-  };
-
-  const doRename = async () => {
-    const next = renameValue.trim();
-    if (!next) {
-      setRenameError("Name cannot be empty.");
-      return;
-    }
-    if (next === displayName) {
-      setRenameOpen(false);
-      return;
-    }
-    setRenaming(true);
-    setRenameError(null);
-    try {
-      await renameJob(baseUrl, fetchWithHeaders, model.id, next);
-      toast({
-        title: "Model renamed",
-        description: `"${displayName}" → "${next}".`,
-      });
-      setRenameOpen(false);
-      onRenamed?.();
-    } catch (e) {
-      setRenameError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setRenaming(false);
-    }
-  };
 
   // Key ancestors by id+count so frequent list refreshes (new array refs)
   // don't refetch unless the lineage actually changed.
@@ -212,30 +154,6 @@ const ModelCard: React.FC<Props> = ({
   const selected =
     lineageCheckpoints.find((c) => c.ckpt.step === selectedStep) ?? null;
   const selectedJob = selected?.job ?? model;
-
-  const handleDelete = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    if (isRunning) return;
-    if (isImported) {
-      if (
-        window.confirm(
-          "Remove this imported model? The source files are left untouched.",
-        )
-      )
-        onDelete(model.id);
-    } else if (model.runner === "hf_cloud") {
-      if (
-        window.confirm(
-          "Remove this cloud model from the list? Model repos on the Hub are not deleted.",
-        )
-      )
-        onDelete(model.id);
-    } else if (
-      window.confirm("Delete this model? This wipes the output directory.")
-    ) {
-      onDelete(model.id);
-    }
-  };
 
   const handlePlay = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -527,48 +445,6 @@ const ModelCard: React.FC<Props> = ({
               </div>
             ) : null}
           </div>
-          <div className="flex items-center gap-0.5">
-            <Button
-              variant="ghost"
-              size="icon"
-              onClick={openRename}
-              className="h-7 w-7 text-muted-foreground hover:text-foreground"
-              aria-label="Rename model"
-              title="Rename"
-            >
-              <Pencil className="w-3.5 h-3.5" />
-            </Button>
-            {model.runner === "hf_cloud" && model.hf_job_url ? (
-              <Button
-                variant="ghost"
-                size="icon"
-                asChild
-                className="h-7 w-7 text-muted-foreground hover:text-foreground"
-                aria-label="Open Hub job page"
-              >
-                <a
-                  href={model.hf_job_url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  onClick={(e) => e.stopPropagation()}
-                >
-                  <ExternalLink className="w-3.5 h-3.5" />
-                </a>
-              </Button>
-            ) : null}
-            {!isRunning ? (
-              <Button
-                variant="ghost"
-                size="icon"
-                onClick={handleDelete}
-                className="h-7 w-7 text-muted-foreground hover:text-destructive"
-                aria-label="Delete model"
-                title="Remove"
-              >
-                <Trash2 className="w-3.5 h-3.5" />
-              </Button>
-            ) : null}
-          </div>
         </div>
 
         <div>
@@ -713,64 +589,6 @@ const ModelCard: React.FC<Props> = ({
           </div>
         </div>
       </CardContent>
-
-      <Dialog open={renameOpen} onOpenChange={setRenameOpen}>
-        <DialogContent
-          className="bg-background border-border"
-          onClick={(e) => e.stopPropagation()}
-        >
-          <DialogHeader>
-            <DialogTitle>Rename model</DialogTitle>
-            <DialogDescription className="text-muted-foreground">
-              Sets a display name only — the underlying{" "}
-              {isImported && model.hf_repo_id ? "Hub repo" : "run"} (
-              <span className="font-mono text-muted-foreground">
-                {isImported ? importedSource : model.id}
-              </span>
-              ) is not moved or changed.
-            </DialogDescription>
-          </DialogHeader>
-          <Input
-            value={renameValue}
-            onChange={(e) => {
-              setRenameValue(e.target.value);
-              setRenameError(null);
-            }}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                e.preventDefault();
-                void doRename();
-              }
-            }}
-            autoFocus
-            placeholder="New name"
-            className="bg-background border-input"
-          />
-          {renameError && (
-            <p className="text-sm text-destructive">{renameError}</p>
-          )}
-          <DialogFooter className="flex gap-2 justify-end">
-            <Button
-              variant="outline"
-              className="border-border text-muted-foreground"
-              onClick={() => setRenameOpen(false)}
-            >
-              Cancel
-            </Button>
-            <Button
-              className="bg-primary hover:bg-primary/90 text-primary-foreground"
-              disabled={
-                renaming ||
-                !renameValue.trim() ||
-                renameValue.trim() === displayName
-              }
-              onClick={doRename}
-            >
-              {renaming ? "Renaming…" : "Rename"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
     </Card>
   );
 };

@@ -74,7 +74,6 @@ const ModelsLibrary: React.FC<ModelsLibraryProps> = ({
     ancestorsOf,
     refresh,
     stop,
-    remove,
   } = useJobsData();
   // Shared lazy-import (idempotent registration + husk-repo messaging) so an
   // untracked Hub repo resolves to a pseudo-job exactly as everywhere else.
@@ -170,9 +169,7 @@ const ModelsLibrary: React.FC<ModelsLibraryProps> = ({
               key={job.id}
               model={job}
               onStop={stop}
-              onDelete={remove}
               onPlay={(j, step) => onPick(j, step)}
-              onRenamed={refresh}
               ancestors={ancestorsOf(job)}
             />
           ));
