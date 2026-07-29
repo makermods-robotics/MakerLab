@@ -63,7 +63,7 @@ _HOST_ONLY_EXTRAS = frozenset({"feetech"})
 
 # policy_type -> lerobot extra that carries the policy's model dependencies
 # at the pinned ref (e.g. transformers for smolvla). Policies without an
-# entry (act, tdmpc, vqbet, sac) need nothing beyond the core install.
+# entry (act, tdmpc, vqbet, gaussian_actor) need nothing beyond the core install.
 _POLICY_CLOUD_EXTRAS = {
     "smolvla": "smolvla",
     "diffusion": "diffusion",

@@ -17,6 +17,8 @@ import {
   SkillBadgePill,
   classifySkill,
   formatCount,
+  isWipSkillId,
+  skillAuthorLabel,
   skillNamespace,
   skillThumbnail,
   skillTitle,
@@ -61,8 +63,10 @@ const SkillDetailDialog: React.FC<SkillDetailDialogProps> = ({
   // Lazily enrich with /models/info while the dialog is open — a hub-only row's
   // list entry has null dataset/steps that model_info can recover (base dataset
   // lineage, size). Best-effort: a failure leaves the list-derived fields.
+  // A WIP preview has no repo behind it, so there is nothing to enrich and the
+  // lookup would only 404 into the silent catch below.
   useEffect(() => {
-    if (!open || !model) {
+    if (!open || !model || isWipSkillId(model.id)) {
       setInfo(null);
       return;
     }
@@ -79,8 +83,12 @@ const SkillDetailDialog: React.FC<SkillDetailDialogProps> = ({
 
   if (!model) return null;
 
-  const badge = classifySkill(model, username);
-  const ns = skillNamespace(model);
+  const isWip = isWipSkillId(model.id);
+  const badge = isWip ? "wip" : classifySkill(model, username);
+  const author = skillAuthorLabel(model);
+  // "by <org>" reads right only for a real namespace — a bare local run and a
+  // WIP preview both carry a standalone label instead.
+  const hasAuthor = !isWip && skillNamespace(model) !== null;
   const policyType = info?.policy_type ?? model.policy_type;
   const policy = policyType ? policyTypeDisplayName(policyType) : null;
   const steps = info?.steps ?? model.steps;
@@ -152,7 +160,7 @@ const SkillDetailDialog: React.FC<SkillDetailDialogProps> = ({
             </div>
 
             <p className="mb-1 font-mono text-xs text-muted-foreground">
-              {ns ? `by ${ns}` : "local checkpoint"}
+              {hasAuthor ? `by ${author}` : author}
             </p>
             {stats.length > 0 && (
               <p className="mb-2 text-sm text-muted-foreground">
@@ -167,18 +175,26 @@ const SkillDetailDialog: React.FC<SkillDetailDialogProps> = ({
             )}
 
             <div className="mt-auto flex flex-col gap-2 pt-2">
-              <Button onClick={handleRun} className="w-full gap-2">
-                <Play className="h-4 w-4" />
-                Run on {robotName}
-              </Button>
-              <Button
-                variant="outline"
-                onClick={handleFineTune}
-                className="w-full gap-2"
-              >
-                <Sparkles className="h-4 w-4" />
-                Fine-tune this skill
-              </Button>
+              {isWip ? (
+                <p className="rounded-md border border-warn/40 px-3 py-2 text-sm text-warn">
+                  Not trained yet — this skill is still in development.
+                </p>
+              ) : (
+                <>
+                  <Button onClick={handleRun} className="w-full gap-2">
+                    <Play className="h-4 w-4" />
+                    Run on {robotName}
+                  </Button>
+                  <Button
+                    variant="outline"
+                    onClick={handleFineTune}
+                    className="w-full gap-2"
+                  >
+                    <Sparkles className="h-4 w-4" />
+                    Fine-tune this skill
+                  </Button>
+                </>
+              )}
               <div className="flex gap-2">
                 <span className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-md border border-border px-3 py-2 text-sm text-muted-foreground">
                   <Heart className="h-4 w-4" />
