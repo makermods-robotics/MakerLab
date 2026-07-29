@@ -78,7 +78,7 @@ const JointPositionChart: React.FC<{
 
   return (
     <div className="rounded-md border border-border bg-muted/40 p-2">
-      <div className="mb-1 flex items-baseline justify-between">
+      <div className="mb-1 flex items-baseline justify-between select-none">
         <span className="eyebrow">joint positions — synced to playhead</span>
         <span className="eyebrow">
           {episode ? `episode ${episode.episode_index}` : "—"}
