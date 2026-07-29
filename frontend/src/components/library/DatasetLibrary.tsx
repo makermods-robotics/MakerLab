@@ -136,7 +136,7 @@ const DatasetCard: React.FC<{
         : "border-border hover:border-muted-foreground/40",
     )}
   >
-    <div className="flex w-full items-start justify-between gap-2">
+    <div className="flex w-full items-center justify-between gap-2">
       <div className="flex min-w-0 items-center gap-2">
         <SourceBadge source={item.source} />
         {item.private && (
