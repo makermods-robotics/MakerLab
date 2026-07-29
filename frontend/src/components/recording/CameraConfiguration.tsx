@@ -207,18 +207,18 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
 
   return (
     <div className="space-y-4">
-      <h3 className="text-lg font-semibold text-foreground border-b border-border pb-2">
-        Camera Configuration
-      </h3>
+      {/* Cameras is a repeater, not a single labelled control, so it keeps an
+          eyebrow heading — the studio's one exception to the flat rule. */}
+      <h3 className="eyebrow">Cameras</h3>
 
       {/* Add Camera Section */}
       <div className="bg-muted/50 rounded-lg p-4 space-y-4">
-        <h4 className="text-md font-medium text-foreground">Add Camera</h4>
+        <h4 className="text-sm font-medium text-foreground">Add a camera</h4>
 
         <div className="space-y-2">
           <div className="flex items-center justify-between">
             <Label className="text-sm font-medium text-muted-foreground">
-              Available Cameras
+              Available cameras
             </Label>
             <Button
               type="button"
@@ -307,7 +307,7 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
                 className="bg-primary text-primary-foreground hover:bg-primary/90"
               >
                 <Plus className="w-4 h-4 mr-2" />
-                Add Camera
+                Add camera
               </Button>
               {!cameraName.trim() && (
                 <p className="text-xs text-muted-foreground">
@@ -322,8 +322,8 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
       {/* Configured Cameras */}
       {cameras.length > 0 && (
         <div className="space-y-4">
-          <h4 className="text-md font-medium text-foreground">
-            Configured Cameras ({cameras.length})
+          <h4 className="text-sm font-medium text-foreground">
+            Configured cameras ({cameras.length})
           </h4>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-2 gap-4">

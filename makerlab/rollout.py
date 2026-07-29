@@ -109,6 +109,17 @@ _last_result: dict[str, Any] | None = None
 # orphaned worker from a stopped session sees its (set) event and bails, while a
 # new session gets a clean one. None while idle.
 _inference_cancel: threading.Event | None = None
+# Handle to the background startup worker (_run_inference_startup) for the
+# CURRENT/most-recently-started session. `_inference_cancel` only aborts the
+# worker at coarse boundaries (before it opens the bus in _prepare_robot,
+# and again after _prepare_robot returns) — nothing interrupts it WHILE
+# _prepare_robot is actually touching hardware, so a stop can leave the
+# worker alive and still driving the bus for a few more seconds. Tracking the
+# thread (mirrors teleoperate.py's `teleoperation_thread`, added for the same
+# reason in T3) lets handle_start_inference refuse a new session while that
+# orphaned worker is still alive, instead of racing it for the same serial
+# port. None once the worker has exited or before any session has started.
+_inference_startup_thread: threading.Thread | None = None
 # Guards mutations to the globals above; held only for the short critical
 # sections in start/stop/status.
 _state_lock = threading.Lock()
@@ -909,7 +920,7 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
     launch modal; the multi-minute Hub download moves off the request thread so
     the UI lands on the inference page and shows download progress there."""
     global inference_active, _inference_started_at, _inference_meta, _inference_cancel
-    global _last_result
+    global _last_result, _inference_startup_thread
 
     # Mutex with teleop and recording: all three drive the same serial bus.
     from . import record as _record, teleoperate as _teleoperate
@@ -932,6 +943,18 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
                 "success": False,
                 "status_code": 409,
                 "message": "Inference is already active. Stop it first.",
+            }
+        if _inference_startup_thread is not None and _inference_startup_thread.is_alive():
+            # A previous session was stopped while its startup worker was
+            # inside _prepare_robot (already touching hardware) or still
+            # unwinding just after — inference_active is already False, but
+            # the worker itself hasn't exited yet. Starting a new session now
+            # would open the same serial port out from under it. Refuse until
+            # it's actually gone.
+            return {
+                "success": False,
+                "status_code": 409,
+                "message": "The previous session is still shutting down. Try again in a few seconds.",
             }
         # Claim the slot now so a concurrent caller losing the race sees us, and
         # seed the meta + timer so the phase is visible from the very first
@@ -975,12 +998,16 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
         }
 
     # Everything heavy (download, preflight, spawn) runs off the request thread.
-    threading.Thread(
+    # Tracked so a later start can tell whether a stopped session's worker is
+    # still alive (see the is_alive() guard above) instead of racing it.
+    worker = threading.Thread(
         target=_run_inference_startup,
         args=(request, cancel_event),
         name="inference-startup",
         daemon=True,
-    ).start()
+    )
+    _inference_startup_thread = worker
+    worker.start()
     return {"success": True, "message": "Inference starting"}
 
 

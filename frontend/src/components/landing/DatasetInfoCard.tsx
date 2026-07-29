@@ -546,7 +546,7 @@ const HubSyncRow: React.FC<{ repoId: string }> = ({ repoId }) => {
   if (status === "on_hub") {
     return (
       <div className="flex items-center gap-1.5 text-muted-foreground">
-        <span>On Hub</span>
+        <span>Uploaded to HuggingFace</span>
         {hubUrl && (
           <a
             href={hubUrl}
