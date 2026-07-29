@@ -3,11 +3,11 @@ import { ChevronDown } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { LIBRARY_GRID } from "./LibraryToolbar";
 
-/** One row of the shared 2-up library grid — how many cards show before the
- * "Show all" toggle. Exported so a caller (jobs) can tell whether its active
- * grid overflows, and thus whether to fold its Untracked toggle under "Show
- * all" instead of stacking a second footer button. */
-export const LIBRARY_ROW_CAP = 2;
+/** One row of the shared 3-up library grid — how many cards show before the
+ * "Show all" toggle. Exported so a caller can tell whether its grid overflows,
+ * and thus whether to fold its own footer toggle under "Show all" instead of
+ * stacking a second footer button. */
+export const LIBRARY_ROW_CAP = 3;
 
 /** Total height of the reserved grid block: the 16.5rem row + the 1.875rem
  * footer slot ("Show all" / Untracked / spacer) and its gutter. Empty/no-match
@@ -18,11 +18,12 @@ export const GRID_MIN_H = "min-h-[18.875rem]";
 
 /**
  * The shared library grid, capped at one row. Every studio library (datasets,
- * training jobs, models) renders one row of two cards by default; anything past
- * that stays hidden behind a "Show all" toggle. By default the row is reserved
- * at a fixed height (blank cells when there aren't enough cards) so datasets
- * and jobs keep one uniform height however large a collection grows. Models
- * opts into `flexHeight` instead, letting its taller cards size to content.
+ * training jobs, models) renders one row of three cards by default; anything
+ * past that stays hidden behind a "Show all" toggle. By default the row is
+ * reserved at a fixed height (blank cells when there aren't enough cards) so
+ * datasets and jobs keep one uniform height however large a collection grows.
+ * Models opts into `flexHeight` instead, letting its taller cards size to
+ * content.
  */
 const CappedGrid: React.FC<{
   /** Pre-keyed cards, already sorted newest-first by the caller. */
