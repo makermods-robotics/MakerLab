@@ -218,10 +218,11 @@ export const DatasetLibraryList: React.FC<{
 }> = ({ datasets, loading, selectedRepoId, onSelect }) => {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<LibraryFilter>("all");
-  // Hides a Hub-only row once it's confirmed to have no video — this surface
-  // wires onView (opens the episode viewer), so a row without video would
-  // just open to an empty state. See useHubVideoFilter for why the Train
-  // picker (which doesn't use this component) must NOT do the same.
+  // Hides a Hub-only row once it's confirmed to have no video. Kept from when
+  // this surface used to open the episode viewer (now removed, see
+  // eye-icon-full-feature); revisit whether this filter still belongs here.
+  // See useHubVideoFilter for why the Train picker (which doesn't use this
+  // component) must NOT do the same.
   const videoFilteredDatasets = useHubVideoFilter(datasets);
 
   const visible = useMemo(() => {
