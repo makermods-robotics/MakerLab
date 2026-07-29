@@ -117,13 +117,6 @@ const job = (j: Partial<JobRecord> & Pick<JobRecord, "id" | "name">): JobRecord 
   ...j,
 });
 
-const localCkpts = (id: string, steps: number[]): JobCheckpoint[] =>
-  steps.map((step) => ({
-    step,
-    source: "local",
-    ref: `/tmp/makerlab_mock/${id}/checkpoints/${step}/pretrained_model`,
-  }));
-
 const hubCkpts = (repo: string, steps: number[]): JobCheckpoint[] =>
   steps.map((step) => ({
     step,
@@ -131,190 +124,18 @@ const hubCkpts = (repo: string, steps: number[]): JobCheckpoint[] =>
     ref: step === 0 ? `${repo}@root` : `${repo}@checkpoints/${step}`,
   }));
 
-/** Mutable registry the mock mutations edit in place. */
-const jobs: JobRecord[] = [
-  job({
-    id: "act_sock_sort_live_2026-07-16_10-00-00",
-    name: "ACT · sock sort (live)",
-    state: "running",
-    started_at: NOW - 40 * 60,
-    ended_at: null,
-    exit_code: null,
-    metrics: metrics(4_200, 10_000),
-    checkpoint_count: 2,
-  }),
-  job({
-    id: "act_cube_grab_2026-07-15_18-22-10",
-    name: "ACT · cube grab",
-    config: cfg(`${USER}/cube_grab`, "act", 10_000),
-    started_at: NOW - 18 * H,
-    ended_at: NOW - 16 * H,
-    checkpoint_count: 5,
-  }),
-  job({
-    id: "smolvla_sock_sort_2026-07-14_09-15-00",
-    name: "SmolVLA · sock sort",
-    config: cfg(`${USER}/sock_2_only_merged`, "smolvla", 10_000),
-    runner: "hf_cloud",
-    hf_job_id: "mock-hub-job-1",
-    hf_flavor: "a10g-large",
-    hf_repo_id: `${USER}/smolvla_sock_sort_mock`,
-    hf_job_url: "https://huggingface.co/jobs/makermods/mock-hub-job-1",
-    started_at: NOW - 2 * D,
-    ended_at: NOW - 2 * D + 3 * H,
-    checkpoint_count: 2,
-  }),
-  job({
-    id: "act_booth_bimanual_2026-07-13_20-05-00",
-    name: "ACT · bimanual booth",
-    config: cfg(`${USER}/bimanual_test_booth`, "act", 10_000),
-    state: "failed",
-    error_message: "CUDA out of memory",
-    exit_code: 1,
-    runner: "hf_cloud",
-    hf_job_id: "mock-hub-job-2",
-    hf_flavor: "t4-medium",
-    hf_repo_id: `${USER}/act_bimanual_booth_mock`,
-    hf_job_url: "https://huggingface.co/jobs/makermods/mock-hub-job-2",
-    started_at: NOW - 3 * D,
-    ended_at: NOW - 3 * D + H,
-    metrics: metrics(4_000, 10_000),
-    checkpoint_count: 1,
-  }),
-  job({
-    id: "pi05_imported_2026-07-12_11-00-00",
-    name: "pi05_metal_pick_place_lora",
-    config: cfg("(imported)", "pi05", 0),
-    runner: "imported",
-    hf_repo_id: `${USER}/pi05_metal_pick_place_lora_mock`,
-    output_dir: `hub:${USER}/pi05_metal_pick_place_lora_mock`,
-    started_at: NOW - 4 * D,
-    ended_at: null,
-    checkpoint_count: 1,
-  }),
-  job({
-    id: "act_imported_2026-07-11_16-39-00",
-    name: "act_so101_merged",
-    config: cfg("(imported)", "act", 0),
-    runner: "imported",
-    hf_repo_id: `${USER}/act_so101_merged_mock`,
-    output_dir: `hub:${USER}/act_so101_merged_mock`,
-    started_at: NOW - 5 * D,
-    ended_at: null,
-    checkpoint_count: 2,
-  }),
-  job({
-    id: "smolvla_imported_2026-07-10_09-30-00",
-    name: "smolvla_sock_purple_green",
-    config: cfg("(imported)", "smolvla", 0),
-    runner: "imported",
-    hf_repo_id: `${USER}/smolvla_sock_purple_green_mock`,
-    output_dir: `hub:${USER}/smolvla_sock_purple_green_mock`,
-    started_at: NOW - 6 * D,
-    ended_at: null,
-    checkpoint_count: 1,
-  }),
-  job({
-    id: "act_scratch_2026-07-09_14-00-00",
-    name: "ACT · aborted scratch run",
-    state: "interrupted",
-    started_at: NOW - 7 * D,
-    ended_at: NOW - 7 * D + 600,
-    exit_code: null,
-    metrics: metrics(300, 10_000),
-    checkpoint_count: 0,
-  }),
-];
+/** Mutable registry populated only by mock-mode actions during this tab. */
+const jobs: JobRecord[] = [];
 
-const checkpointsByJob: Record<string, JobCheckpoint[]> = {
-  "act_sock_sort_live_2026-07-16_10-00-00": localCkpts(
-    "act_sock_sort_live_2026-07-16_10-00-00",
-    [2000, 4000],
-  ),
-  "act_cube_grab_2026-07-15_18-22-10": localCkpts(
-    "act_cube_grab_2026-07-15_18-22-10",
-    [2000, 4000, 6000, 8000, 10000],
-  ),
-  "smolvla_sock_sort_2026-07-14_09-15-00": hubCkpts(
-    `${USER}/smolvla_sock_sort_mock`,
-    [5000, 10000],
-  ),
-  "act_booth_bimanual_2026-07-13_20-05-00": hubCkpts(
-    `${USER}/act_bimanual_booth_mock`,
-    [4000],
-  ),
-  "pi05_imported_2026-07-12_11-00-00": hubCkpts(
-    `${USER}/pi05_metal_pick_place_lora_mock`,
-    [0],
-  ),
-  "act_imported_2026-07-11_16-39-00": hubCkpts(`${USER}/act_so101_merged_mock`, [
-    5000, 10000,
-  ]),
-  "smolvla_imported_2026-07-10_09-30-00": hubCkpts(
-    `${USER}/smolvla_sock_purple_green_mock`,
-    [0],
-  ),
-};
+const checkpointsByJob: Record<string, JobCheckpoint[]> = {};
 
 const iso = (secAgo: number) => new Date((NOW - secAgo) * 1000).toISOString();
 
-/** Untracked Hub jobs (no local record): one live, two dead leftovers. */
-const hubJobs: HubJob[] = [
-  {
-    id: "mock-untracked-live",
-    created_at: iso(20 * 60),
-    docker_image: "huggingface/lerobot-gpu:latest",
-    space_id: null,
-    flavor: "a10g-large",
-    status: { stage: "RUNNING", message: null },
-    owner: USER,
-    url: "https://huggingface.co/jobs/makermods/mock-untracked-live",
-  },
-  {
-    id: "mock-untracked-done",
-    created_at: iso(4 * D),
-    docker_image: "huggingface/lerobot-gpu:latest",
-    space_id: null,
-    flavor: "t4-medium",
-    status: { stage: "COMPLETED", message: null },
-    owner: USER,
-    url: "https://huggingface.co/jobs/makermods/mock-untracked-done",
-  },
-  {
-    id: "mock-untracked-error",
-    created_at: iso(6 * D),
-    docker_image: "huggingface/lerobot-gpu:latest",
-    space_id: null,
-    flavor: "t4-medium",
-    status: { stage: "ERROR", message: "exit code 1" },
-    owner: USER,
-    url: "https://huggingface.co/jobs/makermods/mock-untracked-error",
-  },
-];
+/** Untracked Hub jobs created by mock-mode actions during this tab. */
+const hubJobs: HubJob[] = [];
 
-/** Uploaded Hub model repos no job tracks → "Uploaded" cards. */
-const hubModels: HubModel[] = [
-  {
-    repo_id: `${USER}/act_cube_grab_uploaded_mock`,
-    last_modified: iso(30 * 60),
-    private: false,
-  },
-  {
-    repo_id: `${USER}/pi05_sock_lora_uploaded_mock`,
-    last_modified: iso(26 * H),
-    private: true,
-  },
-  {
-    repo_id: `${USER}/smolvla_booth_uploaded_mock`,
-    last_modified: iso(3 * D),
-    private: false,
-  },
-  {
-    repo_id: `${USER}/act_old_experiment_uploaded_mock`,
-    last_modified: iso(9 * D),
-    private: false,
-  },
-];
+/** Uploaded Hub model repos created by mock-mode actions during this tab. */
+const hubModels: HubModel[] = [];
 
 const policyConfig = (policy: string): PolicyConfigSummary => ({
   policy_type: policy,
