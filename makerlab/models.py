@@ -88,7 +88,7 @@ KNOWN_POLICY_TYPES = {
     "vqbet",
     "pi0",
     "pi05",
-    "sac",
+    "gaussian_actor",
     "smolvla",
     "wall_x",
     "pi0_fast",

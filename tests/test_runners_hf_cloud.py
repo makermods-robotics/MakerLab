@@ -149,7 +149,9 @@ def test_cloud_lerobot_spec_uses_archive_tarball_not_git() -> None:
 
     spec = cloud_lerobot_spec("act")
     assert "git+" not in spec
-    assert re.search(r"@ https://github\.com/.+/archive/[0-9a-f]+\.tar\.gz$", spec)
+    # 0.6.0 pins by tag (v0.6.0), not a hex SHA, so the archive ref may contain
+    # non-hex chars (v, dots). Match any non-slash ref, not just [0-9a-f].
+    assert re.search(r"@ https://github\.com/.+/archive/[^/]+\.tar\.gz$", spec)
 
 
 def test_cloud_lerobot_spec_drops_host_only_extras_and_adds_policy_extra() -> None:

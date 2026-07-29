@@ -4,18 +4,13 @@ import { NumberInput } from "@/components/ui/number-input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "@/components/ui/collapsible";
-import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { ChevronDown } from "lucide-react";
+import { AdvancedSection } from "@/components/studio/panel/primitives";
 import { cn } from "@/lib/utils";
 import { ConfigComponentProps } from "../types";
 import { useApi } from "@/contexts/ApiContext";
@@ -52,9 +47,10 @@ const OPTIMIZER_LABELS: Record<string, string> = {
   multi_adam: "Multi Adam",
 };
 
-/** Advanced-parameters section of the training form — a flat collapsible
- * matching the Collect form's "Advanced parameters" (the old boxed Card
- * chrome is gone). */
+/** Advanced-parameters section of the training form. Uses the shared
+ * AdvancedSection, so its trigger is the same eyebrow-level control as the
+ * Collect form's "Advanced parameters" instead of a heavier heading that
+ * outranked the sections above it. */
 const AdvancedCard: React.FC<ConfigComponentProps> = ({
   config,
   updateConfig,
@@ -104,20 +100,15 @@ const AdvancedCard: React.FC<ConfigComponentProps> = ({
     timeoutValue.trim() !== "" && !isValidTimeout(timeoutValue);
 
   return (
-    <Collapsible
+    <AdvancedSection
       open={expanded}
       onOpenChange={setExpanded}
-      className="group space-y-4"
+      summary="Optimizer, learning rate, log frequency, checkpoints, and more"
     >
-      <CollapsibleTrigger className="flex w-full items-center justify-between border-b border-border pb-2 text-sm font-semibold text-foreground">
-        <span>Advanced parameters</span>
-        <ChevronDown className="h-4 w-4 transition-transform group-data-[state=open]:rotate-180" />
-      </CollapsibleTrigger>
-
-      <CollapsibleContent className="space-y-6">
+      <div className="space-y-6">
         {/* Policy */}
         <section className="space-y-3">
-          <SectionHeading>Policy</SectionHeading>
+          <SectionHeading>Policy preset</SectionHeading>
           <div className="flex items-center gap-3">
             <Switch
               id="policy_use_amp"
@@ -333,8 +324,8 @@ const AdvancedCard: React.FC<ConfigComponentProps> = ({
             </Label>
           </div>
         </section>
-      </CollapsibleContent>
-    </Collapsible>
+      </div>
+    </AdvancedSection>
   );
 };
 
