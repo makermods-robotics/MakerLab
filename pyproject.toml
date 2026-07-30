@@ -27,8 +27,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# `dev` pulls in `test` rather than restating pytest, so the two can never drift
+# apart — installing `.[dev]` always gets everything needed to run the suite.
 dev = [
-    "pytest>=7.0",
+    "makerlab[test]",
     "ruff>=0.6",
     "pre-commit>=3.0",
 ]
