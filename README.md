@@ -29,7 +29,7 @@ Built by [makermods-robotics](https://github.com/makermods-robotics) and forked 
 
 ## Demo
 
-[▶ Watch the demo](https://github.com/makermods-robotics/MakerLab/blob/assets/readme-demo/demo.mov)
+![MakerLab demo](https://raw.githubusercontent.com/makermods-robotics/MakerLab/assets/readme-demo/demo.gif)
 
 ## Quick Start
 
