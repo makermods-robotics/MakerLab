@@ -99,6 +99,7 @@ The core LeRobot workflow, extended throughout:
 **Datasets:**
 
 - 🪪 **Dataset info cards** — episodes, cameras, and tasks with per-task episode counts, plus warnings on unusable datasets.
+- 🎬 **Episode viewer** — click any dataset, local or Hub-only, to open a synced camera grid, transport controls, and a joint-position chart tied to the playhead. Hub-only datasets stream chunk-by-chunk on demand, no full download required.
 - 🔀 **Merge from the UI** — combine datasets (wraps LeRobot's <code>aggregate_datasets</code>), with legible errors and name validation.
 - 🎥 **Preview before naming** — see all camera feeds before committing to a recording setup.
 
