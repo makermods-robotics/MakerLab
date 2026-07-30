@@ -42,8 +42,6 @@ makerlab            # run the app: built UI + API on :8000
 makerlab --dev      # hack on it: Vite hot reload on :8080 + auto-reloading API on :8000
 ```
 
-See [INSTALL.md](INSTALL.md) for platform-specific setup (macOS, Jetson) and network tips.
-
 ## What you can do
 
 The core LeRobot workflow, extended throughout:
