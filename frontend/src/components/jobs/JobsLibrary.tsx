@@ -7,10 +7,7 @@ import {
 } from "@/components/ui/collapsible";
 import { cn } from "@/lib/utils";
 import LibraryToolbar from "@/components/library/LibraryToolbar";
-import CappedGrid, {
-  GRID_MIN_H,
-  LIBRARY_ROW_CAP,
-} from "@/components/library/CappedGrid";
+import CappedGrid, { GRID_MIN_H } from "@/components/library/CappedGrid";
 import LibraryHeader from "@/components/library/LibraryHeader";
 import { SLIDE } from "@/components/studio/panel/primitives";
 import { useStudio } from "@/contexts/StudioContext";
@@ -80,10 +77,11 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
   // Untracked is expanded — the untracked cards flow right below the active
   // ones instead of after a gap.
   const [untrackedOpen, setUntrackedOpen] = useState(false);
-  // Lifted from the active grid so the Untracked toggle can fold *under* "Show
-  // all" instead of stacking a second footer button: when the active runs
-  // overflow one row, Untracked only appears once "Show all" is expanded.
+  // Lifted from the active grid so Untracked can fold under "Show all" rather
+  // than stacking a second dashed button beneath it: when the active runs
+  // overflow one row, Untracked appears only once "Show all" is expanded.
   const [activeExpanded, setActiveExpanded] = useState(false);
+  const [activeOverflow, setActiveOverflow] = useState(false);
   const query = search.trim().toLowerCase();
   const matchesQuery = useCallback(
     (text: string | null | undefined) =>
@@ -157,11 +155,10 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
   const untrackedCount =
     localUntracked.length + cloudUntracked.length + hubInactive.length;
 
-  // When active runs spill past the single reserved row the grid shows its own
-  // "Show all" toggle; Untracked then folds under it (revealed only once "Show
-  // all" is open) so the collapsed library shows just one footer button. With
-  // no overflow there's no "Show all", so Untracked stays the sole footer.
-  const activeOverflow = activeCount > LIBRARY_ROW_CAP;
+  // When the active runs spill past the single reserved row the grid shows its
+  // own "Show all" toggle; Untracked then folds under it, revealed only once
+  // "Show all" is open, so the collapsed library shows just one footer button.
+  // With no overflow there is no "Show all", so Untracked stays the sole footer.
   const showUntrackedToggle =
     untrackedCount > 0 && (!activeOverflow || activeExpanded);
 
@@ -248,6 +245,7 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
               footerSpacer={untrackedCount === 0}
               expanded={activeExpanded}
               onExpandedChange={setActiveExpanded}
+              onOverflowChange={setActiveOverflow}
               items={[
                 ...[...localActive, ...cloudActive].map((job) => ({
                   time: jobTime(job),
@@ -277,7 +275,7 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
 
           {/* Inactive leftovers, folded away by default — the trigger is the
               jobs library's footer row, styled like "Show all". Hidden until
-              the active grid's "Show all" is open when there's overflow, so
+              the active grid's "Show all" is open when there is overflow, so
               the collapsed library never stacks two dashed footer buttons. */}
           {showUntrackedToggle ? (
             <Collapsible open={untrackedOpen} onOpenChange={setUntrackedOpen}>

@@ -1,19 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import {
-  AlertTriangle,
-  CheckCircle,
-  ChevronDown,
-  Loader2,
-  Play,
-  Square,
-  VideoOff,
-} from "lucide-react";
+import { AlertTriangle, Loader2, Play, Square, VideoOff } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "@/components/ui/collapsible";
 import { Input } from "@/components/ui/input";
 import { NumberInput } from "@/components/ui/number-input";
 import { Label } from "@/components/ui/label";
@@ -49,15 +36,19 @@ import { findJobForModel, importSourceForModel } from "@/lib/inferenceLaunch";
 import CheckpointDropdown from "@/components/jobs/CheckpointDropdown";
 import ModelsLibrary from "@/components/jobs/ModelsLibrary";
 import {
+  FormSection,
   LibrarySection,
+  PANEL_ENTRY_CLASS,
+  PanelEntryDot,
   PanelHeader,
-  SLIDE,
+  RobotStatus,
 } from "@/components/studio/panel/primitives";
+import { cn } from "@/lib/utils";
 import {
   AvailableCamera,
   useAvailableCameras,
 } from "@/hooks/useAvailableCameras";
-import { useCameraStream } from "@/hooks/useCameraStream";
+import BackendCameraStream from "@/components/BackendCameraStream";
 
 /**
  * Studio panel 3 · Deploy — run a skill (local trained checkpoint or an
@@ -79,15 +70,20 @@ const JOB_SCAN_LIMIT = 200;
 
 const cameraKey = (cam: AvailableCamera) => String(cam.index);
 
-/** Small getUserMedia preview for verifying which physical camera a role binds
- * to. `paused` drops the browser stream so the rollout subprocess can open the
- * same device via OpenCV without contending. (Ported from InferenceModal.) */
-const CameraThumbnail: React.FC<{ deviceId: string; paused: boolean }> = ({
-  deviceId,
-  paused,
-}) => {
-  const { videoRef, hasError } = useCameraStream(deviceId, paused);
-  if (paused || hasError || !deviceId) {
+/** Small preview for verifying which physical camera a role binds to.
+ *
+ * Streams from the backend by cv2 index — the live feed at exactly the index
+ * the rollout will open, independent of any browser deviceId match. That match
+ * was by localizedName, so twin cameras ("KD-USB Cameras" x2) paired
+ * arbitrarily and the tiles swapped footage between refreshes.
+ * `paused` unmounts the stream so the rollout subprocess can claim the device.
+ * (Ported from InferenceModal.) */
+const CameraThumbnail: React.FC<{
+  cameraIndex?: number;
+  uniqueId?: string;
+  paused: boolean;
+}> = ({ cameraIndex, uniqueId, paused }) => {
+  if (paused || cameraIndex === undefined) {
     return (
       <div className="flex h-24 w-32 flex-col items-center justify-center rounded border border-border bg-muted">
         <VideoOff className="mb-1 h-5 w-5 text-muted-foreground" />
@@ -97,12 +93,11 @@ const CameraThumbnail: React.FC<{ deviceId: string; paused: boolean }> = ({
       </div>
     );
   }
+  // BackendCameraStream owns its own failure/retry UI.
   return (
-    <video
-      ref={videoRef}
-      autoPlay
-      muted
-      playsInline
+    <BackendCameraStream
+      cameraIndex={cameraIndex}
+      uniqueId={uniqueId}
       className="h-24 w-32 rounded border border-border bg-muted object-cover"
     />
   );
@@ -203,7 +198,6 @@ const DeployPanel: React.FC = () => {
 
   // The settings block (robot, checkpoint, run parameters, cameras) collapses
   // as one so a configured deploy can be folded down to picker + actions.
-  const [settingsOpen, setSettingsOpen] = useState(true);
 
   const jobId = selectedJob?.id ?? null;
   const isBimanual = robot?.mode === "bimanual";
@@ -252,9 +246,9 @@ const DeployPanel: React.FC = () => {
     let cancelled = false;
     (async () => {
       setResolving(true);
-      // "Run on robot" means the user is heading for Start — surface the
-      // settings block (robot, checkpoint, cameras) even if they collapsed it.
-      setSettingsOpen(true);
+      // The settings (robot, checkpoint, cameras) are no longer collapsible —
+      // they render as soon as a skill is selected, which the prefill does
+      // below, so there is nothing to re-open here.
       try {
         if (deployPrefill.source === "job") {
           const job = await getJob(baseUrl, fetchWithHeaders, deployPrefill.id);
@@ -410,9 +404,18 @@ const DeployPanel: React.FC = () => {
           (c) => c.name.toLowerCase() === m.display.toLowerCase(),
         );
         if (!robotCam) continue;
-        const live = robotCam.device_id
-          ? availableCameras.find((c) => c.deviceId === robotCam.device_id)
-          : availableCameras.find((c) => c.index === robotCam.camera_index);
+        // Resolve by unique_id first: it names the physical device exactly.
+        // device_id is a coin flip when two cameras share a name (the browser
+        // match is by localizedName), and camera_index goes stale on replug —
+        // both are fallbacks for records saved before unique_id was stored.
+        const live =
+          (robotCam.unique_id
+            ? availableCameras.find((c) => c.uniqueId === robotCam.unique_id)
+            : undefined) ??
+          (robotCam.device_id
+            ? availableCameras.find((c) => c.deviceId === robotCam.device_id)
+            : undefined) ??
+          availableCameras.find((c) => c.index === robotCam.camera_index);
         if (live) {
           next[m.requestKey] = cameraKey(live);
           changed = true;
@@ -602,26 +605,36 @@ const DeployPanel: React.FC = () => {
 
   return (
     <div className="flex flex-1 flex-col gap-5 p-5">
-      <PanelHeader step="3" title="Deploy policy">
+      <PanelHeader step="3" title="Run">
         {resolving ? (
           <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
         ) : null}
       </PanelHeader>
 
-      {/* Skill picker — the panel's entry control. Unlabeled so it sits at
-          the same level as Collect's and Train's entry controls; the
-          placeholder carries the meaning. ----------------------------------- */}
+      {/* Skill picker — the panel's entry control. A real <Select> rather than
+          a PanelEntryControl because picking a skill IS the value here, not a
+          trigger that opens a form; it wears PANEL_ENTRY_CLASS and a dot so it
+          still reads as the same control as Collect's and Train's openers. */}
       <div className="space-y-2">
         <Select
           value={selectedModelId ?? undefined}
           onValueChange={handlePickSkill}
           disabled={resolving}
         >
-          <SelectTrigger className="w-full">
+          {/* justify-start + ml-auto on the chevron: SelectTrigger defaults to
+              justify-between, which would shove the dot away from the label
+              once a third child is added. */}
+          <SelectTrigger
+            className={cn(
+              PANEL_ENTRY_CLASS,
+              "justify-start [&>svg]:ml-auto [&>svg]:shrink-0",
+            )}
+          >
+            <PanelEntryDot className="bg-sky-500" />
             {selectedSkillLabel ? (
-              <span className="truncate">{selectedSkillLabel}</span>
+              <span className="min-w-0 truncate">{selectedSkillLabel}</span>
             ) : (
-              <SelectValue placeholder="Pick a policy" />
+              <SelectValue placeholder="Pick a skill" />
             )}
           </SelectTrigger>
           <SelectContent>
@@ -651,62 +664,50 @@ const DeployPanel: React.FC = () => {
         </Select>
         {!selectedJob ? (
           <p className="text-xs text-muted-foreground">
-            Pick a trained checkpoint or an imported Hub model to run on your
+            Pick a trained checkpoint or an imported Hub skill to run on your
             robot.
           </p>
         ) : null}
       </div>
 
-      {/* Settings & configuration — robot, checkpoint, run parameters and
-          cameras collapse as one block. ------------------------------------ */}
-      <Collapsible
-        open={settingsOpen}
-        onOpenChange={setSettingsOpen}
-        className="group space-y-5"
-      >
-        <CollapsibleTrigger className="flex w-full items-center justify-between border-b border-border pb-2 text-sm font-semibold text-foreground">
-          <span>Settings &amp; configuration</span>
-          <ChevronDown className="h-4 w-4 transition-transform group-data-[state=open]:rotate-180" />
-        </CollapsibleTrigger>
-        <CollapsibleContent className={SLIDE}>
-          <div className="space-y-5">
-          {/* Runs-on row ------------------------------------------------------ */}
-          <div className="space-y-2">
-            <h3 className="eyebrow">Runs on</h3>
+      {/* Everything below is flat and appears as soon as a skill is picked —
+          disclosure comes from the selection, not from a second click. The old
+          "Settings & configuration" collapsible was an extra step neither
+          Collect nor Train has. ------------------------------------------- */}
+      {selectedJob ? (
+        <div className="space-y-5">
+          <p className="text-sm leading-relaxed text-muted-foreground">
+            Run this skill on your robot, then start inference.
+          </p>
+
+          {/* Robot readiness — a status line, not a parameter, so no eyebrow. */}
+          <RobotStatus ready={!!robot && robot.follower_ready}>
             {!robot ? (
-              <Alert className="border-warn/40 text-warn [&>svg]:text-warn">
-                <AlertTriangle className="h-4 w-4" />
-                <AlertDescription>
-                  Select a robot to deploy — use the robot menu in the
-                  top-right corner of this window.
-                </AlertDescription>
-              </Alert>
+              <>
+                Select a robot to run on — use the robot menu in the top-right
+                corner of this window.
+              </>
             ) : !robot.follower_ready ? (
-              <Alert className="border-warn/40 text-warn [&>svg]:text-warn">
-                <AlertTriangle className="h-4 w-4" />
-                <AlertDescription>
-                  <strong>{robot.name}</strong> {robotSetupGap(robot, "follower")}.
-                  Open Robot settings before running inference. (Inference only
-                  uses the follower arm{isBimanual ? "s" : ""} — leader setup
-                  isn't needed.)
-                </AlertDescription>
-              </Alert>
+              <>
+                <strong>{robot.name}</strong> {robotSetupGap(robot, "follower")}.
+                Open Robot settings before running inference. (Inference only
+                uses the follower arm{isBimanual ? "s" : ""} — leader setup
+                isn't needed.)
+              </>
             ) : (
-              <div className="flex items-center gap-2 text-sm">
-                <CheckCircle className="h-4 w-4 text-ok" />
+              <>
                 <span className="text-foreground">{robot.name}</span>
                 <span className="rounded border border-border px-1.5 py-0.5 text-[11px] text-muted-foreground">
                   {isBimanual ? "bimanual — both followers" : "single arm"}
                 </span>
-              </div>
+              </>
             )}
-          </div>
+          </RobotStatus>
 
           {/* Checkpoint ------------------------------------------------------- */}
-          {selectedJob ? (
-            <div className="space-y-2">
-              <h3 className="eyebrow">Checkpoint</h3>
-              {checkpoints.length === 0 ? (
+          <div className="space-y-2">
+            <Label htmlFor="deploy-checkpoint">Checkpoint</Label>
+            {checkpoints.length === 0 ? (
                 <Alert className="border-warn/40 text-warn [&>svg]:text-warn">
                   <AlertTriangle className="h-4 w-4" />
                   <AlertDescription>
@@ -715,6 +716,7 @@ const DeployPanel: React.FC = () => {
                 </Alert>
               ) : (
                 <CheckpointDropdown
+                  id="deploy-checkpoint"
                   checkpoints={checkpoints}
                   // Single-job list: steps are unique here, so the step maps
                   // 1:1 onto the checkpoint's identifying ref.
@@ -749,18 +751,16 @@ const DeployPanel: React.FC = () => {
                   </AlertDescription>
                 </Alert>
               ) : null}
-            </div>
-          ) : null}
+          </div>
 
-          {/* Run parameters --------------------------------------------------- */}
-          {selectedJob && policyConfig ? (
-            <div className="space-y-3">
-              <h3 className="eyebrow">Run parameters</h3>
+          {/* Run parameters — flat, each with its own <Label>; the old "Run
+              parameters" eyebrow sat above two fields that already say what
+              they are. --------------------------------------------------- */}
+          {policyConfig ? (
+            <>
               {policyConfig.requires_task ? (
-                <div className="space-y-1.5">
-                  <Label htmlFor="deploy-task" className="text-sm font-medium">
-                    Task description
-                  </Label>
+                <div className="space-y-2">
+                  <Label htmlFor="deploy-task">Task description</Label>
                   <Input
                     id="deploy-task"
                     value={task}
@@ -772,10 +772,8 @@ const DeployPanel: React.FC = () => {
                   </p>
                 </div>
               ) : null}
-              <div className="space-y-1.5">
-                <Label htmlFor="deploy-duration" className="text-sm font-medium">
-                  Max duration (seconds)
-                </Label>
+              <div className="space-y-2">
+                <Label htmlFor="deploy-duration">Max duration (s)</Label>
                 <NumberInput
                   id="deploy-duration"
                   min={1}
@@ -785,13 +783,11 @@ const DeployPanel: React.FC = () => {
                   }}
                 />
               </div>
-            </div>
+            </>
           ) : null}
 
-          {/* Cameras ---------------------------------------------------------- */}
-          {selectedJob ? (
-            <div className="space-y-2">
-              <h3 className="eyebrow">Cameras</h3>
+          {/* Cameras — a repeater, so it keeps its eyebrow. ------------------ */}
+          <FormSection title="Cameras">
               {policyConfigLoading ? (
                 <div className="flex items-center gap-2 text-sm text-muted-foreground">
                   <Loader2 className="h-4 w-4 animate-spin" />
@@ -851,7 +847,8 @@ const DeployPanel: React.FC = () => {
                           </SelectContent>
                         </Select>
                         <CameraThumbnail
-                          deviceId={selectedCamera?.deviceId ?? ""}
+                          cameraIndex={selectedCamera?.index}
+                          uniqueId={selectedCamera?.uniqueId}
                           paused={submitting || inferenceActive}
                         />
                       </div>
@@ -859,13 +856,11 @@ const DeployPanel: React.FC = () => {
                   })}
                 </div>
               )}
-            </div>
-          ) : null}
-          </div>
-        </CollapsibleContent>
-      </Collapsible>
+          </FormSection>
+        </div>
+      ) : null}
 
-      {/* Actions — pinned directly above the model library. Side by side so
+      {/* Actions — pinned directly above the skill library. Side by side so
           the row sits level with Collect's and Train's single Start. -------- */}
       <div className="mt-auto flex gap-2 pt-2">
         <Button

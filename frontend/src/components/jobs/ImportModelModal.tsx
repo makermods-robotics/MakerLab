@@ -65,11 +65,11 @@ const ImportModelModal: React.FC<Props> = ({ open, onOpenChange, onImported }) =
       <DialogContent className="bg-background border-border sm:max-w-[520px] p-8">
         <DialogHeader>
           <DialogTitle className="text-foreground text-center text-2xl font-bold">
-            Import a model
+            Import a skill
           </DialogTitle>
           <DialogDescription className="text-muted-foreground text-center">
-            Point at a local directory or a Hugging Face repo. It appears as a
-            job you can run inference on.
+            Point at a local directory or a Hugging Face repo. It appears in
+            your skills, ready to run inference on.
           </DialogDescription>
         </DialogHeader>
 

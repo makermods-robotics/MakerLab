@@ -467,6 +467,26 @@ def _safe_disconnect(device, label: str = "device") -> str | None:
         return message
 
 
+def _cleanup_after_setup_failure(
+    robot, teleop_device, robot_label: str = "follower arm", teleop_label: str = "leader arm"
+) -> str | None:
+    """Force-disable torque and disconnect both devices after a setup failure.
+
+    Shared by the single-arm and bimanual setup paths: either device may
+    already be configured (energized) by the time a *later* setup step
+    raises, so skipping the explicit disable — or dropping _safe_disconnect's
+    error text — would leave an arm energized with no warning surfaced.
+    Returns the joined problem text, or None when cleanup was clean.
+    """
+    problems = force_disable_torque(robot, robot_label)
+    problems += force_disable_torque(teleop_device, teleop_label)
+    for device, label in ((robot, robot_label), (teleop_device, teleop_label)):
+        error = _safe_disconnect(device, label)
+        if error:
+            problems.append(error)
+    return " ".join(problems) if problems else None
+
+
 def _connect_bimanual(request: TeleoperateRequest):
     """Build, connect, and configure a bimanual leader+follower pair.
 
@@ -537,9 +557,14 @@ def _connect_bimanual(request: TeleoperateRequest):
         identity_warnings += clear_goal_velocity(robot, "follower arms")
         logger.info("Successfully connected to both bimanual arms")
         return robot, teleop_device, identity_warnings
-    except Exception:
-        _safe_disconnect(robot, "follower arms")
-        _safe_disconnect(teleop_device, "leader arms")
+    except Exception as e:
+        # robot.configure() above may already have energized both follower
+        # sub-arms before a later step (e.g. teleop_device.configure()) failed
+        # — mirror the single-arm path's belt-and-braces cleanup instead of a
+        # bare disconnect, and stash the result on the exception so the caller
+        # (which has no robot/teleop_device of its own to clean up) can surface
+        # it as a warning instead of losing it.
+        e.cleanup_error = _cleanup_after_setup_failure(robot, teleop_device, "follower arms", "leader arms")
         raise
 
 
@@ -806,16 +831,31 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
 
     except Exception as e:
         # Connection (or setup) failed before the loop started: release any
-        # device that did open, reset state, and surface the error.
-        _safe_disconnect(robot, "follower arm")
-        _safe_disconnect(teleop_device, "leader arm")
+        # device that did open, reset state, and surface the error. Mirrors
+        # the worker's normal cleanup below — robot.configure() above may
+        # already have written Torque_Enable=1 on the real follower servos
+        # before this fired, so skipping the explicit disable (or dropping
+        # _safe_disconnect's error text) would leave the arm energized with
+        # no warning surfaced. The bimanual path's _connect_bimanual already
+        # ran this same cleanup itself — it owns robot/teleop_device before
+        # this scope ever sees them — and stashed the result on the
+        # exception; reuse that instead of dropping it (running it again here
+        # would be a no-op anyway, since robot/teleop_device are still None
+        # for that path).
+        if hasattr(e, "cleanup_error"):
+            last_cleanup_error = e.cleanup_error
+        else:
+            last_cleanup_error = _cleanup_after_setup_failure(robot, teleop_device)
         teleoperation_active = False
         current_robot = None
         current_teleop = None
         logger.error(f"Failed to start teleoperation: {e}")
         # str(e) is already a user-facing message for the connection failures
         # raised above; the toast title supplies the "error starting" context.
-        return {"success": False, "message": str(e)}
+        response = {"success": False, "message": str(e)}
+        if last_cleanup_error:
+            response["warning"] = last_cleanup_error
+        return response
 
 
 def handle_stop_teleoperation() -> dict[str, Any]:
@@ -870,7 +910,6 @@ def handle_stop_teleoperation() -> dict[str, Any]:
         worker.join(timeout=5.0)
         if worker.is_alive():
             logger.warning("Teleoperation worker did not exit within 5s")
-            teleoperation_thread = None
             return {
                 "success": True,
                 "message": "Release requested, but the worker has not shut down yet",

@@ -15,6 +15,7 @@ import { useSelectedDataset } from "@/hooks/useSelectedDataset";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import {
   Collapsible,
   CollapsibleContent,
@@ -118,9 +119,13 @@ const DatasetResultRow: React.FC<{
 /**
  * Studio panel 2 · Train. Mirrors the Collect panel's progressive disclosure:
  * a "Start a new training" button slides the full configuration open in place
- * (base skill → dataset → the shared training configurator), folding the
- * training-jobs library down to its header while the form is open. Policy is
- * chosen inside Run configuration — there is no separate policy grid.
+ * (dataset → starting point → the shared training configurator), folding the
+ * training-jobs library down to its header while the form is open.
+ *
+ * The form is flat — every control carries its own <Label> and there are no
+ * eyebrow category headings above single fields, so nothing reads as a
+ * category restating the parameter beneath it. Policy is picked in the
+ * configurator's PolicyField, immediately after Starting point.
  */
 const TrainPanel: React.FC = () => {
   const { trainPrefill, clearTrainPrefill, monitorJobId, closeJobMonitor } =
@@ -145,7 +150,7 @@ const TrainPanel: React.FC = () => {
     setJobsOpen(!open);
   };
 
-  // ── Base skill (fine-tune) ────────────────────────────────────────────────
+  // ── Starting point (fine-tune base) ───────────────────────────────────────
   const [models, setModels] = useState<ModelItem[]>([]);
   const [baseModelId, setBaseModelId] = useState<string>(NONE);
   const [finetuneSeed, setFinetuneSeed] = useState<FinetuneSeed | null>(null);
@@ -158,7 +163,7 @@ const TrainPanel: React.FC = () => {
         if (!cancelled) setModels(m);
       })
       .catch(() => {
-        /* base skill is optional — leave the list empty */
+        /* the starting point is optional — leave the list empty */
       });
     return () => {
       cancelled = true;
@@ -170,7 +175,7 @@ const TrainPanel: React.FC = () => {
   // prefill choice re-targets it so the fine-tune trains the matching policy.
   const [policyType, setPolicyType] = useState<string>("act");
 
-  // Resolve a base model into a fine-tune seed: fine-tuning needs a concrete
+  // Resolve a starting point into a fine-tune seed: fine-tuning needs a concrete
   // job id + checkpoint step (the exact contract Training's finetune flow
   // expects). A Hub-only model is registered as an imported job first (the
   // proven lazy-import path), then its latest checkpoint step seeds the run.
@@ -225,7 +230,7 @@ const TrainPanel: React.FC = () => {
           pinned ?? (cks.length > 0 ? cks[cks.length - 1].step : null);
         if (latest == null) {
           toast({
-            title: "No checkpoints in this model",
+            title: "No checkpoints in this skill",
             description: "It has no saved checkpoint to fine-tune from.",
             variant: "destructive",
           });
@@ -243,7 +248,7 @@ const TrainPanel: React.FC = () => {
       } catch (e) {
         if (!current()) return;
         toast({
-          title: "Couldn't load base model",
+          title: "Couldn't load the starting point",
           description: e instanceof Error ? e.message : String(e),
           variant: "destructive",
         });
@@ -382,53 +387,15 @@ const TrainPanel: React.FC = () => {
         <CollapsibleContent className={SLIDE}>
           <div className="space-y-6">
             <p className="text-sm leading-relaxed text-muted-foreground">
-              Pick the dataset to train on and where the run should execute,
-              then start training.
+              Choose what to train on, where the run executes, and how long it
+              trains — then start.
             </p>
 
-            {/* Base skill (optional) → fine-tune */}
-            <section className="space-y-3">
-              <h3 className="eyebrow">Base skill (optional)</h3>
-              <div className="space-y-2">
-                <Select value={baseModelId} onValueChange={handleBaseModelChange}>
-                  <SelectTrigger className="w-full">
-                    {/* A prefilled base (job card's Fine-tune) may not exist as
-                        an item in the models listing — render the resolved
-                        seed's name so the trigger is never blank (same pattern
-                        as the Deploy panel's skill picker). */}
-                    {baseModelId !== NONE && finetuneSeed ? (
-                      <span className="truncate">{finetuneSeed.name}</span>
-                    ) : (
-                      <SelectValue placeholder="Train from scratch" />
-                    )}
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value={NONE}>Train from scratch</SelectItem>
-                    {models.map((m) => (
-                      <SelectItem key={m.id} value={m.id}>
-                        {m.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <p className="text-xs text-muted-foreground">
-                  {resolvingBase ? (
-                    <span className="inline-flex items-center gap-1">
-                      <Loader2 className="h-3 w-3 animate-spin" /> Loading
-                      checkpoints…
-                    </span>
-                  ) : finetuneSeed ? (
-                    "Fine-tunes from this model's latest checkpoint."
-                  ) : (
-                    "Pick a model to fine-tune from, or train a fresh policy."
-                  )}
-                </p>
-              </div>
-            </section>
-
-            {/* Dataset picker — search-driven, no standing list */}
-            <section className="space-y-3">
-              <h3 className="eyebrow">Dataset</h3>
+            {/* Dataset picker — search-driven, no standing list. Flat: the
+                label rides on the control, so no "Dataset" category heading
+                sits above it restating the same word. */}
+            <div className="space-y-2">
+              <Label htmlFor="train-dataset-search">Dataset *</Label>
               {selectedId ? (
                 <div className="flex flex-wrap gap-1.5">
                   <span className="inline-flex max-w-full items-center gap-1 rounded-md border border-border bg-muted/40 py-1 pl-2 pr-1 font-mono text-xs text-foreground">
@@ -445,11 +412,11 @@ const TrainPanel: React.FC = () => {
                 </div>
               ) : null}
               <Input
+                id="train-dataset-search"
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search datasets, or type any public org/name Hub id"
+                placeholder="Search datasets, or type a public org/name Hub id"
                 className="h-8 text-sm"
-                aria-label="Search datasets"
               />
               {trimmedQuery ? (
                 <div className="max-h-56 divide-y divide-border overflow-auto rounded-md border border-border">
@@ -490,11 +457,50 @@ const TrainPanel: React.FC = () => {
               ) : null}
               {!selectedId ? (
                 <p className="text-xs text-muted-foreground">
-                  Search to pick a dataset — yours or any public Hugging Face
-                  dataset.
+                  Yours, or any public Hugging Face dataset.
                 </p>
               ) : null}
-            </section>
+            </div>
+
+            {/* Starting point — the optional fine-tune base. Sits directly
+                under Dataset because both answer "what is this run built
+                from"; Policy follows from inside the configurator. */}
+            <div className="space-y-2">
+              <Label htmlFor="train-starting-point">Starting point</Label>
+              <Select value={baseModelId} onValueChange={handleBaseModelChange}>
+                <SelectTrigger id="train-starting-point" className="w-full">
+                  {/* A prefilled base (job card's Fine-tune) may not exist as
+                      an item in the models listing — render the resolved
+                      seed's name so the trigger is never blank (same pattern
+                      as the Run panel's skill picker). */}
+                  {baseModelId !== NONE && finetuneSeed ? (
+                    <span className="truncate">{finetuneSeed.name}</span>
+                  ) : (
+                    <SelectValue placeholder="Train from scratch" />
+                  )}
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={NONE}>Train from scratch</SelectItem>
+                  {models.map((m) => (
+                    <SelectItem key={m.id} value={m.id}>
+                      {m.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                {resolvingBase ? (
+                  <span className="inline-flex items-center gap-1">
+                    <Loader2 className="h-3 w-3 animate-spin" /> Loading
+                    checkpoints…
+                  </span>
+                ) : finetuneSeed ? (
+                  "Fine-tunes from this skill's latest checkpoint."
+                ) : (
+                  "Fine-tune an existing skill, or start fresh."
+                )}
+              </p>
+            </div>
 
             {/* Shared configuration form: compute target, run configuration,
                 advanced, extras gates, and the Start button with all its

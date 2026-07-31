@@ -1,13 +1,17 @@
-import React, { useState } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ChevronDown } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { LIBRARY_GRID } from "./LibraryToolbar";
+import { LIBRARY_GRID, LIBRARY_GRID_COLS } from "./LibraryToolbar";
 
-/** One row of the shared 2-up library grid — how many cards show before the
- * "Show all" toggle. Exported so a caller (jobs) can tell whether its active
- * grid overflows, and thus whether to fold its Untracked toggle under "Show
- * all" instead of stacking a second footer button. */
-export const LIBRARY_ROW_CAP = 2;
+/** Column width (px) at or above which a library row fits three cards instead
+ * of two. Each library sits in a narrow one-third studio column, so what
+ * decides the count is that column's width, not the display's: a 16" MacBook
+ * (1728px viewport) gives the column 535px, where three cards are 173px each
+ * and their icons and buttons squeeze past the card edges. Two cards there are
+ * 263px. Three cards only reach that same 263px once the column is
+ * 263*3 + 8*2 ≈ 805px wide, so that is the crossover. A large external display
+ * (3008px viewport → 962px column) clears it and gets three. */
+const WIDE_COLUMN_MIN_PX = 800;
 
 /** Total height of the reserved grid block: the 16.5rem row + the 1.875rem
  * footer slot ("Show all" / Untracked / spacer) and its gutter. Empty/no-match
@@ -18,7 +22,8 @@ export const GRID_MIN_H = "min-h-[18.875rem]";
 
 /**
  * The shared library grid, capped at one row. Every studio library (datasets,
- * training jobs, models) renders one row of two cards by default; anything past
+ * training jobs, models) renders one row of cards by default — three where the
+ * column is wide enough (see WIDE_COLUMN_MIN_PX), two otherwise; anything past
  * that stays hidden behind a "Show all" toggle. The row is always reserved
  * (fixed row height, blank cells when there aren't enough cards) so the three
  * panels' libraries keep one uniform height however large a collection grows.
@@ -34,17 +39,24 @@ const CappedGrid: React.FC<{
    * "Show all" — keeps every library's total height identical. False when
    * the caller renders its own footer row in that slot (jobs' Untracked). */
   footerSpacer?: boolean;
-  /** Optionally control the expanded state from the parent (jobs lifts it so
-   * its Untracked toggle can appear only once "Show all" is open). Omit for
-   * the self-managed default used by datasets and models. */
+  /** Optionally drive the expanded state from the parent. Jobs lifts it so its
+   * Untracked toggle can fold *under* "Show all" — appearing only once "Show
+   * all" is open. Omit for the self-managed default (datasets, models). */
   expanded?: boolean;
   onExpandedChange?: (expanded: boolean) => void;
+  /** Reports whether this grid currently spills past its one reserved row —
+   * i.e. whether it is showing a "Show all" toggle. The row cap is measured
+   * from the column, not a constant, so a caller that needs to know (jobs,
+   * to decide where its Untracked toggle goes) cannot derive it from the item
+   * count alone. */
+  onOverflowChange?: (overflow: boolean) => void;
 }> = ({
   items,
   reserveRows = true,
   footerSpacer = true,
   expanded: expandedProp,
   onExpandedChange,
+  onOverflowChange,
 }) => {
   const [expandedState, setExpandedState] = useState(false);
   const expanded = expandedProp ?? expandedState;
@@ -52,14 +64,36 @@ const CappedGrid: React.FC<{
     onExpandedChange?.(value);
     if (expandedProp === undefined) setExpandedState(value);
   };
-  const overflow = items.length - LIBRARY_ROW_CAP;
-  const shown =
-    expanded || overflow <= 0 ? items : items.slice(0, LIBRARY_ROW_CAP);
+  const columnRef = useRef<HTMLDivElement>(null);
+  // How many cards one row holds here. Measured rather than keyed off a media
+  // query so the cap below always matches the number of cards actually laid
+  // out — one threshold, not a CSS breakpoint and a JS constant that can drift
+  // apart. useLayoutEffect so the first measurement lands before paint and the
+  // row never flashes at the wrong count.
+  const [cap, setCap] = useState<keyof typeof LIBRARY_GRID_COLS>(2);
+  useLayoutEffect(() => {
+    const el = columnRef.current;
+    if (!el) return;
+    const apply = (width: number) =>
+      setCap(width >= WIDE_COLUMN_MIN_PX ? 3 : 2);
+    apply(el.getBoundingClientRect().width);
+    const observer = new ResizeObserver(([entry]) =>
+      apply(entry.contentRect.width),
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+  const overflow = items.length - cap;
+  useEffect(() => {
+    onOverflowChange?.(overflow > 0);
+  }, [overflow, onOverflowChange]);
+  const shown = expanded || overflow <= 0 ? items : items.slice(0, cap);
   return (
-    <div className="space-y-2">
+    <div ref={columnRef} className="space-y-2">
       <div
         className={cn(
           LIBRARY_GRID,
+          LIBRARY_GRID_COLS[cap],
           "auto-rows-[16.5rem]",
           reserveRows && "grid-rows-[16.5rem]",
         )}

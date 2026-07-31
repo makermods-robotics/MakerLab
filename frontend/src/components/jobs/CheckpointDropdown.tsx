@@ -22,6 +22,9 @@ interface Props {
   /** Extra classes for the trigger (e.g. `w-full min-w-0` when the dropdown
    * flexes inside a card's single-line action row). */
   className?: string;
+  /** Trigger id, so a <Label htmlFor> can be attached when the dropdown is
+   * rendered as a labelled form field (the Run panel). */
+  id?: string;
 }
 
 export const CheckpointDropdown: React.FC<Props> = ({
@@ -31,6 +34,7 @@ export const CheckpointDropdown: React.FC<Props> = ({
   disabled,
   placeholder = "Select checkpoint",
   className,
+  id,
 }) => {
   // step 0 is the sentinel for an imported single-model checkpoint (lerobot
   // never saves at step 0), so it has no meaningful step number — show
@@ -57,6 +61,7 @@ export const CheckpointDropdown: React.FC<Props> = ({
       disabled={disabled || checkpoints.length === 0}
     >
       <SelectTrigger
+        id={id}
         className={cn(
           "bg-background border-input h-8 text-xs px-2 w-auto min-w-[110px]",
           className,

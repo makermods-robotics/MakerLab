@@ -33,7 +33,7 @@ from typing import Any, Literal
 import httpx
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from huggingface_hub.errors import HfHubHTTPError
 from pydantic import BaseModel
@@ -50,6 +50,8 @@ from lerobot.policies.factory import make_policy_config
 from . import (
     datasets as dataset_browser,
     models as model_browser,
+    record as record_state,
+    rollout as rollout_state,
 )
 
 # Import our custom calibration functionality
@@ -60,6 +62,8 @@ from .auto_calibrate import (
     auto_calibration_manager,
 )
 from .calibrate import CalibrationRequest, calibration_manager
+from .camera_identity import resolve_cv2_index
+from .camera_preview import CameraOpenError, camera_preview_manager
 from .identify import identify_arm_by_motion
 from .jobs import (
     DatasetNotOnHubError,
@@ -602,6 +606,43 @@ def datasets_info(repo_id: str):
     if info is None:
         raise HTTPException(status_code=404, detail=f"Dataset '{repo_id}' not found in the local cache")
     return info
+
+
+@app.get("/datasets/episodes")
+def datasets_episodes(repo_id: str):
+    """Per-episode index/length/duration/tasks for the dataset viewer window.
+    404 when the dataset isn't local or predates the v3.0 parquet episode
+    layout (meta/episodes/chunk-*/file-*.parquet) the viewer reads."""
+    episodes = dataset_browser.list_episode_summaries(repo_id)
+    if episodes is None:
+        raise HTTPException(status_code=404, detail=f"No viewable episode list for '{repo_id}'")
+    return episodes
+
+
+@app.get("/datasets/episode-joints")
+def datasets_episode_joints(repo_id: str, episode_index: int):
+    """Per-frame timestamp + joint (observation.state) values for one episode,
+    for the dataset viewer's joint-position chart."""
+    series = dataset_browser.get_episode_joint_series(repo_id, episode_index)
+    if series is None:
+        raise HTTPException(
+            status_code=404, detail=f"No joint data for episode {episode_index} of '{repo_id}'"
+        )
+    return series
+
+
+@app.get("/datasets/episode-video")
+def datasets_episode_video(repo_id: str, episode_index: int, camera: str):
+    """The mp4 backing one camera's footage for one episode, served straight
+    off disk. FileResponse handles Range requests, so the <video> element can
+    seek without downloading the whole file first."""
+    video_path = dataset_browser.get_episode_video_path(repo_id, episode_index, camera)
+    if video_path is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No video for camera '{camera}', episode {episode_index} of '{repo_id}'",
+        )
+    return FileResponse(video_path, media_type="video/mp4")
 
 
 @app.get("/datasets/hub-status")
@@ -2348,6 +2389,53 @@ def get_available_cameras():
     except Exception as e:
         logger.error(f"Error detecting cameras: {e}")
         return {"status": "error", "message": str(e), "cameras": []}
+
+
+@app.get("/camera-preview/{index}")
+def camera_preview_stream(index: int, unique_id: str | None = None):
+    """MJPEG preview stream of a camera attached to the *server* machine.
+
+    The browser's getUserMedia only sees the *viewing* machine's cameras, and
+    it identifies them by ``deviceId`` — which the frontend can only match to a
+    cv2 index by localizedName. Two cameras of the same model share that name,
+    so the match is a coin flip and the preview can show the wrong device (and
+    swap between refreshes). Streaming from the backend by cv2 index removes
+    the browser from the loop: the tile shows exactly what the recorder will
+    open. It is also the only preview that works at all on a headless host.
+
+    ``unique_id`` (AVFoundation uniqueID, from /available-cameras) re-anchors
+    the index to the physical device before opening: cv2 resolves indices
+    against this process's startup device snapshot, which diverges from the
+    fresh-subprocess enumeration after a replug — without the re-anchor the
+    stream can silently show a different camera (see makerlab/camera_identity.py).
+
+    Returns 409 while recording or inference is active (they own the cv2
+    devices) and 503 when the camera can't be opened. Teleoperation drives the
+    serial bus and opens no cv2 cameras, so a preview during teleop does not
+    contend — it is allowed.
+    """
+    if record_state.recording_active:
+        raise HTTPException(
+            status_code=409,
+            detail="Recording is active — the cameras are in use. Stop recording to preview them.",
+        )
+    if rollout_state.inference_active:
+        raise HTTPException(
+            status_code=409,
+            detail="Inference is active — the cameras are in use. Stop the run to preview them.",
+        )
+    resolved = resolve_cv2_index(unique_id, index)
+    if resolved is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Camera not visible to the server — it was plugged in after makerlab "
+            "started. Restart makerlab to use it.",
+        )
+    try:
+        stream = camera_preview_manager.open_stream(resolved)
+    except CameraOpenError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return StreamingResponse(stream, media_type="multipart/x-mixed-replace; boundary=frame")
 
 
 RobotSideLiteral = Literal["leader", "follower"]
