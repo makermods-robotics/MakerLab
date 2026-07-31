@@ -42,6 +42,7 @@ from tqdm.auto import tqdm as _base_tqdm
 from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
 
 from .arm_identity import ArmIdentityError, ArmSlot, verify_devices
+from .camera_preview import camera_preview_manager
 from .motor_power import clear_goal_velocity, reset_torque_limit
 from .record import _DEFAULT_FOURCC
 from .utils.config import (
@@ -996,6 +997,12 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
             "status_code": 400,
             "message": f"Unrecognised policy ref: {request.policy_ref!r}",
         }
+
+    # Backend camera previews hold the cv2 devices the rollout subprocess is about
+    # to open. Released here — after the cheap guards above, so a rejected request
+    # doesn't needlessly kill the modal's previews, and while `inference_active`
+    # is already True so /camera-preview 409s instead of re-acquiring a device.
+    camera_preview_manager.stop_all()
 
     # Everything heavy (download, preflight, spawn) runs off the request thread.
     # Tracked so a later start can tell whether a stopped session's worker is
