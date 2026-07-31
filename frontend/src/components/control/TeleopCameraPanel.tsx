@@ -24,15 +24,17 @@ const TeleopCameraPanel: React.FC = () => {
   const [reloadKey, setReloadKey] = useState(0);
   const { selectedRecord, isLoading: robotsLoading } = useRobots();
 
-  // Feeds come solely from the robot's configured cameras; each carries a stored
-  // browser device_id we stream directly. A configured camera whose device is
-  // currently absent still shows (name + failed-preview placeholder), so the
-  // user can tell it's expected but not detected.
+  // Feeds come solely from the robot's configured cameras, streamed from the
+  // backend by cv2 index (+ unique_id so the server re-anchors it across
+  // replugs). A configured camera whose device is currently absent still shows
+  // (name + failed-preview placeholder), so the user can tell it's expected but
+  // not detected.
   const configured = selectedRecord?.cameras ?? [];
   const feeds = configured.map((c) => ({
     key: c.id,
     name: c.name,
-    deviceId: c.device_id,
+    cameraIndex: c.camera_index,
+    uniqueId: c.unique_id,
   }));
 
   return (
@@ -70,7 +72,8 @@ const TeleopCameraPanel: React.FC = () => {
             {feeds.map((feed) => (
               <CameraFeed
                 key={`${feed.key}:${reloadKey}`}
-                deviceId={feed.deviceId}
+                cameraIndex={feed.cameraIndex}
+                uniqueId={feed.uniqueId}
                 label={feed.name}
               />
             ))}
