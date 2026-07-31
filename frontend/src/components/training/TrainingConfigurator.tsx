@@ -43,7 +43,6 @@ export type ResumeSeed = {
   sourceSteps: number; // the source run's configured total, for a sane prefill
   logFreq?: number; // the source run's log cadence, to preserve on resume
   saveFreq?: number; // the source run's checkpoint cadence, to preserve on resume
-  saveCheckpoint?: boolean; // the source run's checkpointing switch, to preserve
   // Cloud resume: the parent run's runner + flavor. A local Continue omits
   // these (runner defaults to "local"). When "hf_cloud", the launched run
   // targets the same flavor and continues into the parent's Hub output repo.
@@ -68,7 +67,6 @@ export type ResumeSeed = {
   optimizerLr?: number;
   optimizerWeightDecay?: number;
   optimizerGradClipNorm?: number;
-  usePolicyTrainingPreset?: boolean;
 };
 
 // Passed by the "Fine-tune" button on an imported model. A fine-tune is a
@@ -205,7 +203,16 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
     num_workers: resumeSeed?.numWorkers ?? 4,
     log_freq: resumeSeed?.logFreq ?? 50,
     save_freq: resumeSeed?.saveFreq ?? 1000,
-    save_checkpoint: resumeSeed?.saveCheckpoint ?? true,
+    // Always on, no longer user-settable. Turning checkpointing off produced a
+    // run whose only artifact was a log: with no checkpoint there is nothing to
+    // continue, fine-tune, download or deploy, so every follow-up action on the
+    // job card went dead. The request field stays — lerobot still needs the
+    // flag — it just isn't a choice the form offers.
+    save_checkpoint: true,
+    // Derived from the entry point, never from a control: a ResumeSeed means
+    // the user arrived via Continue / Resume on a job card, and that is the
+    // only way a resume can be coherent. The backend resolves resume_from_* into
+    // the checkpoint's config_path, and refuses `resume` without a source.
     // Fine-tune is NOT a resume — it's a fresh run whose weights are seeded from
     // the source checkpoint. resume stays false; the backend resolves
     // finetune_from_* into --policy.pretrained_path.
@@ -223,7 +230,12 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
     optimizer_lr: resumeSeed?.optimizerLr,
     optimizer_weight_decay: resumeSeed?.optimizerWeightDecay,
     optimizer_grad_clip_norm: resumeSeed?.optimizerGradClipNorm,
-    use_policy_training_preset: resumeSeed?.usePolicyTrainingPreset ?? true,
+    // Always on, no longer user-settable. lerobot rejects the config outright
+    // when the preset is off and no scheduler is supplied ("Optimizer and
+    // Scheduler must be set when the policy presets are not used") — and this
+    // form never emits a --scheduler.* flag, so `false` could only ever produce
+    // a run that died at config validation. The request field stays.
+    use_policy_training_preset: true,
     // Cloud-only. Prefilled from the parent so a Continue keeps its budget
     // instead of silently falling back to the runner's 2h default; the field
     // stays editable so the user can raise it for a longer tail.

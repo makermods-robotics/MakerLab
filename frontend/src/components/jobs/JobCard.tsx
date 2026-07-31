@@ -364,7 +364,6 @@ const JobCard: React.FC<Props> = ({
           sourceSteps: parent.steps,
           logFreq: parent.log_freq,
           saveFreq: parent.save_freq,
-          saveCheckpoint: parent.save_checkpoint,
           runner,
           flavor: runner === "hf_cloud" ? (selectedJob.hf_flavor ?? undefined) : undefined,
           // Cloud-only: without this a Continue fell back to the runner's 2h
@@ -380,7 +379,6 @@ const JobCard: React.FC<Props> = ({
           optimizerLr: parent.optimizer_lr,
           optimizerWeightDecay: parent.optimizer_weight_decay,
           optimizerGradClipNorm: parent.optimizer_grad_clip_norm,
-          usePolicyTrainingPreset: parent.use_policy_training_preset,
         },
       },
     });
