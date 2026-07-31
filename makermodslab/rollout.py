@@ -31,10 +31,11 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 from pydantic import BaseModel
 
@@ -88,6 +89,12 @@ class InferenceRequest(BaseModel):
     # Escape hatch for the arm-identity guard (see makermodslab/arm_identity.py):
     # when true, run even if the connected arm doesn't match its calibration.
     skip_identity_check: bool = False
+    # Multi-episode EVALUATION mode. 1 (the default) is exactly the historical
+    # single-rollout flow — no episode bookkeeping, no reset phase, no accuracy.
+    # >1 walks N sequential rollout subprocesses inside ONE session (one model
+    # download, one arm preflight, one camera handover), scoring each episode.
+    # Clamped server-side to [1, MAX_EVAL_EPISODES] — see clamp_eval_episodes.
+    eval_episodes: int = 1
 
 
 inference_active: bool = False
@@ -121,8 +128,10 @@ _inference_cancel: threading.Event | None = None
 # orphaned worker is still alive, instead of racing it for the same serial
 # port. None once the worker has exited or before any session has started.
 _inference_startup_thread: threading.Thread | None = None
-# Guards mutations to the globals above; held only for the short critical
-# sections in start/stop/status.
+# Multi-episode evaluation bookkeeping for the CURRENT session lives in
+# `_eval_session`, declared just below the _EvalSession dataclass.
+# Guards mutations to the globals above (and _eval_session); held only for the
+# short critical sections in start/stop/status.
 _state_lock = threading.Lock()
 # Bound on how long a second stop-inference call waits for an orphaned startup
 # worker (see _inference_startup_thread) to exit before giving up and
@@ -158,6 +167,16 @@ _ROLLOUT_START_MARKER = "Rollout setup complete"
 # build passes no --dataset, so build_rollout_context never sets up (or
 # downloads) a dataset. We omit the phase rather than invent one that never
 # fires.
+#
+# EVAL-ONLY phases (eval_episodes > 1). The startup phases above repeat per
+# episode (each episode is its own subprocess), plus:
+#   resetting — an episode ended, the tally was updated, and the session is
+#       parked waiting for the user to rearrange the scene and POST
+#       /inference-next-episode. Also where a CRASHED episode parks, with
+#       `error`/`hint` populated so the user can continue or abort.
+#   finished  — every episode ran; terminal, carries `accuracy`.
+#   aborted   — /stop-inference ended the session early; terminal, partial
+#       tally, NO accuracy claimed.
 PHASE_DOWNLOADING_MODEL = "downloading_model"
 PHASE_STARTING = "starting"
 PHASE_LOADING_POLICY = "loading_policy"
@@ -166,6 +185,147 @@ PHASE_RUNNING = "running"
 PHASE_STOPPING = "stopping"
 PHASE_STOPPED = "stopped"
 PHASE_ERROR = "error"
+PHASE_RESETTING = "resetting"
+PHASE_FINISHED = "finished"
+PHASE_ABORTED = "aborted"
+
+# Per-episode verdicts, in the order the UI tallies them.
+#   success — the user pressed "task succeeded" and we terminated the episode.
+#   failure — the episode ran out its --duration without the user calling it.
+#   error   — the episode crashed (a serial glitch, a camera drop, a policy
+#       blow-up). NEITHER success nor failure: deliberately excluded from the
+#       accuracy denominator so one hardware hiccup can't poison a 20-episode
+#       number.
+EPISODE_SUCCESS = "success"
+EPISODE_FAILURE = "failure"
+EPISODE_ERROR = "error"
+
+# Upper bound on a single eval session. 200 episodes × a 60s duration is
+# already a >3h bench session; anything past this is a typo, not a plan.
+MAX_EVAL_EPISODES = 200
+
+
+def clamp_eval_episodes(value: int | None) -> int:
+    """Coerce a requested episode count into [1, MAX_EVAL_EPISODES].
+
+    Clamps rather than rejects: a nonsensical count (0, -5, 10_000) is a UI slip,
+    and silently running one episode / the cap is friendlier than a 422 that
+    loses the whole configured launch. A non-integer or None falls back to 1."""
+    try:
+        n = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 1
+    return max(1, min(MAX_EVAL_EPISODES, n))
+
+
+def eval_accuracy(results: Sequence[str]) -> float | None:
+    """successes / (successes + failures) over the recorded episode verdicts.
+
+    Crashed episodes (EPISODE_ERROR) are excluded from BOTH numerator and
+    denominator — see EPISODE_ERROR. Returns None when nothing scoreable has
+    happened yet (no episodes, or every episode crashed), so the UI shows
+    "no accuracy" instead of a misleading 0%."""
+    scored = [r for r in results if r in (EPISODE_SUCCESS, EPISODE_FAILURE)]
+    if not scored:
+        return None
+    return round(sum(1 for r in scored if r == EPISODE_SUCCESS) / len(scored), 4)
+
+
+def classify_episode(
+    rc: int | None,
+    stop_requested: bool,
+    rollout_started: bool,
+    error_text: str | None,
+) -> str:
+    """Turn one episode's subprocess exit into a verdict.
+
+    `stop_requested` (the user pressed "task succeeded — stop episode") wins
+    outright: we terminated the subprocess ourselves, so its exit code is our own
+    SIGTERM and says nothing about the run.
+
+    Otherwise the episode ended on its own. Reuse `_classify_outcome`:
+      ok / ran_with_warning → the rollout ran its full --duration (a noisy
+          torque-disable on teardown is not a failed episode) → FAILURE, i.e.
+          the policy never got the task done in the time allowed.
+      failed → the episode crashed → ERROR, excluded from the accuracy."""
+    if stop_requested:
+        return EPISODE_SUCCESS
+    if _classify_outcome(rc, rollout_started, error_text) == "failed":
+        return EPISODE_ERROR
+    return EPISODE_FAILURE
+
+
+@dataclass
+class _EvalSession:
+    """Bookkeeping for ONE multi-episode evaluation session.
+
+    Lives for the whole session (across N subprocesses) — unlike
+    `_inference_meta`, which is per-episode and cleared at each subprocess exit.
+    Mutated only under `_state_lock`. None whenever the session is single-episode
+    or idle, which is what every eval-only endpoint gates on."""
+
+    request: InferenceRequest
+    episodes_total: int
+    # Resolved ONCE by the startup worker and reused verbatim for every episode:
+    # the model is downloaded once and the arm preflight runs once per session.
+    policy_path: str | None = None
+    robot_args: list[str] = field(default_factory=list)
+    # Verdicts in episode order; len(results) is how many episodes have finished,
+    # so the CURRENT episode is 1-based index len(results) + 1.
+    results: list[str] = field(default_factory=list)
+    # Set by /inference-episode-stop just before it terminates the subprocess, so
+    # the exit finalisation scores the episode a success instead of reading our
+    # own SIGTERM as a crash. Cleared as each episode is scored.
+    stop_requested: bool = False
+    # A crashed episode's mined error + plain-language hint, surfaced on the
+    # resetting payload and cleared when the user continues.
+    error: str | None = None
+    hint: str | None = None
+
+    @property
+    def episode_index(self) -> int:
+        """1-based index of the episode currently running (or about to run).
+
+        Clamped to episodes_total so the final payload reads "10 / 10" rather
+        than "11 / 10"."""
+        return min(len(self.results) + 1, self.episodes_total)
+
+
+# Evaluation bookkeeping for the CURRENT session, or None when the session is a
+# plain single rollout (eval_episodes <= 1) or nothing is running. Every
+# eval-only endpoint gates on this being non-None, which is what keeps the
+# single-episode flow bit-for-bit unchanged. Mutated under `_state_lock`.
+_eval_session: _EvalSession | None = None
+
+
+def _eval_fields(
+    ev: _EvalSession | None,
+    *,
+    accuracy: float | None = None,
+) -> dict[str, Any]:
+    """The eval block of an /inference-status payload.
+
+    Emitted on EVERY payload so the shape is stable for the frontend: a
+    single-episode run reports `eval_mode: False` with null/empty companions
+    rather than omitting the keys. `accuracy` is passed in (not derived) because
+    it is claimed ONLY on a session that ran to completion — an aborted session
+    reports its partial tally with accuracy None."""
+    if ev is None:
+        return {
+            "eval_mode": False,
+            "episode_index": None,
+            "episodes_total": None,
+            "episode_results": None,
+            "accuracy": None,
+        }
+    return {
+        "eval_mode": True,
+        "episode_index": ev.episode_index,
+        "episodes_total": ev.episodes_total,
+        "episode_results": list(ev.results),
+        "accuracy": accuracy,
+    }
+
 
 # Stable lerobot setup log fragments (lerobot/rollout/context.py) that mark the
 # transition into a finer sub-phase. Watched in _pump_stdout. These are plain
@@ -675,18 +835,24 @@ def _fail_startup(error: str) -> None:
 
     A no-op when a stop already tore the session down (inference_active False):
     the stop wins, and a download that raised while being abandoned must not
-    resurrect a phantom failure."""
+    resurrect a phantom failure.
+
+    Session-level, not episode-level: this is the download/preflight/first-spawn
+    window, so in eval mode there is nothing to score yet — the eval session is
+    dropped and the failure is reported the same way a single run's would be."""
     global inference_active, _inference_proc, _inference_started_at
-    global _inference_rollout_started_at, _inference_meta, _last_result
+    global _inference_rollout_started_at, _inference_meta, _last_result, _eval_session
     with _state_lock:
         if not inference_active:
             return
         policy_ref = _inference_meta.get("policy_ref")
+        finished_eval = _eval_session
         inference_active = False
         _inference_proc = None
         _inference_started_at = None
         _inference_rollout_started_at = None
         _inference_meta = {}
+        _eval_session = None
         _last_result = {
             "inference_active": False,
             "exited": True,
@@ -702,7 +868,62 @@ def _fail_startup(error: str) -> None:
             "rollout_started_at": None,
             "rollout_elapsed_s": 0,
             "elapsed_s": 0,
+            **_eval_fields(finished_eval),
         }
+
+
+def _launch_rollout_subprocess(
+    request: InferenceRequest,
+    policy_path: str,
+    robot_args: list[str],
+) -> tuple[subprocess.Popen, IO[str], Path]:
+    """Build the argv, open a fresh log file, spawn ONE rollout subprocess and
+    seed its stdin.
+
+    The pure "start a rollout process" step, factored out of the startup worker
+    so eval mode's second-and-later episodes can respawn without re-downloading
+    the model or re-preflighting the arm. Returns (proc, log_handle, log_path);
+    the caller owns committing them to the module state and starting the stdout
+    pump. Raises on spawn failure (after closing the log handle) — the caller
+    decides how to report it, since a first-episode failure fails the session
+    while a later one fails just that episode."""
+    log_dir = Path.home() / ".cache" / "huggingface" / "lerobot" / "inference_logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"{int(time.time())}.log"
+    log_handle = log_path.open("w", buffering=1)
+
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
+    # Feed a newline into stdin PER follower arm so SOFollower.calibrate()'s
+    # `input("Press ENTER to use the calibration file ...")` returns "" and
+    # writes the existing calibration to the motors instead of hanging
+    # forever waiting for an interactive operator. A BiSO follower connects
+    # its two sub-arms sequentially (left then right), each of which can fire
+    # that prompt once — so seed two newlines for bimanual, one for single.
+    # Any prompt that doesn't fire just leaves an unread newline (harmless);
+    # subsequent input() calls in the recalibration path get EOF and raise —
+    # fine, because we never want to enter that path from the UI.
+    stdin_seed = b"\n\n" if request.mode == "bimanual" else b"\n"
+    try:
+        proc = subprocess.Popen(
+            _build_rollout_cmd(request, policy_path, robot_args),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            env=env,
+        )
+    except Exception:
+        with contextlib.suppress(Exception):
+            log_handle.close()
+        raise
+    try:
+        assert proc.stdin is not None
+        proc.stdin.write(stdin_seed)
+        proc.stdin.flush()
+        proc.stdin.close()
+    except Exception as exc:
+        logger.warning("Failed to seed stdin for inference subprocess: %s", exc)
+    return proc, log_handle, log_path
 
 
 def _run_inference_startup(request: InferenceRequest, cancel_event: threading.Event) -> None:
@@ -752,48 +973,21 @@ def _run_inference_startup(request: InferenceRequest, cancel_event: threading.Ev
         logger.info("Inference startup abandoned after preflight (stop requested)")
         return
 
-    # 3. Spawn the rollout subprocess.
-    is_bimanual = request.mode == "bimanual"
-    cmd = _build_rollout_cmd(request, policy_path, robot_args)
+    # 3. Spawn the rollout subprocess (episode 1 of 1, or of N in eval mode).
+    #    In eval mode, cache what the later episodes reuse verbatim — the model
+    #    is downloaded once and the arm preflight runs once per SESSION, not per
+    #    episode (which is what makes N episodes cheap to chain).
+    with _state_lock:
+        if _eval_session is not None:
+            _eval_session.policy_path = policy_path
+            _eval_session.robot_args = list(robot_args)
 
-    log_dir = Path.home() / ".cache" / "huggingface" / "lerobot" / "inference_logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / f"{int(time.time())}.log"
-    log_handle = log_path.open("w", buffering=1)
-
-    env = os.environ.copy()
-    env["PYTHONUNBUFFERED"] = "1"
-    # Feed a newline into stdin PER follower arm so SOFollower.calibrate()'s
-    # `input("Press ENTER to use the calibration file ...")` returns "" and
-    # writes the existing calibration to the motors instead of hanging
-    # forever waiting for an interactive operator. A BiSO follower connects
-    # its two sub-arms sequentially (left then right), each of which can fire
-    # that prompt once — so seed two newlines for bimanual, one for single.
-    # Any prompt that doesn't fire just leaves an unread newline (harmless);
-    # subsequent input() calls in the recalibration path get EOF and raise —
-    # fine, because we never want to enter that path from the UI.
-    stdin_seed = b"\n\n" if is_bimanual else b"\n"
     try:
-        proc = subprocess.Popen(
-            cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            env=env,
-        )
+        proc, log_handle, log_path = _launch_rollout_subprocess(request, policy_path, robot_args)
     except Exception as exc:
         logger.exception("Failed to spawn rollout subprocess")
-        with contextlib.suppress(Exception):
-            log_handle.close()
         _fail_startup(f"Failed to start inference: {exc}")
         return
-    try:
-        assert proc.stdin is not None
-        proc.stdin.write(stdin_seed)
-        proc.stdin.flush()
-        proc.stdin.close()
-    except Exception as exc:
-        logger.warning("Failed to seed stdin for inference subprocess: %s", exc)
 
     # Commit the subprocess under the lock, re-checking the cancel flag: a stop
     # that raced the spawn must NOT leave a live subprocess driving the arm.
@@ -857,7 +1051,7 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
     launch modal; the multi-minute Hub download moves off the request thread so
     the UI lands on the inference page and shows download progress there."""
     global inference_active, _inference_started_at, _inference_meta, _inference_cancel
-    global _last_result, _inference_startup_thread
+    global _last_result, _inference_startup_thread, _eval_session
 
     # Mutex with every other feature that drives the same serial bus (see
     # CLAUDE.md's "State model & mutual exclusion").
@@ -931,14 +1125,22 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
         # A new run supersedes the previous run's terminal payload — status
         # polls must reflect THIS session from the first tick.
         _last_result = None
+        # Eval mode is decided once, here, and clamped: episodes > 1 seeds the
+        # session bookkeeping so the very first status poll already reports
+        # "episode 1 / N". A count of 1 leaves `_eval_session` None, which is
+        # what keeps the historical single-rollout flow untouched.
+        episodes = clamp_eval_episodes(request.eval_episodes)
+        _eval_session = _EvalSession(request=request, episodes_total=episodes) if episodes > 1 else None
 
     def _release_slot() -> None:
         global inference_active, _inference_started_at, _inference_cancel, _inference_meta
+        global _eval_session
         with _state_lock:
             inference_active = False
             _inference_started_at = None
             _inference_cancel = None
             _inference_meta = {}
+            _eval_session = None
 
     # Arm-count guard: reject a single-arm checkpoint on a bimanual robot (and
     # vice versa) BEFORE spawning the worker, where the shape mismatch would
@@ -994,10 +1196,58 @@ def inference_in_use_path() -> str | None:
         return _inference_meta.get("policy_path")
 
 
-def handle_stop_inference() -> dict[str, Any]:
-    global inference_active, _inference_proc, _inference_started_at
-    global _inference_rollout_started_at, _inference_meta, _inference_cancel
+def _go_idle_locked() -> None:
+    """Drop every per-session global back to the idle shape.
 
+    Caller must hold `_state_lock`. Does NOT touch `_last_result` — whether a
+    teardown leaves a terminal payload behind is the caller's decision."""
+    global inference_active, _inference_proc, _inference_started_at
+    global _inference_rollout_started_at, _inference_meta, _eval_session
+    inference_active = False
+    _inference_proc = None
+    _inference_started_at = None
+    _inference_rollout_started_at = None
+    _inference_meta = {}
+    _eval_session = None
+
+
+def _abort_eval_locked(ev: _EvalSession) -> None:
+    """End an eval session early and leave the ABORTED terminal payload behind.
+
+    Caller must hold `_state_lock`. Partial tally, and deliberately NO accuracy:
+    a session the user cut short says nothing about the policy's success rate
+    over N episodes, so claiming one would be a lie. The episode that was running
+    when the abort landed is simply not scored."""
+    global _last_result
+    finished_meta = _inference_meta
+    finished_started = _inference_started_at
+    _go_idle_locked()
+    _last_result = {
+        "inference_active": False,
+        "exited": True,
+        "exit_code": None,
+        "outcome": "ok",
+        "error": ev.error,
+        "hint": ev.hint,
+        "phase": PHASE_ABORTED,
+        "policy_ref": finished_meta.get("policy_ref"),
+        "duration_s": finished_meta.get("duration_s"),
+        "log_path": finished_meta.get("log_path"),
+        "started_at": finished_started,
+        "rollout_started_at": None,
+        "rollout_elapsed_s": 0,
+        "elapsed_s": 0,
+        **_eval_fields(ev),
+    }
+
+
+def handle_stop_inference() -> dict[str, Any]:
+    """Abort the WHOLE session — single run or eval.
+
+    In eval mode this is the session-level stop, not the per-episode one: it
+    ends the run wherever it is (mid-episode or parked in a reset) and reports
+    the partial tally under the `aborted` phase. Ending only the current episode
+    while keeping the session alive is `handle_stop_episode`."""
     with _state_lock:
         session_active = inference_active
         orphaned_worker = _inference_startup_thread if not session_active else None
@@ -1032,24 +1282,22 @@ def handle_stop_inference() -> dict[str, Any]:
         if _inference_cancel is not None:
             _inference_cancel.set()
         proc = _inference_proc
+        ev = _eval_session
         # Surface the stop as its own phase so a status poll racing the
         # terminate/wait below sees "stopping" rather than a stale "running".
         if _inference_meta:
             _inference_meta["phase"] = PHASE_STOPPING
 
         if proc is None:
-            # Stop pressed before the subprocess spawned (during the model
-            # download or the arm preflight). There's no process to terminate and
-            # no policy has driven the robot. Go straight to idle: the orphaned
-            # startup worker (if any) finishes its in-flight download into the HF
-            # cache and bails at its next cancel check — it never opens the bus
-            # or spawns a subprocess. A download-first ordering guarantees "no
-            # robot touched" here.
-            inference_active = False
-            _inference_proc = None
-            _inference_started_at = None
-            _inference_rollout_started_at = None
-            _inference_meta = {}
+            # Stop pressed with no live subprocess: either before the first one
+            # spawned (during the model download / arm preflight — no policy has
+            # driven the robot, and the orphaned startup worker bails at its next
+            # cancel check), or, in eval mode, while parked in a reset between
+            # episodes. Either way there's nothing to terminate.
+            if ev is not None:
+                _abort_eval_locked(ev)
+                return {"success": True, "message": "Evaluation aborted"}
+            _go_idle_locked()
             return {"success": True, "message": "Inference stopped"}
 
     try:
@@ -1064,12 +1312,150 @@ def handle_stop_inference() -> dict[str, Any]:
         logger.exception("Stop inference: %s", exc)
 
     with _state_lock:
-        inference_active = False
-        _inference_proc = None
-        _inference_started_at = None
-        _inference_rollout_started_at = None
-        _inference_meta = {}
+        # Re-read: a status poll could have finalised the exit (and, in eval
+        # mode, even finished the session) while we were outside the lock.
+        ev = _eval_session
+        if ev is not None:
+            _abort_eval_locked(ev)
+            return {"success": True, "message": "Evaluation aborted"}
+        _go_idle_locked()
     return {"success": True, "message": "Inference stopped"}
+
+
+def handle_stop_episode() -> dict[str, Any]:
+    """End the CURRENT eval episode early and score it a SUCCESS.
+
+    This is the "the robot did the task — next" button. It terminates the
+    episode's subprocess exactly the way `handle_stop_inference` does (so the
+    follower still eases back to its start pose via
+    `--return_to_initial_position`) but leaves the SESSION standing: the exit
+    finalisation in `handle_inference_status` then parks it in the reset phase
+    (or finishes it, if that was the last episode).
+
+    Eval-only by design: a single-episode run has no tally to record a success
+    into, so it gets a 409 rather than a silent no-op."""
+    with _state_lock:
+        if not inference_active or _eval_session is None:
+            return {
+                "success": False,
+                "status_code": 409,
+                "message": "No evaluation episode is running",
+            }
+        proc = _inference_proc
+        if proc is None:
+            # Either still starting up, or already parked in a reset — there is
+            # no running episode to call a success.
+            return {
+                "success": False,
+                "status_code": 409,
+                "message": "No evaluation episode is running",
+            }
+        # Set BEFORE terminating so the flag is always visible to whichever
+        # thread finalises the exit. If a status poll beats us to the exit (the
+        # episode hit its duration in this exact window) it clears
+        # `_inference_proc` under this same lock, and the guard above turns the
+        # next call into a 409 — the two orders can't both score the episode.
+        _eval_session.stop_requested = True
+
+    try:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            logger.warning("Eval episode did not exit in 5s; killing")
+            proc.kill()
+            proc.wait()
+    except Exception as exc:
+        logger.exception("Stop eval episode: %s", exc)
+    # The verdict is recorded in ONE place — the exit finalisation in
+    # handle_inference_status — so a poll that raced us can't double-score.
+    return {"success": True, "message": "Episode recorded as a success"}
+
+
+def handle_next_episode() -> dict[str, Any]:
+    """Leave the reset phase and spawn the next eval episode.
+
+    The reset between episodes is explicitly user-ended (no auto-timer, unlike
+    recording's): rearranging a bench scene has no reason to be rushed. Reuses
+    the session's already-resolved policy path and already-preflighted
+    `--robot.*` args, so continuing costs one subprocess spawn — no re-download,
+    no second arm-identity pass, and the cameras stay owned by the session
+    throughout."""
+    global _inference_proc, _inference_started_at, _inference_rollout_started_at, _inference_meta
+
+    with _state_lock:
+        ev = _eval_session
+        if not inference_active or ev is None:
+            return {"success": False, "status_code": 409, "message": "No evaluation is active"}
+        if _inference_meta.get("phase") != PHASE_RESETTING:
+            return {
+                "success": False,
+                "status_code": 409,
+                "message": "The evaluation is not waiting for a reset",
+            }
+        if ev.policy_path is None:
+            # Only reachable if the startup worker never got far enough to cache
+            # the resolved path, which also means no episode ever ran.
+            return {
+                "success": False,
+                "status_code": 409,
+                "message": "The evaluation session has no prepared policy to run",
+            }
+        request, policy_path, robot_args = ev.request, ev.policy_path, list(ev.robot_args)
+        carried_ref = _inference_meta.get("policy_ref")
+        carried_warning = _inference_meta.get("warning")
+
+    try:
+        proc, log_handle, log_path = _launch_rollout_subprocess(request, policy_path, robot_args)
+    except Exception as exc:
+        logger.exception("Failed to spawn the next eval episode")
+        # Spawning is the cheap part; a failure here is a session-level problem
+        # (a broken interpreter/env), not something the next reset can fix.
+        _fail_startup(f"Failed to start the next episode: {exc}")
+        return {"success": False, "status_code": 500, "message": f"Failed to start the next episode: {exc}"}
+
+    with _state_lock:
+        if not inference_active or _eval_session is None:
+            # Aborted while we were spawning — kill what we just started rather
+            # than leave a policy driving the arm for a dead session.
+            logger.info("Next eval episode abandoned right after spawn; killing subprocess")
+            with contextlib.suppress(Exception):
+                proc.terminate()
+            with contextlib.suppress(Exception):
+                proc.wait(timeout=5)
+            with contextlib.suppress(Exception):
+                log_handle.close()
+            return {"success": False, "status_code": 409, "message": "No evaluation is active"}
+        _inference_proc = proc
+        # Both timers restart per episode: `elapsed_s` is this episode's setup
+        # time and `rollout_elapsed_s` its rollout time, so the dialog's clock
+        # and the frontend's past-duration safety net both measure the EPISODE,
+        # not the (much longer) session.
+        _inference_started_at = time.time()
+        _inference_rollout_started_at = None
+        # Clear the previous episode's crash banner — the user chose to continue.
+        _eval_session.error = None
+        _eval_session.hint = None
+        meta: dict[str, Any] = {
+            "policy_ref": carried_ref or request.policy_ref,
+            "policy_path": policy_path,
+            "duration_s": request.duration_s,
+            "log_path": str(log_path),
+            "phase": PHASE_STARTING,
+        }
+        if carried_warning:
+            meta["warning"] = carried_warning
+        _inference_meta = meta
+        episode_index = _eval_session.episode_index
+
+    threading.Thread(
+        target=_pump_stdout,
+        args=(proc, log_handle),
+        name="inference-stdout-pump",
+        daemon=True,
+    ).start()
+    logger.info("Eval episode %s started: pid=%s", episode_index, proc.pid)
+    return {"success": True, "message": f"Episode {episode_index} starting"}
 
 
 # Tail cap for the inference-log endpoint: last N lines, bounded so a very long
@@ -1116,6 +1502,96 @@ def handle_inference_log(max_lines: int = _INFERENCE_LOG_MAX_LINES) -> dict[str,
     return {"logs": "\n".join(tail), "log_path": str(path)}
 
 
+def _finalise_eval_episode_locked(rc: int | None, ev: _EvalSession) -> dict[str, Any]:
+    """Score one finished eval episode and either park or finish the session.
+
+    Caller must hold `_state_lock`. This is the SINGLE place an episode verdict
+    is recorded — `handle_stop_episode` only sets the flag and terminates, so a
+    status poll racing the stop can't double-score.
+
+    Not finishing the session means keeping `inference_active` True through the
+    reset: the session still owns the inference slot (recording/teleop stay
+    blocked) and still owns the cameras (previews stay 409'd), which is exactly
+    what lets the next episode spawn straight into a ready rig."""
+    global _inference_proc, _inference_rollout_started_at, _inference_meta, _last_result
+
+    finished_meta = _inference_meta
+    finished_started = _inference_started_at
+    rollout_started = _inference_rollout_started_at is not None
+    # Mine the log only when the exit was non-zero; a stop we asked for exits
+    # non-zero via our own SIGTERM, so the snippet is discarded unless the
+    # verdict actually turns out to be a crash.
+    error = _extract_error_from_log(finished_meta.get("log_path")) if rc else None
+    verdict = classify_episode(rc, ev.stop_requested, rollout_started, error)
+    # Read the index BEFORE appending — the property is derived from the result
+    # count, so afterwards it names the NEXT episode.
+    logger.info(
+        "Eval episode %s/%s exited rc=%s -> %s",
+        ev.episode_index,
+        ev.episodes_total,
+        rc,
+        verdict,
+    )
+    ev.results.append(verdict)
+    ev.stop_requested = False
+    if verdict == EPISODE_ERROR:
+        ev.error = error
+        ev.hint = friendly_hint(error)
+    else:
+        ev.error = None
+        ev.hint = None
+
+    _inference_proc = None
+    _inference_rollout_started_at = None
+
+    if len(ev.results) < ev.episodes_total:
+        # More to go: park in the reset phase and wait for the user to rearrange
+        # the scene and POST /inference-next-episode. No auto-timer.
+        _inference_meta = {**finished_meta, "phase": PHASE_RESETTING}
+        return {
+            **_eval_fields(ev),
+            "inference_active": True,
+            "started_at": finished_started,
+            "rollout_started_at": None,
+            "elapsed_s": 0,
+            "rollout_elapsed_s": 0,
+            "duration_s": finished_meta.get("duration_s"),
+            "policy_ref": finished_meta.get("policy_ref"),
+            "log_path": finished_meta.get("log_path"),
+            "phase": PHASE_RESETTING,
+            "download_bytes_done": None,
+            "download_bytes_total": None,
+            "download_percent": None,
+            "warning": finished_meta.get("warning"),
+            # Populated only for a CRASHED episode — the reset screen doubles as
+            # the "this one broke, continue or abort?" screen.
+            "error": ev.error,
+            "hint": ev.hint,
+        }
+
+    # Last episode: the session is done. Claim the accuracy and release the slot.
+    _go_idle_locked()
+    _last_result = {
+        "inference_active": False,
+        "exited": True,
+        "exit_code": rc,
+        "outcome": "ok",
+        "error": ev.error,
+        "hint": ev.hint,
+        "phase": PHASE_FINISHED,
+        "policy_ref": finished_meta.get("policy_ref"),
+        "duration_s": finished_meta.get("duration_s"),
+        "log_path": finished_meta.get("log_path"),
+        "started_at": finished_started,
+        "rollout_started_at": None,
+        "rollout_elapsed_s": 0,
+        "elapsed_s": 0,
+        **_eval_fields(ev, accuracy=eval_accuracy(ev.results)),
+    }
+    logger.info("Evaluation finished: %s accuracy=%s", ev.results, _last_result["accuracy"])
+    return dict(_last_result)
+
+
 def handle_inference_status() -> dict[str, Any]:
     global inference_active, _inference_proc, _inference_started_at
     global _inference_rollout_started_at, _inference_meta, _last_result
@@ -1142,6 +1618,10 @@ def handle_inference_status() -> dict[str, Any]:
             return {**_last_result, "shutting_down": shutting_down}
         if proc is not None and proc.poll() is not None:
             rc = proc.returncode
+            if _eval_session is not None:
+                # Eval mode: this exit ends an EPISODE, which only ends the
+                # SESSION if it was the last one.
+                return _finalise_eval_episode_locked(rc, _eval_session)
             logger.info("Inference subprocess exited rc=%s", rc)
             finished_meta = _inference_meta
             finished_started = _inference_started_at
@@ -1179,11 +1659,18 @@ def handle_inference_status() -> dict[str, Any]:
                 "rollout_started_at": finished_rollout_started,
                 "rollout_elapsed_s": 0,
                 "elapsed_s": 0,
+                **_eval_fields(None),
             }
             return {**_last_result, "shutting_down": shutting_down}
         elapsed = (time.time() - _inference_started_at) if _inference_started_at else 0
         rollout_elapsed = time.time() - _inference_rollout_started_at if _inference_rollout_started_at else 0
         return {
+            **_eval_fields(_eval_session),
+            # A crashed episode parks the eval session in the reset phase with
+            # its mined error still on show, so the user can decide to continue
+            # or abort. Null on every other live payload.
+            "error": _eval_session.error if _eval_session else None,
+            "hint": _eval_session.hint if _eval_session else None,
             "inference_active": inference_active,
             "started_at": _inference_started_at,
             "rollout_started_at": _inference_rollout_started_at,

@@ -25,12 +25,19 @@ export interface StartInferenceRequest {
   // Checkpoint's flat state width (6 = single arm, 12 = bimanual). Lets the
   // server reject an arm-count mismatch before spawning the rollout subprocess.
   checkpoint_state_dim?: number;
+  // Multi-episode EVALUATION mode. Omitted/1 = the historical single rollout.
+  // >1 runs N sequential episodes in one session (one model download, one arm
+  // preflight, one camera handover), each scored success/failure, ending in an
+  // accuracy. Clamped server-side to [1, 200].
+  eval_episodes?: number;
 }
 
 // Structured startup sub-phase, mirrored from rollout.py's phase constants.
 // Names which substep a slow startup is in so the UI can say "Downloading
 // model…" / "Connecting to arm…" instead of one opaque spinner. Absent/null
 // when no session has seeded a phase yet.
+// The startup phases repeat PER EPISODE in evaluation mode (each episode is its
+// own rollout subprocess); `resetting`/`finished`/`aborted` are eval-only.
 export type InferencePhase =
   | "downloading_model"
   | "starting"
@@ -39,7 +46,20 @@ export type InferencePhase =
   | "running"
   | "stopping"
   | "stopped"
-  | "error";
+  | "error"
+  // Eval only: an episode ended and was scored; the session is parked waiting
+  // for the user to rearrange the scene and start the next one. Also where a
+  // CRASHED episode parks, with `error`/`hint` populated.
+  | "resetting"
+  // Eval only, terminal: every episode ran — `accuracy` is populated.
+  | "finished"
+  // Eval only, terminal: the user aborted. Partial tally, NO accuracy claimed.
+  | "aborted";
+
+// One episode's verdict. `error` (a crash: serial glitch, camera drop, policy
+// blow-up) is deliberately NEITHER success nor failure — it's excluded from the
+// accuracy denominator so one hardware hiccup can't poison a 20-episode number.
+export type EpisodeResult = "success" | "failure" | "error";
 
 // How a finished run turned out (present only on the exited status payload):
 //   ok               — clean exit.
@@ -78,6 +98,19 @@ export interface InferenceStatus {
   // Warn-but-allow arm-identity finding, surfaced once the run is up (the
   // preflight now runs server-side in the background, after the POST returned).
   warning?: string | null;
+  // --- Multi-episode evaluation -------------------------------------------
+  // False (with null companions) for a plain single rollout — the shape is
+  // stable, so `eval_mode` is the only flag worth branching on.
+  eval_mode?: boolean;
+  // 1-based index of the episode running / just scored, clamped to the total.
+  episode_index?: number | null;
+  episodes_total?: number | null;
+  // Verdicts in episode order; its length is how many episodes have finished.
+  episode_results?: EpisodeResult[] | null;
+  // successes / (successes + failures). Claimed ONLY on the `finished` payload:
+  // an aborted session reports its partial tally with accuracy null, and so
+  // does a session where every episode crashed.
+  accuracy?: number | null;
 }
 
 // The POST now returns immediately: it only validates the request cheaply, then
@@ -106,6 +139,36 @@ export async function stopInference(
     method: "POST",
     action: "Stop inference",
   });
+}
+
+// Evaluation mode only: end the CURRENT episode early and score it a SUCCESS
+// ("the robot did the task"). The session stays up and moves into its reset
+// phase — this is NOT stopInference, which aborts the whole run.
+export async function stopInferenceEpisode(
+  baseUrl: string,
+  fetcher: Fetcher,
+): Promise<{ message: string }> {
+  return apiRequest<{ message: string }>(
+    baseUrl,
+    fetcher,
+    "/inference-episode-stop",
+    { method: "POST", action: "Stop inference episode" },
+  );
+}
+
+// Evaluation mode only: leave the reset phase and start the next episode. The
+// reset is user-ended (no auto-timer) — rearranging a bench scene shouldn't be
+// on a clock.
+export async function startNextInferenceEpisode(
+  baseUrl: string,
+  fetcher: Fetcher,
+): Promise<{ message: string }> {
+  return apiRequest<{ message: string }>(
+    baseUrl,
+    fetcher,
+    "/inference-next-episode",
+    { method: "POST", action: "Start next episode" },
+  );
 }
 
 export async function getInferenceStatus(
