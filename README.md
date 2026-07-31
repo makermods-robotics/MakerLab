@@ -86,8 +86,8 @@ At a glance, MakerLab wraps the following LeRobot workflow steps:
       <td>Execute a trained policy on the follower.</td>
     </tr>
     <tr>
-      <td>⏪ <b>Replay</b></td>
-      <td>Re-run any recorded episode.</td>
+      <td>📥 <b>Import</b></td>
+      <td>Pull a dataset or model from the <a href="https://huggingface.co/">Hugging Face Hub</a> or your disk to get started.</td>
     </tr>
     <tr>
       <td>☁️ <b>Upload</b></td>
