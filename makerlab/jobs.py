@@ -728,10 +728,82 @@ def _list_local_checkpoints(output_dir: str) -> list[JobCheckpoint]:
 _TRAIN_CONFIG_NAME = "train_config.json"
 
 
-# A Hub checkpoint's training_state/ is what makes it resumable (optimizer +
-# step). The cloud wrapper uploads the whole checkpoints/<step>/ entry, so both
-# subtrees land in the repo; this file is the cheapest existence probe.
-_HUB_TRAINING_STATE_FILE = "training_state/training_step.json"
+# What a COMPLETE lerobot checkpoint looks like, and how to test one.
+#
+# save_checkpoint writes a checkpoint over several seconds in a fixed order:
+# pretrained_model/config.json, then the weights, then train_config.json, then
+# training_state/ (training_step.json, rng_state, and the large
+# optimizer_state.safetensors last). A directory holding only the leading files
+# is a snapshot of a save IN PROGRESS, not a resumable checkpoint — the cloud
+# uploader used to publish exactly that and seal it forever, leaving Hub
+# checkpoints that pass a naive guard and then die inside the trainer on
+# `training_state/optimizer_state.safetensors`.
+#
+# Both helpers below must stay SELF-CONTAINED (stdlib only, no module-level
+# names, no annotations): runners/hf_cloud.py inlines their source verbatim
+# into the in-container HF Jobs wrapper the same way it inlines _install_plan,
+# so the uploader's readiness rule is exactly the one these tests exercise.
+
+
+def scan_checkpoint_dir(checkpoint_dir):
+    """Inspect one checkpoints/<step>/ directory on disk.
+
+    Returns (names, fingerprint): `names` is every file below it as a relative
+    posix path ("training_state/training_step.json"); `fingerprint` is the
+    sorted (path, size, mtime_ns) tuple of the same files. Comparing the
+    fingerprint across two polls is how the uploader tells "finished" from
+    "still being written" without having to know lerobot's exact file list.
+
+    Unreadable entries are skipped rather than raised on — the walk races an
+    in-flight save, and safetensors' atomic-write temp files vanish mid-scan.
+    """
+    names = set()
+    fingerprint = []
+    for path in sorted(checkpoint_dir.rglob("*")):
+        try:
+            if not path.is_file():
+                continue
+            stat = path.stat()
+        except OSError:
+            continue
+        rel = path.relative_to(checkpoint_dir).as_posix()
+        names.add(rel)
+        fingerprint.append((rel, stat.st_size, stat.st_mtime_ns))
+    return names, tuple(fingerprint)
+
+
+def missing_checkpoint_files(names):
+    """Which required artifacts are absent from `names` (relative posix paths
+    inside one checkpoints/<step>/). An empty list means complete and resumable.
+
+    scheduler_state.json is deliberately NOT required: save_training_state
+    writes it only `if scheduler is not None`, so its presence is a property of
+    the policy preset rather than of completeness. The weights are matched by
+    suffix because the filename varies (model.safetensors, or a PEFT adapter),
+    and optimizer_state.safetensors is matched at ANY depth under
+    training_state/ because a MultiAdam policy nests one directory per
+    optimizer there.
+    """
+    missing = []
+    if "pretrained_model/config.json" not in names:
+        missing.append("pretrained_model/config.json")
+    if not any(n.startswith("pretrained_model/") and n.endswith(".safetensors") for n in names):
+        missing.append("pretrained_model/*.safetensors")
+    if "pretrained_model/train_config.json" not in names:
+        missing.append("pretrained_model/train_config.json")
+    if "training_state/training_step.json" not in names:
+        missing.append("training_state/training_step.json")
+    if not any(
+        n.startswith("training_state/") and n.rsplit("/", 1)[-1] == "optimizer_state.safetensors"
+        for n in names
+    ):
+        missing.append("training_state/optimizer_state.safetensors")
+    return missing
+
+
+# Shared tail for both resume refusals: name the remedy, since "incomplete
+# checkpoint" is otherwise a dead end for the user.
+_INCOMPLETE_REMEDY = "Resume an earlier checkpoint, or fine-tune from its weights instead."
 
 
 def _resolve_cloud_resume(source: JobRecord, step: int | None) -> tuple[str, str]:
@@ -746,7 +818,8 @@ def _resolve_cloud_resume(source: JobRecord, step: int | None) -> tuple[str, str
     Raises ValueError (→ HTTP 400) with a user-facing message when the source
     can't be resumed on the cloud: not a cloud run, no output repo, no
     checkpoints at all (the run died before its first save), an unknown step, or
-    a checkpoint whose training_state/ never made it to the Hub.
+    a checkpoint that is only partly on the Hub (missing weights or any of the
+    training_state/ files — see missing_checkpoint_files).
     """
     if source.runner != "hf_cloud":
         raise ValueError(
@@ -779,10 +852,12 @@ def _resolve_cloud_resume(source: JobRecord, step: int | None) -> tuple[str, str
             f"Could not read cloud run {source.id!r}'s repo to verify the "
             f"checkpoint at step {chosen.step}: {exc}"
         ) from exc
-    if f"checkpoints/{step_dir}/{_HUB_TRAINING_STATE_FILE}" not in files:
+    prefix = f"checkpoints/{step_dir}/"
+    missing = missing_checkpoint_files({f[len(prefix) :] for f in files if f.startswith(prefix)})
+    if missing:
         raise ValueError(
-            f"Checkpoint at step {chosen.step} has no optimizer/step state "
-            "(training_state/) on the Hub, so it can't be resumed."
+            f"Checkpoint at step {chosen.step} is incomplete on the Hub (a known "
+            f"uploader race) — missing {', '.join(missing)}. {_INCOMPLETE_REMEDY}"
         )
     return source.hf_repo_id, step_dir
 
@@ -792,9 +867,10 @@ def _resolve_resume_config_path(source: JobRecord, step: int | None) -> str:
     `step` (or its latest checkpoint if step is None).
 
     Raises ValueError (→ HTTP 400) with a user-facing message when the source
-    can't be resumed: not a local run, no checkpoints, unknown step, or a
+    can't be resumed: not a local run, no checkpoints, unknown step, a
     weights-only checkpoint missing the training_state/ (optimizer + step)
-    needed to continue.
+    needed to continue, or a checkpoint left partly written by an interrupted
+    save.
     """
     if source.runner != "local":
         raise ValueError(
@@ -812,18 +888,29 @@ def _resolve_resume_config_path(source: JobRecord, step: int | None) -> str:
             raise ValueError(f"Run {source.id!r} has no checkpoint at step {step}.")
     # chosen.ref is <output_dir>/checkpoints/<step>/pretrained_model
     pretrained_dir = Path(chosen.ref)
+    checkpoint_dir = pretrained_dir.parent
     train_config = pretrained_dir / _TRAIN_CONFIG_NAME
-    training_state = pretrained_dir.parent / "training_state"
+    training_state = checkpoint_dir / "training_state"
     if not train_config.is_file():
         raise ValueError(
             f"Checkpoint at step {chosen.step} is missing {_TRAIN_CONFIG_NAME}, "
             "so it can't be resumed."
         )
+    # No training_state/ at all is the weights-only shape (an imported model),
+    # which deserves its own wording; a training_state/ that exists but is
+    # short of files is an interrupted save and gets the incomplete message.
     if not training_state.is_dir():
         raise ValueError(
             f"Checkpoint at step {chosen.step} has no optimizer/step state "
             "(training_state/), so it can't be resumed. Weights-only models "
             "(e.g. imported) can only start a fresh run."
+        )
+    names, _fingerprint = scan_checkpoint_dir(checkpoint_dir)
+    missing = missing_checkpoint_files(names)
+    if missing:
+        raise ValueError(
+            f"Checkpoint at step {chosen.step} is incomplete — missing "
+            f"{', '.join(missing)}. {_INCOMPLETE_REMEDY}"
         )
     return str(train_config.resolve())
 

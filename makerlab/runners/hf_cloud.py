@@ -42,7 +42,14 @@ from huggingface_hub import get_token
 from huggingface_hub.errors import RepositoryNotFoundError
 from packaging.requirements import Requirement
 
-from ..jobs import LogLine, TrainingMetrics, extract_wandb_run_url, parse_metrics_into
+from ..jobs import (
+    LogLine,
+    TrainingMetrics,
+    extract_wandb_run_url,
+    missing_checkpoint_files,
+    parse_metrics_into,
+    scan_checkpoint_dir,
+)
 from ..train import TrainingRequest, build_training_command, parse_hf_duration
 from ..utils.config import with_makerlab_tag
 from ..utils.hf_auth import cached_whoami, shared_hf_api
@@ -211,9 +218,11 @@ _CONTAINER_TRAIN_CONFIG_NAME = "train_config.json"
 #
 # Sent verbatim as the value of `python -c '...'`. Wrapper-side arguments
 # (the pinned lerobot spec) come before `--`; anything after `--` is
-# forwarded to the trainer. The __INSTALL_PLAN_SOURCE__ placeholder is
-# replaced with _install_plan's own source below, so the wrapper's installer
-# choice is the exact function the unit tests exercise.
+# forwarded to the trainer. The __INSTALL_PLAN_SOURCE__ and
+# __CHECKPOINT_READINESS_SOURCE__ placeholders are replaced with the source of
+# the corresponding host-side functions below, so the wrapper's installer
+# choice and its checkpoint-readiness rule are the exact functions the unit
+# tests exercise.
 _WRAPPER_TEMPLATE = r'''
 import importlib.util
 import os, re, shlex, shutil, sys, threading, subprocess
@@ -221,6 +230,8 @@ from pathlib import Path
 from huggingface_hub import HfApi
 
 __INSTALL_PLAN_SOURCE__
+
+__CHECKPOINT_READINESS_SOURCE__
 
 argv = sys.argv[1:]
 if "--" not in argv:
@@ -289,6 +300,11 @@ except Exception as exc:
     print(f"[wrapper] create_repo failed: {exc}", flush=True)
 
 seen = set()
+# step_dir -> the file fingerprint seen on the PREVIOUS poll. A checkpoint is
+# uploaded only once it is complete AND byte-identical to the previous poll, so
+# a tick landing inside lerobot's multi-second save defers instead of
+# publishing a half-written tree.
+pending = {}
 
 # Resume: download the parent checkpoint tree (pretrained_model/ +
 # training_state/) into <output_dir>/checkpoints/<step_dir>/ so lerobot's own
@@ -316,8 +332,9 @@ if resume_from:
         # copytree from the snapshot cache (symlinked files) into a real tree the
         # trainer can read/rewrite; resolve symlinks so lerobot sees plain files.
         shutil.copytree(src, dest, symlinks=False)
-        if not (dest / "training_state").is_dir():
-            print("[wrapper] resume checkpoint has no training_state/; cannot resume", flush=True)
+        resume_missing = missing_checkpoint_files(scan_checkpoint_dir(dest)[0])
+        if resume_missing:
+            print(f"[wrapper] resume checkpoint is incomplete (missing {', '.join(resume_missing)}); cannot resume", flush=True)
             sys.exit(1)
         seen.add(step_dir)
         print(f"[wrapper] resume checkpoint ready at {dest}", flush=True)
@@ -328,7 +345,10 @@ if resume_from:
 stop_event = threading.Event()
 
 
-def _scan_and_upload():
+def _scan_and_upload(final=False):
+    """Upload every checkpoint that is finished. `final` = the trainer has
+    already exited, so nothing can still be writing and the settle wait below
+    would never be satisfied (there is no next poll)."""
     root = Path(output_dir) / "checkpoints"
     if not root.is_dir():
         return
@@ -337,10 +357,23 @@ def _scan_and_upload():
     for entry in entries:
         if not re.fullmatch(r"\d+", entry.name):
             continue
-        config_json = entry / "pretrained_model" / "config.json"
-        if not config_json.is_file():
-            continue
         if entry.name in seen:
+            continue
+        names, fingerprint = scan_checkpoint_dir(entry)
+        settled = pending.get(entry.name) == fingerprint
+        pending[entry.name] = fingerprint
+        missing = missing_checkpoint_files(names)
+        if missing:
+            # A save in flight, or one the trainer never finished. Either way
+            # do NOT publish it and do NOT mark it seen — the next poll (or a
+            # later run) re-evaluates from scratch.
+            if final:
+                print(f"[wrapper] checkpoint {entry.name} left incomplete (missing {', '.join(missing)}); not uploading", flush=True)
+            elif not settled:
+                print(f"[wrapper] checkpoint {entry.name} still saving (missing {', '.join(missing)})", flush=True)
+            continue
+        if not settled and not final:
+            print(f"[wrapper] checkpoint {entry.name} complete but still settling; deferring upload", flush=True)
             continue
         try:
             api.upload_folder(
@@ -348,11 +381,18 @@ def _scan_and_upload():
                 repo_id=repo_id,
                 path_in_repo=f"checkpoints/{entry.name}",
                 commit_message=f"checkpoint {entry.name}",
+                # safetensors writes through a .tmpXXXX file and renames; one
+                # caught mid-rename has landed on the Hub before.
+                ignore_patterns=[".tmp*", "**/.tmp*"],
             )
-            seen.add(entry.name)
-            print(f"[wrapper] uploaded checkpoint {entry.name}", flush=True)
         except Exception as exc:
+            # NOT added to `seen`: sealing a step whose upload failed (or only
+            # partly landed) is what made incomplete Hub checkpoints permanent.
             print(f"[wrapper] upload failed for {entry.name}: {exc}", flush=True)
+            continue
+        seen.add(entry.name)
+        pending.pop(entry.name, None)
+        print(f"[wrapper] uploaded checkpoint {entry.name}", flush=True)
 
 
 def _watch():
@@ -379,9 +419,10 @@ try:
     rc = proc.wait()
 finally:
     stop_event.set()
-    # One final pass picks up any checkpoint saved in the last 15s window.
+    # One final pass picks up any checkpoint saved in the last 15s window. The
+    # trainer is gone, so skip the settle wait — nothing can still be writing.
     try:
-        _scan_and_upload()
+        _scan_and_upload(final=True)
     except Exception as exc:
         print(f"[wrapper] final scan error: {exc}", flush=True)
 
@@ -389,7 +430,12 @@ print(f"[wrapper] trainer exited with rc={rc}", flush=True)
 sys.exit(rc)
 '''
 
-WRAPPER_SOURCE = _WRAPPER_TEMPLATE.replace("__INSTALL_PLAN_SOURCE__", inspect.getsource(_install_plan))
+WRAPPER_SOURCE = _WRAPPER_TEMPLATE.replace(
+    "__INSTALL_PLAN_SOURCE__", inspect.getsource(_install_plan)
+).replace(
+    "__CHECKPOINT_READINESS_SOURCE__",
+    f"{inspect.getsource(scan_checkpoint_dir)}\n{inspect.getsource(missing_checkpoint_files)}",
+)
 
 # HF Jobs' platform default timeout has killed legitimate runs that pushed the
 # model successfully but were still uploading auxiliary files — that is why a

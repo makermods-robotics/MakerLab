@@ -319,15 +319,198 @@ def test_wrapper_source_compiles_and_launches_an_argv_list() -> None:
 
 def test_wrapper_source_handles_resume_download() -> None:
     """Cloud resume: the wrapper must parse --resume-from, download the parent
-    checkpoint tree, refuse when training_state/ is absent, and pre-seed `seen`
-    so it never re-uploads the checkpoint it just pulled down."""
+    checkpoint tree, refuse an incomplete one using the same readiness rule the
+    uploader applies, and pre-seed `seen` so it never re-uploads the checkpoint
+    it just pulled down."""
     from makerlab.runners.hf_cloud import WRAPPER_SOURCE
 
     compile(WRAPPER_SOURCE, "<hf-jobs-wrapper>", "exec")  # still valid with the resume block
     assert "--resume-from=" in WRAPPER_SOURCE
     assert "snapshot_download" in WRAPPER_SOURCE
     assert "training_state" in WRAPPER_SOURCE
+    assert "missing_checkpoint_files(scan_checkpoint_dir(dest)[0])" in WRAPPER_SOURCE
     assert "seen.add(step_dir)" in WRAPPER_SOURCE
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint uploader (NEW-17). The watcher used to publish a directory the
+# moment pretrained_model/config.json appeared — the FIRST file of a save that
+# takes seconds — and `seen.add` then retired it forever, so the files that
+# finished writing afterwards were never uploaded. The tests below exec the
+# wrapper's own _scan_and_upload against fakes, so they exercise the exact
+# source that runs in the container rather than a host-side paraphrase.
+# ---------------------------------------------------------------------------
+
+
+class _FakeUploadApi:
+    """Records upload_folder calls; optionally fails the first `fail_times`."""
+
+    def __init__(self, fail_times: int = 0) -> None:
+        self.calls: list[dict] = []
+        self._fail_times = fail_times
+
+    def upload_folder(self, **kwargs):
+        self.calls.append(kwargs)
+        if self._fail_times > 0:
+            self._fail_times -= 1
+            raise RuntimeError("hub is having a day")
+
+    @property
+    def uploaded_steps(self) -> list[str]:
+        return [c["path_in_repo"].rsplit("/", 1)[-1] for c in self.calls]
+
+
+def _wrapper_scanner(output_dir: Path, api: _FakeUploadApi):
+    """Exec the wrapper's own `_scan_and_upload` and return (call, seen).
+
+    The function is sliced out of WRAPPER_SOURCE by name and given the globals
+    the wrapper would have around it, so a drift between the template and this
+    test surfaces as a KeyError/NameError rather than passing silently.
+    """
+    from makerlab.jobs import missing_checkpoint_files, scan_checkpoint_dir
+    from makerlab.runners.hf_cloud import WRAPPER_SOURCE
+
+    match = re.search(r"^def _scan_and_upload\(.*?(?=^\S)", WRAPPER_SOURCE, re.MULTILINE | re.DOTALL)
+    assert match, "_scan_and_upload not found in WRAPPER_SOURCE"
+    namespace: dict = {
+        "Path": Path,
+        "re": re,
+        "api": api,
+        "output_dir": str(output_dir),
+        "repo_id": "user/run",
+        "seen": set(),
+        "pending": {},
+        "scan_checkpoint_dir": scan_checkpoint_dir,
+        "missing_checkpoint_files": missing_checkpoint_files,
+        "print": lambda *a, **k: None,  # keep the wrapper's logging out of pytest
+    }
+    exec(compile(match.group(0), "<hf-jobs-wrapper>", "exec"), namespace)  # noqa: S102
+    return namespace["_scan_and_upload"], namespace["seen"]
+
+
+def _write_checkpoint(output_dir: Path, step_dir: str, *, with_optimizer: bool = True) -> Path:
+    """A lerobot checkpoint tree under <output_dir>/checkpoints/<step_dir>."""
+    ck = output_dir / "checkpoints" / step_dir
+    pm = ck / "pretrained_model"
+    pm.mkdir(parents=True, exist_ok=True)
+    (pm / "config.json").write_text("{}")
+    (pm / "model.safetensors").write_bytes(b"weights")
+    (pm / "train_config.json").write_text("{}")
+    ts = ck / "training_state"
+    ts.mkdir(exist_ok=True)
+    (ts / "training_step.json").write_text("{}")
+    (ts / "rng_state.safetensors").write_bytes(b"rng")
+    if with_optimizer:
+        (ts / "optimizer_state.safetensors").write_bytes(b"optim")
+    return ck
+
+
+def test_wrapper_does_not_upload_or_seal_a_mid_save_checkpoint(tmp_path: Path) -> None:
+    """The live failure: a poll tick lands inside the save, before the big
+    optimizer file. Nothing may be published, and — the part that made it
+    permanent — the step must NOT enter `seen`, so a later tick re-evaluates."""
+    api = _FakeUploadApi()
+    scan, seen = _wrapper_scanner(tmp_path, api)
+
+    _write_checkpoint(tmp_path, "005000", with_optimizer=False)
+    scan()
+    scan()  # settled, but still incomplete — completeness is not a timing question
+    assert api.calls == []
+    assert seen == set()
+
+    # The save finishes; the next two polls (tree changed, then stable) publish it.
+    training_state = tmp_path / "checkpoints" / "005000" / "training_state"
+    (training_state / "optimizer_state.safetensors").write_bytes(b"optim")
+    scan()
+    assert api.calls == []  # fingerprint moved — defer one tick
+    scan()
+    assert api.uploaded_steps == ["005000"]
+    assert seen == {"005000"}
+
+
+def test_wrapper_defers_a_complete_checkpoint_until_the_tree_stops_changing(
+    tmp_path: Path,
+) -> None:
+    """Two-poll stability: the full file set can be present while the last file
+    is still being written, so one unchanged poll is required before upload."""
+    api = _FakeUploadApi()
+    scan, seen = _wrapper_scanner(tmp_path, api)
+
+    _write_checkpoint(tmp_path, "001000")
+    scan()
+    assert api.calls == []  # first sighting is never enough
+    assert seen == set()
+    scan()
+    assert api.uploaded_steps == ["001000"]
+
+    scan()  # already seen — no duplicate commit
+    assert api.uploaded_steps == ["001000"]
+
+
+def test_wrapper_final_pass_skips_the_settle_wait(tmp_path: Path) -> None:
+    """After the trainer exits there is no next poll, so the final pass must
+    upload a complete checkpoint on first sight or the last one is lost."""
+    api = _FakeUploadApi()
+    scan, seen = _wrapper_scanner(tmp_path, api)
+
+    _write_checkpoint(tmp_path, "015000")
+    scan(final=True)
+    assert api.uploaded_steps == ["015000"]
+    assert seen == {"015000"}
+
+
+def test_wrapper_final_pass_still_refuses_an_incomplete_checkpoint(tmp_path: Path) -> None:
+    """Skipping the settle wait must not become skipping the completeness gate:
+    a save the trainer died inside stays unpublished."""
+    api = _FakeUploadApi()
+    scan, seen = _wrapper_scanner(tmp_path, api)
+
+    _write_checkpoint(tmp_path, "004000", with_optimizer=False)
+    scan(final=True)
+    assert api.calls == []
+    assert seen == set()
+
+
+def test_wrapper_does_not_seal_a_checkpoint_whose_upload_failed(tmp_path: Path) -> None:
+    """`seen.add` used to run inside the try, so a step could be retired on a
+    partial or failed commit. A failure must leave it retryable."""
+    api = _FakeUploadApi(fail_times=1)
+    scan, seen = _wrapper_scanner(tmp_path, api)
+
+    _write_checkpoint(tmp_path, "002000")
+    scan()
+    scan()  # settled ⇒ attempts the upload, which raises
+    assert len(api.calls) == 1
+    assert seen == set()  # not retired
+
+    scan()  # retried on the next tick, and this time it lands
+    assert len(api.calls) == 2
+    assert seen == {"002000"}
+
+
+def test_wrapper_upload_excludes_safetensors_temp_files(tmp_path: Path) -> None:
+    """A .tmp* file caught mid-rename has landed on the Hub before; keep it out
+    of the commit even when the rest of the tree is complete."""
+    api = _FakeUploadApi()
+    scan, _seen = _wrapper_scanner(tmp_path, api)
+
+    _write_checkpoint(tmp_path, "003000")
+    scan()
+    scan()
+    assert api.calls[0]["ignore_patterns"] == [".tmp*", "**/.tmp*"]
+
+
+def test_wrapper_source_inlines_the_tested_checkpoint_readiness_helpers() -> None:
+    """The container's readiness rule is jobs.py's source inlined verbatim, the
+    same contract the resume guards apply — one definition, three call sites."""
+    import inspect
+
+    from makerlab.jobs import missing_checkpoint_files, scan_checkpoint_dir
+    from makerlab.runners.hf_cloud import WRAPPER_SOURCE
+
+    assert inspect.getsource(scan_checkpoint_dir) in WRAPPER_SOURCE
+    assert inspect.getsource(missing_checkpoint_files) in WRAPPER_SOURCE
+    assert "__CHECKPOINT_READINESS_SOURCE__" not in WRAPPER_SOURCE  # placeholder replaced
 
 
 def test_cloud_resume_argv_keeps_lineage_in_parent_repo() -> None:
