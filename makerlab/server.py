@@ -241,31 +241,18 @@ app.add_middleware(
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
+    # Chrome sends a Private Network Access preflight — an OPTIONS carrying
+    # `Access-Control-Request-Private-Network: true` — whenever a page reaches a
+    # server on a local/private network, even for a plain GET that ordinary CORS
+    # would never preflight. Starlette REJECTS that preflight (400 "Disallowed
+    # CORS private-network") unless this is set, and Chrome then reports the
+    # thoroughly misleading "No 'Access-Control-Allow-Origin' header is present"
+    # even though the server sent exactly that header.
+    #
+    # Without this, a MakerLab client cannot reach a remote station in Chrome at
+    # all, while curl works fine — which is exactly how it presented.
+    allow_private_network=True,
 )
-
-
-@app.middleware("http")
-async def allow_private_network_access(request: Request, call_next):
-    """Answer Chrome's Private Network Access preflight.
-
-    When a page reaches a server on a local/private network (a MakerLab station
-    on the LAN or over Tailscale), Chrome sends a PNA preflight — an OPTIONS
-    carrying `Access-Control-Request-Private-Network: true` — even for a plain
-    GET that ordinary CORS would never preflight. If the response lacks
-    `Access-Control-Allow-Private-Network: true`, Chrome discards it and
-    reports the misleading "No 'Access-Control-Allow-Origin' header is present",
-    despite the server having sent exactly that header.
-
-    Starlette's CORSMiddleware knows nothing about PNA, so without this every
-    remote-host connection fails in Chrome while curl succeeds — which is
-    precisely how this presented. Registered after CORSMiddleware so it wraps
-    it and can annotate the preflight response it generates.
-    """
-    response = await call_next(request)
-    if request.headers.get("access-control-request-private-network") == "true":
-        response.headers["Access-Control-Allow-Private-Network"] = "true"
-    return response
-
 
 FRONTEND_DIST = Path(__file__).parent.parent / "frontend" / "dist"
 
