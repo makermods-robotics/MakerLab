@@ -243,6 +243,30 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.middleware("http")
+async def allow_private_network_access(request: Request, call_next):
+    """Answer Chrome's Private Network Access preflight.
+
+    When a page reaches a server on a local/private network (a MakerLab station
+    on the LAN or over Tailscale), Chrome sends a PNA preflight — an OPTIONS
+    carrying `Access-Control-Request-Private-Network: true` — even for a plain
+    GET that ordinary CORS would never preflight. If the response lacks
+    `Access-Control-Allow-Private-Network: true`, Chrome discards it and
+    reports the misleading "No 'Access-Control-Allow-Origin' header is present",
+    despite the server having sent exactly that header.
+
+    Starlette's CORSMiddleware knows nothing about PNA, so without this every
+    remote-host connection fails in Chrome while curl succeeds — which is
+    precisely how this presented. Registered after CORSMiddleware so it wraps
+    it and can annotate the preflight response it generates.
+    """
+    response = await call_next(request)
+    if request.headers.get("access-control-request-private-network") == "true":
+        response.headers["Access-Control-Allow-Private-Network"] = "true"
+    return response
+
+
 FRONTEND_DIST = Path(__file__).parent.parent / "frontend" / "dist"
 
 # Get the path to the lerobot root directory (3 levels up from this script)
