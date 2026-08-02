@@ -2648,11 +2648,29 @@ class PortalTokenBody(BaseModel):
 # These handlers touch the filesystem, probe a socket, or mint a JWT — all
 # blocking. Declared `def` (not `async def`) so FastAPI runs them in a
 # threadpool; as coroutines they would stall every other request on the loop.
+def _client_host(request: Request) -> str | None:
+    """Hostname the caller used to reach us, from the Host header (port stripped).
+
+    This station can be reachable on a LAN address, a Tailscale name, or both,
+    and the server cannot guess which one a given client can route to. Whatever
+    host reached this API demonstrably works, so we hand the same host back for
+    the ws:// URL and only change the port. Without this an off-LAN operator
+    gets a valid token pointing at an unroutable LAN IP, and Portal connect
+    times out with nothing in the logs explaining why.
+    """
+    raw = (request.headers.get("host") or "").strip()
+    if not raw:
+        return None
+    if raw.startswith("["):  # bracketed IPv6 literal, e.g. [::1]:8000
+        return raw.split("]")[0].lstrip("[") or None
+    return raw.rsplit(":", 1)[0] if ":" in raw else raw
+
+
 @app.get("/portal/info")
-def portal_info():
+def portal_info(request: Request):
     from .portal_host import handle_portal_info
 
-    return handle_portal_info()
+    return handle_portal_info(client_host=_client_host(request))
 
 
 @app.get("/portal/status")
@@ -2663,10 +2681,10 @@ def portal_status():
 
 
 @app.post("/portal/token")
-def portal_token(body: PortalTokenBody):
+def portal_token(body: PortalTokenBody, request: Request):
     from .portal_host import handle_portal_token
 
-    result = handle_portal_token(body.identity, body.room)
+    result = handle_portal_token(body.identity, body.room, client_host=_client_host(request))
     if not result.get("success", True):
         return JSONResponse(status_code=result.get("status_code", 400), content=result)
     return result

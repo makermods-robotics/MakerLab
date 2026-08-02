@@ -677,10 +677,19 @@ def _enabled_state() -> tuple[bool, str | None]:
     return True, None
 
 
-def handle_portal_info() -> dict:
-    """GET /portal/info — can this machine host Portal, and where to dial it."""
+def handle_portal_info(client_host: str | None = None) -> dict:
+    """GET /portal/info — can this machine host Portal, and where to dial it.
+
+    `client_host` is the hostname the caller actually used to reach this API
+    (from the request's Host header). It matters: this station may be reachable
+    on a LAN address, a Tailscale name, or both, and `primary_lan_ip()` only
+    ever knows the LAN one. Handing an off-LAN client a LAN ws:// URL produces
+    a Portal connect that simply times out with nothing in the logs to explain
+    it. Whatever host reached the API is, by construction, a host that can
+    reach this machine — so reuse it and only swap the port.
+    """
     enabled, reason = _enabled_state()
-    host = primary_lan_ip()
+    host = client_host or primary_lan_ip()
     info = {
         "enabled": enabled,
         "livekit_url": livekit_url(host),
@@ -712,13 +721,18 @@ def handle_portal_status() -> dict:
     return status
 
 
-def handle_portal_token(identity: str, room: str) -> dict:
+def handle_portal_token(identity: str, room: str, client_host: str | None = None) -> dict:
     """POST /portal/token — mint a LiveKit JWT for a remote operator.
 
     The API secret stays on this machine: only the signed token goes out.
     Grants match the SPEC wire contract — `can_update_own_metadata` is NOT
     optional, both Portal roles self-set `lk.portal.role` on connect and the
     connection fails outright without it.
+
+    `client_host` — see handle_portal_info(). The returned `url` is what the
+    client will actually dial, so it must be derived from the host that reached
+    us, not from the LAN IP; otherwise an off-LAN operator (e.g. over Tailscale)
+    receives a valid token pointing at an unreachable address.
     """
     identity = (identity or "").strip()
     room = (room or "").strip()
@@ -771,4 +785,4 @@ def handle_portal_token(identity: str, room: str) -> dict:
         .to_jwt()
     )
     logger.info("Portal: minted a token for identity=%s room=%s", identity, room)
-    return {"token": token, "url": livekit_url(), "room": room}
+    return {"token": token, "url": livekit_url(client_host), "room": room}
