@@ -3,6 +3,17 @@ import { VideoOff, RefreshCw } from "lucide-react";
 import { useApi } from "@/contexts/ApiContext";
 import { cn } from "@/lib/utils";
 
+/**
+ * Which pipe the frames come down. See `useStreamSource` below — this is the
+ * whole remote-camera story in one prop.
+ */
+export type CameraStreamSource =
+  /** Config-time preview: the host that owns the camera opens it directly. */
+  | "host"
+  /** Live teleop/record session: on a remote host, frames arrive over Portal
+   *  and are re-served by the leader-bridge on THIS machine. */
+  | "session";
+
 interface BackendCameraStreamProps {
   /** cv2 camera index on the server (CameraConfig.camera_index). */
   cameraIndex: number;
@@ -11,6 +22,12 @@ interface BackendCameraStreamProps {
    * resolves indices against a startup snapshot that drifts from the fresh
    * enumeration after a replug, so index alone can open the wrong camera. */
   uniqueId?: string;
+  /** Defaults to "host" — i.e. exactly the pre-remote behaviour. */
+  source?: CameraStreamSource;
+  /** The camera's MakerLab name (CameraConfig.name). Required for
+   * `source="session"` on a remote host: the leader-bridge keys its Portal
+   * video tracks by name, not by the server's cv2 index. */
+  cameraName?: string;
   className?: string;
 }
 
@@ -24,7 +41,9 @@ const RETRY_MAX_MS = 12000;
 
 /**
  * MJPEG `<img>` stream of a camera attached to the *server* machine
- * (GET /camera-preview/{index}).
+ * (GET /camera-preview/{index}), or — during a live session against a remote
+ * host — of the Portal feed re-served by this machine's leader-bridge
+ * (GET /leader-bridge/camera/{name}). See the `source` prop.
  *
  * Fallback for headless deployments (e.g. a Jetson on the LAN): the browser's
  * getUserMedia only sees the viewing machine's cameras, so a camera plugged
@@ -40,9 +59,11 @@ const RETRY_MAX_MS = 12000;
 const BackendCameraStream: React.FC<BackendCameraStreamProps> = ({
   cameraIndex,
   uniqueId,
+  source = "host",
+  cameraName,
   className,
 }) => {
-  const { baseUrl, fetchWithHeaders } = useApi();
+  const { baseUrl, localBaseUrl, isRemote, fetchWithHeaders } = useApi();
   const imgRef = useRef<HTMLImageElement>(null);
   const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const attemptRef = useRef(0);
@@ -50,18 +71,39 @@ const BackendCameraStream: React.FC<BackendCameraStreamProps> = ({
   const [attempt, setAttempt] = useState(0);
   const [down, setDown] = useState(false);
   const [reason, setReason] = useState<string | null>(null);
-  const uniqueIdQuery = uniqueId
-    ? `?unique_id=${encodeURIComponent(uniqueId)}`
-    : "";
 
-  // A new index or identity is a new stream — forget the previous one's
-  // failure state.
+  // ---- Where the frames come from --------------------------------------
+  //
+  // Exactly one condition moves the stream off the active host: a LIVE SESSION
+  // against a REMOTE host. There, the remote's cameras are already open inside
+  // the teleop/record loop, and its /camera-preview would contend with the
+  // recorder for the device. The frames the operator needs have instead been
+  // tee'd onto Portal and re-served as MJPEG by the leader-bridge running on
+  // this laptop (docs/remote-portal/SPEC.md decision 3) — so we read them from
+  // localBaseUrl, keyed by camera NAME (Portal's track id), not by cv2 index.
+  //
+  // Every other case — config-time previews, and everything on a single local
+  // machine — keeps hitting {activeHost}/camera-preview/{index} verbatim.
+  const viaLeaderBridge = source === "session" && isRemote && !!cameraName;
+  const streamBase = viaLeaderBridge ? localBaseUrl : baseUrl;
+  const streamPath = viaLeaderBridge
+    ? `/leader-bridge/camera/${encodeURIComponent(cameraName as string)}`
+    : `/camera-preview/${cameraIndex}`;
+  // unique_id only means something to the cv2 preview endpoint.
+  const uniqueIdQuery =
+    !viaLeaderBridge && uniqueId
+      ? `?unique_id=${encodeURIComponent(uniqueId)}`
+      : "";
+  const streamUrl = `${streamBase}${streamPath}`;
+
+  // A new index, identity, or source is a new stream — forget the previous
+  // one's failure state.
   useEffect(() => {
     attemptRef.current = 0;
     setAttempt(0);
     setDown(false);
     setReason(null);
-  }, [cameraIndex, uniqueId]);
+  }, [cameraIndex, uniqueId, streamUrl]);
 
   useEffect(() => {
     const img = imgRef.current;
@@ -92,7 +134,7 @@ const BackendCameraStream: React.FC<BackendCameraStreamProps> = ({
     // the status detail so the tile can say "recording is using the cameras"
     // instead of a generic failure. Best-effort: any probe error is itself
     // a reason ("server unreachable").
-    fetchWithHeaders(`${baseUrl}/camera-preview/${cameraIndex}${uniqueIdQuery}`, {
+    fetchWithHeaders(`${streamUrl}${uniqueIdQuery}`, {
       method: "GET",
       headers: { Range: "bytes=0-0" },
     })
@@ -110,9 +152,21 @@ const BackendCameraStream: React.FC<BackendCameraStreamProps> = ({
             : `camera preview unavailable (${r.status})`
         );
       })
-      .catch(() => setReason("server unreachable"))
+      .catch(() =>
+        setReason(
+          viaLeaderBridge
+            ? "leader-bridge unreachable"
+            : "server unreachable",
+        ),
+      )
       .finally(scheduleRetry);
-  }, [baseUrl, fetchWithHeaders, cameraIndex, uniqueIdQuery, scheduleRetry]);
+  }, [
+    streamUrl,
+    viaLeaderBridge,
+    fetchWithHeaders,
+    uniqueIdQuery,
+    scheduleRetry,
+  ]);
 
   const retryNow = useCallback(() => {
     if (retryTimer.current) clearTimeout(retryTimer.current);
@@ -147,12 +201,14 @@ const BackendCameraStream: React.FC<BackendCameraStreamProps> = ({
     <img
       key={attempt}
       ref={imgRef}
-      src={`${baseUrl}/camera-preview/${cameraIndex}?r=${attempt}${
-        uniqueId ? `&unique_id=${encodeURIComponent(uniqueId)}` : ""
+      src={`${streamUrl}?r=${attempt}${
+        !viaLeaderBridge && uniqueId
+          ? `&unique_id=${encodeURIComponent(uniqueId)}`
+          : ""
       }`}
       onError={handleError}
       className={className}
-      alt="Server camera preview"
+      alt={viaLeaderBridge ? "Live camera over Portal" : "Server camera preview"}
     />
   );
 };

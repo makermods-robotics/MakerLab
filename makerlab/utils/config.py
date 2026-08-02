@@ -282,8 +282,31 @@ _BIMANUAL_CONFIG_FIELDS = (
     "right_leader_config",
     "right_follower_config",
 )
-_ROBOT_STRING_FIELDS = _SINGLE_CONFIG_FIELDS + _BIMANUAL_CONFIG_FIELDS
+# Where the leader arm physically lives. "local" (default) is the classic
+# single-machine setup. "remote" means the follower + cameras are on THIS
+# machine while the leader sits on an operator's laptop and streams joint
+# targets in over LiveKit Portal (docs/remote-portal/SPEC.md). Such a record has
+# no local leader port and no local leader calibration, which
+# is_robot_record_clean() must tolerate or every start path would refuse it.
+LEADER_SOURCE_LOCAL = "local"
+LEADER_SOURCE_REMOTE = "remote"
+_VALID_LEADER_SOURCES = (LEADER_SOURCE_LOCAL, LEADER_SOURCE_REMOTE)
+
+_ROBOT_STRING_FIELDS = _SINGLE_CONFIG_FIELDS + _BIMANUAL_CONFIG_FIELDS + ("leader_source",)
 _ROBOT_LIST_FIELDS = ("cameras",)
+
+
+def sanitize_leader_source(value: object) -> str:
+    """Coerce a stored/incoming leader_source to a valid value ('local' default)."""
+    return value if value in _VALID_LEADER_SOURCES else LEADER_SOURCE_LOCAL
+
+
+def leader_is_remote(record: dict) -> bool:
+    """True when this record's leader arm lives on a remote operator machine."""
+    if not record:
+        return False
+    return sanitize_leader_source(record.get("leader_source")) == LEADER_SOURCE_REMOTE
+
 
 # Auto-calibration drive torque, as a percentage of full torque. Threaded into
 # the vendored autocal subprocess as --torque-limit (percent × 10; see
@@ -334,6 +357,9 @@ def _empty_record(name: str) -> dict:
         record[field] = ""
     for field in _ROBOT_LIST_FIELDS:
         record[field] = []
+    # Explicit rather than "" so the JSON is self-describing; sanitize_leader_source
+    # still treats any legacy blank/unknown value as local.
+    record["leader_source"] = LEADER_SOURCE_LOCAL
     return record
 
 
@@ -366,6 +392,9 @@ def get_robot_record(name: str) -> dict | None:
     # out-of-range or corrupted value on disk is clamped so every consumer
     # sees a safe 10-100 integer.
     record["motor_power"] = clamp_motor_power(record.get("motor_power"))
+    # Legacy records predate leader_source; blank/unknown reads as local so
+    # every existing single-machine setup keeps its current behaviour.
+    record["leader_source"] = sanitize_leader_source(record.get("leader_source"))
     return record
 
 
@@ -487,7 +516,10 @@ def is_robot_record_clean(record: dict, arms: str = "all") -> bool:
     """
     if not record:
         return False
-    follower_only = arms == "follower"
+    # A remote leader has no local port and no local calibration file on this
+    # machine — the operator's laptop owns both — so scope the check to the
+    # follower side exactly as inference/replay do.
+    follower_only = arms == "follower" or leader_is_remote(record)
 
     # Config fields are stems; the file on disk is "<stem>.json". Tolerate a
     # stored value that still carries the extension (defensive).

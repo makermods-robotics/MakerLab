@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import UrdfViewer from "@/components/UrdfViewer";
+import SessionCameraStrip from "@/components/control/SessionCameraStrip";
 import { useToast } from "@/hooks/use-toast";
 import { useApi } from "@/contexts/ApiContext";
 import { useRobots } from "@/hooks/useRobots";
@@ -287,6 +288,11 @@ const TeleopDialog: React.FC<TeleopDialogProps> = ({ open, onOpenChange }) => {
             <UrdfViewer variant="light" compact />
           </div>
         )}
+
+        {/* Remote session only: the operator is not in the room with the arm,
+            so the workspace has to be on screen. Renders nothing on a local
+            host, where this dialog stays exactly as it was. */}
+        <SessionCameraStrip className="mt-3" />
       </div>
     </div>
   );

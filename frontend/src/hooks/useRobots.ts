@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useSyncExternalStore } from "react";
 import { useLocation } from "react-router-dom";
 import { useApi } from "@/contexts/ApiContext";
 import { useToast } from "@/hooks/use-toast";
+import { localApiBaseUrl } from "@/lib/apiHosts";
 import type { CameraConfig } from "@/components/recording/CameraConfiguration";
 
 export type RobotMode = "single" | "bimanual";
@@ -30,6 +31,12 @@ export interface RobotRecord {
   // is_clean so a missing LEADER setup — which they never touch — can't block
   // them. Mirrors the backend's is_robot_record_clean(record, arms="follower").
   follower_ready: boolean;
+  // Where the LEADER arm physically is. "remote" means the follower + cameras
+  // are on this record's host but the leader is plugged into the CLIENT
+  // laptop, which streams its joints over Portal (docs/remote-portal/SPEC.md).
+  // Optional here because a backend predating the field simply omits it —
+  // always read it as `record.leader_source ?? "local"`.
+  leader_source?: "local" | "remote";
 }
 
 // Human-readable diagnosis for a record with `is_clean === false` (or, with
@@ -76,19 +83,26 @@ export const robotSetupGap = (
 
 const SELECTED_KEY = "makerlab.selectedRobot";
 
-const readSelected = (): string | null => {
+// Robot names only mean something on the machine that owns the records, so the
+// selection is stored PER HOST. The local host keeps the original unsuffixed
+// key, which makes a single-machine install byte-identical to before hosts
+// existed (same key, same value, same startup selection).
+const selectedKeyFor = (host: string): string =>
+  host === localApiBaseUrl() ? SELECTED_KEY : `${SELECTED_KEY}::${host}`;
+
+const readSelected = (host: string): string | null => {
   try {
-    const raw = localStorage.getItem(SELECTED_KEY);
+    const raw = localStorage.getItem(selectedKeyFor(host));
     return raw && typeof raw === "string" ? raw : null;
   } catch {
     return null;
   }
 };
 
-const writeSelected = (name: string | null) => {
+const writeSelected = (host: string, name: string | null) => {
   try {
-    if (name) localStorage.setItem(SELECTED_KEY, name);
-    else localStorage.removeItem(SELECTED_KEY);
+    if (name) localStorage.setItem(selectedKeyFor(host), name);
+    else localStorage.removeItem(selectedKeyFor(host));
   } catch {
     // Storage may be unavailable (private mode, quota). Failures here are non-fatal.
   }
@@ -99,52 +113,68 @@ const writeSelected = (name: string | null) => {
 // useState copies drift: selecting a robot on Landing left the inference
 // modal (mounted under JobsSection) holding the stale previous selection.
 // One store, one truth — instances subscribe via useSyncExternalStore.
+//
+// ONE STORE PER HOST, though: two machines have different arms, so host A's
+// records and selection must never surface while host B is active. Keying by
+// base URL means switching hosts swaps the whole snapshot atomically instead
+// of leaking stale records through the gap before the first refetch lands.
 interface RobotsState {
   records: Record<string, RobotRecord>;
   selectedName: string | null;
   isLoading: boolean;
 }
 
-let state: RobotsState = {
-  records: {},
-  selectedName: readSelected(),
-  isLoading: false,
-};
-const listeners = new Set<() => void>();
+const stores = new Map<string, RobotsState>();
+const listeners = new Map<string, Set<() => void>>();
+// Several instances can fetch concurrently (each mount refreshes); isLoading
+// is true while ANY fetch for that host is in flight, not just the last one.
+const pendingFetches = new Map<string, number>();
 
-const setState = (patch: Partial<RobotsState>) => {
-  state = { ...state, ...patch };
-  listeners.forEach((l) => l());
+const getStore = (host: string): RobotsState => {
+  let s = stores.get(host);
+  if (!s) {
+    s = { records: {}, selectedName: readSelected(host), isLoading: false };
+    stores.set(host, s);
+  }
+  return s;
 };
 
-const subscribe = (l: () => void) => {
-  listeners.add(l);
+const setState = (host: string, patch: Partial<RobotsState>) => {
+  stores.set(host, { ...getStore(host), ...patch });
+  listeners.get(host)?.forEach((l) => l());
+};
+
+const subscribeTo = (host: string) => (l: () => void) => {
+  let set = listeners.get(host);
+  if (!set) {
+    set = new Set();
+    listeners.set(host, set);
+  }
+  set.add(l);
   return () => {
-    listeners.delete(l);
+    set?.delete(l);
   };
 };
 
-const getSnapshot = (): RobotsState => state;
-
-const setSelectedShared = (name: string | null) => {
-  writeSelected(name);
-  setState({ selectedName: name });
+const setSelectedShared = (host: string, name: string | null) => {
+  writeSelected(host, name);
+  setState(host, { selectedName: name });
 };
 
 const patchRecords = (
+  host: string,
   updater: (prev: Record<string, RobotRecord>) => Record<string, RobotRecord>
 ) => {
-  setState({ records: updater(state.records) });
+  setState(host, { records: updater(getStore(host).records) });
 };
-
-// Several instances can fetch concurrently (each mount refreshes); isLoading
-// is true while ANY fetch is in flight, not just the last one to finish.
-let pendingFetches = 0;
 
 export const useRobots = () => {
   const { baseUrl, fetchWithHeaders } = useApi();
   const { toast } = useToast();
   const location = useLocation();
+
+  const subscribe = useMemo(() => subscribeTo(baseUrl), [baseUrl]);
+  const getSnapshot = useCallback(() => getStore(baseUrl), [baseUrl]);
 
   const { records, selectedName, isLoading } = useSyncExternalStore(
     subscribe,
@@ -157,23 +187,25 @@ export const useRobots = () => {
   // can update every subscriber. Writes go to the module-level store, so a
   // late response after unmount is harmless.
   const refresh = useCallback(async () => {
-    pendingFetches += 1;
-    setState({ isLoading: true });
+    pendingFetches.set(baseUrl, (pendingFetches.get(baseUrl) ?? 0) + 1);
+    setState(baseUrl, { isLoading: true });
     try {
       const res = await fetchWithHeaders(`${baseUrl}/robots`);
       const data = await res.json();
       const next: Record<string, RobotRecord> = {};
       for (const r of data.robots ?? []) next[r.name] = r;
-      setState({ records: next });
+      setState(baseUrl, { records: next });
       // Drop the selection if the underlying record vanished (deleted from another tab)
-      if (state.selectedName && !(state.selectedName in next)) {
-        setSelectedShared(null);
+      const current = getStore(baseUrl).selectedName;
+      if (current && !(current in next)) {
+        setSelectedShared(baseUrl, null);
       }
     } catch (e) {
       console.error("Failed to fetch robots:", e);
     } finally {
-      pendingFetches -= 1;
-      setState({ isLoading: pendingFetches > 0 });
+      const left = (pendingFetches.get(baseUrl) ?? 1) - 1;
+      pendingFetches.set(baseUrl, left);
+      setState(baseUrl, { isLoading: left > 0 });
     }
   }, [baseUrl, fetchWithHeaders]);
 
@@ -183,13 +215,16 @@ export const useRobots = () => {
     refresh();
   }, [refresh, location.key]);
 
-  const selectRobot = useCallback((name: string) => {
-    setSelectedShared(name);
-  }, []);
+  const selectRobot = useCallback(
+    (name: string) => {
+      setSelectedShared(baseUrl, name);
+    },
+    [baseUrl],
+  );
 
   const clearSelection = useCallback(() => {
-    setSelectedShared(null);
-  }, []);
+    setSelectedShared(baseUrl, null);
+  }, [baseUrl]);
 
   const createRobot = useCallback(
     async (rawName: string, mode: RobotMode = "single"): Promise<boolean> => {
@@ -223,8 +258,8 @@ export const useRobots = () => {
         }
         const data = await res.json();
         if (data.robot) {
-          patchRecords((prev) => ({ ...prev, [name]: data.robot }));
-          setSelectedShared(name);
+          patchRecords(baseUrl, (prev) => ({ ...prev, [name]: data.robot }));
+          setSelectedShared(baseUrl, name);
         }
         return true;
       } catch (e) {
@@ -249,11 +284,12 @@ export const useRobots = () => {
           toast({ title: "Delete failed", description: text, variant: "destructive" });
           return false;
         }
-        patchRecords((prev) => {
+        patchRecords(baseUrl, (prev) => {
           const { [name]: _omit, ...rest } = prev;
           return rest;
         });
-        if (state.selectedName === name) setSelectedShared(null);
+        if (getStore(baseUrl).selectedName === name)
+          setSelectedShared(baseUrl, null);
         toast({
           title: "Robot deleted",
           description:
@@ -303,11 +339,12 @@ export const useRobots = () => {
         }
         const data = await res.json();
         // Swap the key oldName → newName in the local map, preserving order roughly.
-        patchRecords((prev) => {
+        patchRecords(baseUrl, (prev) => {
           const { [oldName]: _omit, ...rest } = prev;
           return data.robot ? { ...rest, [newName]: data.robot } : rest;
         });
-        if (state.selectedName === oldName) setSelectedShared(newName);
+        if (getStore(baseUrl).selectedName === oldName)
+          setSelectedShared(baseUrl, newName);
         return true;
       } catch (e) {
         toast({ title: "Network error", description: String(e), variant: "destructive" });

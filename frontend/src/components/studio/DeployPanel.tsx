@@ -153,7 +153,7 @@ function cameraMappings(
 }
 
 const DeployPanel: React.FC = () => {
-  const { baseUrl, fetchWithHeaders } = useApi();
+  const { baseUrl, fetchWithHeaders, isRemote } = useApi();
   const { toast } = useToast();
   const { open, deployPrefill, clearDeployPrefill } = useStudio();
   const { openInferenceSession } = useInferenceSession();
@@ -189,7 +189,13 @@ const DeployPanel: React.FC = () => {
   const [cameraBindings, setCameraBindings] = useState<
     Record<string, string | null>
   >({});
-  const { cameras: availableCameras } = useAvailableCameras({ enabled: open });
+  // Remote host: its cameras are on THAT machine, so pairing them with this
+  // laptop's browser devices by label would bind a role to the wrong camera.
+  // The thumbnails stream from the backend by index either way.
+  const { cameras: availableCameras } = useAvailableCameras({
+    enabled: open,
+    matchBrowser: !isRemote,
+  });
 
   // Light status poll while the panel is visible so ⏹ Stop enables only when a
   // rollout is actually active.

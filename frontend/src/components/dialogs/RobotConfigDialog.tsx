@@ -54,6 +54,7 @@ import {
   Wand2,
   Trash2,
   FolderOpen,
+  Laptop,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { useApi } from "@/contexts/ApiContext";
@@ -63,6 +64,7 @@ import CameraConfiguration, {
   CameraConfig,
 } from "@/components/recording/CameraConfiguration";
 import CalibrationLibrary from "@/components/calibration/CalibrationLibrary";
+import LocalLeaderCard from "@/components/dialogs/LocalLeaderCard";
 import {
   Collapsible,
   CollapsibleContent,
@@ -171,7 +173,8 @@ const RobotConfigWindow = ({
   onOpenChange: (open: boolean) => void;
 }) => {
   const { toast } = useToast();
-  const { baseUrl, fetchWithHeaders } = useApi();
+  const { baseUrl, localBaseUrl, isRemote, activeHost, fetchWithHeaders } =
+    useApi();
 
   const demoVideoRef = useRef<HTMLDivElement>(null);
 
@@ -470,10 +473,15 @@ const RobotConfigWindow = ({
   // Open the side's calibration folder in the OS file browser (Finder/Explorer/
   // xdg-open). A local, non-network action handled server-side; the dir is
   // created there if missing so a fresh install still opens an empty folder.
+  //
+  // "Local" is the whole catch: the window that opens is on whichever machine
+  // handles the request. Pointed at a remote host it would pop a Finder window
+  // on the SERVER, where nobody is sitting — so `host` is explicit and the
+  // callers only offer the button when it resolves to this computer.
   const openCalibrationFolder = useCallback(
-    async (device: "teleop" | "robot") => {
+    async (device: "teleop" | "robot", host: string) => {
       try {
-        const res = await fetchWithHeaders(`${baseUrl}/open-calibration-folder`, {
+        const res = await fetchWithHeaders(`${host}/open-calibration-folder`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ device_type: device }),
@@ -494,7 +502,7 @@ const RobotConfigWindow = ({
         });
       }
     },
-    [baseUrl, fetchWithHeaders, toast],
+    [fetchWithHeaders, toast],
   );
 
   // List the USB-serial ports for the dropdown (filtered to arm-like devices by
@@ -1240,6 +1248,24 @@ const RobotConfigWindow = ({
     setPowerDraft(robot?.motor_power ?? 38);
   }, [robot?.motor_power]);
 
+  // --- Where the leader arm physically is --------------------------------
+  // Split setups put the follower + cameras on the remote host and keep the
+  // LEADER on this laptop, streaming its joints over Portal. That is a field
+  // on the record (`leader_source`), drafted like every other edit here.
+  // Only offered while a remote host is active — on a single machine the
+  // leader is on "this computer" by definition and the control would be a
+  // no-op, so the whole affordance stays hidden.
+  const [leaderSourceDraft, setLeaderSourceDraft] = useState<
+    "local" | "remote" | null
+  >(null);
+  useEffect(() => {
+    setLeaderSourceDraft(null);
+  }, [robotName, robot?.leader_source]);
+  const savedLeaderSource = robot?.leader_source ?? "local";
+  const leaderSource = leaderSourceDraft ?? savedLeaderSource;
+  // "The leader is on THIS computer while the record's host is elsewhere."
+  const leaderOnThisComputer = isRemote && leaderSource === "remote";
+
   // Slider is in raw Torque_Limit units; convert to the percent the draft holds.
   const torqueLimitDraft = Math.round(powerDraft) * TORQUE_LIMIT_PER_PERCENT;
   // The integer percent the draft would persist, clamped to the backend's 10-100.
@@ -1267,13 +1293,16 @@ const RobotConfigWindow = ({
     [portDraft, robot],
   );
   const motorDirty = !!robot && motorPercent !== robot.motor_power;
-  const isDirty = camerasDirty || portsDirty || motorDirty;
+  const leaderSourceDirty = !!robot && leaderSource !== savedLeaderSource;
+  const isDirty =
+    camerasDirty || portsDirty || motorDirty || leaderSourceDirty;
 
   const handleSave = useCallback(async () => {
     if (!robotName || !robot) return;
     const patch: Record<string, unknown> = {};
     if (camerasDirty) patch.cameras = cameras;
     if (motorDirty) patch.motor_power = motorPercent;
+    if (leaderSourceDirty) patch.leader_source = leaderSource;
     if (portsDirty) {
       for (const [f, v] of Object.entries(portDraft)) {
         if ((v ?? "") !== ((robot[f as keyof RobotRecord] as string) || "")) {
@@ -1298,6 +1327,7 @@ const RobotConfigWindow = ({
         // powerDraft re-syncs via its effect when motor_power changes.
         setRobot(data.robot);
         setPortDraft({});
+        setLeaderSourceDraft(null);
         setCameras((data.robot as RobotRecord).cameras ?? []);
         setJustSaved(true);
         toast({ title: "Changes saved" });
@@ -1324,6 +1354,8 @@ const RobotConfigWindow = ({
     camerasDirty,
     motorDirty,
     portsDirty,
+    leaderSourceDirty,
+    leaderSource,
     cameras,
     motorPercent,
     portDraft,
@@ -1931,6 +1963,42 @@ const RobotConfigWindow = ({
               </div>
             )}
 
+            {/* Split setup: follower + cameras on the remote host, leader in
+                the operator's hands here. Hidden entirely on a single machine,
+                where it could only ever mean "yes". */}
+            {isRemote && (
+              <div className="flex items-start justify-between gap-3 rounded-md border border-border bg-muted/30 p-3">
+                <div className="space-y-1">
+                  <Label htmlFor="leader-source" className="flex items-center gap-1.5">
+                    <Laptop className="h-3.5 w-3.5 text-muted-foreground" />
+                    Leader arm is on this computer
+                  </Label>
+                  <p className="text-xs text-muted-foreground">
+                    {robotName}'s follower and cameras are attached to{" "}
+                    {activeHost.name}. Turn this on when the leader you hold is
+                    plugged into THIS laptop — its joints are then streamed to{" "}
+                    {activeHost.name} over Portal, and its port and calibration
+                    are configured here instead of in that record.
+                  </p>
+                </div>
+                <Switch
+                  id="leader-source"
+                  checked={leaderSource === "remote"}
+                  onCheckedChange={(checked) =>
+                    setLeaderSourceDraft(checked ? "remote" : "local")
+                  }
+                  disabled={
+                    calibrationStatus.calibration_active || batchAutoCal.active
+                  }
+                />
+              </div>
+            )}
+
+            {/* The leader lives here, so the remote record has no port for it —
+                its port + calibration come from this machine instead. */}
+            {leaderOnThisComputer && deviceType === "teleop" ? (
+              <LocalLeaderCard robotName={robotName} bimanual={!!isBimanual} />
+            ) : (
             <div className="space-y-2">
               <Label htmlFor="port">Port</Label>
               <div className="flex flex-wrap gap-2">
@@ -2068,6 +2136,7 @@ const RobotConfigWindow = ({
                 </p>
               )}
             </div>
+            )}
           </section>
 
           {/* 02 · Calibration files */}
@@ -2078,30 +2147,59 @@ const RobotConfigWindow = ({
                 {/* One folder per device type — both same-side slots share a
                     single directory (so101_leader / so101_follower), so a
                     single leader + follower pair covers single AND bimanual
-                    modes (no per-slot duplication). */}
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  className="ml-auto h-6 gap-1.5 px-2 text-xs text-muted-foreground hover:text-foreground"
-                  onClick={() => openCalibrationFolder("teleop")}
-                  aria-label="Open leader calibrations folder"
-                  title="Open leader calibrations folder"
-                >
-                  <FolderOpen className="h-4 w-4" />
-                  Leader
-                </Button>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  className="h-6 gap-1.5 px-2 text-xs text-muted-foreground hover:text-foreground"
-                  onClick={() => openCalibrationFolder("robot")}
-                  aria-label="Open follower calibrations folder"
-                  title="Open follower calibrations folder"
-                >
-                  <FolderOpen className="h-4 w-4" />
-                  Follower
-                </Button>
+                    modes (no per-slot duplication).
+
+                    Each button is only rendered when its files are on THIS
+                    machine: the endpoint opens a Finder/Explorer window on
+                    whichever host handles it, so against a remote host it
+                    would pop a window on the server where nobody is looking.
+                    The leader is the exception — with the leader on this
+                    laptop, its calibration folder really is local. */}
+                {isRemote && !leaderOnThisComputer && (
+                  <span className="ml-auto text-[11px] text-muted-foreground">
+                    Files are on {activeHost.name}
+                  </span>
+                )}
+                {(!isRemote || leaderOnThisComputer) && (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="ml-auto h-6 gap-1.5 px-2 text-xs text-muted-foreground hover:text-foreground"
+                    onClick={() =>
+                      openCalibrationFolder(
+                        "teleop",
+                        leaderOnThisComputer ? localBaseUrl : baseUrl,
+                      )
+                    }
+                    aria-label="Open leader calibrations folder"
+                    title="Open leader calibrations folder on this computer"
+                  >
+                    <FolderOpen className="h-4 w-4" />
+                    Leader
+                  </Button>
+                )}
+                {!isRemote && (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="h-6 gap-1.5 px-2 text-xs text-muted-foreground hover:text-foreground"
+                    onClick={() => openCalibrationFolder("robot", baseUrl)}
+                    aria-label="Open follower calibrations folder"
+                    title="Open follower calibrations folder"
+                  >
+                    <FolderOpen className="h-4 w-4" />
+                    Follower
+                  </Button>
+                )}
               </div>
+              {leaderOnThisComputer && (
+                <p className="rounded-md border border-border bg-muted/30 p-2 text-xs text-muted-foreground">
+                  The leader arm is on this computer, so its calibration is not
+                  part of {activeHost.name}'s record — pick it under{" "}
+                  <span className="font-medium">01 · Device</span> with the
+                  device type set to Teleoperator (Leader).
+                </p>
+              )}
               {(isBimanual
                 ? // Bimanual: each of the four slots gets the same free-naming
                   // picker as single mode — names are arbitrary now, and the
@@ -2140,7 +2238,13 @@ const RobotConfigWindow = ({
                       cfgField: "follower_config",
                     },
                   ] as const)
-              ).map((row) => {
+              )
+                // A leader that lives on this laptop has no slot in the remote
+                // host's record — its calibration is picked in step 01.
+                .filter(
+                  (row) => !(leaderOnThisComputer && row.device === "teleop"),
+                )
+                .map((row) => {
                 const cfg = (robot[row.cfgField] as string) || "";
                 // The same config may drive both same-side slots only by
                 // mistake (one physical arm on two arms), so exclude the

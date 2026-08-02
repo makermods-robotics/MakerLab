@@ -159,7 +159,7 @@ const InferenceModal: React.FC<Props> = ({
   jobId,
   initialStep,
 }) => {
-  const { baseUrl, fetchWithHeaders } = useApi();
+  const { baseUrl, fetchWithHeaders, isRemote } = useApi();
   const { toast } = useToast();
   const { openInferenceSession } = useInferenceSession();
 
@@ -178,7 +178,13 @@ const InferenceModal: React.FC<Props> = ({
   // checkpoint feature key — see `cameraMappings` / the CameraMapping doc for
   // the round-trip.
   const [cameraBindings, setCameraBindings] = useState<Record<string, string | null>>({});
-  const { cameras: availableCameras } = useAvailableCameras({ enabled: open });
+  // Remote host: its cameras are on THAT machine, so pairing them with this
+  // laptop's browser devices by label would bind a role to the wrong camera.
+  // The thumbnails stream from the backend by index either way.
+  const { cameras: availableCameras } = useAvailableCameras({
+    enabled: open,
+    matchBrowser: !isRemote,
+  });
 
   // `lerobot-rollout` drives any Robot generically, including `bi_so_follower`,
   // so a bimanual record now runs inference on BOTH followers — the server

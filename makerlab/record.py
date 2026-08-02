@@ -32,7 +32,7 @@ from lerobot.motors.motors_bus import MotorsBus
 # Import the main record functionality to reuse it
 from lerobot.scripts.lerobot_record import RecordConfig
 
-from .arm_identity import ArmIdentityError, verify_devices
+from .arm_identity import verify_devices
 from .camera_preview import camera_preview_manager
 from .datasets import (
     _lerobot_cache_root,
@@ -41,8 +41,14 @@ from .datasets import (
     invalidate_hub_status,
 )
 from .motor_power import clear_goal_velocity, reset_torque_limit
+from .portal_link import PortalTeeRobot, RemoteLeaderSession, remote_leader_record
 from .rest_pose import capture_rest_pose
-from .teleoperate import _device_buses, _return_followers_to_rest, force_disable_torque
+from .teleoperate import (
+    _device_buses,
+    _return_followers_to_rest,
+    _safe_disconnect,
+    force_disable_torque,
+)
 from .utils.config import (
     validate_dataset_repo_id,
     with_makerlab_tag,
@@ -61,6 +67,23 @@ logger = logging.getLogger(__name__)
 # negotiates MJPEG, so this only changes Linux behavior. An explicit per-camera
 # fourcc (e.g. a deliberate YUYV choice from the UI) still wins.
 _DEFAULT_FOURCC = "MJPG"
+
+# Transient camera-session turbulence, all observed on this bench and all
+# curable by a clean re-connect (an AVCaptureSession opened into another
+# session's asynchronous teardown intermittently comes up wrong — forensically
+# established 2026-07-09):
+#   * "failed to set fps=30 (actual_fps=5.0)" — cold-open fps read-back
+#   * "do not match configured"   — session landed the neighboring native
+#     format (e.g. 640x360 instead of 640x480)
+#   * "timed out waiting for frame" — session came up frame-dead (opens fine,
+#     background reader never receives a frame)
+# Lifted to a constant so the remote-leader teleoperation path (which opens the
+# same cameras — see makerlab/teleoperate.py) retries on the same signals.
+_TRANSIENT_CAMERA_MARKERS = (
+    "failed to set fps",
+    "do not match configured",
+    "timed out waiting for frame",
+)
 
 # --- Motor bus read retries ----------------------------------------------------
 # lerobot's SO-10x follower/leader call bus.sync_read("Present_Position") with
@@ -368,8 +391,16 @@ def _build_camera_configs(cameras: dict, default_backend) -> dict:
     return camera_configs
 
 
-def create_record_config(request: RecordingRequest) -> RecordConfig:
-    """Create a RecordConfig from the recording request"""
+def create_record_config(request: RecordingRequest, record: dict | None = None) -> RecordConfig:
+    """Create a RecordConfig from the recording request
+
+    ``record`` is the robot record when this session's leader is REMOTE
+    (docs/remote-portal/SPEC.md); the factory then stages/builds the follower
+    half only and returns ``teleop_config = None``, and the network
+    teleoperator is constructed later, in ``record_with_web_events``, where the
+    local robot object it wraps exists. ``None`` (every local flow) is
+    unchanged.
+    """
     # Convert the frontend camera dict into OpenCVCameraConfig objects. Backend
     # defaults to the platform pin unless the request overrides it per camera.
     camera_configs = _build_camera_configs(request.cameras, _platform_backend())
@@ -378,9 +409,9 @@ def create_record_config(request: RecordingRequest) -> RecordConfig:
         # Build a lerobot BiSO leader+follower pair (config assembly + calibration
         # staging in build_bimanual_configs). Cameras go on the left follower arm
         # (exposed prefixed "left_*").
-        robot_config, teleop_config = build_bimanual_configs(request, cameras=camera_configs)
+        robot_config, teleop_config = build_bimanual_configs(request, cameras=camera_configs, record=record)
     else:
-        robot_config, teleop_config = build_single_configs(request, cameras=camera_configs)
+        robot_config, teleop_config = build_single_configs(request, cameras=camera_configs, record=record)
 
     # Create dataset config
     dataset_config = DatasetRecordConfig(
@@ -452,7 +483,7 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
         identity_warnings, \
         discard_requested
 
-    from . import rollout as _rollout, teleoperate as _teleoperate
+    from . import leader_bridge as _leader_bridge, rollout as _rollout, teleoperate as _teleoperate
 
     # Claim the active flag under the lock so two concurrent starts can't both
     # pass the precondition check.
@@ -484,6 +515,11 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
             return {"success": False, "message": "Teleoperation is currently active. Stop it first."}
         if _rollout.inference_active:
             return {"success": False, "message": "Inference is currently active. Stop it first."}
+        # The other half of the leader bridge's mutex: while the bridge is
+        # streaming this machine's leader arm to a remote follower, that leader
+        # port is held and driving anything locally would fight it.
+        if _leader_bridge.bridge_active:
+            return {"success": False, "message": "The leader bridge is currently active. Stop it first."}
         # Refuse a malformed dataset name up front (before claiming the flag or
         # touching hardware). Rejecting beats silent sanitization: "whoo/" used to
         # smuggle in a namespace and land the dataset at "user/whoo/".
@@ -550,7 +586,21 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
             "rerecord_episode": False,  # Left arrow key -> "Re-record episode" button
         }
 
-        record_config = create_record_config(request)
+        # Remote leader (docs/remote-portal/SPEC.md): None for every local
+        # record — the default — so everything below stays on its current path.
+        # Resolved here, on the request thread, so a Portal host that is missing
+        # or not running fails THIS response with a legible message instead of
+        # dying inside the worker thread.
+        leader_record = remote_leader_record(request.robot_name)
+        remote_leader = (
+            RemoteLeaderSession.resolve(leader_record, fps=request.fps) if leader_record is not None else None
+        )
+
+        if leader_record is None:
+            # Local leader: called exactly as before, same single argument.
+            record_config = create_record_config(request)
+        else:
+            record_config = create_record_config(request, record=leader_record)
 
         def recording_worker():
             global \
@@ -598,11 +648,19 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                     if request.mode == "bimanual"
                     else None
                 )
+                # Remote leader: only the two followers are connected on this
+                # machine, so the guard sees two arms, not four.
+                if remote_leader is not None and request.mode == "bimanual":
+                    identity_config_names = [
+                        request.follower_config,
+                        request.right_follower_config,
+                    ]
                 dataset = record_with_web_events(
                     record_config,
                     recording_events,
                     skip_identity_check=request.skip_identity_check,
                     identity_config_names=identity_config_names,
+                    remote_leader=remote_leader,
                 )
                 logger.info(f"Recording completed successfully. Dataset has {dataset.num_episodes} episodes")
                 last_session_outcome = "ok"
@@ -1175,11 +1233,39 @@ def handle_upload_status() -> dict[str, Any]:
     return upload_manager.get_status()
 
 
+def _release_connected_devices(devices: list[tuple[Any, str]]) -> str | None:
+    """Force-disable torque and disconnect the devices a failed setup connected.
+
+    The recording setup phase — the robot connect, the teleop connect (a
+    NETWORK connect when the leader is remote), the identity guard, the
+    calibration writes and the rest-pose capture — runs BEFORE the try/finally
+    that owns the torque release, so anything raising in there left every
+    device already opened connected and (past ``configure()``) energized, with
+    nothing to release it.
+
+    Same shape as ``teleoperate._cleanup_after_setup_failure`` — torque off on
+    everything first, then disconnect everything, so one device's failure can't
+    leave the other rigid — but ownership-aware: only devices this run actually
+    connected are touched, so a device that never opened cannot produce a
+    spurious "TORQUE MAY STILL BE ENABLED". Returns the joined problem text, or
+    None when the release was clean.
+    """
+    problems: list[str] = []
+    for device, label in devices:
+        problems += force_disable_torque(device, label)
+    for device, label in devices:
+        error = _safe_disconnect(device, label)
+        if error:
+            problems.append(error)
+    return " ".join(problems) if problems else None
+
+
 def record_with_web_events(
     cfg: RecordConfig,
     web_events: dict,
     skip_identity_check: bool = False,
     identity_config_names: list[str] | None = None,
+    remote_leader: RemoteLeaderSession | None = None,
 ) -> LeRobotDataset:
     """
     Implement recording with phase tracking - exactly mirrors original record() function behavior
@@ -1188,6 +1274,14 @@ def record_with_web_events(
     — [left_follower, right_follower, left_leader, right_leader] — so the arm
     identity guard compares against the library instead of the BiSO staging alias
     ids ("<base>_left"/"<base>_right"). None for single-arm (id is the real stem).
+
+    `remote_leader` (docs/remote-portal/SPEC.md) is set when the leader arm lives
+    on another machine: the teleop device is then a Portal network object built
+    here (it needs the local robot to derive its wire schema), and the robot is
+    wrapped in a tee that also publishes each observation to Portal. The dataset
+    path is deliberately untouched by that wrapper — frames still come straight
+    from `robot.get_observation()` to disk, uncompressed; Portal only gets a
+    copy. None (every local session) changes nothing.
     """
     import time
 
@@ -1207,6 +1301,18 @@ def record_with_web_events(
 
     robot = make_robot_from_config(cfg.robot)
     teleop = make_teleoperator_from_config(cfg.teleop) if cfg.teleop is not None else None
+
+    if remote_leader is not None:
+        # Remote leader: cfg.teleop is None (the factory's marker), so build the
+        # network teleoperator against the local robot — it derives the wire
+        # schema from this robot's action/observation features — and tee the
+        # robot so every observation is ALSO published to Portal. The tee
+        # delegates everything else (name, features, cameras, buses,
+        # send_action, connect/disconnect), so the dataset, the identity guard,
+        # lerobot's record_loop and the torque-release cleanup below all keep
+        # seeing the real follower.
+        teleop = remote_leader.build_teleoperator(robot)
+        robot = PortalTeeRobot(robot, teleop)
 
     teleop_action_processor, robot_action_processor, robot_observation_processor = make_default_processors()
 
@@ -1276,155 +1382,177 @@ def record_with_web_events(
     # can't cleanly split arm-connect from camera-warmup — they share this
     # substep. (Both surface through the same current_phase global the status
     # handler already returns; no new plumbing.)
-    current_phase = "connecting_robot"
-    phase_start_time = time.time()
-    connect_attempts = 3
-    for attempt in range(1, connect_attempts + 1):
-        try:
-            logger.info(
-                "🔧 ROBOT CONNECTION: Attempting to connect robot (attempt %d/%d)...",
-                attempt,
-                connect_attempts,
-            )
-            # Calibration is already on disk (loaded via the configs above), so never
-            # let connect() drop into interactive recalibration — that would hang the
-            # headless record thread (the "stuck on preparing session" symptom).
-            robot.connect(calibrate=False)
-            logger.info("✅ ROBOT CONNECTION: Robot connected successfully")
-            break
-        except Exception as e:
-            msg = str(e)
-            # Transient camera-session turbulence, all observed on this bench and
-            # all curable by a clean re-connect (an AVCaptureSession opened into
-            # another session's asynchronous teardown intermittently comes up
-            # wrong — forensically established 2026-07-09):
-            #   * "failed to set fps=30 (actual_fps=5.0)" — cold-open fps read-back
-            #   * "do not match configured"   — session landed the neighboring
-            #     native format (e.g. 640x360 instead of 640x480)
-            #   * "timed out waiting for frame" — session came up frame-dead
-            #     (opens fine, background reader never receives a frame)
-            transient_camera = any(
-                marker in msg.lower()
-                for marker in (
-                    "failed to set fps",
-                    "do not match configured",
-                    "timed out waiting for frame",
-                )
-            )
-            logger.error(f"❌ ROBOT CONNECTION: Failed to connect robot: {e}")
-            # If robot connection fails due to camera conflict, provide clear error
-            if (
-                "camera" in msg.lower()
-                or "device" in msg.lower()
-                or "busy" in msg.lower()
-                or transient_camera
-            ):
-                logger.error(
-                    "💡 ROBOT CONNECTION: Camera connection failure - resource conflict or cold-open session turbulence"
-                )
-                logger.error(
-                    "💡 ROBOT CONNECTION: Make sure frontend camera streams are released before recording"
-                )
-            if attempt < connect_attempts and transient_camera:
-                # Drop any half-open handles from this failed attempt so the retry
-                # starts from a clean device, then let the OS release settle past
-                # the turbulence window before re-rolling the connect.
-                with contextlib.suppress(Exception):
-                    robot.disconnect()
-                time.sleep(2.0)
-                continue
-            raise
-
-    if teleop is not None:
-        # Second detectable substep of the preparing window: the leader bus.
-        current_phase = "connecting_teleop"
-        phase_start_time = time.time()
-        try:
-            logger.info("🔧 TELEOP CONNECTION: Attempting to connect teleoperator...")
-            # calibrate=False for the same reason as the robot connect above —
-            # and critically for the identity guard below: with the default
-            # calibrate=True, an EEPROM/file mismatch (exactly the swapped-port
-            # case) drops into SOLeader.calibrate(), which writes the wrong
-            # JSON into the servos' EEPROM (or hangs on input() in this
-            # headless thread). The calibration write happens explicitly in
-            # _write_calibration below, after the guard has read the EEPROM.
-            teleop.connect(calibrate=False)
-            logger.info("✅ TELEOP CONNECTION: Teleoperator connected successfully")
-        except Exception as e:
-            logger.error(f"❌ TELEOP CONNECTION: Failed to connect teleoperator: {e}")
-            raise
-
-    # Arm-identity guard: read-only check that each connected arm matches its
-    # assigned calibration, BEFORE _write_calibration below can stamp a wrong
-    # file into a swapped arm's EEPROM and before any action is sent. On a hard
-    # mismatch, release the arms (torque was never enabled) and let the worker's
-    # error path surface the message via the recording status.
+    # Setup phase, made ownership-aware (see _release_connected_devices):
+    # everything from here to the rest-pose capture runs BEFORE the
+    # try/finally that owns the torque release, and any of it can raise —
+    # a camera that will not open, a swapped arm, a failed calibration
+    # write, and now a NETWORK connect for a remote leader, which fails far
+    # more readily than a local file write. `connected_devices` records what
+    # has actually been opened, in connect order, so the except below
+    # releases exactly those and nothing else.
+    connected_devices: list[tuple[Any, str]] = []
     try:
+        current_phase = "connecting_robot"
+        phase_start_time = time.time()
+        connect_attempts = 3
+        for attempt in range(1, connect_attempts + 1):
+            try:
+                logger.info(
+                    "🔧 ROBOT CONNECTION: Attempting to connect robot (attempt %d/%d)...",
+                    attempt,
+                    connect_attempts,
+                )
+                # Calibration is already on disk (loaded via the configs above), so never
+                # let connect() drop into interactive recalibration — that would hang the
+                # headless record thread (the "stuck on preparing session" symptom).
+                robot.connect(calibrate=False)
+                # Connected: from here on a failure ANYWHERE below owes this
+                # device a torque release and a disconnect.
+                connected_devices.append((robot, "robot"))
+                logger.info("✅ ROBOT CONNECTION: Robot connected successfully")
+                break
+            except Exception as e:
+                msg = str(e)
+                # Transient camera-session turbulence — see _TRANSIENT_CAMERA_MARKERS.
+                transient_camera = any(marker in msg.lower() for marker in _TRANSIENT_CAMERA_MARKERS)
+                logger.error(f"❌ ROBOT CONNECTION: Failed to connect robot: {e}")
+                # If robot connection fails due to camera conflict, provide clear error
+                if (
+                    "camera" in msg.lower()
+                    or "device" in msg.lower()
+                    or "busy" in msg.lower()
+                    or transient_camera
+                ):
+                    logger.error(
+                        "💡 ROBOT CONNECTION: Camera connection failure - resource conflict or cold-open session turbulence"
+                    )
+                    logger.error(
+                        "💡 ROBOT CONNECTION: Make sure frontend camera streams are released before recording"
+                    )
+                if attempt < connect_attempts and transient_camera:
+                    # Drop any half-open handles from this failed attempt so the retry
+                    # starts from a clean device, then let the OS release settle past
+                    # the turbulence window before re-rolling the connect.
+                    with contextlib.suppress(Exception):
+                        robot.disconnect()
+                    time.sleep(2.0)
+                    continue
+                raise
+
+        if teleop is not None:
+            # Second detectable substep of the preparing window: the leader bus.
+            current_phase = "connecting_teleop"
+            phase_start_time = time.time()
+            try:
+                logger.info("🔧 TELEOP CONNECTION: Attempting to connect teleoperator...")
+                # calibrate=False for the same reason as the robot connect above —
+                # and critically for the identity guard below: with the default
+                # calibrate=True, an EEPROM/file mismatch (exactly the swapped-port
+                # case) drops into SOLeader.calibrate(), which writes the wrong
+                # JSON into the servos' EEPROM (or hangs on input() in this
+                # headless thread). The calibration write happens explicitly in
+                # _write_calibration below, after the guard has read the EEPROM.
+                teleop.connect(calibrate=False)
+                # For a remote leader this was a NETWORK connect (Portal), and
+                # its disconnect is what closes the session — so it belongs on
+                # the cleanup list exactly like a serial leader does.
+                connected_devices.append((teleop, "teleop"))
+                logger.info("✅ TELEOP CONNECTION: Teleoperator connected successfully")
+            except Exception as e:
+                logger.error(f"❌ TELEOP CONNECTION: Failed to connect teleoperator: {e}")
+                raise
+
+        # Arm-identity guard: read-only check that each connected arm matches its
+        # assigned calibration, BEFORE _write_calibration below can stamp a wrong
+        # file into a swapped arm's EEPROM and before any action is sent. On a hard
+        # mismatch, the setup-failure cleanup below releases the arms (torque was
+        # never enabled) and the worker's error path surfaces the message via the
+        # recording status. That cleanup is why this no longer disconnects by
+        # hand: doing both would disconnect each device twice, and the second
+        # call reports a failure that never happened.
         identity_warnings = verify_devices(
             ((robot, "follower"), (teleop, "leader")),
             skip=skip_identity_check,
             config_names=identity_config_names,
         )
-    except ArmIdentityError:
-        robot.disconnect()
-        if teleop is not None:
-            teleop.disconnect()
-        raise
 
-    # Ensure calibration is properly loaded and applied to the devices
-    logger.info("Applying calibration to devices")
+        # Ensure calibration is properly loaded and applied to the devices
+        logger.info("Applying calibration to devices")
 
-    # Write calibration to motors' memory (similar to teleoperation code). A
-    # single-arm device has its own .bus/.calibration; a bimanual BiSO device
-    # exposes left_arm/right_arm sub-arms instead, so write each of those.
-    def _write_calibration(device, label: str) -> None:
-        if device is None:
-            return
-        sub_arms = [
-            a
-            for a in (getattr(device, "left_arm", None), getattr(device, "right_arm", None))
-            if a is not None
+        # Write calibration to motors' memory (similar to teleoperation code). A
+        # single-arm device has its own .bus/.calibration; a bimanual BiSO device
+        # exposes left_arm/right_arm sub-arms instead, so write each of those.
+        def _write_calibration(device, label: str) -> None:
+            if device is None:
+                return
+            sub_arms = [
+                a
+                for a in (getattr(device, "left_arm", None), getattr(device, "right_arm", None))
+                if a is not None
+            ]
+            targets = sub_arms if sub_arms else [device]
+            wrote = False
+            for target in targets:
+                if hasattr(target, "bus") and getattr(target, "calibration", None) is not None:
+                    try:
+                        target.bus.write_calibration(target.calibration)
+                        wrote = True
+                    except Exception as e:
+                        logger.error(f"Error writing {label} calibration: {e}")
+            if wrote:
+                logger.info(f"{label.capitalize()} calibration applied successfully")
+            else:
+                logger.warning(
+                    f"{label.capitalize()} bus or calibration not available - calibration may not be applied"
+                )
+
+        _write_calibration(robot, "robot")
+        if remote_leader is None:
+            # A remote leader has no bus and no calibration on this machine — its
+            # calibration lives with the arm, on the operator's laptop.
+            _write_calibration(teleop, "teleop")
+
+        # Stock session torque (RAM Torque_Limit re-seeded from EEPROM) — the
+        # follower only, never the human-held leader. Clears any torque cap a
+        # previous auto-calibration left in RAM; a failed write degrades to the
+        # previous limit (logged inside) and must not abort the session.
+        reset_torque_limit(robot, "follower arm")
+        # Clear any leftover Goal_Velocity speed cap a previous arm-driving feature
+        # stamped in RAM (auto-cal fold/unfold=1000, rest-pose return=400); the
+        # follower only, never the human-held leader. See makerlab/motor_power.py.
+        clear_goal_velocity(robot, "follower arm")
+
+        # Capture the follower's rest pose now — after connect/configure/identity
+        # guard, before the recording loop moves anything — so a normal stop can
+        # drive it back to where the user left it (same as teleop; see
+        # makerlab/rest_pose.py). Followers only (a bimanual BiSO robot exposes two
+        # follower buses), NEVER the human-held leader. The gripper is excluded: at
+        # stop time it may be holding an object, and returning it to its (likely
+        # open) starting width would drop the object mid-return.
+        follower_rest_poses = [
+            (bus, {m: v for m, v in capture_rest_pose(bus).items() if m != "gripper"})
+            for bus in _device_buses(robot)
         ]
-        targets = sub_arms if sub_arms else [device]
-        wrote = False
-        for target in targets:
-            if hasattr(target, "bus") and getattr(target, "calibration", None) is not None:
-                try:
-                    target.bus.write_calibration(target.calibration)
-                    wrote = True
-                except Exception as e:
-                    logger.error(f"Error writing {label} calibration: {e}")
-        if wrote:
-            logger.info(f"{label.capitalize()} calibration applied successfully")
-        else:
-            logger.warning(
-                f"{label.capitalize()} bus or calibration not available - calibration may not be applied"
+    except Exception as e:
+        # Nothing below has started yet, so the try/finally that normally
+        # releases torque never ran — release whatever this setup DID open,
+        # then let the original error travel on untouched. The problem text is
+        # stashed on the exception the way teleoperate's setup paths do it, so
+        # a caller that wants to surface "the arm may still be energized" can,
+        # and logged here so it is never lost silently.
+        cleanup_error = _release_connected_devices(connected_devices)
+        with contextlib.suppress(Exception):
+            # Belt and braces: an exception type that refuses attributes must
+            # not be what replaces the real error on a safety path.
+            e.cleanup_error = cleanup_error
+        if cleanup_error:
+            logger.error("Releasing the arms after a failed recording setup reported: %s", cleanup_error)
+        elif connected_devices:
+            logger.info(
+                "Recording setup failed; released %s.",
+                ", ".join(label for _device, label in connected_devices),
             )
-
-    _write_calibration(robot, "robot")
-    _write_calibration(teleop, "teleop")
-
-    # Stock session torque (RAM Torque_Limit re-seeded from EEPROM) — the
-    # follower only, never the human-held leader. Clears any torque cap a
-    # previous auto-calibration left in RAM; a failed write degrades to the
-    # previous limit (logged inside) and must not abort the session.
-    reset_torque_limit(robot, "follower arm")
-    # Clear any leftover Goal_Velocity speed cap a previous arm-driving feature
-    # stamped in RAM (auto-cal fold/unfold=1000, rest-pose return=400); the
-    # follower only, never the human-held leader. See makerlab/motor_power.py.
-    clear_goal_velocity(robot, "follower arm")
-
-    # Capture the follower's rest pose now — after connect/configure/identity
-    # guard, before the recording loop moves anything — so a normal stop can
-    # drive it back to where the user left it (same as teleop; see
-    # makerlab/rest_pose.py). Followers only (a bimanual BiSO robot exposes two
-    # follower buses), NEVER the human-held leader. The gripper is excluded: at
-    # stop time it may be holding an object, and returning it to its (likely
-    # open) starting width would drop the object mid-return.
-    follower_rest_poses = [
-        (bus, {m: v for m, v in capture_rest_pose(bus).items() if m != "gripper"})
-        for bus in _device_buses(robot)
-    ]
+        raise
 
     # Start with episode 1 - but track it properly
     current_episode = 1

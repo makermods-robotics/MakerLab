@@ -23,6 +23,7 @@ import {
   leaveDiscardMessage,
 } from "@/lib/recordingExit";
 import LogPanel from "@/components/LogPanel";
+import SessionCameraStrip from "@/components/control/SessionCameraStrip";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import {
   AlertDialog,
@@ -861,6 +862,12 @@ const RecordingSessionDialog: React.FC<{
                 );
               })()}
             </div>
+
+            {/* Remote session only: the cameras are on the other machine and
+                the record loop is holding their cv2 devices, so the operator's
+                view arrives over Portal through this machine's leader-bridge.
+                Renders nothing on a local host — unchanged from before. */}
+            <SessionCameraStrip className="mt-6" />
 
             <div className="mt-6">
               <LogPanel logs={logs} title="Recording log" defaultCollapsed />

@@ -10,6 +10,7 @@ import {
 import { cn } from "@/lib/utils";
 import { ConfigComponentProps } from "../types";
 import { RunnerFlavor } from "@/lib/jobsApi";
+import { useApi } from "@/contexts/ApiContext";
 
 interface TargetCardProps extends ConfigComponentProps {
   authenticated: boolean;
@@ -39,11 +40,19 @@ const TargetCard: React.FC<TargetCardProps> = ({
   loading,
 }) => {
   const target = config.target;
+  const { hosts, baseUrl, activeHost } = useApi();
+
+  // Training drives no hardware, so a "local" run can execute on either
+  // machine — it is only a question of which host receives the job. The
+  // picker appears solely when there is more than one, so a single-machine
+  // install sees the toggle it always had.
+  const trainingHost = target.host ?? baseUrl;
+  const multiHost = hosts.length > 1;
 
   const setRunner = (runner: "local" | "hf_cloud") => {
     if (runner === target.runner) return;
     if (runner === "local") {
-      updateConfig("target", { runner: "local" });
+      updateConfig("target", { runner: "local", host: target.host });
     } else {
       // Preserve any previously-chosen flavor (may be undefined until picked).
       updateConfig("target", { runner: "hf_cloud", flavor: target.flavor });
@@ -67,11 +76,46 @@ const TargetCard: React.FC<TargetCardProps> = ({
                   : "bg-background text-muted-foreground hover:text-foreground",
               )}
             >
-              {r === "local" ? "Local — your machine" : "Hugging Face Cloud"}
+              {r === "local"
+                ? multiHost
+                  ? "Your own machines"
+                  : "Local — your machine"
+                : "Hugging Face Cloud"}
             </button>
           ))}
         </div>
       </div>
+
+      {target.runner === "local" && multiHost && (
+        <div className="space-y-2">
+          <Label htmlFor="training_host">Machine</Label>
+          <Select
+            value={trainingHost}
+            onValueChange={(host) =>
+              updateConfig("target", { runner: "local", host })
+            }
+          >
+            <SelectTrigger id="training_host">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {hosts.map((h) => (
+                <SelectItem key={h.url} value={h.url}>
+                  {h.name}
+                  {h.url === activeHost.url ? " (current)" : ""}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <p className="text-xs text-muted-foreground">
+            The run happens on this machine, so the dataset must already be
+            there — otherwise pull it from the Hub on that machine first.
+            {trainingHost !== activeHost.url
+              ? " Switch the robot corner to it to watch progress."
+              : ""}
+          </p>
+        </div>
+      )}
 
       {target.runner === "local" ? (
         <div className="space-y-2">

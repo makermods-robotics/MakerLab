@@ -206,6 +206,13 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
     [trainingConfig, policyType, controlledDatasetRepoId],
   );
 
+  // Which MACHINE a local run goes to. Training drives no hardware, so it may
+  // run on either host; only the job POST, its per-machine mutex, and the
+  // policy-extra capability check follow this — everything else (dataset
+  // browsing, HF auth, the job monitor) stays on the active host.
+  // Undefined `target.host` ⇒ the active host, i.e. today's behaviour.
+  const trainingHost = config.target.host ?? baseUrl;
+
   const [trainingExtraAvailable, setTrainingExtraAvailable] = useState<
     boolean | null
   >(null);
@@ -239,14 +246,18 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
     // Only the local lock matters for the Start button; cloud jobs can stack.
     // Pull a generous slice so a running local isn't masked by newer cloud
     // jobs in the started_at-desc ordering.
-    listJobs(baseUrl, fetchWithHeaders, 200)
+    //
+    // The lock is PER MACHINE: a training already running on the server says
+    // nothing about whether this laptop can start one, so the check follows
+    // the host the job would actually be posted to.
+    listJobs(trainingHost, fetchWithHeaders, 200)
       .then((j) =>
         setLocalJobRunning(
           j.some((r) => r.runner === "local" && r.state === "running"),
         ),
       )
       .catch(() => setLocalJobRunning(false));
-  }, [baseUrl, fetchWithHeaders]);
+  }, [trainingHost, fetchWithHeaders]);
 
   useEffect(() => {
     // Re-fetches when auth status flips (e.g. user pastes a token in
@@ -323,22 +334,33 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
     setIsStarting(true);
     try {
       const job = await startTrainingJob(
-        baseUrl,
+        trainingHost,
         fetchWithHeaders,
         configToRequest(config),
       );
-      toast({ title: "Training Started", description: job.name });
       onStarted?.(job.id);
-      // The monitor is a dialog over the studio's Train panel, not a route.
-      // openJobMonitor opens the studio; off-Launchpad callers (the
-      // transitional /training route) must also land on "/" to see it.
-      openJobMonitor(job.id);
-      if (location.pathname !== "/") navigate("/");
+      if (trainingHost !== baseUrl) {
+        // The run lives on another machine, and the monitor reads jobs from
+        // the ACTIVE host — opening it would just show "not found". Say where
+        // the run went instead.
+        toast({
+          title: "Training started on the other computer",
+          description: `${job.name} is running there. Switch the computer in the robot corner to watch it.`,
+          duration: 10000,
+        });
+      } else {
+        toast({ title: "Training Started", description: job.name });
+        // The monitor is a dialog over the studio's Train panel, not a route.
+        // openJobMonitor opens the studio; off-Launchpad callers (the
+        // transitional /training route) must also land on "/" to see it.
+        openJobMonitor(job.id);
+        if (location.pathname !== "/") navigate("/");
+      }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       toast({ title: "Error", description: msg, variant: "destructive" });
       // If the failure was the 409 case, refresh our running-job knowledge.
-      listJobs(baseUrl, fetchWithHeaders, 200)
+      listJobs(trainingHost, fetchWithHeaders, 200)
         .then((j) =>
           setLocalJobRunning(
             j.some((r) => r.runner === "local" && r.state === "running"),
@@ -350,6 +372,7 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
     }
   }, [
     baseUrl,
+    trainingHost,
     fetchWithHeaders,
     config,
     toast,
@@ -399,8 +422,11 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
     // own environment, so the local package is irrelevant — skip the check.
     if (config.target.runner === "local") {
       try {
+        // "Does the machine that will train have this policy's extra
+        // installed" — so it must be asked of the training host, not whichever
+        // host the UI happens to be pointed at.
         const r = await fetchWithHeaders(
-          `${baseUrl}/system/policy-extra/${config.policy_type}`,
+          `${trainingHost}/system/policy-extra/${config.policy_type}`,
         );
         if (r.ok) {
           const extra = await r.json();

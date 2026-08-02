@@ -20,6 +20,10 @@ pre-built frontend at /. Opens the user's browser to the local app.
 
 --dev mode: spawns the Vite dev server (frontend/, port 8080) for HMR
 and starts uvicorn with --reload. Opens the browser to :8080.
+
+--server mode: headless remote-server posture (docs/remote-portal/SPEC.md).
+Binds 0.0.0.0 like --lan, opens no browser, and additionally hosts the
+LiveKit server a remote MakerLab client connects its leader arm through.
 """
 
 import argparse
@@ -297,12 +301,69 @@ def _open_browser_when_ready():
         return
 
 
-def _run_prod(lan: bool = False):
+def _print_server_banner(portal: dict, ips: list[str], primary: str) -> None:
+    """Operator-facing startup block for `--server` (headless, no GUI).
+
+    This is the only thing a person sitting at the station sees, so it must
+    answer "what address do I type into the client?" without any digging.
+    Printed rather than logged: no level prefixes, no wrapping surprises.
+    """
+    others = [ip for ip in ips if ip != primary]
+    bar = "=" * 68
+    print(f"\n{bar}")
+    print("  MakerLab — remote SERVER mode (headless, no browser)")
+    print(bar)
+    if ips:
+        suffix = f"   (also reachable at: {', '.join(others)})" if others else ""
+        print(f"  LAN address    : {primary}{suffix}")
+    else:
+        print("  LAN address    : none detected — this machine looks offline/isolated")
+    print(f"  API + UI       : http://{primary}:{BACKEND_PORT}")
+    if portal.get("started"):
+        print(f"  LiveKit Portal : {portal.get('url')}   (running)")
+        print(f"  LiveKit log    : {portal.get('log_file')}")
+    else:
+        print(f"  LiveKit Portal : DISABLED — {portal.get('reason')}")
+        print("                   MakerLab still serves the API/UI; a remote leader arm cannot connect.")
+    print(bar)
+    print(f"  ➜  Point your MakerLab client at  http://{primary}:{BACKEND_PORT}")
+    print(f"{bar}\n", flush=True)
+
+
+def _start_portal_host():
+    """Start the LiveKit host for `--server` and print the operator banner.
+
+    Returns the portal_host module (for shutdown) or None if it could not be
+    imported. Imported lazily so nothing about the default launch path
+    changes, and it must never take MakerLab down with it — a station with no
+    livekit-server installed still serves the API/UI.
+    """
+    try:
+        from makerlab import portal_host
+    except Exception as exc:
+        logger.error("❌ Portal host unavailable (%s) — continuing without it.", exc)
+        return None
+    portal_host.set_server_mode(True)
+    try:
+        result = portal_host.start_livekit_server()
+    except Exception as exc:  # defensive: never block the server start
+        logger.error("❌ Could not start livekit-server (%s) — continuing without Portal.", exc)
+        result = {"started": False, "reason": str(exc)}
+    ips = portal_host.detect_lan_ips()
+    _print_server_banner(result, ips, portal_host.primary_lan_ip(ips))
+    return portal_host
+
+
+def _run_prod(lan: bool = False, server_mode: bool = False):
     """Serve built frontend from backend on a single port.
 
     `lan` binds 0.0.0.0 for headless stations serving other machines on the
     network; it also skips the open-a-local-browser step (there is no local
     browser worth opening in that deployment).
+
+    `server_mode` is the remote-server posture (docs/remote-portal/SPEC.md): it
+    implies `lan` (the caller passes both), stays headless, and additionally
+    owns the livekit-server subprocess for the whole run.
     """
     if not FRONTEND_DIST.exists():
         logger.error(f"❌ Built frontend not found at {FRONTEND_DIST}")
@@ -316,6 +377,9 @@ def _run_prod(lan: bool = False):
     else:
         logger.info("🚀 Starting MakerLab on http://localhost:%d ...", BACKEND_PORT)
         threading.Thread(target=_open_browser_when_ready, daemon=True).start()
+
+    # Server mode owns a livekit-server child for the lifetime of this process.
+    portal_host = _start_portal_host() if server_mode else None
 
     # Run uvicorn in the main thread so its native SIGINT handler works,
     # and bound graceful shutdown so a stuck WebSocket can't hang Ctrl+C.
@@ -355,7 +419,13 @@ def _run_prod(lan: bool = False):
                 with contextlib.suppress(ValueError, OSError):
                     signal.signal(_sig, _shutdown)
 
-    server.run()
+    try:
+        server.run()
+    finally:
+        # Ctrl+C, SIGTERM and a crashed uvicorn all land here. portal_host also
+        # registers an atexit hook; stopping twice is a no-op.
+        if portal_host is not None:
+            portal_host.stop_livekit_server()
 
 
 def _run_dev():
@@ -461,6 +531,14 @@ def main():
         help="Headless station mode: bind 0.0.0.0 (serve other machines), don't open a browser",
     )
     parser.add_argument(
+        "--server",
+        action="store_true",
+        help=(
+            "Remote server mode: headless like --lan, plus hosts the LiveKit server so a "
+            "remote MakerLab client can drive this station's follower arm"
+        ),
+    )
+    parser.add_argument(
         "--offline",
         action="store_true",
         help="Set HF_HUB_OFFLINE=1: every Hub call fails fast (all hardware flows work offline)",
@@ -491,9 +569,13 @@ def main():
     if args.dev:
         if args.lan:
             logger.warning("--lan is ignored in --dev mode (Vite serves localhost only)")
+        if args.server:
+            logger.warning("--server is ignored in --dev mode (Vite serves localhost only)")
         _run_dev()
     else:
-        _run_prod(lan=args.lan)
+        # --server is a superset of --lan: same 0.0.0.0 bind and same
+        # no-browser posture, plus the LiveKit host.
+        _run_prod(lan=args.lan or args.server, server_mode=args.server)
 
 
 def station():

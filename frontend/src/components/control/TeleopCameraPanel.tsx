@@ -75,6 +75,12 @@ const TeleopCameraPanel: React.FC = () => {
                 cameraIndex={feed.cameraIndex}
                 uniqueId={feed.uniqueId}
                 label={feed.name}
+                // This panel is only ever on screen during a live teleop
+                // session, so on a remote host its feeds come from the
+                // leader-bridge's Portal re-serve, not the remote's
+                // /camera-preview (which the loop is already holding).
+                source="session"
+                cameraName={feed.name}
               />
             ))}
           </div>

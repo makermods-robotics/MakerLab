@@ -1,9 +1,14 @@
 import { useCallback, useEffect, useRef, useState, ReactNode } from "react";
 import { Button } from "@/components/ui/button";
+import { useApi } from "@/contexts/ApiContext";
 
 type Peer = { id: string; openedAt: number; lastSeen: number };
 
-const CHANNEL = "makerlab-tabs-v1";
+// The election is PER BACKEND: the lock exists because only one tab may drive
+// a given machine's arm. Two tabs pointed at two different hosts drive two
+// different arms and must not fight each other, so the channel is keyed by the
+// active host's base URL.
+const CHANNEL_PREFIX = "makerlab-tabs-v1";
 const HEARTBEAT_MS = 1000;
 const PEER_TIMEOUT_MS = 3000;
 
@@ -16,6 +21,7 @@ const newTabId = (): string =>
     : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 
 const SingleTabGuard = ({ children }: { children: ReactNode }) => {
+  const { baseUrl } = useApi();
   const [isPrimary, setIsPrimary] = useState(true);
   const peersRef = useRef<Map<string, Peer>>(new Map());
   const myIdRef = useRef<string>("");
@@ -49,8 +55,12 @@ const SingleTabGuard = ({ children }: { children: ReactNode }) => {
 
     myIdRef.current = newTabId();
     myOpenedAtRef.current = Date.now();
+    // Switching hosts re-runs this effect: the peers we knew belong to the old
+    // host's election and must not carry over.
+    peersRef.current.clear();
+    setIsPrimary(true);
 
-    const channel = new BroadcastChannel(CHANNEL);
+    const channel = new BroadcastChannel(`${CHANNEL_PREFIX}::${baseUrl}`);
     channelRef.current = channel;
 
     const send = (type: string) => {
@@ -104,7 +114,7 @@ const SingleTabGuard = ({ children }: { children: ReactNode }) => {
       channel.close();
       channelRef.current = null;
     };
-  }, [recompute]);
+  }, [recompute, baseUrl]);
 
   const takeOver = useCallback(() => {
     myOpenedAtRef.current = 0;

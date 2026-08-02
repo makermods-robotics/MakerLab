@@ -2628,6 +2628,99 @@ def delete_robot(name: str):
     return JSONResponse(status_code=404, content={"status": "error", "message": "Robot not found"})
 
 
+# ---------------------------------------------------------------------------
+# Remote server/client over LiveKit Portal — see docs/remote-portal/SPEC.md
+#
+# Two disjoint feature modules hang off these routes:
+#   portal_host.py   — SERVER side (owns the follower + cameras + livekit-server)
+#   leader_bridge.py — CLIENT side (owns the leader arm, streams actions out)
+#
+# Handlers are imported lazily inside each route so a machine without the
+# livekit-portal packages installed still starts and serves everything else.
+# ---------------------------------------------------------------------------
+
+
+class PortalTokenBody(BaseModel):
+    identity: str
+    room: str
+
+
+# These handlers touch the filesystem, probe a socket, or mint a JWT — all
+# blocking. Declared `def` (not `async def`) so FastAPI runs them in a
+# threadpool; as coroutines they would stall every other request on the loop.
+@app.get("/portal/info")
+def portal_info():
+    from .portal_host import handle_portal_info
+
+    return handle_portal_info()
+
+
+@app.get("/portal/status")
+def portal_status():
+    from .portal_host import handle_portal_status
+
+    return handle_portal_status()
+
+
+@app.post("/portal/token")
+def portal_token(body: PortalTokenBody):
+    from .portal_host import handle_portal_token
+
+    result = handle_portal_token(body.identity, body.room)
+    if not result.get("success", True):
+        return JSONResponse(status_code=result.get("status_code", 400), content=result)
+    return result
+
+
+@app.post("/leader-bridge/start")
+async def leader_bridge_start(request: Request):
+    from starlette.concurrency import run_in_threadpool
+
+    from .leader_bridge import handle_leader_bridge_start
+
+    payload = await request.json()
+    # Blocking: opens the leader's serial bus and connects to Portal, which can
+    # take seconds. Off the event loop or it stalls every other request.
+    result = await run_in_threadpool(handle_leader_bridge_start, payload)
+    if not result.get("success", True):
+        return JSONResponse(status_code=result.get("status_code", 400), content=result)
+    return result
+
+
+@app.post("/leader-bridge/stop")
+async def leader_bridge_stop():
+    from starlette.concurrency import run_in_threadpool
+
+    from .leader_bridge import handle_leader_bridge_stop
+
+    # Blocking: joins the worker and releases leader torque.
+    return await run_in_threadpool(handle_leader_bridge_stop)
+
+
+@app.get("/leader-bridge/status")
+async def leader_bridge_status():
+    from .leader_bridge import handle_leader_bridge_status
+
+    return handle_leader_bridge_status()
+
+
+@app.get("/leader-bridge/camera/{name}")
+def leader_bridge_camera(name: str):
+    """MJPEG re-serve of frames received over Portal from the remote follower.
+
+    Lets the existing BackendCameraStream component render the server's cameras
+    by pointing it at localhost instead of the remote host.
+
+    Declared `def`, not `async def`: the handler blocks waiting for the first
+    frame, which as a coroutine would freeze every other request for that whole
+    wait. The threadpool also lets the bridge afford a generous first-frame
+    window instead of racing the event loop.
+    """
+    from .leader_bridge import handle_leader_bridge_camera
+
+    return handle_leader_bridge_camera(name)
+
+
 @app.on_event("startup")
 def startup_event():
     """One-time startup diagnostics surfaced in the server terminal."""

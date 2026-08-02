@@ -30,6 +30,14 @@ before this module existed.
 Inference (rollout.py) drives followers only and assembles its robot config
 as subprocess CLI args, not as config objects, so it does not use this
 module — the follower-only asymmetry lives there, not here.
+
+A record whose ``leader_source`` is ``"remote"`` (docs/remote-portal/SPEC.md)
+has NO leader on this machine at all: no port, no calibration file. Both
+builders take an optional ``record`` and, when that record's leader is
+remote, build only the follower half and return ``None`` in the
+``teleop_config`` slot — the marker that tells the caller to construct the
+network teleoperator instead (see makerlab/portal_link.py). Callers that pass
+no record (every existing single-machine flow) are unaffected.
 """
 
 from pathlib import Path
@@ -41,12 +49,15 @@ from lerobot.teleoperators.so_leader import SO101LeaderConfig
 
 from .config import (
     bimanual_base_id,
+    leader_is_remote,
     setup_calibration_files,
+    setup_follower_calibration_file,
     stage_bimanual_calibrations,
+    stage_bimanual_follower_calibrations,
 )
 
 
-def build_single_configs(request, cameras=None):
+def build_single_configs(request, cameras=None, record=None):
     """Build (robot_config, teleop_config) for a single leader/follower pair.
 
     Stages the selected library calibrations into lerobot's expected
@@ -54,7 +65,32 @@ def build_single_configs(request, cameras=None):
     ``SO101FollowerConfig`` and a leader ``SO101LeaderConfig``. When
     ``cameras`` is provided it is wired onto the follower; when ``None`` the
     follower config is built without a ``cameras`` kwarg (teleoperation).
+
+    When ``record``'s leader is remote, only the follower is staged/built
+    (``setup_follower_calibration_file``, exactly as inference and replay do)
+    and the returned ``teleop_config`` is ``None``.
     """
+    if leader_is_remote(record):
+        # Remote leader: no local leader port and no local leader calibration,
+        # so the leader half of setup_calibration_files must be skipped — it
+        # would raise FileNotFoundError on the blank name, which is the correct
+        # guard for a LOCAL setup and is preserved for it below.
+        follower_config_name = setup_follower_calibration_file(request.follower_config)
+
+        if cameras is None:
+            robot_config = SO101FollowerConfig(
+                port=request.follower_port,
+                id=follower_config_name,
+            )
+        else:
+            robot_config = SO101FollowerConfig(
+                port=request.follower_port,
+                id=follower_config_name,
+                cameras=cameras,
+            )
+
+        return robot_config, None
+
     leader_config_name, follower_config_name = setup_calibration_files(
         request.leader_config, request.follower_config
     )
@@ -79,7 +115,7 @@ def build_single_configs(request, cameras=None):
     return robot_config, teleop_config
 
 
-def build_bimanual_configs(request, cameras=None):
+def build_bimanual_configs(request, cameras=None, record=None):
     """Build (robot_config, teleop_config) for a bimanual BiSO pair.
 
     Stages the four arbitrarily-named library calibrations into the BiSO
@@ -88,7 +124,36 @@ def build_bimanual_configs(request, cameras=None):
     at the per-device staging dirs. When ``cameras`` is provided it is wired
     onto the left follower arm; when ``None`` the left follower arm is built
     without a ``cameras`` kwarg (teleoperation).
+
+    When ``record``'s leader is remote, only the two follower calibrations are
+    staged (``stage_bimanual_follower_calibrations``, as inference does) and
+    the returned ``teleop_config`` is ``None``.
     """
+    if leader_is_remote(record):
+        # Remote leader: staging the leader side would require library files
+        # this machine does not have. Follower-only staging produces the
+        # identical follower layout.
+        base = bimanual_base_id(request.robot_name)
+        follower_staging, _ = stage_bimanual_follower_calibrations(
+            base,
+            request.follower_config,
+            request.right_follower_config,
+        )
+
+        if cameras is None:
+            left_follower = SO101FollowerConfig(port=request.follower_port)
+        else:
+            left_follower = SO101FollowerConfig(port=request.follower_port, cameras=cameras)
+
+        robot_config = BiSOFollowerConfig(
+            id=base,
+            calibration_dir=Path(follower_staging),
+            left_arm_config=left_follower,
+            right_arm_config=SO101FollowerConfig(port=request.right_follower_port),
+        )
+
+        return robot_config, None
+
     base = bimanual_base_id(request.robot_name)
     leader_staging, follower_staging, _ = stage_bimanual_calibrations(
         base,

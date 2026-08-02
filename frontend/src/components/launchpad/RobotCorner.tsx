@@ -45,6 +45,7 @@ import {
 import CreateRobotDialog from "@/components/landing/CreateRobotDialog";
 import TeleopDialog from "@/components/dialogs/TeleopDialog";
 import RobotConfigDialog from "@/components/dialogs/RobotConfigDialog";
+import HostSwitcher from "@/components/launchpad/HostSwitcher";
 import { useApi } from "@/contexts/ApiContext";
 import { useToast } from "@/hooks/use-toast";
 import { useRobots, RobotRecord, RobotMode, robotSetupGap } from "@/hooks/useRobots";
@@ -74,7 +75,7 @@ const StatusDot: React.FC<{ ready: boolean; className?: string }> = ({
  * sharing state through useRobots' module-level store.
  */
 const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
-  const { baseUrl, fetchWithHeaders } = useApi();
+  const { baseUrl, fetchWithHeaders, isRemote, activeHost } = useApi();
   const { toast } = useToast();
   const {
     records,
@@ -158,6 +159,37 @@ const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
   const handleTeleop = async (robot: RobotRecord) => {
     setTeleopStarting(true);
     try {
+      // Same camera dict shape the recording path builds (CollectPanel).
+      // Teleop needs it now because a REMOTE session opens these devices to
+      // publish them over Portal — without the dict the operator gets joint
+      // state and a black screen. The local path ignores it by design, so it
+      // is sent unconditionally rather than branched on isRemote.
+      const cameraDict = (robot.cameras ?? []).reduce(
+        (acc, cam) => {
+          acc[cam.name] = {
+            type: cam.type,
+            camera_index: cam.camera_index,
+            width: cam.width,
+            height: cam.height,
+            fps: cam.fps,
+            ...(cam.fourcc ? { fourcc: cam.fourcc } : {}),
+            ...(cam.backend ? { backend: cam.backend } : {}),
+          };
+          return acc;
+        },
+        {} as Record<
+          string,
+          {
+            type: string;
+            camera_index?: number;
+            width: number;
+            height: number;
+            fps?: number;
+            fourcc?: string;
+            backend?: string;
+          }
+        >,
+      );
       const res = await fetchWithHeaders(`${baseUrl}/move-arm`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -175,6 +207,7 @@ const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
           // Robot name → BiSO staging base id (bimanual). Names the per-session
           // staging dir; does not affect which calibration drives which arm.
           robot_name: robot.name,
+          cameras: cameraDict,
         }),
       });
       const data = await res.json();
@@ -236,6 +269,12 @@ const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
         className,
       )}
     >
+      {/* Which computer everything below runs on. Leftmost so the cluster reads
+          left-to-right as "machine → robot → action"; icon-only until a remote
+          exists, so the single-machine header is unchanged. */}
+      <HostSwitcher />
+      <span aria-hidden className="mx-0.5 h-4 w-px shrink-0 bg-border" />
+
       <Tooltip>
         <TooltipTrigger asChild>
           {/* First run (no robots yet): the very first action in the app lives
@@ -368,6 +407,7 @@ const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
               variant="secondary"
               className="h-7 gap-1.5 rounded-full px-2.5"
               disabled={!!teleopDisabledReason || teleopStarting}
+              aria-busy={teleopStarting}
               onClick={() => selectedRecord && handleTeleop(selectedRecord)}
             >
               {teleopStarting ? (
@@ -375,13 +415,21 @@ const RobotCorner: React.FC<{ className?: string }> = ({ className }) => {
               ) : (
                 <Gamepad2 className="h-3.5 w-3.5" />
               )}
-              Teleop
+              {/* A remote start hands the cameras over to the teleop loop
+                  before it can publish, which adds a couple of seconds — say
+                  so, otherwise a silent spinner reads as hung. */}
+              {teleopStarting ? "Starting…" : "Teleop"}
             </Button>
           </span>
         </TooltipTrigger>
-        {teleopDisabledReason && (
+        {teleopDisabledReason ? (
           <TooltipContent side="bottom">{teleopDisabledReason}</TooltipContent>
-        )}
+        ) : teleopStarting && isRemote ? (
+          <TooltipContent side="bottom">
+            Connecting to {activeHost.name} and handing the cameras to the
+            session — this takes a few seconds.
+          </TooltipContent>
+        ) : null}
       </Tooltip>
 
       <CreateRobotDialog

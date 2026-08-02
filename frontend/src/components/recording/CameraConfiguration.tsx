@@ -17,6 +17,7 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { useToast } from "@/hooks/use-toast";
+import { useApi } from "@/contexts/ApiContext";
 import { useAvailableCameras } from "@/hooks/useAvailableCameras";
 import BackendCameraStream from "@/components/BackendCameraStream";
 import { isCameraConnected } from "@/lib/cameraResolve";
@@ -74,11 +75,19 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
   // keep index 0 open and starve the recorder (OpenCVCamera(0) actual_fps=5.0).
   const [streamsPaused, setStreamsPaused] = useState(false);
 
+  // Against a REMOTE host the backend's cameras are plugged into THAT machine,
+  // so matching them to this laptop's browser devices by label would pair a
+  // server camera with the local webcam. Previews stream from the backend by
+  // index regardless, so the browser match buys nothing and only misleads.
+  const { isRemote } = useApi();
   const {
     cameras: availableCameras,
     isLoading: isLoadingCameras,
     refresh: refreshCameras,
-  } = useAvailableCameras({ enabled: !streamsPaused });
+  } = useAvailableCameras({
+    enabled: !streamsPaused,
+    matchBrowser: !isRemote,
+  });
   const [selectedCameraIndex, setSelectedCameraIndex] = useState<string>("");
   const [cameraName, setCameraName] = useState("");
 

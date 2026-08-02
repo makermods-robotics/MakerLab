@@ -923,8 +923,11 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
     global inference_active, _inference_started_at, _inference_meta, _inference_cancel
     global _last_result, _inference_startup_thread
 
-    # Mutex with teleop and recording: all three drive the same serial bus.
-    from . import record as _record, teleoperate as _teleoperate
+    # Mutex with teleop, recording and the leader bridge: all four drive (or
+    # hold) a serial bus on this machine. Lazy import, same pattern as the
+    # sibling modules — leader_bridge already refuses to start while inference
+    # is active, and this is the other half of that pair.
+    from . import leader_bridge as _leader_bridge, record as _record, teleoperate as _teleoperate
 
     with _state_lock:
         if _teleoperate.teleoperation_active:
@@ -944,6 +947,15 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
                 "success": False,
                 "status_code": 409,
                 "message": "Inference is already active. Stop it first.",
+            }
+        # The other half of the leader bridge's mutex: while the bridge is
+        # streaming this machine's leader arm to a remote follower, that leader
+        # port is held and driving anything locally would fight it.
+        if _leader_bridge.bridge_active:
+            return {
+                "success": False,
+                "status_code": 409,
+                "message": "The leader bridge is currently active. Stop it first.",
             }
         if _inference_startup_thread is not None and _inference_startup_thread.is_alive():
             # A previous session was stopped while its startup worker was

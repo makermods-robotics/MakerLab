@@ -28,6 +28,7 @@ from lerobot.teleoperators.so_leader import SO101Leader
 
 from .arm_identity import verify_devices
 from .motor_power import clear_goal_velocity, reset_torque_limit
+from .portal_link import PortalTeeRobot, RemoteLeaderSession, remote_leader_record
 from .rest_pose import capture_rest_pose, return_to_rest_pose
 from .utils.devices import _force_close_device_resources
 from .utils.errors import classify_outcome, format_exception, friendly_hint
@@ -306,6 +307,15 @@ class TeleoperateRequest(BaseModel):
     # Escape hatch for the arm-identity guard (see makerlab/arm_identity.py):
     # when true, start even if the connected arms don't match their calibrations.
     skip_identity_check: bool = False
+    # Cameras to open for THIS session, same shape as RecordingRequest.cameras
+    # (name -> {type, camera_index, width, height, fps, fourcc?, backend?}).
+    # Honored ONLY when the leader is remote: the operator drives from another
+    # machine and cannot perform the task without seeing the workspace, so the
+    # follower's frames are published over Portal (docs/remote-portal/SPEC.md).
+    # A LOCAL teleoperation session ignores this field entirely and opens ZERO
+    # cv2 devices, exactly as it always has — the browser gets its video from
+    # /camera-preview instead.
+    cameras: dict = {}
 
 
 def get_joint_positions_from_robot(robot, prefix: str = "", calibration=None) -> dict[str, float]:
@@ -568,6 +578,182 @@ def _connect_bimanual(request: TeleoperateRequest):
         raise
 
 
+def _remote_teleop_camera_configs(request: TeleoperateRequest) -> dict | None:
+    """OpenCVCameraConfigs for a REMOTE-leader teleoperation session, or None.
+
+    A remote operator cannot perform the task without seeing the workspace, so
+    a remote-leader teleop session opens the follower's cameras and the tee
+    publishes their frames over Portal — the same thing recording does. The
+    conversion (and its fourcc/backend defaults, which are load-bearing on
+    multi-camera USB rigs) is recording's ``_build_camera_configs``; it is
+    imported lazily here because record.py imports this module at import time.
+
+    Returns ``None`` — not ``{}`` — when the request configures no usable
+    camera, so the caller builds the follower config WITHOUT a ``cameras``
+    kwarg, i.e. byte-identically to a camera-less session.
+    """
+    cameras = getattr(request, "cameras", None) or {}
+    if not cameras:
+        return None
+
+    from .record import _build_camera_configs, _platform_backend
+
+    return _build_camera_configs(cameras, _platform_backend()) or None
+
+
+def _connect_teleop_cameras(robot, attempts: int = 3) -> None:
+    """Open every camera on ``robot``, retrying the known transient failures.
+
+    Recording gets this for free inside ``robot.connect()``; teleoperation
+    connects the bus by hand (it must run the identity guard between connect
+    and the first EEPROM write), so the cameras are opened here, after
+    calibration is written and BEFORE ``configure()`` energizes the arm — a
+    camera that will not open should fail the start with the servos still limp.
+    Retries only on the transient markers recording retries on, and raises a
+    legible error otherwise; the caller's cleanup releases whatever did open.
+    """
+    from .record import _TRANSIENT_CAMERA_MARKERS
+
+    cameras = getattr(robot, "cameras", None) or {}
+    if not cameras:
+        return
+    logger.info("Opening cameras for the remote operator: %s", ", ".join(cameras))
+    for name, camera in cameras.items():
+        for attempt in range(1, attempts + 1):
+            try:
+                camera.connect()
+                break
+            except Exception as e:
+                transient = any(marker in str(e).lower() for marker in _TRANSIENT_CAMERA_MARKERS)
+                if attempt < attempts and transient:
+                    logger.warning(
+                        "Camera %r came up wrong (%s); re-opening (attempt %d/%d)",
+                        name,
+                        e,
+                        attempt + 1,
+                        attempts,
+                    )
+                    with contextlib.suppress(Exception):
+                        camera.disconnect()
+                    time.sleep(2.0)
+                    continue
+                raise RuntimeError(
+                    f"Could not open the camera '{name}' for this session: {e}. "
+                    "Close any other app or browser tab using it, then try again."
+                ) from e
+    logger.info("Cameras opened; the remote operator will receive their frames over Portal")
+
+
+def _connect_remote_leader(request: TeleoperateRequest, record: dict):
+    """Connect the LOCAL follower(s) and attach a REMOTE leader over Portal.
+
+    Only the leader moves off this machine (docs/remote-portal/SPEC.md): the
+    follower and its buses are set up exactly as the local paths do — connect,
+    identity guard, write_calibration, configure, torque/velocity reset — and
+    then the teleop device is built as a network object instead of a serial
+    ``SO101Leader``. A network teleoperator has no bus, so there is nothing to
+    connect, calibrate, configure or force-torque-off on that side; its
+    ``connect()`` opens the Portal session and its ``disconnect()`` closes it
+    (both reached through the usual teleop-device call sites).
+
+    Unlike a local session this one also opens the follower's CAMERAS (when the
+    request carries any): the operator is on another machine and needs to see
+    the workspace, and the tee publishes those frames over Portal. That is why
+    the backend previews are handed over first, exactly as recording does.
+
+    Returns ``(robot, teleop_device, identity_warnings)`` where ``robot`` is a
+    :class:`~makerlab.portal_link.PortalTeeRobot` — the real follower plus a
+    Portal publish on every observation, so the operator sees this side's state
+    and cameras while driving. It delegates everything else to the follower, so
+    every caller downstream is unchanged (including the teardown that releases
+    the cameras: ``robot.disconnect()`` closes bus AND cameras, and the
+    force-close fallback covers a failed disconnect). Raises after cleaning up
+    whatever was already opened, stashing the cleanup text on the exception
+    exactly as ``_connect_bimanual`` does.
+    """
+    session = RemoteLeaderSession.resolve(record)
+    logger.info(
+        "Leader for robot %r is REMOTE — driving the local follower from Portal session %r",
+        record.get("name", ""),
+        session.session,
+    )
+
+    # Cameras for the operator's view. None when the record has none configured
+    # — a remote session with no cameras still teleoperates fine (state only).
+    camera_configs = _remote_teleop_camera_configs(request)
+    if camera_configs:
+        # The backend previews hold these cv2 devices; hand them over before we
+        # open the same indices, then let the OS-level release settle (the same
+        # ordering and settle window recording uses).
+        from .camera_preview import camera_preview_manager
+
+        camera_preview_manager.stop_all()
+        logger.info("Waiting for camera resources to be released (cameras: %s)", list(camera_configs))
+        time.sleep(2.0)
+
+    if request.mode == "bimanual":
+        robot_config, _ = build_bimanual_configs(request, cameras=camera_configs, record=record)
+        robot = BiSOFollower(robot_config)
+        follower_arms = (
+            (robot.left_arm, "left follower", request.follower_port),
+            (robot.right_arm, "right follower", request.right_follower_port),
+        )
+        # The BiSO sub-arm ids are staging aliases, so hand the guard the real
+        # library stems — only the two followers are connected here.
+        identity_config_names = [request.follower_config, request.right_follower_config]
+        follower_label = "follower arms"
+    else:
+        robot_config, _ = build_single_configs(request, cameras=camera_configs, record=record)
+        robot = SO101Follower(robot_config)
+        follower_arms = ((robot, "follower", request.follower_port),)
+        identity_config_names = None
+        follower_label = "follower arm"
+
+    teleop_device = None
+    try:
+        for arm, label, port in follower_arms:
+            try:
+                arm.bus.connect()
+            except Exception as e:
+                raise RuntimeError(
+                    f"Could not connect to the {label} arm on {port}. "
+                    "Make sure it's plugged in and powered on, then try again."
+                ) from e
+
+        # Arm-identity guard, follower side only: the leader arm is on the
+        # operator's machine, with its calibration, and is not ours to check.
+        identity_warnings = verify_devices(
+            ((robot, "follower"),),
+            skip=request.skip_identity_check,
+            config_names=identity_config_names,
+        )
+
+        logger.info("Writing calibration to motors...")
+        for arm, _label, _port in follower_arms:
+            arm.bus.write_calibration(arm.calibration)
+
+        # Cameras before configure(): a camera that won't open fails the start
+        # with the arm still limp, instead of after it has been energized.
+        _connect_teleop_cameras(robot)
+
+        logger.info("Configuring motors...")
+        robot.configure()
+        identity_warnings += reset_torque_limit(robot, follower_label)
+        identity_warnings += clear_goal_velocity(robot, follower_label)
+
+        # The remote leader. Built against the local follower so the wire
+        # schema is exactly this robot's motors/cameras, then connected — a
+        # failure here lands in the caller's existing error path.
+        teleop_device = session.build_teleoperator(robot)
+        teleop_device.connect()
+        logger.info("Remote leader connected over Portal session %r", session.session)
+
+        return PortalTeeRobot(robot, teleop_device), teleop_device, identity_warnings
+    except Exception as e:
+        e.cleanup_error = _cleanup_after_setup_failure(robot, teleop_device, follower_label, "remote leader")
+        raise
+
+
 def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=None) -> dict[str, Any]:
     """Handle start teleoperation request.
 
@@ -579,7 +765,7 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
     global teleoperation_active, teleoperation_thread, current_robot, current_teleop, last_cleanup_error
     global releasing, last_session_outcome, last_session_error
 
-    from . import record as _record, rollout as _rollout
+    from . import leader_bridge as _leader_bridge, record as _record, rollout as _rollout
 
     # A previous session (teleop or recording) may still be holding torque for
     # its release grace — cut it short so this start doesn't fail on a busy
@@ -602,6 +788,11 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
             return {"success": False, "message": "Recording is currently active. Stop it first."}
         if _rollout.inference_active:
             return {"success": False, "message": "Inference is currently active. Stop it first."}
+        # The other half of the leader bridge's mutex: while the bridge is
+        # streaming this machine's leader arm to a remote follower, that leader
+        # port is held and driving anything locally would fight it.
+        if _leader_bridge.bridge_active:
+            return {"success": False, "message": "The leader bridge is currently active. Stop it first."}
         # Per-session state reset, under the same lock that claims the active
         # flag: a stale _release_now from a previous session's double-stop
         # would otherwise cut EVERY later grace/return short until the server
@@ -620,7 +811,14 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
             f"Starting teleoperation with leader port: {request.leader_port}, follower port: {request.follower_port}"
         )
 
-        if request.mode == "bimanual":
+        # Remote leader (docs/remote-portal/SPEC.md): the follower stays local
+        # and real; the teleop device becomes a Portal network object. None for
+        # every local record (the default), which keeps the paths below intact.
+        leader_record = remote_leader_record(request.robot_name)
+
+        if leader_record is not None:
+            robot, teleop_device, identity_warnings = _connect_remote_leader(request, leader_record)
+        elif request.mode == "bimanual":
             robot, teleop_device, identity_warnings = _connect_bimanual(request)
         else:
             # Create robot and teleop configs (stages calibration files).
@@ -724,10 +922,30 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
                 last_broadcast_time = 0
                 last_current_sample_time = 0.0
                 broadcast_interval = 0.05  # 20 FPS
+                # An EMPTY action is never forwarded: send_action({}) writes a
+                # goal packet with no goals to the servo bus. A remote leader
+                # hands one back only when it has no pose to hold (see
+                # portal_link._RemoteLeader), a local one only on a transient
+                # read glitch — and in both cases skipping the send is the safe
+                # answer, because these are absolute position targets: the
+                # servos simply keep their last goal, i.e. hold pose. Counted
+                # so a persistent gap is visible in the log without spamming it.
+                skipped_actions = 0
 
                 while teleoperation_active:
                     action = teleop_device.get_action()
-                    robot.send_action(action)
+                    if action:
+                        if skipped_actions:
+                            logger.info("Leader actions resumed after %d empty one(s).", skipped_actions)
+                            skipped_actions = 0
+                        robot.send_action(action)
+                    else:
+                        skipped_actions += 1
+                        if skipped_actions == 1:
+                            logger.warning(
+                                "The leader returned an empty action — not sending it to the "
+                                "follower. The arm holds its last goal until a real action arrives."
+                            )
 
                     current_time = time.time()
                     if current_time - last_broadcast_time >= broadcast_interval:

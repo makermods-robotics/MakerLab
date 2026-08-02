@@ -18,6 +18,9 @@ interface ImportCalibrationButtonProps {
   device: "teleop" | "robot";
   /** Called with the saved config name after a successful import. */
   onImported?: (name: string) => void;
+  /** Which machine's calibration library to import INTO. Defaults to the
+   * active host; a leader that lives on this laptop passes localBaseUrl. */
+  apiBaseUrl?: string;
 }
 
 /**
@@ -28,8 +31,10 @@ interface ImportCalibrationButtonProps {
 const ImportCalibrationButton: React.FC<ImportCalibrationButtonProps> = ({
   device,
   onImported,
+  apiBaseUrl,
 }) => {
-  const { baseUrl, fetchWithHeaders } = useApi();
+  const { baseUrl: activeBaseUrl, fetchWithHeaders } = useApi();
+  const baseUrl = apiBaseUrl ?? activeBaseUrl;
   const { toast } = useToast();
   const fileInputRef = useRef<HTMLInputElement>(null);
 

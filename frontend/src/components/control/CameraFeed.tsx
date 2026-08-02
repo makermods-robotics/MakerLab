@@ -1,6 +1,8 @@
 import React from "react";
 import { VideoOff } from "lucide-react";
-import BackendCameraStream from "@/components/BackendCameraStream";
+import BackendCameraStream, {
+  CameraStreamSource,
+} from "@/components/BackendCameraStream";
 
 interface CameraFeedProps {
   /** cv2 index on the server. Undefined renders the "no camera" state. */
@@ -9,6 +11,11 @@ interface CameraFeedProps {
   uniqueId?: string;
   /** Optional caption shown under the feed. */
   label?: string;
+  /** "session" routes a remote host's feed through this machine's
+   * leader-bridge (the Portal video path). Defaults to "host". */
+  source?: CameraStreamSource;
+  /** The camera's MakerLab name — the leader-bridge's track key. */
+  cameraName?: string;
 }
 
 /** Live camera feed streamed from the *server* by cv2 index.
@@ -23,6 +30,8 @@ const CameraFeed: React.FC<CameraFeedProps> = ({
   cameraIndex,
   uniqueId,
   label,
+  source,
+  cameraName,
 }) => {
   return (
     <div className="bg-card rounded-lg border border-border overflow-hidden">
@@ -31,6 +40,8 @@ const CameraFeed: React.FC<CameraFeedProps> = ({
           <BackendCameraStream
             cameraIndex={cameraIndex}
             uniqueId={uniqueId}
+            source={source}
+            cameraName={cameraName}
             className="w-full h-full object-cover"
           />
         ) : (

@@ -1,5 +1,13 @@
 export interface TrainingConfig {
-  target: { runner: "local" | "hf_cloud"; flavor?: string };
+  target: {
+    runner: "local" | "hf_cloud";
+    flavor?: string;
+    // Which MACHINE a "local" run executes on — the base URL that receives
+    // POST /jobs/training. Training touches no hardware, so either host can do
+    // it; the dataset just has to be present there. Undefined ⇒ the active
+    // host, which is the only option on a single-machine install.
+    host?: string;
+  };
 
   // Dataset configuration
   dataset_repo_id: string;

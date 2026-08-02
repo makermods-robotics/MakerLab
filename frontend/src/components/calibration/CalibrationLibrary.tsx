@@ -66,6 +66,20 @@ interface CalibrationLibraryProps {
    * sibling instance renamed/deleted/imported one (see onLibraryChanged).
    */
   reloadToken?: number;
+  /**
+   * Which machine owns these calibration FILES. Defaults to the active host,
+   * which is what every existing call site wants. A leader arm plugged into
+   * this laptop while the follower lives on a remote host passes localBaseUrl
+   * so the list, rename, delete and import all act on this machine.
+   */
+  apiBaseUrl?: string;
+  /**
+   * Replaces the "picking a config assigns it to the robot record" behaviour.
+   * When provided, selection calls this instead of POSTing to
+   * `/robots/{name}` — used for a client-side leader, whose calibration is
+   * never part of the remote host's record.
+   */
+  onAssignOverride?: (name: string) => void;
 }
 
 /**
@@ -86,8 +100,14 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
   onAssigned,
   onLibraryChanged,
   reloadToken,
+  apiBaseUrl,
+  onAssignOverride,
 }) => {
-  const { baseUrl, fetchWithHeaders } = useApi();
+  const { baseUrl: activeBaseUrl, fetchWithHeaders } = useApi();
+  // Every request this component makes — list, rename, delete, import — goes
+  // to the machine that owns the files, which is the active host unless the
+  // caller says otherwise.
+  const baseUrl = apiBaseUrl ?? activeBaseUrl;
   const { toast } = useToast();
 
   const [configs, setConfigs] = useState<ConfigEntry[]>([]);
@@ -196,7 +216,14 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
   // no separate "Use for this robot" confirmation step.
   const assignToRobot = useCallback(
     async (name: string) => {
-      if (!name || !robotName) return;
+      if (!name) return;
+      // Client-side leader: the choice belongs to this laptop, not to the
+      // (possibly remote) host's robot record. No request at all.
+      if (onAssignOverride) {
+        onAssignOverride(name);
+        return;
+      }
+      if (!robotName) return;
       setAssigning(true);
       try {
         const field =
@@ -250,6 +277,7 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
       }
     },
     [
+      onAssignOverride,
       robotName,
       device,
       configField,
@@ -400,6 +428,7 @@ const CalibrationLibrary: React.FC<CalibrationLibraryProps> = ({
         </Button>
         <ImportCalibrationButton
           device={device}
+          apiBaseUrl={apiBaseUrl}
           onImported={async (name) => {
             await refresh();
             setSelected(name);
