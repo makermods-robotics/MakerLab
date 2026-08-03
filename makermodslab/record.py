@@ -1263,6 +1263,68 @@ def handle_upload_status() -> dict[str, Any]:
     return upload_manager.get_status()
 
 
+def _reset_loop_with_pause(
+    robot,
+    teleop,
+    events: dict,
+    fps: int,
+    teleop_action_processor,
+    robot_action_processor,
+    control_time_s: float,
+) -> None:
+    """Reset-phase tick loop: same per-tick shape as lerobot's record_loop
+    (lerobot.scripts.lerobot_record.record_loop) called with dataset=None —
+    read the leader, send it to the follower, no dataset write, no display —
+    but additionally checks events["paused"] every tick, which record_loop has
+    no primitive for and which can't be added without patching that vendored
+    dependency.
+
+    While paused: skips the leader-to-follower step entirely (the follower
+    holds its last commanded position and ignores the leader — "freeze
+    passthrough"), and holds the loop's own control_time_s budget rather than
+    spending it, so the operator gets the full reset_time_s of active gap
+    time regardless of how long they stayed paused. Pausing is indefinite —
+    this loop enforces no timeout of its own.
+
+    Never blocks on an unbounded wait while paused: sleeps one control tick
+    at a time and rechecks events["exit_early"] every iteration BEFORE the
+    pause check (stop_recording also sets exit_early — see
+    handle_stop_recording), so Stop remains responsive within about one tick
+    even while paused.
+    """
+    from lerobot.utils.robot_utils import precise_sleep
+
+    control_interval = 1 / fps
+    timestamp = 0.0
+    start_episode_t = time.perf_counter()
+
+    while timestamp < control_time_s:
+        start_loop_t = time.perf_counter()
+
+        if events["exit_early"]:
+            events["exit_early"] = False
+            break
+
+        if events.get("paused", False):
+            precise_sleep(control_interval)
+            # Paused time isn't spent from control_time_s: push the reference
+            # point forward by the tick we just spent paused.
+            start_episode_t += time.perf_counter() - start_loop_t
+            timestamp = time.perf_counter() - start_episode_t
+            continue
+
+        if teleop is not None:
+            obs = robot.get_observation()
+            act = teleop.get_action()
+            act_processed_teleop = teleop_action_processor((act, obs))
+            robot_action_to_send = robot_action_processor((act_processed_teleop, obs))
+            robot.send_action(robot_action_to_send)
+
+        dt_s = time.perf_counter() - start_loop_t
+        precise_sleep(max(control_interval - dt_s, 0.0))
+        timestamp = time.perf_counter() - start_episode_t
+
+
 def record_with_web_events(
     cfg: RecordConfig,
     web_events: dict,
@@ -1292,6 +1354,7 @@ def record_with_web_events(
 
     global current_phase, phase_start_time, current_episode, saved_episodes, releasing
     global identity_warnings
+    global paused_accum_seconds, pause_started_at
 
     robot = make_robot_from_config(cfg.robot)
     teleop = make_teleoperator_from_config(cfg.teleop) if cfg.teleop is not None else None
@@ -1610,29 +1673,27 @@ def record_with_web_events(
                 # RESET PHASE - without dataset (matches original record.py exactly)
                 current_phase = "resetting"
                 phase_start_time = time.time()
+                paused_accum_seconds = 0.0
+                pause_started_at = None
                 logger.info(f"Starting reset phase for re-record of episode {current_episode}")
                 logger.info(f"Events state at start of reset phase: {web_events}")
                 print(f"🔄 STATUS CHANGE: Starting reset phase for episode {current_episode}")
 
                 log_say("Reset the environment", cfg.play_sounds)
 
-                # Reset exit_early flag at the start of each phase
+                # Reset exit_early/paused flags at the start of each phase
                 web_events["exit_early"] = False
-                logger.info(f"Reset phase - calling record_loop with events: {web_events}")
+                web_events["paused"] = False
+                logger.info(f"Reset phase - calling reset loop with events: {web_events}")
 
-                record_loop(
+                _reset_loop_with_pause(
                     robot=robot,
+                    teleop=teleop,
                     events=web_events,
                     fps=cfg.dataset.fps,
                     teleop_action_processor=teleop_action_processor,
                     robot_action_processor=robot_action_processor,
-                    robot_observation_processor=robot_observation_processor,
-                    teleop=teleop,
-                    # NOTE: NO dataset parameter here - matches LeRobot CLI exactly
-                    # This means NO recording happens during reset phase
                     control_time_s=cfg.dataset.reset_time_s,
-                    single_task=cfg.dataset.single_task,
-                    display_data=cfg.display_data,
                 )
 
                 logger.info(f"Reset phase completed - events state: {web_events}")
@@ -1680,29 +1741,27 @@ def record_with_web_events(
                 # RESET PHASE - without dataset (matches original record.py exactly)
                 current_phase = "resetting"
                 phase_start_time = time.time()
+                paused_accum_seconds = 0.0
+                pause_started_at = None
                 logger.info(f"Starting reset phase for next episode {current_episode}")
                 logger.info(f"Events state at start of reset phase: {web_events}")
                 print(f"🔄 STATUS CHANGE: Starting reset phase for episode {current_episode}")
 
                 log_say("Reset the environment", cfg.play_sounds)
 
-                # Reset exit_early flag at the start of each phase
+                # Reset exit_early/paused flags at the start of each phase
                 web_events["exit_early"] = False
-                logger.info(f"Reset phase - calling record_loop with events: {web_events}")
+                web_events["paused"] = False
+                logger.info(f"Reset phase - calling reset loop with events: {web_events}")
 
-                record_loop(
+                _reset_loop_with_pause(
                     robot=robot,
+                    teleop=teleop,
                     events=web_events,
                     fps=cfg.dataset.fps,
                     teleop_action_processor=teleop_action_processor,
                     robot_action_processor=robot_action_processor,
-                    robot_observation_processor=robot_observation_processor,
-                    teleop=teleop,
-                    # NOTE: NO dataset parameter here - matches LeRobot CLI exactly
-                    # This means NO recording happens during reset phase
                     control_time_s=cfg.dataset.reset_time_s,
-                    single_task=cfg.dataset.single_task,
-                    display_data=cfg.display_data,
                 )
 
                 logger.info(f"Reset phase completed - events state: {web_events}")

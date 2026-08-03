@@ -671,6 +671,119 @@ def test_recording_status_never_exposes_pause_during_recording_phase(
     assert status["available_controls"]["resume_recording"] is False
 
 
+class _FakePauseTeleop:
+    def __init__(self) -> None:
+        self.get_action_calls = 0
+
+    def get_action(self) -> dict:
+        self.get_action_calls += 1
+        return {"shoulder_pan.pos": 1.0}
+
+
+class _FakePauseRobot:
+    def __init__(self) -> None:
+        self.send_action_calls = 0
+
+    def get_observation(self) -> dict:
+        return {"shoulder_pan.pos": 0.5}
+
+    def send_action(self, action: dict) -> dict:
+        self.send_action_calls += 1
+        return action
+
+
+def _identity(pair):
+    return pair[0]
+
+
+def test_reset_loop_freezes_passthrough_while_paused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """While paused, the loop must never read the leader or send to the
+    follower, and must not exit on its own (freeze = indefinite, no
+    auto-timeout) — it only exits here because the fake sleep flips
+    exit_early after a few ticks, standing in for a real Stop request."""
+    from makermodslab import record
+
+    robot = _FakePauseRobot()
+    teleop = _FakePauseTeleop()
+    events = {"exit_early": False, "paused": True}
+    sleep_calls: list[float] = []
+
+    def _fake_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+        if len(sleep_calls) >= 3:
+            events["exit_early"] = True
+
+    monkeypatch.setattr("lerobot.utils.robot_utils.precise_sleep", _fake_sleep, raising=False)
+
+    record._reset_loop_with_pause(
+        robot=robot,
+        teleop=teleop,
+        events=events,
+        fps=30,
+        teleop_action_processor=_identity,
+        robot_action_processor=_identity,
+        control_time_s=10.0,
+    )
+
+    assert teleop.get_action_calls == 0
+    assert robot.send_action_calls == 0
+    assert len(sleep_calls) == 3
+
+
+def test_reset_loop_drives_passthrough_when_not_paused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unpaused, the loop behaves like the original record_loop: reads the
+    leader and sends to the follower every tick until control_time_s elapses."""
+    from makermodslab import record
+
+    robot = _FakePauseRobot()
+    teleop = _FakePauseTeleop()
+    events = {"exit_early": False, "paused": False}
+
+    monkeypatch.setattr("lerobot.utils.robot_utils.precise_sleep", lambda seconds: None, raising=False)
+
+    record._reset_loop_with_pause(
+        robot=robot,
+        teleop=teleop,
+        events=events,
+        fps=30,
+        teleop_action_processor=_identity,
+        robot_action_processor=_identity,
+        control_time_s=0.02,
+    )
+
+    assert teleop.get_action_calls > 0
+    assert robot.send_action_calls == teleop.get_action_calls
+
+
+def test_reset_loop_exit_early_stops_promptly_even_while_paused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stop (which sets exit_early — see handle_stop_recording) must win
+    immediately even if the loop is paused when it's requested; it must not
+    be deferred until a resume."""
+    from makermodslab import record
+
+    robot = _FakePauseRobot()
+    teleop = _FakePauseTeleop()
+    events = {"exit_early": True, "paused": True}
+
+    def _fail_sleep(seconds: float) -> None:
+        raise AssertionError("must not sleep at all — exit_early is already set")
+
+    monkeypatch.setattr("lerobot.utils.robot_utils.precise_sleep", _fail_sleep, raising=False)
+
+    record._reset_loop_with_pause(
+        robot=robot,
+        teleop=teleop,
+        events=events,
+        fps=30,
+        teleop_action_processor=_identity,
+        robot_action_processor=_identity,
+        control_time_s=10.0,
+    )
+
+    assert events["exit_early"] is False  # consumed, matching record_loop's own convention
+    assert teleop.get_action_calls == 0
+
+
 def test_worker_quit_discards_fresh_dataset_with_saved_episodes(
     monkeypatch: pytest.MonkeyPatch, tmp_lerobot_home
 ) -> None:
