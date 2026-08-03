@@ -921,6 +921,9 @@ def _run_record_session(
     raise_in_loop: bool = False,
     preset_release_now: bool = False,
     repo_id: str = "tester/ds",
+    num_episodes: int = 1,
+    reset_time_s: int = 10,
+    record_loop_side_effect=None,
 ):
     """Drive record_with_web_events with every lerobot dependency mocked so no
     real hardware, dataset, or record_loop runs. Returns the spy call log for
@@ -964,7 +967,11 @@ def _run_record_session(
         if raise_in_loop:
             raise RuntimeError("bus died mid-episode")
         events = kwargs.get("events")
-        if events is not None and kwargs.get("dataset") is not None:
+        if events is None or kwargs.get("dataset") is None:
+            return
+        if record_loop_side_effect is not None:
+            record_loop_side_effect(events)
+        else:
             events.update(stop_events or {"stop_recording": True, "_exit_early_triggered": True})
 
     monkeypatch.setattr("lerobot.scripts.lerobot_record.record_loop", _fake_record_loop, raising=False)
@@ -1006,7 +1013,8 @@ def _run_record_session(
             follower_config="follower",
             dataset_repo_id=repo_id,
             single_task="pick",
-            num_episodes=1,
+            num_episodes=num_episodes,
+            reset_time_s=reset_time_s,
             video=False,
         )
     )
@@ -1020,6 +1028,64 @@ def _run_record_session(
     except Exception as e:  # the error-path test expects this
         error = e
     return return_calls, robot, error, dataset_calls
+
+
+def test_reset_phase_globals_reset_on_both_call_sites(
+    monkeypatch: pytest.MonkeyPatch, tmp_lerobot_home
+) -> None:
+    """paused_accum_seconds/pause_started_at must be freshly reset at the
+    START of every reset phase — both the re-record call site and the normal
+    inter-episode call site — not just one of them. Verified by spying on
+    _reset_loop_with_pause: the spy snapshots the globals on each call (which
+    should always read as freshly reset, since record_with_web_events resets
+    them immediately before calling it), then pollutes them, so the SECOND
+    snapshot only reads clean if the SECOND call site independently reset
+    them rather than inheriting the first call's pollution."""
+    import makermodslab.record as record
+
+    calls: list[dict] = []
+
+    def _spy_reset_loop(**kwargs):
+        calls.append(
+            {
+                "paused_accum_seconds": record.paused_accum_seconds,
+                "pause_started_at": record.pause_started_at,
+            }
+        )
+        if len(calls) == 1:
+            record.paused_accum_seconds = 7.5
+            record.pause_started_at = 555.0
+
+    monkeypatch.setattr(record, "_reset_loop_with_pause", _spy_reset_loop)
+    monkeypatch.setattr(
+        "makermodslab.utils.robot_factory.setup_calibration_files",
+        lambda leader, follower: ("leader", "follower"),
+    )
+
+    call_count = [0]
+
+    def _record_loop_side_effect(events: dict) -> None:
+        call_count[0] += 1
+        if call_count[0] == 1:
+            # Episode 1, first take: trigger a re-record (RE-RECORD call site).
+            events.update({"rerecord_episode": True, "_exit_early_triggered": True})
+        else:
+            # Episode 1's re-take, then episode 2: normal skip-to-next
+            # (NORMAL call site after episode 1; session completes after 2).
+            events.update({"rerecord_episode": False, "_exit_early_triggered": True})
+
+    robot = _RecRobot(_RecReturnBus())
+    _run_record_session(
+        monkeypatch,
+        robot,
+        num_episodes=2,
+        record_loop_side_effect=_record_loop_side_effect,
+    )
+
+    assert len(calls) == 2
+    assert calls[0] == {"paused_accum_seconds": 0.0, "pause_started_at": None}
+    # The second call site must have reset the polluted values, not inherited them.
+    assert calls[1] == {"paused_accum_seconds": 0.0, "pause_started_at": None}
 
 
 def test_record_accepts_bare_repo_id(monkeypatch: pytest.MonkeyPatch, tmp_lerobot_home) -> None:
