@@ -12,7 +12,7 @@
 
 **MakerLab** is a web app that puts the full LeRobot workflow — calibrate, teleoperate, record, train, replay — into a single browser UI. Plug in your arm, open the app, and go. No CLI gymnastics, no keyboard prompts.
 
-MakerLab is a fork of Hugging Face's **[LeLab](https://github.com/huggingface/leLab)** — the graphical interface for LeRobot, originally built by Team LeLab at the 2025 LeRobot Worldwide Hackathon 🏆 and maintained by the [LeRobot](https://huggingface.co/lerobot) team. MakerLab, by [makermods-robotics](https://github.com/makermods-robotics), extends it with hardware-safety guards, bimanual support, and a more guided setup and training flow.
+Built by [makermods-robotics](https://github.com/makermods-robotics) and forked from Hugging Face's **[LeLab](https://github.com/huggingface/leLab)**, MakerLab adds hardware-safety guards, bimanual support, and a more guided setup and training flow.
 
 ## Quick Start
 
@@ -46,7 +46,7 @@ See [INSTALL.md](INSTALL.md) for platform-specific setup (macOS, Jetson) and net
 
 ## What you can do
 
-The core LeRobot workflow, inherited from LeLab and extended throughout:
+The core LeRobot workflow, extended throughout:
 
 <div align="center">
   <table>
@@ -111,13 +111,19 @@ The core LeRobot workflow, inherited from LeLab and extended throughout:
 ## Resources
 
 - **[LeRobot](https://github.com/huggingface/lerobot):** the underlying library — go here for everything beyond the UI.
-- **[LeLab](https://github.com/huggingface/leLab):** the upstream project this is forked from; try its hosted UI on the [LeLab Space](https://huggingface.co/spaces/lerobot/LeLab).
 - **[Discord](https://discord.gg/q8Dzzpym3f):** chat with the LeRobot community.
 - **[CLAUDE.md](CLAUDE.md):** architecture rundown for contributors.
 
 ## Contribute
 
-PRs welcome. Do the editable install from [Quick Start](#quick-start), then work in hot-reload mode:
+PRs welcome. Do the editable install from [Quick Start](#quick-start), then add the
+dev extra — it brings in ruff, pre-commit, and everything the test suite needs:
+
+```bash
+uv pip install -e ".[dev]"
+```
+
+Work in hot-reload mode:
 
 ```bash
 makerlab --dev
@@ -125,6 +131,16 @@ makerlab --dev
 
 Vite on `:8080`, uvicorn `--reload` on `:8000` — frontend and backend edits reload live.
 
+Before opening a PR, run what CI runs:
+
+```bash
+pytest                                  # Python suite
+ruff check && ruff format --check       # Python lint + format
+cd frontend && npm run lint && npx tsc --noEmit && npm run build
+```
+
+Leave `frontend/dist/` alone — CI rebuilds and commits it on merge to `main`.
+
 <div align="center">
-<sub>MakerLab is maintained by <a href="https://github.com/makermods-robotics">makermods-robotics</a>. Forked with ❤️ from <a href="https://github.com/huggingface/leLab">LeLab</a>, originally hacked together by <a href="https://www.linkedin.com/posts/nicolas-rabault-_lerobot-hackathon-lerobot-ugcPost-7341065019368828930-jTnl/">Team LeLab at the 2025 LeRobot Worldwide Hackathon 🏆</a>.</sub>
+<sub>MakerLab is maintained by <a href="https://github.com/makermods-robotics">makermods-robotics</a>.</sub>
 </div>

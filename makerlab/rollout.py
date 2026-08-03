@@ -42,6 +42,7 @@ from tqdm.auto import tqdm as _base_tqdm
 from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
 
 from .arm_identity import ArmIdentityError, ArmSlot, verify_devices
+from .camera_preview import camera_preview_manager
 from .motor_power import clear_goal_velocity, reset_torque_limit
 from .record import _DEFAULT_FOURCC
 from .utils.config import (
@@ -123,6 +124,13 @@ _inference_startup_thread: threading.Thread | None = None
 # Guards mutations to the globals above; held only for the short critical
 # sections in start/stop/status.
 _state_lock = threading.Lock()
+# Bound on how long a second stop-inference call waits for an orphaned startup
+# worker (see _inference_startup_thread) to exit before giving up and
+# reporting it's still alive. Mirrors teleoperate.py's second-stop join
+# timeout; unlike that one, this can't force the worker out mid-call (no
+# cooperative cancellation checkpoint inside _prepare_robot), so it's a
+# bounded wait-and-report rather than a true force-release.
+_STARTUP_STOP_JOIN_TIMEOUT_S = 5.0
 _HUB_REF_RE = re.compile(r"^(?P<repo>[^@]+)@checkpoints/(?P<step_dir>\d+)$")
 _HUB_ROOT_REF_RE = re.compile(r"^(?P<repo>[^@]+)@root$")
 # lerobot prints this once per run, the moment its main control loop is
@@ -922,8 +930,15 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
     global inference_active, _inference_started_at, _inference_meta, _inference_cancel
     global _last_result, _inference_startup_thread
 
-    # Mutex with teleop and recording: all three drive the same serial bus.
-    from . import record as _record, teleoperate as _teleoperate
+    # Mutex with every other feature that drives the same serial bus (see
+    # CLAUDE.md's "State model & mutual exclusion").
+    from . import (
+        auto_calibrate as _auto_calibrate,
+        calibrate as _calibrate,
+        record as _record,
+        teleoperate as _teleoperate,
+        wiggle as _wiggle,
+    )
 
     with _state_lock:
         if _teleoperate.teleoperation_active:
@@ -955,6 +970,24 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
                 "success": False,
                 "status_code": 409,
                 "message": "The previous session is still shutting down. Try again in a few seconds.",
+            }
+        if _calibrate.calibration_is_active():
+            return {
+                "success": False,
+                "status_code": 409,
+                "message": "Calibration is currently active. Stop it first.",
+            }
+        if _auto_calibrate.auto_calibration_is_active():
+            return {
+                "success": False,
+                "status_code": 409,
+                "message": "Auto-calibration is currently active. Stop it first.",
+            }
+        if _wiggle.wiggle_active:
+            return {
+                "success": False,
+                "status_code": 409,
+                "message": "A gripper wiggle is currently in progress. Wait for it to finish.",
             }
         # Claim the slot now so a concurrent caller losing the race sees us, and
         # seed the meta + timer so the phase is visible from the very first
@@ -997,6 +1030,12 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
             "message": f"Unrecognised policy ref: {request.policy_ref!r}",
         }
 
+    # Backend camera previews hold the cv2 devices the rollout subprocess is about
+    # to open. Released here — after the cheap guards above, so a rejected request
+    # doesn't needlessly kill the modal's previews, and while `inference_active`
+    # is already True so /camera-preview 409s instead of re-acquiring a device.
+    camera_preview_manager.stop_all()
+
     # Everything heavy (download, preflight, spawn) runs off the request thread.
     # Tracked so a later start can tell whether a stopped session's worker is
     # still alive (see the is_alive() guard above) instead of racing it.
@@ -1031,8 +1070,33 @@ def handle_stop_inference() -> dict[str, Any]:
     global _inference_rollout_started_at, _inference_meta, _inference_cancel
 
     with _state_lock:
-        if not inference_active:
+        session_active = inference_active
+        orphaned_worker = _inference_startup_thread if not session_active else None
+
+    if not session_active:
+        if orphaned_worker is None or not orphaned_worker.is_alive():
             return {"success": False, "status_code": 409, "message": "No inference is active"}
+        # A previous stop already fired (inference_active is False), but that
+        # session's startup worker is still stuck inside _prepare_robot with no
+        # way to be interrupted mid-call. This is the "press Stop again" gesture
+        # (mirrors teleoperate.py's second stop): bounded-wait for it and report
+        # honestly, instead of repeating a blanket "nothing to stop" that hides
+        # a worker still touching the serial bus. Joined outside _state_lock so
+        # a slow/stuck worker can't stall other requests (status polls, a
+        # concurrent start) for the whole timeout.
+        orphaned_worker.join(timeout=_STARTUP_STOP_JOIN_TIMEOUT_S)
+        if orphaned_worker.is_alive():
+            return {
+                "success": True,
+                "shutting_down": True,
+                "message": (
+                    "The previous session is still shutting down "
+                    f"(waited {_STARTUP_STOP_JOIN_TIMEOUT_S:.0f}s more). Try again shortly."
+                ),
+            }
+        return {"success": True, "message": "The previous session has now finished shutting down."}
+
+    with _state_lock:
         # Signal the background startup worker to abandon: this is the only way
         # to stop during the pre-subprocess window (Hub download / arm
         # preflight), where there's no process to terminate.
@@ -1130,6 +1194,15 @@ def handle_inference_status() -> dict[str, Any]:
     # Finalise state lazily if the subprocess died on its own.
     with _state_lock:
         proc = _inference_proc
+        # True only while idle: a previous session's startup worker (see
+        # _inference_startup_thread) is still alive after its stop already
+        # fired, so a poller isn't looking at a status indistinguishable from
+        # true idle while the worker still holds the serial bus.
+        shutting_down = (
+            not inference_active
+            and _inference_startup_thread is not None
+            and _inference_startup_thread.is_alive()
+        )
         # Idle with a recorded terminal result (a subprocess exit finalised
         # below, or a download/preflight failure from _fail_startup): keep
         # returning that payload verbatim until the next start clears it.
@@ -1137,7 +1210,7 @@ def handle_inference_status() -> dict[str, Any]:
         # concurrently, and a consume-once payload lets one poller swallow the
         # error the user needed to see (see _last_result's declaration).
         if proc is None and not inference_active and _last_result is not None:
-            return dict(_last_result)
+            return {**_last_result, "shutting_down": shutting_down}
         if proc is not None and proc.poll() is not None:
             rc = proc.returncode
             logger.info("Inference subprocess exited rc=%s", rc)
@@ -1178,7 +1251,7 @@ def handle_inference_status() -> dict[str, Any]:
                 "rollout_elapsed_s": 0,
                 "elapsed_s": 0,
             }
-            return dict(_last_result)
+            return {**_last_result, "shutting_down": shutting_down}
         elapsed = (time.time() - _inference_started_at) if _inference_started_at else 0
         rollout_elapsed = time.time() - _inference_rollout_started_at if _inference_rollout_started_at else 0
         return {
@@ -1203,4 +1276,5 @@ def handle_inference_status() -> dict[str, Any]:
             # Warn-but-allow arm-identity finding, surfaced once the run is up
             # (the preflight now runs in the background, after the POST returned).
             "warning": _inference_meta.get("warning"),
+            "shutting_down": shutting_down,
         }

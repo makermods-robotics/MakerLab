@@ -48,7 +48,7 @@ import {
   AvailableCamera,
   useAvailableCameras,
 } from "@/hooks/useAvailableCameras";
-import { useCameraStream } from "@/hooks/useCameraStream";
+import BackendCameraStream from "@/components/BackendCameraStream";
 
 /**
  * Studio panel 3 · Deploy — run a skill (local trained checkpoint or an
@@ -70,15 +70,20 @@ const JOB_SCAN_LIMIT = 200;
 
 const cameraKey = (cam: AvailableCamera) => String(cam.index);
 
-/** Small getUserMedia preview for verifying which physical camera a role binds
- * to. `paused` drops the browser stream so the rollout subprocess can open the
- * same device via OpenCV without contending. (Ported from InferenceModal.) */
-const CameraThumbnail: React.FC<{ deviceId: string; paused: boolean }> = ({
-  deviceId,
-  paused,
-}) => {
-  const { videoRef, hasError } = useCameraStream(deviceId, paused);
-  if (paused || hasError || !deviceId) {
+/** Small preview for verifying which physical camera a role binds to.
+ *
+ * Streams from the backend by cv2 index — the live feed at exactly the index
+ * the rollout will open, independent of any browser deviceId match. That match
+ * was by localizedName, so twin cameras ("KD-USB Cameras" x2) paired
+ * arbitrarily and the tiles swapped footage between refreshes.
+ * `paused` unmounts the stream so the rollout subprocess can claim the device.
+ * (Ported from InferenceModal.) */
+const CameraThumbnail: React.FC<{
+  cameraIndex?: number;
+  uniqueId?: string;
+  paused: boolean;
+}> = ({ cameraIndex, uniqueId, paused }) => {
+  if (paused || cameraIndex === undefined) {
     return (
       <div className="flex h-24 w-32 flex-col items-center justify-center rounded border border-border bg-muted">
         <VideoOff className="mb-1 h-5 w-5 text-muted-foreground" />
@@ -88,12 +93,11 @@ const CameraThumbnail: React.FC<{ deviceId: string; paused: boolean }> = ({
       </div>
     );
   }
+  // BackendCameraStream owns its own failure/retry UI.
   return (
-    <video
-      ref={videoRef}
-      autoPlay
-      muted
-      playsInline
+    <BackendCameraStream
+      cameraIndex={cameraIndex}
+      uniqueId={uniqueId}
       className="h-24 w-32 rounded border border-border bg-muted object-cover"
     />
   );
@@ -400,9 +404,18 @@ const DeployPanel: React.FC = () => {
           (c) => c.name.toLowerCase() === m.display.toLowerCase(),
         );
         if (!robotCam) continue;
-        const live = robotCam.device_id
-          ? availableCameras.find((c) => c.deviceId === robotCam.device_id)
-          : availableCameras.find((c) => c.index === robotCam.camera_index);
+        // Resolve by unique_id first: it names the physical device exactly.
+        // device_id is a coin flip when two cameras share a name (the browser
+        // match is by localizedName), and camera_index goes stale on replug —
+        // both are fallbacks for records saved before unique_id was stored.
+        const live =
+          (robotCam.unique_id
+            ? availableCameras.find((c) => c.uniqueId === robotCam.unique_id)
+            : undefined) ??
+          (robotCam.device_id
+            ? availableCameras.find((c) => c.deviceId === robotCam.device_id)
+            : undefined) ??
+          availableCameras.find((c) => c.index === robotCam.camera_index);
         if (live) {
           next[m.requestKey] = cameraKey(live);
           changed = true;
@@ -829,7 +842,8 @@ const DeployPanel: React.FC = () => {
                           </SelectContent>
                         </Select>
                         <CameraThumbnail
-                          deviceId={selectedCamera?.deviceId ?? ""}
+                          cameraIndex={selectedCamera?.index}
+                          uniqueId={selectedCamera?.uniqueId}
                           paused={submitting || inferenceActive}
                         />
                       </div>
