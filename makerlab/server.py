@@ -2641,6 +2641,23 @@ async def shutdown_event():
 
     # Stop any active recording - handled by recording module cleanup
 
+    # An in-flight inference run's `lerobot-rollout` subprocess is a real
+    # child process, independent of this one — it keeps driving the follower
+    # under its policy even after we exit unless we terminate it ourselves.
+    # This fires on a graceful SIGTERM (a plain `kill <pid>`, or uvicorn
+    # `--reload` tearing down the worker process on a file change), which is
+    # exactly when nothing else is left to stop it. handle_stop_inference()
+    # is a no-op (409) when idle, so this is safe to call unconditionally.
+    # It can block for several seconds waiting on the subprocess, so it runs
+    # in a thread instead of directly on the event loop — otherwise it would
+    # freeze all other async work (including this same shutdown sequence)
+    # for however long the wait takes. Any failure here is caught so it can't
+    # stop the broadcast-thread cleanup below from running too.
+    try:
+        await asyncio.to_thread(handle_stop_inference)
+    except Exception:
+        logger.exception("Failed to stop inference during shutdown")
+
     if manager:
         manager.stop_broadcast_thread()
     logger.info("✅ Cleanup completed")
