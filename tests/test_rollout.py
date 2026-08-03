@@ -1211,6 +1211,53 @@ def test_friendly_hint_maps_common_failures() -> None:
     assert friendly_hint(None) is None
 
 
+def test_friendly_hint_servo_bus_error_is_not_a_download_failure() -> None:
+    """A servo that stops answering must read as an ARM problem.
+
+    lerobot's motors bus raises every serial failure as `ConnectionError`, and
+    the type name itself contains "connect" — keying the Hub-download hint on
+    that token labelled arm-side startup crashes "couldn't download the model"
+    (observed 2026-08-03: a `Failed to write 'Lock' ... [TxRxResult] Incorrect
+    status packet!` at robot.connect() reported as a failed model download)."""
+    from makermodslab.utils.errors import friendly_hint
+
+    for text in (
+        "ConnectionError: Failed to write 'Lock' on id_=3 with '1' after 1 tries. "
+        "[TxRxResult] Incorrect status packet!",
+        "Failed to start inference: ConnectionError: Failed to sync read 'Present_Position' "
+        "on ids=[1, 2, 3] after 1 tries. [TxRxResult] There is no status packet!",
+    ):
+        hint = friendly_hint(text) or ""
+        assert "motor" in hint.lower()
+        assert "download" not in hint.lower()
+
+
+def test_friendly_hint_still_names_real_download_failures() -> None:
+    """The other side of the tightening: a genuine fetch failure keeps its Hub
+    hint. Download-step failures reach here with rollout's own
+    "Failed to download the model: …" prefix (see _inference_startup_thread)."""
+    from makermodslab.utils.errors import friendly_hint
+
+    network = friendly_hint(
+        "Failed to download the model: (MaxRetryError(\"HTTPSConnectionPool(host='huggingface.co', "
+        'port=443): Max retries exceeded with url: /api/models/user/repo"))'
+    )
+    assert network is not None and "download the model" in network.lower()
+    # No hub host in the text at all — rollout's prefix is what identifies it.
+    offline = friendly_hint(
+        "Failed to download the model: An error happened while trying to locate the file on the Hub "
+        "and we cannot find the requested files in the local cache. Please check your connection."
+    )
+    assert offline is not None and "download the model" in offline.lower()
+    missing = friendly_hint(
+        "Failed to download the model: RepositoryNotFoundError: 404 Client Error. "
+        "Repository Not Found for url: https://huggingface.co/api/models/user/repo"
+    )
+    assert missing is not None and "hub" in missing.lower()
+    full = friendly_hint("Failed to download the model: OSError: [Errno 28] No space left on device")
+    assert full is not None and "disk space" in full.lower()
+
+
 def test_extract_error_from_log_pulls_exception_tail(tmp_path) -> None:
     from makermodslab.rollout import _extract_error_from_log
 
