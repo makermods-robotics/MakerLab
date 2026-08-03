@@ -489,6 +489,109 @@ def test_handle_stop_recording_discard_ignored_when_idle(monkeypatch: pytest.Mon
     assert record.discard_requested is False
 
 
+def test_handle_pause_recording_sets_flag_during_reset_phase(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pause only takes effect during the reset phase, and records a wall-clock
+    pause-start timestamp for the status handler to use."""
+    import makermodslab.record as record
+
+    events = {"stop_recording": False, "exit_early": False, "paused": False}
+    monkeypatch.setattr(record, "recording_active", True)
+    monkeypatch.setattr(record, "recording_events", events)
+    monkeypatch.setattr(record, "current_phase", "resetting")
+    monkeypatch.setattr(record, "pause_started_at", None)
+    monkeypatch.setattr(record.time, "time", lambda: 12345.0)
+
+    result = record.handle_pause_recording()
+
+    assert result["success"] is True
+    assert events["paused"] is True
+    assert record.pause_started_at == 12345.0
+
+
+def test_handle_pause_recording_ignored_outside_reset_phase(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pausing mid-episode (or any phase other than resetting) is refused and
+    never arms the paused flag."""
+    import makermodslab.record as record
+
+    events = {"stop_recording": False, "exit_early": False, "paused": False}
+    monkeypatch.setattr(record, "recording_active", True)
+    monkeypatch.setattr(record, "recording_events", events)
+    monkeypatch.setattr(record, "current_phase", "recording")
+
+    result = record.handle_pause_recording()
+
+    assert result["success"] is False
+    assert events["paused"] is False
+
+
+def test_handle_pause_recording_idempotent_when_already_paused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A duplicate pause request (e.g. a double-click) is a safe no-op, not a
+    second timestamp overwrite that would lose accounted pause time."""
+    import makermodslab.record as record
+
+    events = {"stop_recording": False, "exit_early": False, "paused": True}
+    monkeypatch.setattr(record, "recording_active", True)
+    monkeypatch.setattr(record, "recording_events", events)
+    monkeypatch.setattr(record, "current_phase", "resetting")
+    monkeypatch.setattr(record, "pause_started_at", 999.0)
+
+    result = record.handle_pause_recording()
+
+    assert result["success"] is True
+    assert record.pause_started_at == 999.0  # unchanged
+
+
+def test_handle_resume_recording_credits_paused_duration(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Resuming clears the paused flag and folds the just-finished pause
+    interval into the running total, so status can freeze-then-continue the
+    countdown correctly."""
+    import makermodslab.record as record
+
+    events = {"stop_recording": False, "exit_early": False, "paused": True}
+    monkeypatch.setattr(record, "recording_active", True)
+    monkeypatch.setattr(record, "recording_events", events)
+    monkeypatch.setattr(record, "current_phase", "resetting")
+    monkeypatch.setattr(record, "pause_started_at", 100.0)
+    monkeypatch.setattr(record, "paused_accum_seconds", 0.0)
+    monkeypatch.setattr(record.time, "time", lambda: 106.0)
+
+    result = record.handle_resume_recording()
+
+    assert result["success"] is True
+    assert events["paused"] is False
+    assert record.pause_started_at is None
+    assert record.paused_accum_seconds == 6.0
+
+
+def test_handle_resume_recording_ignored_when_not_paused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Resuming when nothing is paused is a safe no-op — it must not credit
+    bogus paused time."""
+    import makermodslab.record as record
+
+    events = {"stop_recording": False, "exit_early": False, "paused": False}
+    monkeypatch.setattr(record, "recording_active", True)
+    monkeypatch.setattr(record, "recording_events", events)
+    monkeypatch.setattr(record, "current_phase", "resetting")
+    monkeypatch.setattr(record, "pause_started_at", None)
+    monkeypatch.setattr(record, "paused_accum_seconds", 3.0)
+
+    result = record.handle_resume_recording()
+
+    assert result["success"] is True
+    assert record.paused_accum_seconds == 3.0  # unchanged
+
+
+def test_handle_pause_recording_refused_when_idle(monkeypatch: pytest.MonkeyPatch) -> None:
+    import makermodslab.record as record
+
+    monkeypatch.setattr(record, "recording_active", False)
+    monkeypatch.setattr(record, "recording_events", None)
+
+    result = record.handle_pause_recording()
+
+    assert result["success"] is False
+
+
 def test_worker_quit_discards_fresh_dataset_with_saved_episodes(
     monkeypatch: pytest.MonkeyPatch, tmp_lerobot_home
 ) -> None:

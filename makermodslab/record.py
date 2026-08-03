@@ -192,6 +192,16 @@ current_episode = 1  # Track current episode number
 saved_episodes = 0  # Track how many episodes have been saved
 current_phase = "preparing"  # Track current phase: "preparing", "recording", "resetting", "completed"
 phase_start_time = None  # Track when current phase started
+# Total time spent paused during the CURRENT reset phase, credited on resume
+# (see handle_resume_recording). Reset to 0.0 whenever a new reset phase
+# begins (both reset-phase call sites in record_with_web_events) so pause
+# time from an earlier episode's gap never leaks into a later one.
+paused_accum_seconds: float = 0.0
+# Wall-clock time.time() the current pause began; None while not paused. Kept
+# separate from the reset loop's own internal perf_counter()-based pacing —
+# this pair exists purely so handle_recording_status can freeze the
+# frontend-facing countdown, independent of how the tick loop paces itself.
+pause_started_at: float | None = None
 # True when the most recent session saved zero episodes and its (freshly
 # created) dataset directory was discarded. Surfaced in the session-end status
 # so the frontend can tell the user nothing was kept (see Upload.tsx).
@@ -563,6 +573,7 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
             "exit_early": False,  # Right arrow key -> "Skip to next episode" button
             "stop_recording": False,  # ESC key -> "Stop recording" button
             "rerecord_episode": False,  # Left arrow key -> "Re-record episode" button
+            "paused": False,  # Reset-phase pause/resume (mouse-only, no keyboard shortcut)
         }
 
         record_config = create_record_config(request)
@@ -578,10 +589,14 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                 saved_episodes, \
                 last_session_discarded_empty, \
                 last_session_outcome, \
-                last_session_error
+                last_session_error, \
+                paused_accum_seconds, \
+                pause_started_at
             recording_start_time = time.time()
             current_episode = 1
             saved_episodes = 0
+            paused_accum_seconds = 0.0
+            pause_started_at = None
 
             try:
                 logger.info(
@@ -781,6 +796,46 @@ def handle_rerecord_episode() -> dict[str, Any]:
         "message": "Re-record episode requested successfully",
         "events_state": dict(recording_events),
     }
+
+
+def handle_pause_recording() -> dict[str, Any]:
+    """Pause the reset-phase gap between episodes. Freezes teleop passthrough
+    (the follower holds position and ignores the leader) and the reset
+    countdown until resumed. No-ops outside the reset phase and when already
+    paused, so a stray or duplicate request is always safe."""
+    global pause_started_at
+
+    if not recording_active or recording_events is None:
+        return {"success": False, "message": "No recording session is active"}
+    if current_phase != "resetting":
+        return {"success": False, "message": "Pause is only available during the reset phase"}
+    if recording_events.get("paused", False):
+        return {"success": True, "message": "Already paused", "events_state": dict(recording_events)}
+
+    recording_events["paused"] = True
+    pause_started_at = time.time()
+    logger.info("Reset phase paused")
+    return {"success": True, "message": "Reset phase paused", "events_state": dict(recording_events)}
+
+
+def handle_resume_recording() -> dict[str, Any]:
+    """Resume a paused reset-phase gap. No-ops outside the reset phase and
+    when not currently paused."""
+    global paused_accum_seconds, pause_started_at
+
+    if not recording_active or recording_events is None:
+        return {"success": False, "message": "No recording session is active"}
+    if current_phase != "resetting":
+        return {"success": False, "message": "Resume is only available during the reset phase"}
+    if not recording_events.get("paused", False):
+        return {"success": True, "message": "Not paused", "events_state": dict(recording_events)}
+
+    recording_events["paused"] = False
+    if pause_started_at is not None:
+        paused_accum_seconds += time.time() - pause_started_at
+        pause_started_at = None
+    logger.info("Reset phase resumed")
+    return {"success": True, "message": "Reset phase resumed", "events_state": dict(recording_events)}
 
 
 def handle_recording_status() -> dict[str, Any]:
