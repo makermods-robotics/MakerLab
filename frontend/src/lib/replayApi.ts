@@ -183,7 +183,7 @@ export interface EpisodeSummary {
 /** Per-episode index/length/duration/tasks, for the dataset viewer window's
  * episode list. 404 when the dataset isn't local, or predates the v3.0
  * parquet episode layout the viewer reads (older jsonl-metadata datasets
- * aren't viewable — see makerlab/datasets.py `_read_episode_rows`). */
+ * aren't viewable — see makermodslab/datasets.py `_read_episode_rows`). */
 export async function listEpisodes(
   baseUrl: string,
   fetcher: Fetcher,

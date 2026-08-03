@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for makerlab.runners.hf_cloud — covers the host-side wandb credential
+"""Tests for makermodslab.runners.hf_cloud — covers the host-side wandb credential
 resolution, the pinned-lerobot spec derivation, and the cloud-boundary config
 localization. HfCloudJobRunner itself talks to HF Jobs and is not unit-
 testable without a heavy mock of HfApi; we intentionally leave it for
@@ -30,7 +30,7 @@ import pytest
 def test_resolve_wandb_api_key_prefers_environment_variable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from makerlab.runners.hf_cloud import resolve_wandb_api_key
+    from makermodslab.runners.hf_cloud import resolve_wandb_api_key
 
     monkeypatch.setenv("WANDB_API_KEY", "env-key-123")
     assert resolve_wandb_api_key() == "env-key-123"
@@ -39,7 +39,7 @@ def test_resolve_wandb_api_key_prefers_environment_variable(
 def test_resolve_wandb_api_key_falls_back_to_netrc(monkeypatch: pytest.MonkeyPatch) -> None:
     """When WANDB_API_KEY is unset, the function must read the same place
     `wandb login` writes — ~/.netrc under machine api.wandb.ai."""
-    from makerlab.runners.hf_cloud import resolve_wandb_api_key
+    from makermodslab.runners.hf_cloud import resolve_wandb_api_key
 
     monkeypatch.delenv("WANDB_API_KEY", raising=False)
 
@@ -55,7 +55,7 @@ def test_resolve_wandb_api_key_falls_back_to_netrc(monkeypatch: pytest.MonkeyPat
 def test_resolve_wandb_api_key_returns_none_when_netrc_has_no_wandb_entry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from makerlab.runners.hf_cloud import resolve_wandb_api_key
+    from makermodslab.runners.hf_cloud import resolve_wandb_api_key
 
     monkeypatch.delenv("WANDB_API_KEY", raising=False)
 
@@ -71,7 +71,7 @@ def test_resolve_wandb_api_key_returns_none_when_netrc_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """No env var, no ~/.netrc — neither source has it, caller decides."""
-    from makerlab.runners.hf_cloud import resolve_wandb_api_key
+    from makermodslab.runners.hf_cloud import resolve_wandb_api_key
 
     monkeypatch.delenv("WANDB_API_KEY", raising=False)
 
@@ -85,7 +85,7 @@ def test_resolve_wandb_api_key_returns_none_when_netrc_missing(
 def test_resolve_wandb_api_key_returns_none_when_netrc_parse_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from makerlab.runners.hf_cloud import resolve_wandb_api_key
+    from makermodslab.runners.hf_cloud import resolve_wandb_api_key
 
     monkeypatch.delenv("WANDB_API_KEY", raising=False)
 
@@ -102,7 +102,7 @@ def test_resolve_wandb_api_key_returns_none_when_password_is_empty(
     """An empty password from netrc is treated as missing — the helper
     contract is 'returns the usable key or None', not 'returns whatever
     netrc happened to have'."""
-    from makerlab.runners.hf_cloud import resolve_wandb_api_key
+    from makermodslab.runners.hf_cloud import resolve_wandb_api_key
 
     monkeypatch.delenv("WANDB_API_KEY", raising=False)
 
@@ -133,7 +133,7 @@ def _spec_extras(spec: str) -> set[str]:
 def test_cloud_lerobot_spec_carries_the_pyproject_pinned_ref() -> None:
     """The container install spec must reference the exact ref pinned in
     pyproject.toml — never a hardcoded second copy, never :latest."""
-    from makerlab.runners.hf_cloud import cloud_lerobot_spec
+    from makermodslab.runners.hf_cloud import cloud_lerobot_spec
 
     pin = _pyproject_lerobot_pin()
     ref = pin.rsplit("@", 1)[1]  # the sha at the end of git+https://…@<sha>
@@ -145,7 +145,7 @@ def test_cloud_lerobot_spec_carries_the_pyproject_pinned_ref() -> None:
 def test_cloud_lerobot_spec_uses_archive_tarball_not_git() -> None:
     """A GitHub git+ pin is rewritten to the source archive tarball so pip in
     the container can install it without a git binary."""
-    from makerlab.runners.hf_cloud import cloud_lerobot_spec
+    from makermodslab.runners.hf_cloud import cloud_lerobot_spec
 
     spec = cloud_lerobot_spec("act")
     assert "git+" not in spec
@@ -155,7 +155,7 @@ def test_cloud_lerobot_spec_uses_archive_tarball_not_git() -> None:
 
 
 def test_cloud_lerobot_spec_drops_host_only_extras_and_adds_policy_extra() -> None:
-    from makerlab.runners.hf_cloud import cloud_lerobot_spec
+    from makermodslab.runners.hf_cloud import cloud_lerobot_spec
 
     act = _spec_extras(cloud_lerobot_spec("act"))
     assert "feetech" not in act  # serial motor bus: host-only
@@ -172,9 +172,9 @@ def test_cloud_lerobot_spec_drops_host_only_extras_and_adds_policy_extra() -> No
 def test_cloud_lerobot_spec_falls_back_to_pyproject_when_metadata_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Running from a source tree without installed MakerLab metadata must still
+    """Running from a source tree without installed MakerMods Lab metadata must still
     derive the pin — from pyproject.toml directly."""
-    from makerlab.runners import hf_cloud
+    from makermodslab.runners import hf_cloud
 
     monkeypatch.setattr(hf_cloud, "requires", lambda name: None)
     pin = _pyproject_lerobot_pin()
@@ -186,7 +186,7 @@ def test_cloud_lerobot_spec_falls_back_to_pyproject_when_metadata_missing(
 
 
 def _request(**overrides):
-    from makerlab.train import TrainingRequest
+    from makermodslab.train import TrainingRequest
 
     return TrainingRequest(dataset_repo_id="user/ds", **overrides)
 
@@ -194,8 +194,8 @@ def _request(**overrides):
 def test_localize_forces_flavor_device_over_host_detection() -> None:
     """The host's auto-detected device (mps on a Mac) must never reach a cloud
     job: GPU flavors force cuda, cpu tiers force cpu."""
-    from makerlab.runners.hf_cloud import localize_config_for_cloud
-    from makerlab.train import build_training_command
+    from makermodslab.runners.hf_cloud import localize_config_for_cloud
+    from makermodslab.train import build_training_command
 
     for host_device in ("auto", "mps", "cpu", None):
         config = _request(policy_device=host_device)
@@ -210,8 +210,8 @@ def test_localize_forces_flavor_device_over_host_detection() -> None:
 
 
 def test_localize_clears_host_local_dataset_root() -> None:
-    from makerlab.runners.hf_cloud import localize_config_for_cloud
-    from makerlab.train import build_training_command
+    from makermodslab.runners.hf_cloud import localize_config_for_cloud
+    from makermodslab.train import build_training_command
 
     config = _request(dataset_root="/Users/someone/.cache/huggingface/lerobot/user/ds")
     localize_config_for_cloud(config, "t4-small")
@@ -220,7 +220,7 @@ def test_localize_clears_host_local_dataset_root() -> None:
 
 
 def test_localize_rejects_resume_from_host_checkpoint() -> None:
-    from makerlab.runners.hf_cloud import localize_config_for_cloud
+    from makermodslab.runners.hf_cloud import localize_config_for_cloud
 
     config = _request(
         resume=True, config_path="/host/run/checkpoints/5000/pretrained_model/train_config.json"
@@ -234,7 +234,7 @@ def test_localize_allows_cloud_resume_from_hub() -> None:
     checkpoint from the Hub), not a host-local config_path — so localization must
     NOT reject it. The host config_path stays unset here; the runner sets the
     container path later."""
-    from makerlab.runners.hf_cloud import localize_config_for_cloud
+    from makermodslab.runners.hf_cloud import localize_config_for_cloud
 
     config = _request(resume=True, resume_from_hub_repo="user/parent-run", resume_from_hub_step="005000")
     localize_config_for_cloud(config, "t4-small")  # no raise
@@ -242,7 +242,7 @@ def test_localize_allows_cloud_resume_from_hub() -> None:
 
 
 def test_localize_rejects_local_pretrained_path_but_allows_hub_id() -> None:
-    from makerlab.runners.hf_cloud import localize_config_for_cloud
+    from makermodslab.runners.hf_cloud import localize_config_for_cloud
 
     local = _request(policy_pretrained_path="/host/checkpoints/000500/pretrained_model")
     with pytest.raises(ValueError, match="[Ff]ine-tun"):
@@ -259,7 +259,7 @@ def test_localize_rejects_local_pretrained_path_but_allows_hub_id() -> None:
 def test_install_plan_prefers_uv() -> None:
     """The lerobot-gpu image's venv is uv-created (no pip module), so uv on
     PATH must win, with --python pinning the install into this interpreter."""
-    from makerlab.runners.hf_cloud import _install_plan
+    from makermodslab.runners.hf_cloud import _install_plan
 
     label, cmds = _install_plan("lerobot @ url", "/venv/bin/python", "/usr/local/bin/uv", True, True)
     assert label == "uv"
@@ -277,7 +277,7 @@ def test_install_plan_prefers_uv() -> None:
 
 
 def test_install_plan_falls_back_to_pip_without_uv() -> None:
-    from makerlab.runners.hf_cloud import _install_plan
+    from makermodslab.runners.hf_cloud import _install_plan
 
     label, cmds = _install_plan("spec", "/py", None, True, True)
     assert label == "pip"
@@ -285,7 +285,7 @@ def test_install_plan_falls_back_to_pip_without_uv() -> None:
 
 
 def test_install_plan_bootstraps_pip_via_ensurepip_as_last_resort() -> None:
-    from makerlab.runners.hf_cloud import _install_plan
+    from makermodslab.runners.hf_cloud import _install_plan
 
     label, cmds = _install_plan("spec", "/py", None, False, True)
     assert label == "ensurepip+pip"
@@ -296,7 +296,7 @@ def test_install_plan_bootstraps_pip_via_ensurepip_as_last_resort() -> None:
 
 
 def test_install_plan_reports_no_installer() -> None:
-    from makerlab.runners.hf_cloud import _install_plan
+    from makermodslab.runners.hf_cloud import _install_plan
 
     assert _install_plan("spec", "/py", None, False, False) == (None, [])
 
@@ -308,7 +308,7 @@ def test_wrapper_source_compiles_and_launches_an_argv_list() -> None:
     """The wrapper must pass the trainer argv to Popen as a LIST (splitting a
     joined string was the bug-3 hypothesis — it is not the case and must stay
     that way) and quote its log line so spaced values read unambiguously."""
-    from makerlab.runners.hf_cloud import WRAPPER_SOURCE
+    from makermodslab.runners.hf_cloud import WRAPPER_SOURCE
 
     compile(WRAPPER_SOURCE, "<hf-jobs-wrapper>", "exec")  # syntactically valid
     assert "subprocess.Popen(list(trainer_argv)" in WRAPPER_SOURCE
@@ -320,7 +320,7 @@ def test_wrapper_source_handles_resume_download() -> None:
     """Cloud resume: the wrapper must parse --resume-from, download the parent
     checkpoint tree, refuse when training_state/ is absent, and pre-seed `seen`
     so it never re-uploads the checkpoint it just pulled down."""
-    from makerlab.runners.hf_cloud import WRAPPER_SOURCE
+    from makermodslab.runners.hf_cloud import WRAPPER_SOURCE
 
     compile(WRAPPER_SOURCE, "<hf-jobs-wrapper>", "exec")  # still valid with the resume block
     assert "--resume-from=" in WRAPPER_SOURCE
@@ -332,7 +332,7 @@ def test_wrapper_source_handles_resume_download() -> None:
 def test_cloud_resume_argv_keeps_lineage_in_parent_repo() -> None:
     """A cloud-resume config resolves to a --config_path at the container path and
     pushes into the parent's repo (same lineage), with resume essentials only."""
-    from makerlab.train import TrainingRequest, build_training_command
+    from makermodslab.train import TrainingRequest, build_training_command
 
     req = TrainingRequest(
         dataset_repo_id="user/ds",
@@ -340,10 +340,12 @@ def test_cloud_resume_argv_keeps_lineage_in_parent_repo() -> None:
         steps=20000,
         policy_push_to_hub=True,
         policy_repo_id="user/parent-run",
-        config_path="/tmp/makerlab/train/checkpoints/005000/pretrained_model/train_config.json",
+        config_path="/tmp/makermodslab/train/checkpoints/005000/pretrained_model/train_config.json",
     )
-    cmd = build_training_command(req, output_dir="/tmp/makerlab/train")
-    assert "--config_path=/tmp/makerlab/train/checkpoints/005000/pretrained_model/train_config.json" in cmd
+    cmd = build_training_command(req, output_dir="/tmp/makermodslab/train")
+    assert (
+        "--config_path=/tmp/makermodslab/train/checkpoints/005000/pretrained_model/train_config.json" in cmd
+    )
     assert cmd[cmd.index("--policy.push_to_hub") + 1] == "true"
     assert cmd[cmd.index("--policy.repo_id") + 1] == "user/parent-run"
     assert cmd[cmd.index("--resume") + 1] == "true"
@@ -358,7 +360,7 @@ def test_wrapper_source_inlines_the_tested_install_plan() -> None:
     exercised — uv first (shutil.which), pip / ensurepip as fallbacks."""
     import inspect
 
-    from makerlab.runners.hf_cloud import WRAPPER_SOURCE, _install_plan
+    from makermodslab.runners.hf_cloud import WRAPPER_SOURCE, _install_plan
 
     assert inspect.getsource(_install_plan) in WRAPPER_SOURCE
     assert "__INSTALL_PLAN_SOURCE__" not in WRAPPER_SOURCE  # placeholder replaced
@@ -373,8 +375,8 @@ def test_wrapper_source_inlines_the_tested_install_plan() -> None:
 
 
 def test_resolve_job_timeout_falls_back_to_constant_when_unset() -> None:
-    from makerlab.runners.hf_cloud import HF_JOB_TIMEOUT, resolve_job_timeout
-    from makerlab.train import TrainingRequest
+    from makermodslab.runners.hf_cloud import HF_JOB_TIMEOUT, resolve_job_timeout
+    from makermodslab.train import TrainingRequest
 
     config = TrainingRequest(dataset_repo_id="x")
     assert config.hf_job_timeout is None
@@ -385,8 +387,8 @@ def test_resolve_job_timeout_uses_request_value_normalised_to_seconds() -> None:
     """An explicit request value wins over the constant and is converted to an
     int of seconds — run_job's own str parser only handles a single unit, so
     compound forms like "3h30m" must be pre-resolved here."""
-    from makerlab.runners.hf_cloud import resolve_job_timeout
-    from makerlab.train import TrainingRequest
+    from makermodslab.runners.hf_cloud import resolve_job_timeout
+    from makermodslab.train import TrainingRequest
 
     assert resolve_job_timeout(TrainingRequest(dataset_repo_id="x", hf_job_timeout="45m")) == 2700
     assert resolve_job_timeout(TrainingRequest(dataset_repo_id="x", hf_job_timeout="3h30m")) == 12600

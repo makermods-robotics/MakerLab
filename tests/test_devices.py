@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 
-from makerlab.utils.devices import safe_disconnect_device
+from makermodslab.utils.devices import safe_disconnect_device
 
 
 def test_safe_disconnect_force_closes_serial_port_after_disconnect_failure() -> None:

@@ -14,7 +14,7 @@ import { useStudio } from "@/contexts/StudioContext";
 // Router state is lost on a hard refresh / direct visit, so mirror the last
 // resolved type in sessionStorage and fall back to it — the Policy display then
 // survives a refresh instead of silently reverting to "act".
-const POLICY_TYPE_STORAGE_KEY = "makerlab.training.policyType";
+const POLICY_TYPE_STORAGE_KEY = "makermodslab.training.policyType";
 
 function readStoredPolicyType(): string | null {
   try {

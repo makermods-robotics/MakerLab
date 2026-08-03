@@ -1,4 +1,4 @@
-<h1 align="center">🦾 MakerLab</h1>
+<h1 align="center">🦾 MakerMods Lab</h1>
 
 <p align="center">
   <b>A web interface for <a href="https://github.com/huggingface/lerobot">LeRobot</a>, built for the SO-101 leader/follower arm.</b>
@@ -10,9 +10,9 @@
 
 </div>
 
-**MakerLab** is a web app that puts the full LeRobot workflow — calibrate, teleoperate, record, train, replay — into a single browser UI. Plug in your arm, open the app, and go. No CLI gymnastics, no keyboard prompts.
+**MakerMods Lab** is a web app that puts the full LeRobot workflow — calibrate, teleoperate, record, train, replay — into a single browser UI. Plug in your arm, open the app, and go. No CLI gymnastics, no keyboard prompts.
 
-Built by [makermods-robotics](https://github.com/makermods-robotics) and forked from Hugging Face's **[LeLab](https://github.com/huggingface/leLab)**, MakerLab adds hardware-safety guards, bimanual support, and a more guided setup and training flow.
+Built by [makermods-robotics](https://github.com/makermods-robotics) and forked from Hugging Face's **[LeLab](https://github.com/huggingface/leLab)**, MakerMods Lab adds hardware-safety guards, bimanual support, and a more guided setup and training flow.
 
 ## Quick Start
 
@@ -21,25 +21,25 @@ Requires Python ≥ 3.12 and [uv](https://docs.astral.sh/uv/).
 **Just want to use it?** One line, no clone:
 
 ```bash
-uv tool install "git+https://github.com/makermods-robotics/MakerLab"
-makerlab            # serves the UI + API on :8000, opens your browser
+uv tool install "git+https://github.com/makermods-robotics/makermodslab"
+makermodslab            # serves the UI + API on :8000, opens your browser
 ```
 
 **Want to change the code?** Clone and install editable — your edits take effect on the next run, no reinstall needed:
 
 ```bash
-git clone https://github.com/makermods-robotics/MakerLab
-cd MakerLab
+git clone https://github.com/makermods-robotics/makermodslab
+cd makermodslab
 uv venv --python 3.12
 uv pip install -e .
-.venv/bin/makerlab            # first launch also links `makerlab` onto your PATH
+.venv/bin/makermodslab            # first launch also links `makermodslab` onto your PATH
 ```
 
 That first launch symlinks the command into `~/.local/bin`, so from then on you can run it from anywhere:
 
 ```bash
-makerlab            # run the app: built UI + API on :8000
-makerlab --dev      # hack on it: Vite hot reload on :8080 + auto-reloading API on :8000
+makermodslab            # run the app: built UI + API on :8000
+makermodslab --dev      # hack on it: Vite hot reload on :8080 + auto-reloading API on :8000
 ```
 
 See [INSTALL.md](INSTALL.md) for platform-specific setup (macOS, Jetson) and network tips.
@@ -81,7 +81,7 @@ The core LeRobot workflow, extended throughout:
   </table>
 </div>
 
-## What MakerLab adds
+## What MakerMods Lab adds
 
 **Hardware safety** — opinionated about not letting a wiring mistake break a servo:
 
@@ -126,7 +126,7 @@ uv pip install -e ".[dev]"
 Work in hot-reload mode:
 
 ```bash
-makerlab --dev
+makermodslab --dev
 ```
 
 Vite on `:8080`, uvicorn `--reload` on `:8000` — frontend and backend edits reload live.
@@ -142,5 +142,5 @@ cd frontend && npm run lint && npx tsc --noEmit && npm run build
 Leave `frontend/dist/` alone — CI rebuilds and commits it on merge to `main`.
 
 <div align="center">
-<sub>MakerLab is maintained by <a href="https://github.com/makermods-robotics">makermods-robotics</a>.</sub>
+<sub>MakerMods Lab is maintained by <a href="https://github.com/makermods-robotics">makermods-robotics</a>.</sub>
 </div>

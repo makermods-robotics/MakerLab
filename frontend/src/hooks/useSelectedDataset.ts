@@ -1,6 +1,6 @@
 import { useCallback, useSyncExternalStore } from "react";
 
-const KEY = "makerlab.selectedDataset";
+const KEY = "makermodslab.selectedDataset";
 
 // Module-level store shared by every useSelectedDataset() instance. The studio
 // panels (Collect, Train), the launchpad handoff banner, and the library sheet

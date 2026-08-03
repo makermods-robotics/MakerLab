@@ -3,7 +3,7 @@ requires = ["setuptools>=45", "wheel", "setuptools_scm[toml]>=6.2"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "MakerLab"
+name = "MakerModsLab"
 version = "0.1.0"
 description = "LeRobot Lab - A web interface for robotics with lerobot integration"
 readme = "README.md"
@@ -30,7 +30,7 @@ dependencies = [
 # `dev` pulls in `test` rather than restating pytest, so the two can never drift
 # apart — installing `.[dev]` always gets everything needed to run the suite.
 dev = [
-    "makerlab[test]",
+    "makermodslab[test]",
     "ruff>=0.6",
     "pre-commit>=3.0",
 ]
@@ -41,16 +41,16 @@ test = [
 ]
 
 [project.scripts]
-# The installed command is `makerlab`. The Python package/module stays
-# `makerlab` (imports, the wheel, `makerlab.server:app`) — only the CLI is rebranded.
-makerlab = "makerlab.scripts.makerlab:main"
+# The installed command is `makermodslab`; the Python package/module is
+# `makermodslab` (imports, the wheel, `makermodslab.server:app`).
+makermodslab = "makermodslab.scripts.makermodslab:main"
 # Headless robot-station posture as an installed command: --lan --offline
 # defaults, extra args pass through. What the systemd unit runs.
-makerlab-station = "makerlab.scripts.makerlab:station"
+makermodslab-station = "makermodslab.scripts.makermodslab:station"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["makerlab*", "frontend"]
+include = ["makermodslab*", "frontend"]
 
 [tool.setuptools.package-data]
 frontend = ["dist/**/*"]
@@ -60,7 +60,7 @@ target-version = "py312"
 line-length = 110
 exclude = ["tests/artifacts/**/*.safetensors", "*_pb2.py", "*_pb2_grpc.py"]
 # Vendored third-party code (feetech_autocal): kept verbatim, not linted.
-extend-exclude = ["makerlab/vendor"]
+extend-exclude = ["makermodslab/vendor"]
 
 [tool.ruff.lint]
 # E, W: pycodestyle errors and warnings
@@ -128,5 +128,5 @@ ignore_missing_imports = true
 follow_imports = "skip"
 
 [[tool.mypy.overrides]]
-module = "makerlab.*"
+module = "makermodslab.*"
 ignore_errors = true
