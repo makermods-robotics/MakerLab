@@ -31,6 +31,13 @@ _WIGGLE_OFFSET = 200
 _WIGGLE_REPEATS = 3
 _WIGGLE_TIMEOUT_S = 15.0
 
+# True while a wiggle is actually driving the gripper (set just before the
+# blocking drive, cleared in a finally so it can never stick set on a
+# timeout/exception). Wiggle has no "stop" button — it's a brief, bounded
+# one-shot action — so this is the self-check half of the reciprocal mutex
+# with teleop/record/inference/calibration/auto-calibration (see CLAUDE.md).
+wiggle_active = False
+
 
 def plan_wiggle(current: int, min_limit: int, max_limit: int, offset: int = _WIGGLE_OFFSET) -> tuple[int, int, int]:
     """Plan a (high, low, rest) jog that stays inside the servo's programmed limits.
@@ -91,16 +98,72 @@ async def wiggle_gripper(port: str) -> dict:
     ({"success": bool, "message": str}) — logical failures (port busy, arm off)
     are reported, not raised, so the endpoint stays HTTP 200 like the rest of the
     feature handlers.
+
+    Guarded by the same reciprocal mutex as every other feature that drives the
+    servos (see CLAUDE.md): refuses while teleop/record/inference/calibration/
+    auto-calibration is active, and refuses a second concurrent wiggle via
+    ``wiggle_active`` (there is no shared lock, just a self-check like the
+    other five). Wiggle has no "stop" button — it's a brief, bounded one-shot
+    action — so the rejection messages tell the caller to wait rather than to
+    stop something.
     """
+    global wiggle_active
+
     if not port or not port.strip():
         return {"success": False, "message": "No port provided."}
+
+    # Lazy imports to dodge circular imports at module load time (matches the
+    # existing pattern in teleoperate.py/record.py/rollout.py).
+    from . import (
+        auto_calibrate as _auto_calibrate,
+        calibrate as _calibrate,
+        record as _record,
+        rollout as _rollout,
+        teleoperate as _teleoperate,
+    )
+
+    if wiggle_active:
+        return {"success": False, "message": "A gripper wiggle is already in progress."}
+    if _teleoperate.teleoperation_active:
+        return {
+            "success": False,
+            "message": "Teleoperation is currently active — wait for it to stop before wiggling.",
+        }
+    if _record.recording_active:
+        return {
+            "success": False,
+            "message": "Recording is currently active — wait for it to stop before wiggling.",
+        }
+    if _rollout.inference_active:
+        return {
+            "success": False,
+            "message": "Inference is currently active — wait for it to stop before wiggling.",
+        }
+    if _calibrate.calibration_is_active():
+        return {
+            "success": False,
+            "message": "Calibration is currently active — wait for it to stop before wiggling.",
+        }
+    if _auto_calibrate.auto_calibration_is_active():
+        return {
+            "success": False,
+            "message": "Auto-calibration is currently active — wait for it to stop before wiggling.",
+        }
+
+    wiggle_active = True
     try:
         await asyncio.wait_for(
-            asyncio.to_thread(_wiggle_gripper_sync, port.strip()),
+            asyncio.to_thread(_run_wiggle_and_clear_flag, port.strip()),
             timeout=_WIGGLE_TIMEOUT_S,
         )
         return {"success": True, "message": f"Wiggled the gripper on {port}."}
     except TimeoutError:
+        # `wait_for` timing out only stops US from waiting — it does NOT stop
+        # the thread `to_thread` submitted, which keeps driving the gripper
+        # (and holding the port) in the background for however long it
+        # actually takes to unwind. Do NOT clear wiggle_active here: that's
+        # `_run_wiggle_and_clear_flag`'s job, tied to the thread's real exit,
+        # so the mutex stays honest for other features' start checks.
         return {
             "success": False,
             "message": "Wiggle timed out after 15s — is the arm powered on and the port correct?",
@@ -108,3 +171,16 @@ async def wiggle_gripper(port: str) -> dict:
     except Exception as e:
         logger.exception("Wiggle failed")
         return {"success": False, "message": f"Failed to wiggle the gripper: {e}"}
+
+
+def _run_wiggle_and_clear_flag(port: str) -> None:
+    """Run the blocking wiggle, then clear ``wiggle_active`` — from inside the
+    worker thread, so the flag reflects the thread's REAL exit rather than
+    `wiggle_gripper`'s async wrapper giving up on a `wait_for` timeout (see the
+    comment at that timeout's except clause).
+    """
+    global wiggle_active
+    try:
+        _wiggle_gripper_sync(port)
+    finally:
+        wiggle_active = False

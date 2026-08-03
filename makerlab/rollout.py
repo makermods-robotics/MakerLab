@@ -923,8 +923,15 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
     global inference_active, _inference_started_at, _inference_meta, _inference_cancel
     global _last_result, _inference_startup_thread
 
-    # Mutex with teleop and recording: all three drive the same serial bus.
-    from . import record as _record, teleoperate as _teleoperate
+    # Mutex with every other feature that drives the same serial bus (see
+    # CLAUDE.md's "State model & mutual exclusion").
+    from . import (
+        auto_calibrate as _auto_calibrate,
+        calibrate as _calibrate,
+        record as _record,
+        teleoperate as _teleoperate,
+        wiggle as _wiggle,
+    )
 
     with _state_lock:
         if _teleoperate.teleoperation_active:
@@ -956,6 +963,24 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
                 "success": False,
                 "status_code": 409,
                 "message": "The previous session is still shutting down. Try again in a few seconds.",
+            }
+        if _calibrate.calibration_is_active():
+            return {
+                "success": False,
+                "status_code": 409,
+                "message": "Calibration is currently active. Stop it first.",
+            }
+        if _auto_calibrate.auto_calibration_is_active():
+            return {
+                "success": False,
+                "status_code": 409,
+                "message": "Auto-calibration is currently active. Stop it first.",
+            }
+        if _wiggle.wiggle_active:
+            return {
+                "success": False,
+                "status_code": 409,
+                "message": "A gripper wiggle is currently in progress. Wait for it to finish.",
             }
         # Claim the slot now so a concurrent caller losing the race sees us, and
         # seed the meta + timer so the phase is visible from the very first

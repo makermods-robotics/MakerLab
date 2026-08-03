@@ -235,6 +235,35 @@ class CalibrationManager:
             if self.status.calibration_active:
                 return {"success": False, "message": "Calibration already active"}
 
+            # Mutex with every other feature that drives the same serial bus
+            # (see CLAUDE.md's "State model & mutual exclusion"). Lazy
+            # imports to dodge circular imports at module load time (matches
+            # the existing pattern in teleoperate.py/record.py/rollout.py).
+            from . import (
+                auto_calibrate as _auto_calibrate,
+                record as _record,
+                rollout as _rollout,
+                teleoperate as _teleoperate,
+                wiggle as _wiggle,
+            )
+
+            if _teleoperate.teleoperation_active:
+                return {"success": False, "message": "Teleoperation is currently active. Stop it first."}
+            if _record.recording_active:
+                return {"success": False, "message": "Recording is currently active. Stop it first."}
+            if _rollout.inference_active:
+                return {"success": False, "message": "Inference is currently active. Stop it first."}
+            if _auto_calibrate.auto_calibration_is_active():
+                return {
+                    "success": False,
+                    "message": "Auto-calibration is currently active. Stop it first.",
+                }
+            if _wiggle.wiggle_active:
+                return {
+                    "success": False,
+                    "message": "A gripper wiggle is currently in progress. Wait for it to finish.",
+                }
+
             # Refuse to silently overwrite an existing config file. Completing a
             # calibration saves "<config_file>.json"; if that name is taken, the
             # caller must pass overwrite=True (after confirming) or pick another
@@ -671,3 +700,13 @@ class CalibrationManager:
 
 # Global calibration manager instance
 calibration_manager = CalibrationManager()
+
+
+def calibration_is_active() -> bool:
+    """True while a manual calibration session owns the serial bus.
+
+    Reads the singleton's real state (no separately-tracked boolean) so other
+    feature modules' reciprocal mutex checks (see CLAUDE.md) can't drift from
+    the manager's own status.
+    """
+    return calibration_manager.status.calibration_active
