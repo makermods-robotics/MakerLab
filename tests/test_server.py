@@ -1062,3 +1062,39 @@ def test_delete_local_job_records_no_dismissal(
     resp = client.delete("/jobs/some-local-run")
     assert resp.status_code == 204
     assert cfg.get_dismissed_hub_jobs() == set()
+
+
+def test_recording_pause_route_calls_handler(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    import makermodslab.server as server_mod
+
+    called = {}
+
+    def _fake_handle_pause_recording():
+        called["hit"] = True
+        return {"success": True, "message": "Reset phase paused"}
+
+    monkeypatch.setattr(server_mod, "handle_pause_recording", _fake_handle_pause_recording)
+
+    response = client.post("/recording-pause")
+
+    assert response.status_code == 200
+    assert response.json()["success"] is True
+    assert called.get("hit") is True
+
+
+def test_recording_resume_route_calls_handler(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    import makermodslab.server as server_mod
+
+    called = {}
+
+    def _fake_handle_resume_recording():
+        called["hit"] = True
+        return {"success": True, "message": "Reset phase resumed"}
+
+    monkeypatch.setattr(server_mod, "handle_resume_recording", _fake_handle_resume_recording)
+
+    response = client.post("/recording-resume")
+
+    assert response.status_code == 200
+    assert response.json()["success"] is True
+    assert called.get("hit") is True
