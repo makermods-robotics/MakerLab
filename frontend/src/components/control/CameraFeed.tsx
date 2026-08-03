@@ -1,35 +1,43 @@
 import React from "react";
 import { VideoOff } from "lucide-react";
-import { useCameraStream } from "@/hooks/useCameraStream";
+import BackendCameraStream from "@/components/BackendCameraStream";
 
 interface CameraFeedProps {
-  /** Browser deviceId to stream. Empty string renders the "no camera" state. */
-  deviceId: string;
+  /** cv2 index on the server. Undefined renders the "no camera" state. */
+  cameraIndex?: number;
+  /** Stable device identity, so the server re-anchors the index across replugs. */
+  uniqueId?: string;
   /** Optional caption shown under the feed. */
   label?: string;
 }
 
-/** Live browser-camera feed bound to a deviceId via getUserMedia. */
-const CameraFeed: React.FC<CameraFeedProps> = ({ deviceId, label }) => {
-  const { videoRef, hasError } = useCameraStream(deviceId, false);
-  const showVideo = deviceId && !hasError;
-
+/** Live camera feed streamed from the *server* by cv2 index.
+ *
+ * Previously bound to a browser deviceId via getUserMedia. That deviceId was
+ * matched to a cv2 index by localizedName, so two cameras of the same model
+ * paired arbitrarily and a feed could be captioned with the other camera's
+ * name. Streaming by index removes the ambiguity — the caption and the footage
+ * now come from the same identity. Teleoperation opens no cv2 cameras, so
+ * these previews never contend with it. */
+const CameraFeed: React.FC<CameraFeedProps> = ({
+  cameraIndex,
+  uniqueId,
+  label,
+}) => {
   return (
     <div className="bg-card rounded-lg border border-border overflow-hidden">
       <div className="aspect-[4/3] bg-muted relative">
-        {showVideo ? (
-          <video
-            ref={videoRef}
-            autoPlay
-            muted
-            playsInline
+        {cameraIndex !== undefined ? (
+          <BackendCameraStream
+            cameraIndex={cameraIndex}
+            uniqueId={uniqueId}
             className="w-full h-full object-cover"
           />
         ) : (
           <div className="w-full h-full flex flex-col items-center justify-center">
             <VideoOff className="w-8 h-8 text-muted-foreground mb-2" />
             <span className="text-muted-foreground text-sm">
-              {deviceId ? "Preview failed" : "No camera selected"}
+              No camera selected
             </span>
           </div>
         )}

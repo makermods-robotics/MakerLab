@@ -3,9 +3,19 @@ import { Search } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 
-/** Shared 3-up grid for every studio library (datasets, jobs, models) so the
- * three panels read as one system. Cards stretch to their row's height. */
-export const LIBRARY_GRID = "grid grid-cols-3 items-stretch gap-2";
+/** Shared grid for every studio library (datasets, jobs, models) so the three
+ * panels read as one system. Column count is not fixed — CappedGrid measures
+ * the library's own column and picks from LIBRARY_GRID_COLS. Cards stretch to
+ * their row's height. */
+export const LIBRARY_GRID = "grid items-stretch gap-2";
+
+/** The column counts a library row can take, keyed by card count. Spelled out
+ * as literals because Tailwind only generates classes it can see as literals —
+ * a computed `grid-cols-${n}` would emit nothing. */
+export const LIBRARY_GRID_COLS = {
+  2: "grid-cols-2",
+  3: "grid-cols-3",
+} as const;
 
 export interface LibraryFilterOption<K extends string> {
   key: K;

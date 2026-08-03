@@ -42,6 +42,7 @@ from tqdm.auto import tqdm as _base_tqdm
 from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
 
 from .arm_identity import ArmIdentityError, ArmSlot, verify_devices
+from .camera_preview import camera_preview_manager
 from .motor_power import clear_goal_velocity, reset_torque_limit
 from .record import _DEFAULT_FOURCC
 from .utils.config import (
@@ -922,8 +923,15 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
     global inference_active, _inference_started_at, _inference_meta, _inference_cancel
     global _last_result, _inference_startup_thread
 
-    # Mutex with teleop and recording: all three drive the same serial bus.
-    from . import record as _record, teleoperate as _teleoperate
+    # Mutex with every other feature that drives the same serial bus (see
+    # CLAUDE.md's "State model & mutual exclusion").
+    from . import (
+        auto_calibrate as _auto_calibrate,
+        calibrate as _calibrate,
+        record as _record,
+        teleoperate as _teleoperate,
+        wiggle as _wiggle,
+    )
 
     with _state_lock:
         if _teleoperate.teleoperation_active:
@@ -955,6 +963,24 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
                 "success": False,
                 "status_code": 409,
                 "message": "The previous session is still shutting down. Try again in a few seconds.",
+            }
+        if _calibrate.calibration_is_active():
+            return {
+                "success": False,
+                "status_code": 409,
+                "message": "Calibration is currently active. Stop it first.",
+            }
+        if _auto_calibrate.auto_calibration_is_active():
+            return {
+                "success": False,
+                "status_code": 409,
+                "message": "Auto-calibration is currently active. Stop it first.",
+            }
+        if _wiggle.wiggle_active:
+            return {
+                "success": False,
+                "status_code": 409,
+                "message": "A gripper wiggle is currently in progress. Wait for it to finish.",
             }
         # Claim the slot now so a concurrent caller losing the race sees us, and
         # seed the meta + timer so the phase is visible from the very first
@@ -996,6 +1022,12 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
             "status_code": 400,
             "message": f"Unrecognised policy ref: {request.policy_ref!r}",
         }
+
+    # Backend camera previews hold the cv2 devices the rollout subprocess is about
+    # to open. Released here — after the cheap guards above, so a rejected request
+    # doesn't needlessly kill the modal's previews, and while `inference_active`
+    # is already True so /camera-preview 409s instead of re-acquiring a device.
+    camera_preview_manager.stop_all()
 
     # Everything heavy (download, preflight, spawn) runs off the request thread.
     # Tracked so a later start can tell whether a stopped session's worker is
