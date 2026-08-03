@@ -838,6 +838,12 @@ def handle_resume_recording() -> dict[str, Any]:
     return {"success": True, "message": "Reset phase resumed", "events_state": dict(recording_events)}
 
 
+def _reset_paused() -> bool:
+    """True only while a live session is genuinely paused (defensive against
+    recording_events being None between sessions)."""
+    return bool(recording_events and recording_events.get("paused", False))
+
+
 def handle_recording_status() -> dict[str, Any]:
     """Handle recording status request"""
     # If recording is not active and phase is completed or error, indicate session has ended
@@ -862,11 +868,20 @@ def handle_recording_status() -> dict[str, Any]:
         # over but the arm is still energized and driving back to its
         # session-start pose before torque is released.
         "releasing": releasing,
+        # True only during the reset phase, and only while a pause is active —
+        # see handle_pause_recording/handle_resume_recording.
+        "paused": _reset_paused(),
         "available_controls": {
             "stop_recording": recording_active,  # ESC key replacement
-            "exit_early": recording_active,  # Right arrow key replacement
+            "exit_early": recording_active and not _reset_paused(),  # Right arrow key replacement; disabled while paused
             "rerecord_episode": recording_active
             and current_phase == "recording",  # Only during recording phase
+            "pause_recording": recording_active
+            and current_phase == "resetting"
+            and not _reset_paused(),
+            "resume_recording": recording_active
+            and current_phase == "resetting"
+            and _reset_paused(),
         },
         "message": "Recording session failed with error - check logs"
         if current_phase == "error"
@@ -922,7 +937,10 @@ def handle_recording_status() -> dict[str, Any]:
         # Add phase timing information
         if phase_start_time:
             status["phase_start_time"] = phase_start_time
-            status["phase_elapsed_seconds"] = int(time.time() - phase_start_time)
+            elapsed = time.time() - phase_start_time - paused_accum_seconds
+            if pause_started_at is not None:
+                elapsed -= time.time() - pause_started_at
+            status["phase_elapsed_seconds"] = int(elapsed)
 
             # Add phase time limits
             if current_phase == "recording":
