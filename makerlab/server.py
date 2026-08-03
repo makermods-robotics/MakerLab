@@ -33,7 +33,7 @@ from typing import Any, Literal
 import httpx
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from huggingface_hub.errors import HfHubHTTPError
 from pydantic import BaseModel
@@ -50,6 +50,8 @@ from lerobot.policies.factory import make_policy_config
 from . import (
     datasets as dataset_browser,
     models as model_browser,
+    record as record_state,
+    rollout as rollout_state,
 )
 
 # Import our custom calibration functionality
@@ -60,6 +62,8 @@ from .auto_calibrate import (
     auto_calibration_manager,
 )
 from .calibrate import CalibrationRequest, calibration_manager
+from .camera_identity import resolve_cv2_index
+from .camera_preview import CameraOpenError, camera_preview_manager
 from .identify import identify_arm_by_motion
 from .jobs import (
     DatasetNotOnHubError,
@@ -2387,6 +2391,53 @@ def get_available_cameras():
         return {"status": "error", "message": str(e), "cameras": []}
 
 
+@app.get("/camera-preview/{index}")
+def camera_preview_stream(index: int, unique_id: str | None = None):
+    """MJPEG preview stream of a camera attached to the *server* machine.
+
+    The browser's getUserMedia only sees the *viewing* machine's cameras, and
+    it identifies them by ``deviceId`` — which the frontend can only match to a
+    cv2 index by localizedName. Two cameras of the same model share that name,
+    so the match is a coin flip and the preview can show the wrong device (and
+    swap between refreshes). Streaming from the backend by cv2 index removes
+    the browser from the loop: the tile shows exactly what the recorder will
+    open. It is also the only preview that works at all on a headless host.
+
+    ``unique_id`` (AVFoundation uniqueID, from /available-cameras) re-anchors
+    the index to the physical device before opening: cv2 resolves indices
+    against this process's startup device snapshot, which diverges from the
+    fresh-subprocess enumeration after a replug — without the re-anchor the
+    stream can silently show a different camera (see makerlab/camera_identity.py).
+
+    Returns 409 while recording or inference is active (they own the cv2
+    devices) and 503 when the camera can't be opened. Teleoperation drives the
+    serial bus and opens no cv2 cameras, so a preview during teleop does not
+    contend — it is allowed.
+    """
+    if record_state.recording_active:
+        raise HTTPException(
+            status_code=409,
+            detail="Recording is active — the cameras are in use. Stop recording to preview them.",
+        )
+    if rollout_state.inference_active:
+        raise HTTPException(
+            status_code=409,
+            detail="Inference is active — the cameras are in use. Stop the run to preview them.",
+        )
+    resolved = resolve_cv2_index(unique_id, index)
+    if resolved is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Camera not visible to the server — it was plugged in after makerlab "
+            "started. Restart makerlab to use it.",
+        )
+    try:
+        stream = camera_preview_manager.open_stream(resolved)
+    except CameraOpenError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return StreamingResponse(stream, media_type="multipart/x-mixed-replace; boundary=frame")
+
+
 RobotSideLiteral = Literal["leader", "follower"]
 
 
@@ -2589,6 +2640,23 @@ async def shutdown_event():
     logger.info("🔄 FastAPI shutting down, cleaning up...")
 
     # Stop any active recording - handled by recording module cleanup
+
+    # An in-flight inference run's `lerobot-rollout` subprocess is a real
+    # child process, independent of this one — it keeps driving the follower
+    # under its policy even after we exit unless we terminate it ourselves.
+    # This fires on a graceful SIGTERM (a plain `kill <pid>`, or uvicorn
+    # `--reload` tearing down the worker process on a file change), which is
+    # exactly when nothing else is left to stop it. handle_stop_inference()
+    # is a no-op (409) when idle, so this is safe to call unconditionally.
+    # It can block for several seconds waiting on the subprocess, so it runs
+    # in a thread instead of directly on the event loop — otherwise it would
+    # freeze all other async work (including this same shutdown sequence)
+    # for however long the wait takes. Any failure here is caught so it can't
+    # stop the broadcast-thread cleanup below from running too.
+    try:
+        await asyncio.to_thread(handle_stop_inference)
+    except Exception:
+        logger.exception("Failed to stop inference during shutdown")
 
     if manager:
         manager.stop_broadcast_thread()

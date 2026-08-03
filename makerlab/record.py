@@ -33,6 +33,7 @@ from lerobot.motors.motors_bus import MotorsBus
 from lerobot.scripts.lerobot_record import RecordConfig
 
 from .arm_identity import ArmIdentityError, verify_devices
+from .camera_preview import camera_preview_manager
 from .datasets import (
     _lerobot_cache_root,
     invalidate_dataset_listing_cache,
@@ -533,6 +534,14 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
         # lock that claims the active flag (mirrors the _release_now reset), so a
         # stale flag can never make this fresh session delete its own dataset.
         discard_requested = False
+
+    # Backend camera previews hold the cv2 devices; hand them over before we open
+    # the same indices. Ordered deliberately: `recording_active` is already True
+    # (set under the lock above), so /camera-preview now 409s and no client can
+    # re-acquire a device in the gap between this release and the recorder's
+    # open. Doing it the other way round leaves that race open, and a preview
+    # still holding index 0 starves the recorder (OpenCVCamera(0) actual_fps=5.0).
+    camera_preview_manager.stop_all()
 
     # Start capturing this session's logs into a fresh bounded ring buffer so the
     # Record page can display them (detaches any previous session's handler).
