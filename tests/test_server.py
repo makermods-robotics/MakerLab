@@ -73,9 +73,9 @@ def test_shutdown_stops_active_teleoperation(monkeypatch: pytest.MonkeyPatch) ->
     fire-and-forget by design (see teleoperate.stop_and_wait), so calling it
     alone from shutdown would let the process exit while the worker is still
     mid-return, with no return-to-rest and no torque release."""
-    import makerlab.record as record
-    import makerlab.rollout as rollout
-    import makerlab.teleoperate as teleop
+    import makermodslab.record as record
+    import makermodslab.rollout as rollout
+    import makermodslab.teleoperate as teleop
 
     released = threading.Event()
 
@@ -111,9 +111,9 @@ def test_shutdown_stops_active_recording(monkeypatch: pytest.MonkeyPatch) -> Non
     part of its own cleanup. The fake worker here mirrors that division of
     responsibility instead of short-circuiting it, so this test exercises the
     real signal shutdown actually sends."""
-    import makerlab.record as record
-    import makerlab.rollout as rollout
-    import makerlab.teleoperate as teleop
+    import makermodslab.record as record
+    import makermodslab.rollout as rollout
+    import makermodslab.teleoperate as teleop
 
     released = threading.Event()
     events = {"exit_early": False, "stop_recording": False, "rerecord_episode": False}
@@ -157,7 +157,7 @@ def test_shutdown_stops_active_auto_calibration(monkeypatch: pytest.MonkeyPatch)
     SIGTERM -> wait -> torque-release sequence runs end to end through
     shutdown_event(), the same way test_shutdown_stops_active_inference
     exercises the inference path."""
-    from makerlab import auto_calibrate as ac
+    from makermodslab import auto_calibrate as ac
 
     class _FakeAutocalProc:
         def __init__(self) -> None:

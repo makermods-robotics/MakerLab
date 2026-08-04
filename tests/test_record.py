@@ -1457,7 +1457,7 @@ def test_worker_reports_ok_outcome_on_clean_end(monkeypatch: pytest.MonkeyPatch,
 
 
 def test_stop_and_wait_is_a_noop_when_idle(monkeypatch: pytest.MonkeyPatch) -> None:
-    import makerlab.record as record
+    import makermodslab.record as record
 
     monkeypatch.setattr(record, "recording_active", False)
     monkeypatch.setattr(record, "recording_thread", None)
@@ -1473,7 +1473,7 @@ def test_stop_and_wait_blocks_until_worker_finishes_gracefully(
     allowed to finish on its own within the timeout -- stop_and_wait must not
     return before that, and must not force an early release when it didn't
     need to."""
-    import makerlab.record as record
+    import makermodslab.record as record
 
     released = threading.Event()
     events = {"exit_early": False, "stop_recording": False, "rerecord_episode": False}
@@ -1507,7 +1507,7 @@ def test_stop_and_wait_forces_release_if_worker_does_not_finish_in_time(
     via the same "second stop" mechanism the UI's second Stop press uses --
     shutdown has no operator to press it, so stop_and_wait must do it
     automatically once the bound elapses."""
-    import makerlab.record as record
+    import makermodslab.record as record
 
     def _worker() -> None:
         # Ignores the stop_recording event; only responds to a forced
@@ -1542,7 +1542,7 @@ def test_stop_and_wait_lets_an_already_in_progress_release_finish_gracefully(
     handle_stop_recording treats any call made while releasing is True as a
     *second* stop and force-releases immediately, which would abort a return
     that was about to finish gracefully on its own well within the timeout."""
-    import makerlab.record as record
+    import makermodslab.record as record
 
     forced = threading.Event()
     finished_gracefully = threading.Event()

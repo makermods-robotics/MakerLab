@@ -1445,7 +1445,7 @@ def test_teleoperation_status_outcome_none_before_any_session(
 
 
 def test_stop_and_wait_is_a_noop_when_idle(monkeypatch: pytest.MonkeyPatch) -> None:
-    import makerlab.teleoperate as teleop
+    import makermodslab.teleoperate as teleop
 
     monkeypatch.setattr(teleop, "teleoperation_active", False)
     monkeypatch.setattr(teleop, "teleoperation_thread", None)
@@ -1460,7 +1460,7 @@ def test_stop_and_wait_blocks_until_worker_finishes_gracefully(
     normal graceful path: return-to-rest, then release) must be allowed to
     finish on its own within the timeout -- stop_and_wait must not return
     before that, and must not force an early release when it didn't need to."""
-    import makerlab.teleoperate as teleop
+    import makermodslab.teleoperate as teleop
 
     released = threading.Event()
 
@@ -1492,7 +1492,7 @@ def test_stop_and_wait_forces_release_if_worker_does_not_finish_in_time(
     mechanism the UI's second Stop press uses -- shutdown has no operator to
     press it, so stop_and_wait must do it automatically once the bound
     elapses."""
-    import makerlab.teleoperate as teleop
+    import makermodslab.teleoperate as teleop
 
     def _worker() -> None:
         # Ignores teleoperation_active; only responds to a forced release,
