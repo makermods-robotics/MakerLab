@@ -28,17 +28,17 @@ they have shipped since the fork diverged in earnest.
 
 ## Verdicts
 
-| Verdict | Meaning |
-|---|---|
-| `ported` | Re-implemented here. Note the PR or commit that did it. |
-| `knowledge` | We took the lesson, not the code. Note where the lesson landed (CLAUDE.md, a code comment, a test). |
-| `already-have` | We had solved it. Note if our approach differs, so nobody "fixes" it back. |
-| `rejected` | Considered and declined. **The reason is the point of the row.** |
-| `n/a` | Does not apply to our fork — leLab-specific, or against code we have rewritten. |
-| `todo` | Worth having, not yet done. Should have a tracking issue. |
+| Verdict        | Meaning                                                                                             |
+| -------------- | --------------------------------------------------------------------------------------------------- |
+| `ported`       | Re-implemented here. Note the PR or commit that did it.                                             |
+| `knowledge`    | We took the lesson, not the code. Note where the lesson landed (CLAUDE.md, a code comment, a test). |
+| `already-have` | We had solved it. Note if our approach differs, so nobody "fixes" it back.                          |
+| `rejected`     | Considered and declined. **The reason is the point of the row.**                                    |
+| `n/a`          | Does not apply to our fork — leLab-specific, or against code we have rewritten.                     |
+| `todo`         | Worth having, not yet done. Should have a tracking issue.                                           |
 
 ## Log
 
-| Upstream SHA | Date | Subject | Verdict | Notes |
-|---|---|---|---|---|
-| `12ad202` | 2026-07-17 | fix(security): remediate workflow vulnerability in build_frontend.yml | `rejected` | Their vuln was a token interpolated into a push URL. We never had it — `build_frontend.yml` mints a short-lived GitHub App token, hands it to `actions/checkout` with `persist-credentials`, and pushes with a bare `git push origin`, so the token never reaches a command string. Their fix (`gh auth login --with-token`) also broke their dist push and was partly reverted in `a654148`. **Do not port; it would be a downgrade.** |
+| Upstream SHA | Date       | Subject                                                               | Verdict    | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| ------------ | ---------- | --------------------------------------------------------------------- | ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `12ad202`    | 2026-07-17 | fix(security): remediate workflow vulnerability in build_frontend.yml | `rejected` | Their vuln was a token interpolated into a push URL. We never had it — `build_frontend.yml` mints a short-lived GitHub App token, hands it to `actions/checkout` with `persist-credentials`, and pushes with a bare `git push origin`, so the token never reaches a command string. Their fix (`gh auth login --with-token`) also broke their dist push and was partly reverted in `a654148`. **Do not port; it would be a downgrade.** |

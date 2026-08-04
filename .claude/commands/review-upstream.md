@@ -85,6 +85,7 @@ Give every subagent this instruction verbatim, with its own batch substituted in
 > you took in your report.
 >
 > For each commit in your batch:
+>
 > 1. Read the full upstream diff: `git show <sha>`.
 > 2. Find our corresponding code. Upstream `lelab/<x>.py` maps to `makermodslab/<x>.py`,
 >    but the contents frequently differ — read our file, do not assume.
