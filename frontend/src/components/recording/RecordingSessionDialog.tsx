@@ -413,8 +413,11 @@ const RecordingSessionDialog: React.FC<{
         `${baseUrl}/recording-exit-early`,
         { method: "POST" }
       );
-      if (!response.ok) {
-        const data = await response.json();
+      const data = await response.json();
+      // See handlePauseRecording: a refused exit-early also comes back as
+      // HTTP 200 + { success: false } (e.g. the reset phase is currently
+      // paused), not just a non-ok status.
+      if (!response.ok || !data.success) {
         setOptimisticPhase(null);
         toast({
           title: "Error",
