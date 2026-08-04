@@ -84,9 +84,11 @@ from .record import (
     UploadRequest,
     handle_delete_dataset,
     handle_exit_early,
+    handle_pause_recording,
     handle_recording_log,
     handle_recording_status,
     handle_rerecord_episode,
+    handle_resume_recording,
     handle_start_recording,
     handle_stop_recording,
     handle_upload_dataset,
@@ -920,6 +922,20 @@ def recording_exit_early():
 def recording_rerecord_episode():
     """Re-record current episode (replaces left arrow key)"""
     return handle_rerecord_episode()
+
+
+@app.post("/recording-pause")
+def recording_pause():
+    """Pause the reset-phase gap between episodes (mouse-only, no keyboard
+    shortcut). No-ops outside the reset phase — see handle_pause_recording."""
+    return handle_pause_recording()
+
+
+@app.post("/recording-resume")
+def recording_resume():
+    """Resume a paused reset-phase gap. No-ops if not currently paused —
+    see handle_resume_recording."""
+    return handle_resume_recording()
 
 
 @app.post("/upload-dataset")
