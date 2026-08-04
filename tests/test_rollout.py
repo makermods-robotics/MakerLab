@@ -140,6 +140,35 @@ def test_inference_request_accepts_bimanual_block() -> None:
     assert req.checkpoint_state_dim == 12
 
 
+def test_inference_request_defaults_to_sync_engine() -> None:
+    """Absent an explicit choice the request pins lerobot's own default, so
+    adding the A/B knob can't change what an existing caller gets."""
+    from makermodslab.rollout import InferenceRequest
+
+    req = InferenceRequest(
+        follower_port="/dev/ttyUSB0",
+        follower_config="robot_a",
+        policy_ref="user/repo@checkpoints/000050",
+    )
+    assert req.inference_engine == "sync"
+
+
+def test_inference_request_rejects_unknown_engine() -> None:
+    """The field is a Literal, so a typo is a 422 at the API edge rather than a
+    draccus parse crash inside the rollout subprocess."""
+    from pydantic import ValidationError
+
+    from makermodslab.rollout import InferenceRequest
+
+    with pytest.raises(ValidationError):
+        InferenceRequest(
+            follower_port="/dev/ttyUSB0",
+            follower_config="robot_a",
+            policy_ref="user/repo@checkpoints/000050",
+            inference_engine="async",
+        )
+
+
 # ---------------------------------------------------------------------------
 # _arm_count_mismatch — the pre-spawn checkpoint/robot arm-count guard
 # ---------------------------------------------------------------------------
@@ -485,6 +514,40 @@ def test_handle_start_inference_pins_return_to_initial_position(monkeypatch, tmp
     # Sanity: the core rollout invocation is intact around our pinned flag.
     assert "lerobot.scripts.lerobot_rollout" in cmd
     assert "--strategy.type=base" in cmd
+
+
+def test_rollout_cli_args_emits_sync_engine_by_default() -> None:
+    """`inference` is a draccus ChoiceRegistry field defaulting to sync
+    upstream; we name it explicitly so an upstream flip can't silently change
+    which engine drives the arm."""
+    from makermodslab.rollout import _rollout_cli_args
+
+    args = _rollout_cli_args(_stub_request(), "/tmp/pretrained_model", [])
+    assert "--inference.type=sync" in args
+
+
+def test_rollout_cli_args_forwards_the_engine_to_both_front_ends() -> None:
+    """_rollout_cli_args is shared by the single-episode command and the eval
+    runner — guard against the eval path drifting away from the rollout path."""
+    from makermodslab.rollout import (
+        InferenceRequest,
+        _build_eval_runner_cmd,
+        _build_rollout_cmd,
+    )
+
+    request = InferenceRequest(
+        follower_port="/dev/ttyUSB0",
+        follower_config="robot_a",
+        policy_ref="user/repo@checkpoints/000050",
+        inference_engine="rtc",
+        eval_episodes=5,
+    )
+    single = _build_rollout_cmd(request, "/tmp/pretrained_model", [])
+    evalrun = _build_eval_runner_cmd(request, "/tmp/pretrained_model", [])
+    assert "--inference.type=rtc" in single
+    assert "--inference.type=rtc" in evalrun
+    assert "--inference.type=sync" not in single
+    assert "--inference.type=sync" not in evalrun
 
 
 # ---------------------------------------------------------------------------

@@ -167,6 +167,9 @@ const InferenceModal: React.FC<Props> = ({
   const [selectedStep, setSelectedStep] = useState<number | null>(initialStep);
   const [task, setTask] = useState("");
   const [durationS, setDurationS] = useState(60);
+  // Inference engine A/B. "sync" is the server default and the historical
+  // behaviour; "rtc" is experimental (see StartInferenceRequest).
+  const [inferenceEngine, setInferenceEngine] = useState<"sync" | "rtc">("sync");
   const [submitting, setSubmitting] = useState(false);
 
   const [policyConfig, setPolicyConfig] = useState<PolicyConfigSummary | null>(null);
@@ -435,6 +438,7 @@ const InferenceModal: React.FC<Props> = ({
         // same arm-count guard authoritatively (null when the checkpoint omits
         // observation.state — the server then defers to its shape check).
         checkpoint_state_dim: policyConfig.state_dim ?? undefined,
+        inference_engine: inferenceEngine,
       });
       onOpenChange(false);
       openInferenceSession();
@@ -582,6 +586,33 @@ const InferenceModal: React.FC<Props> = ({
                 }}
                 className=""
               />
+            </div>
+            <div className="space-y-2">
+              <Label
+                htmlFor="inference-engine"
+                className="text-sm font-medium text-muted-foreground"
+              >
+                Inference engine
+              </Label>
+              <Select
+                value={inferenceEngine}
+                onValueChange={(v) => setInferenceEngine(v as "sync" | "rtc")}
+              >
+                <SelectTrigger id="inference-engine">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="sync">Sync (default)</SelectItem>
+                  <SelectItem value="rtc">
+                    RTC — experimental, smoother control
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                {inferenceEngine === "rtc"
+                  ? "Real-Time Chunking overlaps inference with motion, removing the pause between action chunks. It also changes how actions are generated — compare against Sync before trusting a result."
+                  : "One policy forward per control step. The arm pauses briefly between action chunks."}
+              </p>
             </div>
           </div>
 

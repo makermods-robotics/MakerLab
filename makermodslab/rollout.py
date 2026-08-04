@@ -50,7 +50,7 @@ from collections.abc import Callable, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import IO, Any
+from typing import IO, Any, Literal
 
 from pydantic import BaseModel
 
@@ -122,6 +122,16 @@ class InferenceRequest(BaseModel):
     # download, one arm preflight, one camera handover), scoring each episode.
     # Clamped server-side to [1, MAX_EVAL_EPISODES] — see clamp_eval_episodes.
     eval_episodes: int = 1
+    # Which lerobot inference engine drives the rollout (--inference.type).
+    # "sync" is lerobot's own default and stays ours: one policy forward per
+    # control tick, so a 50-action SmolVLA chunk replays for ~1.6s and the loop
+    # then stalls ~430ms on MPS computing the next one. "rtc" (Real-Time
+    # Chunking) moves that forward onto a background thread and blends the new
+    # chunk onto the previous chunk's leftover prefix, removing the stall — but
+    # it also routes flow-matching through the RTC processor, a DIFFERENT
+    # action-generation path than the one a checkpoint was evaluated under.
+    # Experimental on purpose: A/B it per run, don't assume equivalence.
+    inference_engine: Literal["sync", "rtc"] = "sync"
 
 
 inference_active: bool = False
@@ -936,6 +946,13 @@ def _rollout_cli_args(request: InferenceRequest, policy_path: str, robot_args: l
     added for one is never missing from the other."""
     return [
         "--strategy.type=base",
+        # Emitted unconditionally, including for the "sync" default — same
+        # reasoning as --strategy.type=base above and the teardown pin below:
+        # `inference` is a draccus ChoiceRegistry field whose default lives
+        # upstream (RolloutConfig.inference = SyncInferenceConfig), so naming it
+        # makes the choice ours and keeps an upstream default flip from
+        # silently changing which engine drives the arm.
+        f"--inference.type={request.inference_engine}",
         f"--policy.path={policy_path}",
         f"--policy.device={_detect_device()}",
         *robot_args,

@@ -30,6 +30,12 @@ export interface StartInferenceRequest {
   // preflight, one camera handover), each scored success/failure, ending in an
   // accuracy. Clamped server-side to [1, 200].
   eval_episodes?: number;
+  // Which lerobot inference engine runs the rollout. "sync" (the server-side
+  // default) does one policy forward per control tick, so the arm pauses
+  // between action chunks; "rtc" (Real-Time Chunking) overlaps that forward
+  // with action playback on a background thread. Experimental: RTC changes the
+  // policy's action-generation path, not just its scheduling.
+  inference_engine?: "sync" | "rtc";
 }
 
 // Structured startup sub-phase, mirrored from rollout.py's phase constants.
