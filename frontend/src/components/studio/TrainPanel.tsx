@@ -5,7 +5,7 @@ import React, {
   useRef,
   useState,
 } from "react";
-import { Check, Loader2, Play, Plus, X } from "lucide-react";
+import { Check, ChevronsUpDown, Loader2, Play, Plus, X } from "lucide-react";
 
 import { useStudio } from "@/contexts/StudioContext";
 import { useApi } from "@/contexts/ApiContext";
@@ -43,6 +43,7 @@ import TrainingConfigurator, {
 } from "@/components/training/TrainingConfigurator";
 import TrainingJobDialog from "@/components/training/TrainingJobDialog";
 import JobsLibrary from "@/components/jobs/JobsLibrary";
+import DatasetPicker from "@/components/landing/DatasetPicker";
 import {
   LibrarySection,
   PanelEntryControl,
@@ -118,7 +119,11 @@ const TrainPanel: React.FC = () => {
     useStudio();
   const { baseUrl, fetchWithHeaders } = useApi();
   const { toast } = useToast();
-  const { datasets, refresh: refreshDatasets } = useDatasets();
+  const {
+    datasets,
+    loading: datasetsLoading,
+    refresh: refreshDatasets,
+  } = useDatasets();
   const { selectedDataset, setSelectedDataset } = useSelectedDataset();
 
   // The new-training form slides open in place; the jobs library folds to its
@@ -383,13 +388,36 @@ const TrainPanel: React.FC = () => {
                   </span>
                 </div>
               ) : null}
-              <Input
-                id="train-dataset-search"
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search datasets, or type a public org/name Hub id"
-                className="h-8 text-sm"
-              />
+              <div className="relative">
+                <Input
+                  id="train-dataset-search"
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  placeholder="Search datasets, or type a public org/name Hub id"
+                  className="h-8 pr-8 text-sm"
+                />
+                {/* "Choose dataset" — browse the full Local/Hugging Face list
+                    instead of typing a search term. Docked on the right edge
+                    of the search bar itself (a sibling overlay, not nested in
+                    the <input>) so it's reachable without typing anything. */}
+                <DatasetPicker
+                  datasets={datasets}
+                  loading={datasetsLoading}
+                  onPickExisting={(item) => pickDataset(item.repo_id)}
+                  hideSearch
+                >
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="absolute right-0.5 top-1/2 h-7 w-7 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                    title="Choose dataset"
+                    aria-label="Choose dataset"
+                  >
+                    <ChevronsUpDown className="h-3.5 w-3.5" />
+                  </Button>
+                </DatasetPicker>
+              </div>
               {trimmedQuery ? (
                 <div className="max-h-56 divide-y divide-border overflow-auto rounded-md border border-border">
                   {matches.map((d) => (
