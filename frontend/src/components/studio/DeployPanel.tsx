@@ -1,5 +1,12 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { AlertTriangle, Loader2, Play, Square, VideoOff } from "lucide-react";
+import {
+  AlertTriangle,
+  Download,
+  Loader2,
+  Play,
+  Square,
+  VideoOff,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { NumberInput } from "@/components/ui/number-input";
@@ -35,6 +42,7 @@ import { ModelItem, getModels } from "@/lib/modelsApi";
 import { findJobForModel, importSourceForModel } from "@/lib/inferenceLaunch";
 import CheckpointDropdown from "@/components/jobs/CheckpointDropdown";
 import ModelsLibrary from "@/components/jobs/ModelsLibrary";
+import ImportModelModal from "@/components/jobs/ImportModelModal";
 import {
   FormSection,
   LibrarySection,
@@ -168,6 +176,10 @@ const DeployPanel: React.FC = () => {
   const [selectedModelId, setSelectedModelId] = useState<string | null>(null);
   const [selectedJob, setSelectedJob] = useState<JobRecord | null>(null);
   const [resolving, setResolving] = useState(false);
+  // Duplicate of ModelsLibrary's "Import skill" entry point, surfaced right
+  // on the skill picker itself so importing doesn't require scrolling down
+  // to the library section below.
+  const [importModalOpen, setImportModalOpen] = useState(false);
 
   // --- Inference config state (ported from InferenceModal) ---------------
   const [checkpoints, setCheckpoints] = useState<JobCheckpoint[]>([]);
@@ -235,6 +247,16 @@ const DeployPanel: React.FC = () => {
       cancelled = true;
     };
   }, [open, baseUrl, fetchWithHeaders]);
+
+  // Re-fetch the skill listing after a successful import so the new skill
+  // shows up in the picker right away — mirrors ModelsLibrary's onImported.
+  const handleImported = useCallback(() => {
+    setModelsLoading(true);
+    getModels(baseUrl, fetchWithHeaders)
+      .then((m) => setModels(m))
+      .catch(() => setModels([]))
+      .finally(() => setModelsLoading(false));
+  }, [baseUrl, fetchWithHeaders]);
 
   // Apply a "Run on robot" prefill: source "job" selects that job (+ optional
   // step); source "hub" lazy-imports the repo, then selects the pseudo-job.
@@ -616,52 +638,78 @@ const DeployPanel: React.FC = () => {
           trigger that opens a form; it wears PANEL_ENTRY_CLASS and a dot so it
           still reads as the same control as Collect's and Train's openers. */}
       <div className="space-y-2">
-        <Select
-          value={selectedModelId ?? undefined}
-          onValueChange={handlePickSkill}
-          disabled={resolving}
-        >
-          {/* justify-start + ml-auto on the chevron: SelectTrigger defaults to
-              justify-between, which would shove the dot away from the label
-              once a third child is added. */}
-          <SelectTrigger
-            className={cn(
-              PANEL_ENTRY_CLASS,
-              "justify-start [&>svg]:ml-auto [&>svg]:shrink-0",
-            )}
+        <div className="relative">
+          <Select
+            value={selectedModelId ?? undefined}
+            onValueChange={handlePickSkill}
+            disabled={resolving}
           >
-            <PanelEntryDot className="bg-sky-500" />
-            {selectedSkillLabel ? (
-              <span className="min-w-0 truncate">{selectedSkillLabel}</span>
-            ) : (
-              <SelectValue placeholder="Pick a skill" />
-            )}
-          </SelectTrigger>
-          <SelectContent>
-            {modelsLoading ? (
-              <div className="px-2 py-1.5 text-xs text-muted-foreground">
-                Loading skills…
-              </div>
-            ) : models.length === 0 ? (
-              <div className="px-2 py-1.5 text-xs text-muted-foreground">
-                No trained or imported skills yet
-              </div>
-            ) : (
-              models.map((m) => (
-                <SelectItem key={m.id} value={m.id}>
-                  <span className="truncate">{m.name}</span>
-                  <span className="ml-2 text-[10px] uppercase tracking-wide text-muted-foreground">
-                    {m.source === "hub"
-                      ? "hub"
-                      : m.source === "both"
-                        ? "local · hub"
-                        : "local"}
-                  </span>
-                </SelectItem>
-              ))
-            )}
-          </SelectContent>
-        </Select>
+            {/* justify-start + ml-auto on the chevron: SelectTrigger defaults
+                to justify-between, which would shove the dot away from the
+                label once a third child is added. pr-9 reserves room on the
+                right for the Import button overlaid below, so the chevron
+                and the button's own gutter don't collide. */}
+            <SelectTrigger
+              className={cn(
+                PANEL_ENTRY_CLASS,
+                "justify-start pr-9 [&>svg]:ml-auto [&>svg]:shrink-0",
+              )}
+            >
+              <PanelEntryDot className="bg-sky-500" />
+              {selectedSkillLabel ? (
+                <span className="min-w-0 truncate">{selectedSkillLabel}</span>
+              ) : (
+                <SelectValue placeholder="Pick a skill" />
+              )}
+            </SelectTrigger>
+            <SelectContent>
+              {modelsLoading ? (
+                <div className="px-2 py-1.5 text-xs text-muted-foreground">
+                  Loading skills…
+                </div>
+              ) : models.length === 0 ? (
+                <div className="px-2 py-1.5 text-xs text-muted-foreground">
+                  No trained or imported skills yet
+                </div>
+              ) : (
+                models.map((m) => (
+                  <SelectItem key={m.id} value={m.id}>
+                    <span className="truncate">{m.name}</span>
+                    <span className="ml-2 text-[10px] uppercase tracking-wide text-muted-foreground">
+                      {m.source === "hub"
+                        ? "hub"
+                        : m.source === "both"
+                          ? "local · hub"
+                          : "local"}
+                    </span>
+                  </SelectItem>
+                ))
+              )}
+            </SelectContent>
+          </Select>
+          {/* Duplicate of ModelsLibrary's "Import skill" button, docked
+              inside the picker's own box (right edge) so it's visible
+              without opening the dropdown. A sibling overlay, not a child of
+              SelectTrigger — SelectTrigger is itself a <button>, and Radix
+              opens on pointerdown, so nesting would either be invalid HTML or
+              also trigger the dropdown. Sitting on top as an absolutely
+              positioned sibling means it alone receives the click. */}
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            onClick={(e) => {
+              e.stopPropagation();
+              setImportModalOpen(true);
+            }}
+            disabled={resolving}
+            className="absolute right-1 top-1/2 h-7 w-7 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+            title="Import skill"
+            aria-label="Import skill"
+          >
+            <Download className="h-3.5 w-3.5" />
+          </Button>
+        </div>
         {!selectedJob ? (
           <p className="text-xs text-muted-foreground">
             Pick a trained checkpoint or an imported Hub skill to run on your
@@ -669,6 +717,11 @@ const DeployPanel: React.FC = () => {
           </p>
         ) : null}
       </div>
+      <ImportModelModal
+        open={importModalOpen}
+        onOpenChange={setImportModalOpen}
+        onImported={handleImported}
+      />
 
       {/* Everything below is flat and appears as soon as a skill is picked —
           disclosure comes from the selection, not from a second click. The old
