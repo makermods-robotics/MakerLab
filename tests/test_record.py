@@ -15,6 +15,9 @@
 
 from __future__ import annotations
 
+import threading
+import time
+
 import pytest
 
 
@@ -1438,3 +1441,132 @@ def test_worker_reports_ok_outcome_on_clean_end(monkeypatch: pytest.MonkeyPatch,
     assert status["outcome"] == "ok"
     assert status["error"] is None
     assert status["hint"] is None
+
+
+# ---------------------------------------------------------------------------
+# I8: shutdown_event() has no UI to poll and no "press Stop again" gesture
+# available, but handle_stop_recording()'s first call is deliberately
+# fire-and-forget -- it only sets the stop_recording/exit_early events and
+# returns immediately, relying on the recording worker to notice them, finish
+# the session, then return to rest and release. Calling it alone from
+# shutdown would let the process exit while the worker is still mid-session,
+# with no return-to-rest and no torque release. stop_and_wait() composes the
+# stop with a bounded join so a caller with no UI can get the same
+# graceful-then-forced guarantee synchronously.
+# ---------------------------------------------------------------------------
+
+
+def test_stop_and_wait_is_a_noop_when_idle(monkeypatch: pytest.MonkeyPatch) -> None:
+    import makermodslab.record as record
+
+    monkeypatch.setattr(record, "recording_active", False)
+    monkeypatch.setattr(record, "recording_thread", None)
+
+    record.stop_and_wait(timeout=1.0)  # must return promptly, no exception
+
+
+def test_stop_and_wait_blocks_until_worker_finishes_gracefully(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A real worker that responds to the stop_recording event (the normal
+    graceful path: finish the session, return-to-rest, then release) must be
+    allowed to finish on its own within the timeout -- stop_and_wait must not
+    return before that, and must not force an early release when it didn't
+    need to."""
+    import makermodslab.record as record
+
+    released = threading.Event()
+    events = {"exit_early": False, "stop_recording": False, "rerecord_episode": False}
+
+    def _worker() -> None:
+        while not events["stop_recording"]:
+            time.sleep(0.01)
+        record.recording_active = False
+        released.set()
+
+    worker = threading.Thread(target=_worker, daemon=True)
+    monkeypatch.setattr(record, "recording_active", True)
+    monkeypatch.setattr(record, "recording_thread", worker)
+    monkeypatch.setattr(record, "recording_events", events)
+    monkeypatch.setattr(record, "releasing", False)
+    record._release_now.clear()
+    worker.start()
+
+    record.stop_and_wait(timeout=2.0)
+
+    assert released.is_set(), "stop_and_wait returned before the worker finished releasing"
+    assert record.recording_active is False
+    assert not record._release_now.is_set(), "a worker that finished gracefully must not be force-released"
+    worker.join(timeout=2.0)
+
+
+def test_stop_and_wait_forces_release_if_worker_does_not_finish_in_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A worker stuck past the graceful-release window must be force-released
+    via the same "second stop" mechanism the UI's second Stop press uses --
+    shutdown has no operator to press it, so stop_and_wait must do it
+    automatically once the bound elapses."""
+    import makermodslab.record as record
+
+    def _worker() -> None:
+        # Ignores the stop_recording event; only responds to a forced
+        # release, standing in for a stalled/wedged end-of-session cleanup.
+        record._release_now.wait(timeout=5.0)
+
+    worker = threading.Thread(target=_worker, daemon=True)
+    monkeypatch.setattr(record, "recording_active", True)
+    monkeypatch.setattr(record, "recording_thread", worker)
+    monkeypatch.setattr(record, "recording_events", {"exit_early": False, "stop_recording": False})
+    monkeypatch.setattr(record, "releasing", False)
+    record._release_now.clear()
+    worker.start()
+
+    record.stop_and_wait(timeout=0.2)
+
+    assert record._release_now.is_set(), "a worker that outlasts the timeout must be force-released"
+    worker.join(timeout=5.0)
+    assert not worker.is_alive()
+
+
+def test_stop_and_wait_lets_an_already_in_progress_release_finish_gracefully(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """recording_active stays True for the worker's entire lifetime -- unlike
+    teleoperation_active, which flips False the instant a stop is requested,
+    recording_active only goes False after the worker's finally block has
+    already released and disconnected. So a session that already received its
+    first stop and is mid return-to-rest (releasing=True) still has
+    recording_active=True. stop_and_wait must not mistake this for a
+    not-yet-stopped session and call handle_stop_recording() again --
+    handle_stop_recording treats any call made while releasing is True as a
+    *second* stop and force-releases immediately, which would abort a return
+    that was about to finish gracefully on its own well within the timeout."""
+    import makermodslab.record as record
+
+    forced = threading.Event()
+    finished_gracefully = threading.Event()
+
+    def _worker() -> None:
+        # Stands in for the tail of a graceful return-to-rest: finishes on its
+        # own shortly, but would also honor a forced release if one came in.
+        if record._release_now.wait(timeout=0.3):
+            forced.set()
+        else:
+            finished_gracefully.set()
+
+    worker = threading.Thread(target=_worker, daemon=True)
+    monkeypatch.setattr(record, "recording_active", True)
+    monkeypatch.setattr(record, "recording_thread", worker)
+    monkeypatch.setattr(
+        record, "recording_events", {"exit_early": False, "stop_recording": True, "rerecord_episode": False}
+    )
+    monkeypatch.setattr(record, "releasing", True)
+    record._release_now.clear()
+    worker.start()
+
+    record.stop_and_wait(timeout=5.0)
+
+    assert finished_gracefully.is_set(), "an already-in-progress graceful return was aborted early"
+    assert not forced.is_set(), "stop_and_wait force-released a session already mid graceful return"
+    worker.join(timeout=2.0)

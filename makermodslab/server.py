@@ -91,6 +91,7 @@ from .record import (
     handle_stop_recording,
     handle_upload_dataset,
     handle_upload_status,
+    stop_and_wait as stop_recording_and_wait,
 )
 from .rollout import (
     InferenceRequest,
@@ -106,6 +107,7 @@ from .teleoperate import (
     handle_start_teleoperation,
     handle_stop_teleoperation,
     handle_teleoperation_status,
+    stop_and_wait as stop_teleoperation_and_wait,
 )
 
 # Training is now job-based; see app/jobs.py.
@@ -2639,31 +2641,32 @@ async def shutdown_event():
     """Clean up resources when FastAPI shuts down"""
     logger.info("🔄 FastAPI shutting down, cleaning up...")
 
-    # Stop any active recording - handled by recording module cleanup
-
-    # Auto-calibration (drives the arm under torque, writes servo EEPROM on
-    # success) and an in-flight inference run (`lerobot-rollout` driving the
-    # follower under a policy) each run their own real, independent
-    # subprocess(es) that don't stop just because this process does. A server
-    # shutdown (a plain `kill <pid>`, or uvicorn `--reload` restarting on a
-    # file change) would otherwise leave them running unsupervised — the arm
-    # energized under an unreachable auto-cal subprocess, or the follower
-    # still being driven by a policy nobody can stop from the API anymore.
-    # stop_and_wait()/handle_stop_inference() are the same stops each
-    # feature's own Stop control uses, but block until actually confirmed
-    # stopped instead of just kicking it off — safe to wait here since this
-    # is a one-time shutdown step, not a UI action waiting on a poll loop.
-    # None of these three are mutually exclusive with each other, so more
-    # than one can be active at once — stop them all concurrently (each can
-    # take up to ~30s) rather than one after another, or the worst case
-    # triples for no reason. Each is a no-op when idle.
+    # Teleoperation and recording drive the follower(s) as background threads
+    # INSIDE this process (teleoperation_thread / recording_thread); auto-
+    # calibration and an in-flight inference run each drive real, independent
+    # subprocess(es) (the vendored autocal script; `lerobot-rollout`). None of
+    # this stops just because the process does — a plain `kill <pid>` or a
+    # uvicorn `--reload` restart otherwise leaves a thread killed mid-loop
+    # (no return-to-rest, no torque release) or a subprocess orphaned with the
+    # arm potentially still energized, and nobody left to reach it from the
+    # API. Each stop_and_wait()/handle_stop_inference() call is the same stop
+    # its own Stop control uses, but blocks (bounded) until actually confirmed
+    # stopped instead of just kicking it off — safe to wait here since this is
+    # a one-time shutdown step, not a UI action waiting on a poll loop. All
+    # five are mutually exclusive with each other in normal operation (see
+    # CLAUDE.md's "State model & mutual exclusion"), so at most one of these
+    # ever has real work — gathered concurrently anyway, both because it's
+    # cheap and as a defensive measure if that invariant is ever violated,
+    # rather than paying each stop's worst case one after another.
     results = await asyncio.gather(
+        asyncio.to_thread(stop_teleoperation_and_wait),
+        asyncio.to_thread(stop_recording_and_wait),
         asyncio.to_thread(auto_calibration_manager.stop_and_wait),
         asyncio.to_thread(auto_calibration_batch_manager.stop_and_wait),
         asyncio.to_thread(handle_stop_inference),
         return_exceptions=True,
     )
-    labels = ("auto-calibration", "auto-calibration batch", "inference")
+    labels = ("teleoperation", "recording", "auto-calibration", "auto-calibration batch", "inference")
     for label, result in zip(labels, results, strict=True):
         if isinstance(result, Exception):
             logger.exception(f"Failed to stop {label} during shutdown", exc_info=result)

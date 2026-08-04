@@ -41,7 +41,7 @@ from .datasets import (
     invalidate_hub_status,
 )
 from .motor_power import clear_goal_velocity, reset_torque_limit
-from .rest_pose import capture_rest_pose
+from .rest_pose import RETURN_CEILING_S, capture_rest_pose
 from .teleoperate import _device_buses, _return_followers_to_rest, force_disable_torque
 from .utils.config import (
     validate_dataset_repo_id,
@@ -260,6 +260,57 @@ def finish_pending_release(timeout: float = 10.0) -> bool:
     _release_now.set()
     worker.join(timeout=timeout)
     return not worker.is_alive()
+
+
+# Bound on how long stop_and_wait() waits for the graceful end-of-session
+# (return-to-rest + torque release) to finish on its own before forcing an
+# immediate release. Mirrors teleoperate.py's own derivation: rest_pose's
+# RETURN_CEILING_S already bounds the return motion itself; the margin covers
+# episode finalization, the torque-release writes, disconnect, and
+# thread-join overhead that follow it.
+_STOP_AND_WAIT_TIMEOUT_S = RETURN_CEILING_S + 5.0
+
+
+def stop_and_wait(timeout: float = _STOP_AND_WAIT_TIMEOUT_S) -> None:
+    """Stop recording and block until the worker has actually released the
+    arm(s), for a caller with no UI to poll and no "press Stop again"
+    gesture available (shutdown).
+
+    handle_stop_recording()'s first call is deliberately fire-and-forget: it
+    only sets the stop_recording/exit_early events and returns immediately,
+    relying on the recording worker to notice them, finish the session
+    (saving whatever episodes already completed), then return to rest and
+    release. Neither a status poll nor a second Stop press exists at
+    shutdown. This composes both: trigger the stop, then join the worker —
+    giving it its normal grace to finish gracefully, and only forcing an
+    immediate release (the same "second stop" mechanism a human pressing
+    Stop twice would trigger) if it hasn't finished within the bound.
+    Discards nothing: a shutdown mid-session should keep whatever episodes
+    were already recorded, not throw them away. A no-op when idle.
+    """
+    if recording_active and not releasing:
+        # recording_active stays True for the worker's entire lifetime --
+        # unlike teleoperation_active, which flips False the instant a stop
+        # is requested -- so a session already mid return-to-rest (releasing)
+        # still has recording_active=True. Calling handle_stop_recording()
+        # again in that state would hit its "releasing" branch and
+        # force-release immediately, aborting a return that may finish
+        # gracefully on its own well within the timeout below.
+        handle_stop_recording(discard=False)
+    worker = recording_thread
+    if worker is None or not worker.is_alive():
+        return
+    worker.join(timeout=timeout)
+    if not worker.is_alive():
+        return
+    logger.warning(
+        "Recording worker did not finish its graceful release within %.0fs; forcing release now",
+        timeout,
+    )
+    _release_now.set()
+    worker.join(timeout=5.0)
+    if worker.is_alive():
+        logger.warning("Recording worker still alive after forcing release; giving up the wait")
 
 
 class RecordingRequest(BaseModel):
