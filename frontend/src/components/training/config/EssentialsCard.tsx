@@ -1,20 +1,10 @@
-import React, { useState } from "react";
+import React from "react";
 import { Input } from "@/components/ui/input";
 import { NumberInput } from "@/components/ui/number-input";
 import { Label } from "@/components/ui/label";
-import { Switch } from "@/components/ui/switch";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { ConfigComponentProps } from "../types";
-import WandbInstallDialog from "../WandbInstallDialog";
-import { useApi } from "@/contexts/ApiContext";
 
-/** The run's headline settings — steps, batch size, name, and W&B logging.
+/** The run's headline settings — steps, batch size, and name.
  * Flat: each control carries its own <Label> and the section has no eyebrow
  * heading, so nothing sits above a single field restating it. The policy
  * select lives in PolicyField, which renders earlier in the form. */
@@ -22,35 +12,6 @@ const EssentialsCard: React.FC<ConfigComponentProps> = ({
   config,
   updateConfig,
 }) => {
-  const { baseUrl, fetchWithHeaders } = useApi();
-  const [wandbDialogOpen, setWandbDialogOpen] = useState(false);
-  const [wandbInstallHint, setWandbInstallHint] = useState("pip install wandb");
-
-  const handleWandbToggle = async (checked: boolean) => {
-    if (!checked) {
-      updateConfig("wandb_enable", false);
-      return;
-    }
-    // Check availability before flipping the switch on. If wandb isn't
-    // importable in this MakerMods Lab process, surface the same install flow used
-    // for the training extra (accelerate) instead of letting the user start
-    // a run that will fail.
-    try {
-      const r = await fetchWithHeaders(`${baseUrl}/system/wandb-extra`);
-      const data: { available: boolean; install_hint: string } = await r.json();
-      if (data.available) {
-        updateConfig("wandb_enable", true);
-      } else {
-        setWandbInstallHint(data.install_hint);
-        setWandbDialogOpen(true);
-      }
-    } catch {
-      // Backend unreachable — let the user proceed; training start will
-      // surface the real error if wandb is genuinely missing.
-      updateConfig("wandb_enable", true);
-    }
-  };
-
   return (
     <section className="space-y-4">
       <div className="grid grid-cols-2 gap-4">
@@ -91,87 +52,6 @@ const EssentialsCard: React.FC<ConfigComponentProps> = ({
           Optional — shown on the job card and searchable.
         </p>
       </div>
-
-      <div className="flex items-center gap-3">
-        <Switch
-          id="wandb_enable"
-          checked={config.wandb_enable}
-          onCheckedChange={handleWandbToggle}
-          className="data-[state=checked]:bg-primary"
-        />
-        <Label htmlFor="wandb_enable">Log to Weights &amp; Biases</Label>
-      </div>
-
-      <WandbInstallDialog
-        open={wandbDialogOpen}
-        onOpenChange={setWandbDialogOpen}
-        installHint={wandbInstallHint}
-      />
-
-      {config.wandb_enable && (
-        <div className="space-y-4 border-l-2 border-border pl-4">
-          <div className="space-y-2">
-            <Label htmlFor="wandb_project">W&amp;B project name</Label>
-            <Input
-              id="wandb_project"
-              value={config.wandb_project || ""}
-              onChange={(e) =>
-                updateConfig("wandb_project", e.target.value || undefined)
-              }
-              placeholder="my-robotics-project"
-            />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="wandb_entity">W&amp;B entity (optional)</Label>
-            <Input
-              id="wandb_entity"
-              value={config.wandb_entity || ""}
-              onChange={(e) =>
-                updateConfig("wandb_entity", e.target.value || undefined)
-              }
-              placeholder="your-username"
-            />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="wandb_notes">W&amp;B notes (optional)</Label>
-            <Input
-              id="wandb_notes"
-              value={config.wandb_notes || ""}
-              onChange={(e) =>
-                updateConfig("wandb_notes", e.target.value || undefined)
-              }
-              placeholder="Training run notes..."
-            />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="wandb_mode">W&amp;B mode</Label>
-            <Select
-              value={config.wandb_mode || "online"}
-              onValueChange={(value) => updateConfig("wandb_mode", value)}
-            >
-              <SelectTrigger id="wandb_mode">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="online">Online</SelectItem>
-                <SelectItem value="offline">Offline</SelectItem>
-                <SelectItem value="disabled">Disabled</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="flex items-center gap-3">
-            <Switch
-              id="wandb_disable_artifact"
-              checked={config.wandb_disable_artifact}
-              onCheckedChange={(checked) =>
-                updateConfig("wandb_disable_artifact", checked)
-              }
-              className="data-[state=checked]:bg-primary"
-            />
-            <Label htmlFor="wandb_disable_artifact">Disable artifacts</Label>
-          </div>
-        </div>
-      )}
     </section>
   );
 };

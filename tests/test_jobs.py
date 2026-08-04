@@ -192,20 +192,6 @@ def test_resolve_cloud_resume_rejects_missing_repo() -> None:
         _resolve_cloud_resume(_cloud_record(repo_id=None), None)
 
 
-def test_extract_wandb_run_url_finds_canonical_url() -> None:
-    from makermodslab.jobs import extract_wandb_run_url
-
-    line = "wandb: \U0001f680 View run at https://wandb.ai/me/myproj/runs/abc123 trailing text"
-    assert extract_wandb_run_url(line) == "https://wandb.ai/me/myproj/runs/abc123"
-
-
-def test_extract_wandb_run_url_returns_none_when_absent() -> None:
-    from makermodslab.jobs import extract_wandb_run_url
-
-    assert extract_wandb_run_url("nothing here") is None
-    assert extract_wandb_run_url("https://example.com/runs/abc") is None
-
-
 def test_parse_duration_handles_mm_ss_and_hh_mm_ss() -> None:
     from makermodslab.jobs import _parse_duration
 
