@@ -49,13 +49,31 @@ MakerMods Lab is a FastAPI + React web interface wrapping the [LeRobot](https://
 
 The frontend (React + Vite) lives in [`frontend/`](frontend/). The built bundle in `frontend/dist/` is committed and shipped inside the Python wheel as package data (`frontend.__init__.py` makes setuptools treat it as a package); [`makermodslab/server.py`](makermodslab/server.py) mounts it as `StaticFiles` at `/` so a single `makermodslab` process serves both API and UI on `:8000`.
 
+## Upstream (leLab)
+
+We forked leLab and have diverged past the point where git-level integration works.
+
+**Never `git merge`, `git rebase`, or `git cherry-pick` from `upstream`.** Anything we take from leLab is a deliberate re-implementation against our code. Upstream `lelab/<x>.py` maps to our `makermodslab/<x>.py`, but the contents usually differ heavily — read our file before assuming an upstream change applies. Upstream commits often arrive with tests; the `tests/` policy below still governs which of those we keep.
+
+The `upstream` remote is not in a fresh clone. Add it when you need it:
+
+```bash
+git remote add upstream https://github.com/huggingface/leLab.git
+```
+
+Run `/review-upstream` ([`.claude/commands/review-upstream.md`](.claude/commands/review-upstream.md)) weekly to triage what they have shipped. It writes a report under `docs/upstream/reviews/` and updates [`docs/upstream/ledger.md`](docs/upstream/ledger.md), the record of every upstream commit we have judged and why. **Read the ledger before porting anything** — some rows are `rejected` because our implementation is already ahead of theirs, and re-porting those is a regression.
+
+Both projects are Apache-2.0. Credit ports with the upstream SHA, and send fixes back when they apply to code we still share.
+
 ## Common commands
 
 Install and run: see [README.md](README.md) Quick Start (uv editable install; `makermodslab` / `makermodslab --dev`). Requires Python ≥3.12. Use the repo `.venv` — pytest fails to collect under other interpreters because of the pinned lerobot.
 
-`lerobot` is pinned to a specific commit on `huggingface/lerobot` `main` (see [pyproject.toml](pyproject.toml)) — no PyPI release yet exposes the `lerobot-rollout` script that [makermodslab/rollout.py](makermodslab/rollout.py) shells out to. Bump the SHA when you want newer upstream changes; expect import-path drift and adjust call sites.
+`lerobot` is pinned to the `v0.6.0` **release tag** on `huggingface/lerobot` (see [pyproject.toml](pyproject.toml)); that release exposes the `lerobot-rollout` script [makermodslab/rollout.py](makermodslab/rollout.py) shells out to. Track lerobot's releases, not its `main` branch — a moving pin makes every unrelated failure a bisect. lerobot is the one dependency the app cannot run without, so treat a bump as a real change: expect import-path drift, adjust call sites, and exercise a rollout end-to-end before landing it.
 
 When `frontend/**` (excluding `frontend/dist/**`) changes on `main`, [`.github/workflows/build_frontend.yml`](.github/workflows/build_frontend.yml) auto-rebuilds `frontend/dist/` and commits it back — don't rebuild it by hand for a PR. `makermodslab --dev` serves from Vite, no rebuild needed.
+
+**`frontend/package-lock.json` is the most fragile file in the repo** — it has broken CI three times (`e345e61`, `944cb05`, `c18d42c`). npm records platform-specific optional dependencies (esbuild, rollup, the `@emnapi/*` wasm shims) in it, so a lockfile written by `npm install` on macOS can fail `npm ci` on the Linux runner. Never hand-edit it; regenerate it on Linux or in a container when it genuinely needs regenerating; and treat an unexplained `package-lock.json` diff in an otherwise-unrelated PR as stray local churn to drop, not a change to keep. [`.github/workflows/frontend.yml`](.github/workflows/frontend.yml) runs `npm ci` + `npx tsc --noEmit` + `npm run build` on every PR so this is caught before merge rather than after.
 
 Test with `pytest` (install `.[test]`), lint with `ruff check` / `ruff format` (config for both in [pyproject.toml](pyproject.toml)). Tests in [tests/](tests/) cover request schemas, pure helpers, and idle/mutex branches; subprocess/thread happy paths and HF Jobs integration are **deliberately** not unit-tested — don't add coverage there. There is no Python build step; for end-to-end validation, run `makermodslab` and exercise endpoints.
 
@@ -123,10 +141,6 @@ All under `~/.cache/huggingface/lerobot/` (managed in [utils/config.py](makermod
 ## Frontend layout (`frontend/src/`)
 
 React + Vite + TypeScript with shadcn/radix primitives. Four pages (`Launchpad`, `Teleoperation`, `Training`, `NotFound`); ~100 components grouped by feature area (`calibration/`, `control/`, `dialogs/`, `studio/`, `library/`, `recording/`, `jobs/`, `launchpad/`, … plus shared `ui/`); state via React contexts (`ApiContext`, `StudioContext`, `InferenceSessionContext`, `UrdfContext`, …) and ~19 data/session hooks (`useRobots`, `useDatasets`, `useRealTimeJoints`, …). No Redux/Zustand.
-
-## UI verification scope
-
-The UI is verified in **light mode only** and is a desktop tool driven from a laptop next to the arms — **skip mobile/responsive-breakpoint checks**. Caveat: `ThemeProvider` defaults to `system`, so OS-dark users do get the `dark` class with unaudited styling; don't polish dark mode unless asked.
 
 ## Hardware target
 
