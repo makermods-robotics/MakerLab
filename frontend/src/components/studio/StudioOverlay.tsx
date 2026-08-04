@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from "react";
-import { X } from "lucide-react";
+import { ChevronDown, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import BrandMark from "@/components/BrandMark";
 import RobotCorner from "@/components/launchpad/RobotCorner";
@@ -61,13 +61,30 @@ const StudioOverlay: React.FC = () => {
         open ? "translate-y-0" : "pointer-events-none translate-y-full",
       )}
     >
-      <header className="flex items-center gap-3 border-b border-border px-4 py-3 sm:px-6">
+      <header className="relative flex items-center gap-3 border-b border-border px-4 py-3 sm:px-6">
         <BrandMark size="md" />
         <span className="hidden rounded border border-border px-1.5 py-0.5 font-orbitron text-[11px] font-black uppercase tracking-[0.08em] text-muted-foreground sm:inline">
           by MakerMods
         </span>
         <span className="eyebrow ml-2 hidden md:inline">Skill studio</span>
         <span className="flex-1" />
+        {/* Pull down to return to the main menu — mirrors the Launchpad's
+            "pull up" arrow at the very bottom of that page. Absolutely
+            centered on the header itself (not via flanking flex-1 spacers,
+            which only center when the left/right groups happen to be equal
+            width — they aren't here), so it's centered regardless of how
+            many of the surrounding chips are hidden at the current
+            breakpoint. */}
+        <Button
+          variant="ghost"
+          size="sm"
+          aria-label="Back to main menu"
+          title="Back to main menu"
+          onClick={closeStudio}
+          className="absolute left-1/2 top-1/2 z-10 h-8 w-8 -translate-x-1/2 -translate-y-1/2 p-0 text-muted-foreground hover:text-foreground"
+        >
+          <ChevronDown className="h-5 w-5 animate-bounce" />
+        </Button>
         <span className="hidden sm:inline-flex">
           <HfAuthChip />
         </span>

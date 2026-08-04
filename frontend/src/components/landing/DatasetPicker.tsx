@@ -26,6 +26,11 @@ interface DatasetPickerProps {
    * the semantics: local delete / local-copy removal / unpin / hide). The
    * picker closes so the Landing-scoped dialog is visible. */
   onDeleteItem?: (item: DatasetItem) => void;
+  /** Omit the in-popover search box — for callers that already sit next to
+   * their own bigger search field (e.g. Train's dataset picker), where a
+   * second search input would just duplicate it. The list still shows every
+   * dataset, unfiltered. */
+  hideSearch?: boolean;
   children: React.ReactNode;
 }
 
@@ -40,6 +45,7 @@ const DatasetPicker: React.FC<DatasetPickerProps> = ({
   loading,
   onPickExisting,
   onDeleteItem,
+  hideSearch = false,
   children,
 }) => {
   const [open, setOpen] = useState(false);
@@ -129,11 +135,13 @@ const DatasetPicker: React.FC<DatasetPickerProps> = ({
         align="end"
       >
         <Command>
-          <CommandInput
-            placeholder="Search datasets…"
-            value={query}
-            onValueChange={setQuery}
-          />
+          {!hideSearch && (
+            <CommandInput
+              placeholder="Search datasets…"
+              value={query}
+              onValueChange={setQuery}
+            />
+          )}
           <CommandList>
             {datasets.length === 0 && (
               <CommandEmpty className="py-4 text-sm text-muted-foreground text-center">

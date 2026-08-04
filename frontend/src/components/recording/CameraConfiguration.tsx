@@ -37,6 +37,10 @@ const BACKEND_OPTIONS = [
   "AVFOUNDATION",
   "MSMF",
 ];
+// Common SO-101 rig placements, offered as one-click camera names before
+// falling back to a free-text name via the CAMERA_NAME_CUSTOM sentinel.
+const CAMERA_NAME_PRESETS = ["wrist", "top", "front", "side"];
+const CAMERA_NAME_CUSTOM = "__custom_name__";
 
 export interface CameraConfig {
   id: string;
@@ -81,6 +85,15 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
   } = useAvailableCameras({ enabled: !streamsPaused });
   const [selectedCameraIndex, setSelectedCameraIndex] = useState<string>("");
   const [cameraName, setCameraName] = useState("");
+  // Tracks which name-picker option is active: "" (none yet), one of
+  // CAMERA_NAME_PRESETS, or CAMERA_NAME_CUSTOM (free-text `cameraName`
+  // input revealed below). Separate from `cameraName` itself so switching
+  // back to a preset after typing a custom name doesn't require clearing it.
+  const [nameChoice, setNameChoice] = useState<string>("");
+  const handleNameChoice = (choice: string) => {
+    setNameChoice(choice);
+    if (choice !== CAMERA_NAME_CUSTOM) setCameraName(choice);
+  };
 
   // The camera currently picked in the dropdown (not yet added). Drives the
   // immediate live preview shown before the camera is named.
@@ -187,6 +200,7 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
 
     setSelectedCameraIndex("");
     setCameraName("");
+    setNameChoice("");
 
     toast({
       title: "Camera Added",
@@ -312,12 +326,37 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
                 <Label className="text-sm font-medium text-muted-foreground">
                   Camera Name <span className="text-warn">*</span>
                 </Label>
-                <Input
-                  value={cameraName}
-                  onChange={(e) => setCameraName(e.target.value)}
-                  placeholder="e.g., workspace_cam"
-                  className="bg-background border-border text-foreground"
-                />
+                <Select value={nameChoice} onValueChange={handleNameChoice}>
+                  <SelectTrigger className="bg-background border-border text-foreground">
+                    <SelectValue placeholder="Select a name" />
+                  </SelectTrigger>
+                  <SelectContent className="bg-popover border-border">
+                    {CAMERA_NAME_PRESETS.map((name) => (
+                      <SelectItem
+                        key={name}
+                        value={name}
+                        className="text-foreground"
+                      >
+                        {name}
+                      </SelectItem>
+                    ))}
+                    <SelectItem
+                      value={CAMERA_NAME_CUSTOM}
+                      className="text-foreground"
+                    >
+                      Custom name…
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+                {nameChoice === CAMERA_NAME_CUSTOM && (
+                  <Input
+                    value={cameraName}
+                    onChange={(e) => setCameraName(e.target.value)}
+                    placeholder="e.g., workspace_cam"
+                    autoFocus
+                    className="bg-background border-border text-foreground"
+                  />
+                )}
               </div>
 
               {/* Deliberately NOT disabled when the name is missing: a dead
