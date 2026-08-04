@@ -816,34 +816,45 @@ def handle_rerecord_episode() -> dict[str, Any]:
 
 
 def handle_pause_recording() -> dict[str, Any]:
-    """Pause the reset-phase gap between episodes. Freezes teleop passthrough
-    (the follower holds position and ignores the leader) and the reset
-    countdown until resumed. No-ops outside the reset phase and when already
-    paused, so a stray or duplicate request is always safe."""
+    """Pause the reset gap. Can be requested during the recording phase too —
+    that ARMS a pending pause: the current episode keeps recording
+    uninterrupted, and the reset phase that follows starts already paused
+    (teleop passthrough frozen, follower holds position, ignores the leader)
+    instead of needing a fresh click once resetting begins. Only takes
+    effect on the reset countdown once resetting actually starts (see the
+    reset-phase preamble in record_with_web_events, which seeds
+    pause_started_at at that point if arming already happened). No-ops
+    outside recording/resetting and when already paused/armed, so a stray or
+    duplicate request is always safe."""
     global pause_started_at
 
     if not recording_active or recording_events is None:
         return {"success": False, "message": "No recording session is active"}
-    if current_phase != "resetting":
-        return {"success": False, "message": "Pause is only available during the reset phase"}
+    if current_phase not in ("recording", "resetting"):
+        return {"success": False, "message": "Pause is only available while recording or during the reset gap"}
     if recording_events.get("paused", False):
         return {"success": True, "message": "Already paused", "events_state": dict(recording_events)}
 
     recording_events["paused"] = True
-    pause_started_at = time.time()
-    logger.info("Reset phase paused")
-    return {"success": True, "message": "Reset phase paused", "events_state": dict(recording_events)}
+    if current_phase == "resetting":
+        pause_started_at = time.time()
+    # else: armed during the recording phase — pause_started_at stays None
+    # until the reset phase actually begins, since the countdown that
+    # matters hasn't started yet.
+    logger.info("Pause requested (phase=%s)", current_phase)
+    return {"success": True, "message": "Pause set", "events_state": dict(recording_events)}
 
 
 def handle_resume_recording() -> dict[str, Any]:
-    """Resume a paused reset-phase gap. No-ops outside the reset phase and
-    when not currently paused."""
+    """Resume a paused reset gap, or cancel a pause armed during the
+    recording phase before the reset gap it targets even begins. No-ops
+    outside recording/resetting and when not currently paused/armed."""
     global paused_accum_seconds, pause_started_at
 
     if not recording_active or recording_events is None:
         return {"success": False, "message": "No recording session is active"}
-    if current_phase != "resetting":
-        return {"success": False, "message": "Resume is only available during the reset phase"}
+    if current_phase not in ("recording", "resetting"):
+        return {"success": False, "message": "Resume is only available while recording or during the reset gap"}
     if not recording_events.get("paused", False):
         return {"success": True, "message": "Not paused", "events_state": dict(recording_events)}
 
@@ -851,21 +862,40 @@ def handle_resume_recording() -> dict[str, Any]:
     if pause_started_at is not None:
         paused_accum_seconds += time.time() - pause_started_at
         pause_started_at = None
-    logger.info("Reset phase resumed")
-    return {"success": True, "message": "Reset phase resumed", "events_state": dict(recording_events)}
+    logger.info("Pause cleared (phase=%s)", current_phase)
+    return {"success": True, "message": "Pause cleared", "events_state": dict(recording_events)}
 
 
 def _reset_paused() -> bool:
     """True only while a live session is genuinely paused DURING THE RESET
-    PHASE. Phase-gated (not just an events-dict flag check) so a stale
-    paused=True left over from a reset loop that exited without clearing it
-    (e.g. via exit_early) can never leak into a later phase's
-    available_controls or status — see the loop-exit cleanup in
-    record_with_web_events, which is defense in depth on top of this gate,
-    not a substitute for it."""
+    PHASE — i.e. the pause is actually freezing the countdown/passthrough
+    right now, as opposed to merely being armed for an upcoming reset gap
+    while still in the recording phase. Phase-gated (not just an
+    events-dict flag check) so a stale paused=True left over from a reset
+    loop that exited without clearing it (e.g. via exit_early) can never
+    leak into a later phase's available_controls or status — see the
+    loop-exit cleanup in record_with_web_events, which is defense in depth
+    on top of this gate, not a substitute for it."""
     return bool(
         recording_events and current_phase == "resetting" and recording_events.get("paused", False)
     )
+
+
+def _pause_armed() -> bool:
+    """True whenever paused is set at all, regardless of phase — covers both
+    a live pause during the reset phase and a pause armed during the
+    recording phase for the upcoming reset gap. Used to gate
+    pause_recording/resume_recording's availability across both phases;
+    _reset_paused() remains the narrower, phase-gated predicate for anything
+    that must only react to an ACTIVE freeze (the exit_early guard, the
+    status `paused` field). Gated on recording_active, not just the
+    events-dict flag: a pause armed on an episode's recording phase can be
+    left stranded True if that episode turns out to be the session's last
+    (no reset phase follows to run the unconditional `paused = False`
+    cleanup in record_with_web_events) — without this gate, the stale flag
+    would keep reporting pause_armed=True in the completed/stopped status
+    until the next session's handle_start_recording rebuilds the dict."""
+    return bool(recording_active and recording_events and recording_events.get("paused", False))
 
 
 def handle_recording_status() -> dict[str, Any]:
@@ -892,20 +922,25 @@ def handle_recording_status() -> dict[str, Any]:
         # over but the arm is still energized and driving back to its
         # session-start pose before torque is released.
         "releasing": releasing,
-        # True only during the reset phase, and only while a pause is active —
-        # see handle_pause_recording/handle_resume_recording.
+        # True only during the reset phase, and only while a pause is
+        # actively freezing it — see handle_pause_recording/handle_resume_recording.
         "paused": _reset_paused(),
+        # True whenever paused is set at all, including a pause armed during
+        # the recording phase for the upcoming reset gap (not yet actually
+        # freezing anything). Drives the frontend's Pause/Resume toggle,
+        # which is available in both phases.
+        "pause_armed": _pause_armed(),
         "available_controls": {
             "stop_recording": recording_active,  # ESC key replacement
             "exit_early": recording_active and not _reset_paused(),  # Right arrow key replacement; disabled while paused
             "rerecord_episode": recording_active
             and current_phase == "recording",  # Only during recording phase
             "pause_recording": recording_active
-            and current_phase == "resetting"
-            and not _reset_paused(),
+            and current_phase in ("recording", "resetting")
+            and not _pause_armed(),
             "resume_recording": recording_active
-            and current_phase == "resetting"
-            and _reset_paused(),
+            and current_phase in ("recording", "resetting")
+            and _pause_armed(),
         },
         "message": "Recording session failed with error - check logs"
         if current_phase == "error"
@@ -1723,9 +1758,14 @@ def record_with_web_events(
 
                 log_say("Reset the environment", cfg.play_sounds)
 
-                # Reset exit_early/paused flags at the start of each phase
+                # Reset exit_early at the start of each phase. Don't clear
+                # `paused` unconditionally: an operator may have armed a
+                # pause during the just-finished recording phase for this
+                # exact reset gap (see handle_pause_recording) — preserve it
+                # and start its wall-clock accounting now that the countdown
+                # it affects has actually begun.
                 web_events["exit_early"] = False
-                web_events["paused"] = False
+                pause_started_at = time.time() if web_events.get("paused", False) else None
                 logger.info(f"Reset phase - calling reset loop with events: {web_events}")
 
                 _reset_loop_with_pause(
@@ -1798,9 +1838,14 @@ def record_with_web_events(
 
                 log_say("Reset the environment", cfg.play_sounds)
 
-                # Reset exit_early/paused flags at the start of each phase
+                # Reset exit_early at the start of each phase. Don't clear
+                # `paused` unconditionally: an operator may have armed a
+                # pause during the just-finished recording phase for this
+                # exact reset gap (see handle_pause_recording) — preserve it
+                # and start its wall-clock accounting now that the countdown
+                # it affects has actually begun.
                 web_events["exit_early"] = False
-                web_events["paused"] = False
+                pause_started_at = time.time() if web_events.get("paused", False) else None
                 logger.info(f"Reset phase - calling reset loop with events: {web_events}")
 
                 _reset_loop_with_pause(
