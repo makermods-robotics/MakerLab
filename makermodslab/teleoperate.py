@@ -28,7 +28,7 @@ from lerobot.teleoperators.so_leader import SO101Leader
 
 from .arm_identity import verify_devices
 from .motor_power import clear_goal_velocity, reset_torque_limit
-from .rest_pose import capture_rest_pose, return_to_rest_pose
+from .rest_pose import RETURN_CEILING_S, capture_rest_pose, return_to_rest_pose
 from .utils.devices import _force_close_device_resources
 from .utils.errors import classify_outcome, format_exception, friendly_hint
 from .utils.robot_factory import build_bimanual_configs, build_single_configs
@@ -229,6 +229,49 @@ def finish_pending_release(timeout: float = 10.0) -> bool:
         return False
     teleoperation_thread = None
     return True
+
+
+# Bound on how long stop_and_wait() waits for the graceful return-to-rest +
+# torque release to finish on its own before forcing an immediate release.
+# return_to_rest_pose's own RETURN_CEILING_S already bounds the return motion
+# itself (and bimanual arms return concurrently, not sequentially — see
+# _return_followers_to_rest — so this doesn't need to account for two arms in
+# series); the margin covers the torque-release writes, disconnect, and
+# thread-join overhead that follow it.
+_STOP_AND_WAIT_TIMEOUT_S = RETURN_CEILING_S + 5.0
+
+
+def stop_and_wait(timeout: float = _STOP_AND_WAIT_TIMEOUT_S) -> None:
+    """Stop teleoperation and block until the worker has actually released
+    the arm(s), for a caller with no UI to poll and no "press Stop again"
+    gesture available (shutdown).
+
+    handle_stop_teleoperation()'s first call is deliberately fire-and-forget:
+    it flips teleoperation_active and returns immediately so the request
+    thread isn't blocked on the return-to-rest motion, relying on a status
+    poll or a second Stop press to observe or force completion. Neither
+    exists at shutdown. This composes both: trigger the stop, then join the
+    worker — giving it its normal grace to finish the graceful return-to-rest
+    and release on its own, and only forcing an immediate release (the same
+    "second stop" mechanism a human pressing Stop twice would trigger) if it
+    hasn't finished within the bound. A no-op when idle.
+    """
+    if teleoperation_active:
+        handle_stop_teleoperation()
+    worker = teleoperation_thread
+    if worker is None or not worker.is_alive():
+        return
+    worker.join(timeout=timeout)
+    if not worker.is_alive():
+        return
+    logger.warning(
+        "Teleoperation worker did not finish its graceful release within %.0fs; forcing release now",
+        timeout,
+    )
+    _release_now.set()
+    worker.join(timeout=5.0)
+    if worker.is_alive():
+        logger.warning("Teleoperation worker still alive after forcing release; giving up the wait")
 
 
 def _return_one_follower_to_rest(bus, pose: dict, abort_event: threading.Event) -> None:

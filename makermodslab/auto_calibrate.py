@@ -64,6 +64,11 @@ _SCRIPT_MODULE = "makermodslab.vendor.feetech_autocal.auto_calibrate_script"
 _STOP_GRACE_S = 18.0
 _STOP_KILL_WAIT_S = 5.0
 _READER_JOIN_S = 5.0
+# Absolute ceiling for stop_and_wait(): the sum of every step in the escalation
+# above, plus margin. Used by callers (server shutdown) that need the arm
+# actually de-energized before they let the process exit, instead of just
+# handing the sequence to its background thread and moving on.
+_STOP_AND_WAIT_CEILING_S = _STOP_GRACE_S + _STOP_KILL_WAIT_S + _READER_JOIN_S + 2.0
 
 
 class AutoCalibrationRequest(BaseModel):
@@ -395,6 +400,28 @@ class _AutoCalArmRunner:
             self._stop_thread.start()
         return {"success": True, "message": "Stopping auto-calibration"}
 
+    def stop_and_wait(self, timeout: float = _STOP_AND_WAIT_CEILING_S) -> None:
+        """Like stop(), but blocks until the escalation has actually finished
+        de-energizing the arm, instead of handing it to the background thread
+        and returning right away.
+
+        stop() returns immediately on purpose — it's built for the HTTP
+        endpoint, where the frontend polls status while the SIGTERM -> grace
+        -> SIGKILL -> torque-release sequence runs in the background. That's
+        wrong for a caller that's about to let the process exit (server
+        shutdown): the background thread doesn't get to keep running after
+        the process is gone, so the arm could be left energized. This joins
+        that thread first so the caller only returns once it's done, or the
+        ceiling has passed.
+
+        A no-op when nothing is running, or when a stop is already in
+        flight — either way, if a stop thread exists, this still waits for
+        it, so shutdown never walks away mid-stop."""
+        self.stop()
+        thread = self._stop_thread
+        if thread is not None:
+            thread.join(timeout=timeout)
+
     def _stop_worker(self, proc: subprocess.Popen, port: str) -> None:
         """Escalating stop: SIGTERM → grace period for the script's own torque
         release → SIGKILL → direct fallback torque release from this process.
@@ -671,6 +698,26 @@ class AutoCalibrationBatchManager:
                 if runner.get_status()["active"] and runner.stop().get("success"):
                     stopped += 1
             return {"success": True, "message": f"Stopping {stopped} arm(s)"}
+
+    def stop_and_wait(self, timeout: float = _STOP_AND_WAIT_CEILING_S) -> None:
+        """Like stop(), but blocks until every arm's escalation has actually
+        finished, instead of returning as soon as they're kicked off. See
+        _AutoCalArmRunner.stop_and_wait for why a caller like server shutdown
+        needs this instead of stop().
+
+        Every arm is signalled to stop first, before waiting on any of
+        them — arms run their escalation concurrently, so stopping one at a
+        time here would leave the others still driving their motors for the
+        length of every earlier arm's stop sequence."""
+        with self._lock:
+            runners = list(self._runners)
+        active_runners = [r for r in runners if r.get_status()["active"]]
+        for runner in active_runners:
+            runner.stop()
+        for runner in active_runners:
+            thread = runner._stop_thread
+            if thread is not None:
+                thread.join(timeout=timeout)
 
     def get_status(self) -> dict:
         with self._lock:

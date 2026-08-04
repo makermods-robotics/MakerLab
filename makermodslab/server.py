@@ -84,13 +84,16 @@ from .record import (
     UploadRequest,
     handle_delete_dataset,
     handle_exit_early,
+    handle_pause_recording,
     handle_recording_log,
     handle_recording_status,
     handle_rerecord_episode,
+    handle_resume_recording,
     handle_start_recording,
     handle_stop_recording,
     handle_upload_dataset,
     handle_upload_status,
+    stop_and_wait as stop_recording_and_wait,
 )
 from .rollout import (
     InferenceRequest,
@@ -106,6 +109,7 @@ from .teleoperate import (
     handle_start_teleoperation,
     handle_stop_teleoperation,
     handle_teleoperation_status,
+    stop_and_wait as stop_teleoperation_and_wait,
 )
 
 # Training is now job-based; see app/jobs.py.
@@ -918,6 +922,20 @@ def recording_exit_early():
 def recording_rerecord_episode():
     """Re-record current episode (replaces left arrow key)"""
     return handle_rerecord_episode()
+
+
+@app.post("/recording-pause")
+def recording_pause():
+    """Pause the reset-phase gap between episodes (mouse-only, no keyboard
+    shortcut). No-ops outside the reset phase — see handle_pause_recording."""
+    return handle_pause_recording()
+
+
+@app.post("/recording-resume")
+def recording_resume():
+    """Resume a paused reset-phase gap. No-ops if not currently paused —
+    see handle_resume_recording."""
+    return handle_resume_recording()
 
 
 @app.post("/upload-dataset")
@@ -2639,24 +2657,35 @@ async def shutdown_event():
     """Clean up resources when FastAPI shuts down"""
     logger.info("🔄 FastAPI shutting down, cleaning up...")
 
-    # Stop any active recording - handled by recording module cleanup
-
-    # An in-flight inference run's `lerobot-rollout` subprocess is a real
-    # child process, independent of this one — it keeps driving the follower
-    # under its policy even after we exit unless we terminate it ourselves.
-    # This fires on a graceful SIGTERM (a plain `kill <pid>`, or uvicorn
-    # `--reload` tearing down the worker process on a file change), which is
-    # exactly when nothing else is left to stop it. handle_stop_inference()
-    # is a no-op (409) when idle, so this is safe to call unconditionally.
-    # It can block for several seconds waiting on the subprocess, so it runs
-    # in a thread instead of directly on the event loop — otherwise it would
-    # freeze all other async work (including this same shutdown sequence)
-    # for however long the wait takes. Any failure here is caught so it can't
-    # stop the broadcast-thread cleanup below from running too.
-    try:
-        await asyncio.to_thread(handle_stop_inference)
-    except Exception:
-        logger.exception("Failed to stop inference during shutdown")
+    # Teleoperation and recording drive the follower(s) as background threads
+    # INSIDE this process (teleoperation_thread / recording_thread); auto-
+    # calibration and an in-flight inference run each drive real, independent
+    # subprocess(es) (the vendored autocal script; `lerobot-rollout`). None of
+    # this stops just because the process does — a plain `kill <pid>` or a
+    # uvicorn `--reload` restart otherwise leaves a thread killed mid-loop
+    # (no return-to-rest, no torque release) or a subprocess orphaned with the
+    # arm potentially still energized, and nobody left to reach it from the
+    # API. Each stop_and_wait()/handle_stop_inference() call is the same stop
+    # its own Stop control uses, but blocks (bounded) until actually confirmed
+    # stopped instead of just kicking it off — safe to wait here since this is
+    # a one-time shutdown step, not a UI action waiting on a poll loop. All
+    # five are mutually exclusive with each other in normal operation (see
+    # CLAUDE.md's "State model & mutual exclusion"), so at most one of these
+    # ever has real work — gathered concurrently anyway, both because it's
+    # cheap and as a defensive measure if that invariant is ever violated,
+    # rather than paying each stop's worst case one after another.
+    results = await asyncio.gather(
+        asyncio.to_thread(stop_teleoperation_and_wait),
+        asyncio.to_thread(stop_recording_and_wait),
+        asyncio.to_thread(auto_calibration_manager.stop_and_wait),
+        asyncio.to_thread(auto_calibration_batch_manager.stop_and_wait),
+        asyncio.to_thread(handle_stop_inference),
+        return_exceptions=True,
+    )
+    labels = ("teleoperation", "recording", "auto-calibration", "auto-calibration batch", "inference")
+    for label, result in zip(labels, results, strict=True):
+        if isinstance(result, Exception):
+            logger.exception(f"Failed to stop {label} during shutdown", exc_info=result)
 
     if manager:
         manager.stop_broadcast_thread()

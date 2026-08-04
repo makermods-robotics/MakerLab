@@ -61,6 +61,144 @@ def test_app_exposes_required_endpoints() -> None:
     assert not missing, f"missing routes: {missing}"
 
 
+def test_shutdown_stops_active_teleoperation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """FastAPI's shutdown handler must wait for an in-flight teleoperation
+    session to actually finish releasing the arm(s), not just flip the flag
+    and move on.
+
+    teleoperation_thread runs INSIDE this process (not a subprocess, unlike
+    inference's rollout or auto-calibration's vendored script) — a plain kill
+    or `--reload` restart kills it mid-loop unless something signals it AND
+    waits for the result. handle_stop_teleoperation()'s first call is
+    fire-and-forget by design (see teleoperate.stop_and_wait), so calling it
+    alone from shutdown would let the process exit while the worker is still
+    mid-return, with no return-to-rest and no torque release."""
+    import makermodslab.record as record
+    import makermodslab.rollout as rollout
+    import makermodslab.teleoperate as teleop
+
+    released = threading.Event()
+
+    def _worker() -> None:
+        while teleop.teleoperation_active:
+            time.sleep(0.01)
+        released.set()
+
+    worker = threading.Thread(target=_worker, daemon=True)
+    monkeypatch.setattr(teleop, "teleoperation_active", True)
+    monkeypatch.setattr(teleop, "teleoperation_thread", worker)
+    monkeypatch.setattr(teleop, "last_cleanup_error", None)
+    teleop._release_now.clear()
+    monkeypatch.setattr(record, "recording_active", False)
+    monkeypatch.setattr(record, "recording_thread", None)
+    monkeypatch.setattr(rollout, "inference_active", False)
+    monkeypatch.setattr(server_mod, "manager", None)
+    worker.start()
+
+    asyncio.run(server_mod.shutdown_event())
+
+    assert released.is_set(), "shutdown returned without waiting for teleoperation to finish releasing"
+    assert teleop.teleoperation_active is False
+    worker.join(timeout=2.0)
+
+
+def test_shutdown_stops_active_recording(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Same requirement as teleoperation, for recording_thread.
+
+    handle_stop_recording() signals via recording_events (stop_recording /
+    exit_early) rather than flipping recording_active itself — the real
+    recording worker notices those events, winds down, and clears the flag as
+    part of its own cleanup. The fake worker here mirrors that division of
+    responsibility instead of short-circuiting it, so this test exercises the
+    real signal shutdown actually sends."""
+    import makermodslab.record as record
+    import makermodslab.rollout as rollout
+    import makermodslab.teleoperate as teleop
+
+    released = threading.Event()
+    events = {"exit_early": False, "stop_recording": False, "rerecord_episode": False}
+
+    def _worker() -> None:
+        while not events["stop_recording"]:
+            time.sleep(0.01)
+        record.recording_active = False
+        released.set()
+
+    worker = threading.Thread(target=_worker, daemon=True)
+    monkeypatch.setattr(record, "recording_active", True)
+    monkeypatch.setattr(record, "recording_thread", worker)
+    monkeypatch.setattr(record, "recording_events", events)
+    monkeypatch.setattr(record, "releasing", False)
+    record._release_now.clear()
+    monkeypatch.setattr(teleop, "teleoperation_active", False)
+    monkeypatch.setattr(teleop, "teleoperation_thread", None)
+    monkeypatch.setattr(rollout, "inference_active", False)
+    monkeypatch.setattr(server_mod, "manager", None)
+    worker.start()
+
+    asyncio.run(server_mod.shutdown_event())
+
+    assert released.is_set(), "shutdown returned without waiting for recording to finish releasing"
+    assert events["stop_recording"] is True
+    assert record.recording_active is False
+    worker.join(timeout=2.0)
+
+
+def test_shutdown_stops_active_auto_calibration(monkeypatch: pytest.MonkeyPatch) -> None:
+    """FastAPI's shutdown handler must terminate an in-flight auto-calibration
+    subprocess and release the arm's torque, not just clean up the broadcast
+    thread.
+
+    Auto-calibration drives the arm under torque via its own subprocess,
+    independent of this server process, and on success writes servo EEPROM.
+    Without this, `--reload` or a plain PID kill during a run leaves that
+    subprocess orphaned with the arm potentially still energized and nobody
+    able to stop it from the API. Uses a real (fake) Popen so the actual
+    SIGTERM -> wait -> torque-release sequence runs end to end through
+    shutdown_event(), the same way test_shutdown_stops_active_inference
+    exercises the inference path."""
+    from makermodslab import auto_calibrate as ac
+
+    class _FakeAutocalProc:
+        def __init__(self) -> None:
+            self._dead = threading.Event()
+            self.terminated = False
+
+        def terminate(self) -> None:
+            self.terminated = True
+            self._dead.set()
+
+        def wait(self, timeout: float | None = None) -> int:
+            if not self._dead.wait(timeout):
+                raise TimeoutError
+            return 0
+
+    proc = _FakeAutocalProc()
+    released: list[str] = []
+    monkeypatch.setattr(ac, "_release_arm_torque", lambda port: (released.append(port), [])[1])
+    monkeypatch.setattr(ac, "_STOP_GRACE_S", 0.2)
+    monkeypatch.setattr(ac, "_STOP_KILL_WAIT_S", 0.2)
+    monkeypatch.setattr(ac, "_READER_JOIN_S", 0.2)
+
+    mgr = ac.auto_calibration_manager
+    monkeypatch.setattr(mgr, "status", ac.AutoCalibrationStatus(active=True, status="running"))
+    monkeypatch.setattr(mgr, "_proc", proc)
+    monkeypatch.setattr(
+        mgr,
+        "_request",
+        ac.AutoCalibrationRequest(device_type="robot", port="/dev/arm", config_file="test_arm"),
+    )
+    monkeypatch.setattr(mgr, "_thread", None)
+    # Broadcast-thread cleanup isn't under test here.
+    monkeypatch.setattr(server_mod, "manager", None)
+
+    asyncio.run(server_mod.shutdown_event())
+
+    assert proc.terminated, "shutdown did not terminate the in-flight auto-calibration subprocess"
+    assert released == ["/dev/arm"], "shutdown did not release the arm's torque"
+    assert mgr.status.active is False
+
+
 def test_shutdown_stops_active_inference(monkeypatch: pytest.MonkeyPatch) -> None:
     """FastAPI's shutdown handler must terminate an in-flight inference
     subprocess, not just the broadcast thread.
@@ -1062,3 +1200,39 @@ def test_delete_local_job_records_no_dismissal(
     resp = client.delete("/jobs/some-local-run")
     assert resp.status_code == 204
     assert cfg.get_dismissed_hub_jobs() == set()
+
+
+def test_recording_pause_route_calls_handler(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    import makermodslab.server as server_mod
+
+    called = {}
+
+    def _fake_handle_pause_recording():
+        called["hit"] = True
+        return {"success": True, "message": "Reset phase paused"}
+
+    monkeypatch.setattr(server_mod, "handle_pause_recording", _fake_handle_pause_recording)
+
+    response = client.post("/recording-pause")
+
+    assert response.status_code == 200
+    assert response.json()["success"] is True
+    assert called.get("hit") is True
+
+
+def test_recording_resume_route_calls_handler(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    import makermodslab.server as server_mod
+
+    called = {}
+
+    def _fake_handle_resume_recording():
+        called["hit"] = True
+        return {"success": True, "message": "Reset phase resumed"}
+
+    monkeypatch.setattr(server_mod, "handle_resume_recording", _fake_handle_resume_recording)
+
+    response = client.post("/recording-resume")
+
+    assert response.status_code == 200
+    assert response.json()["success"] is True
+    assert called.get("hit") is True

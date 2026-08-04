@@ -254,6 +254,34 @@ def test_stop_kills_process_that_ignores_sigterm(
     assert released == ["/dev/arm"]
 
 
+def test_stop_and_wait_blocks_until_torque_released(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """stop_and_wait() must not return until the escalation has actually
+    finished releasing the arm — a caller like server shutdown that's about
+    to exit the process can't rely on the background stop thread to keep
+    running after it's gone, unlike a Stop-button caller."""
+    proc = StoppableFakeProc()
+    released: list[str] = []
+    mgr, _ = _start_with_fake_proc(monkeypatch, proc, released)
+
+    mgr.stop_and_wait(timeout=5)
+
+    status = mgr.get_status()
+    assert status["status"] == "stopped"
+    assert status["active"] is False
+    assert proc.terminated is True
+    assert released == ["/dev/arm"]
+
+
+def test_stop_and_wait_when_idle_is_a_no_op(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Nothing running, nothing to wait for — must return immediately rather
+    than hang, since server shutdown calls this unconditionally."""
+    mgr = auto_calibrate.AutoCalibrationManager()
+    mgr.stop_and_wait(timeout=5)
+    assert mgr.get_status()["active"] is False
+
+
 def test_stop_surfaces_failed_torque_release(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1131,6 +1159,106 @@ def test_batch_stop_stops_all_and_releases_each_torque(monkeypatch: pytest.Monke
     assert {a["status"] for a in status["arms"]} == {"stopped"}
     assert sorted(released) == ["/dev/a", "/dev/b"]
     assert procs["/dev/a"].terminated and procs["/dev/b"].terminated
+
+
+def test_batch_stop_and_wait_blocks_until_every_arm_releases_torque(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """stop_and_wait() must not return until every arm's escalation has
+    actually finished, and must signal every arm up front rather than one at
+    a time — otherwise a later arm would keep driving its motors for the
+    length of every earlier arm's whole stop sequence."""
+    released: list[str] = []
+    monkeypatch.setattr(auto_calibrate, "_calibration_name_taken", lambda dt, stem: False)
+    monkeypatch.setattr(
+        auto_calibrate,
+        "_release_arm_torque",
+        lambda port: (released.append(port), [])[1],
+    )
+    monkeypatch.setattr(auto_calibrate, "_STOP_GRACE_S", 0.2)
+    monkeypatch.setattr(auto_calibrate, "_STOP_KILL_WAIT_S", 0.2)
+
+    procs = {"/dev/a": StoppableFakeProc(), "/dev/b": StoppableFakeProc()}
+    monkeypatch.setattr(auto_calibrate.subprocess, "Popen", lambda *a, **k: procs[_port_of(a)])
+
+    mgr = auto_calibrate.AutoCalibrationBatchManager()
+    arms = [_arm(port="/dev/a", name="a"), _arm(port="/dev/b", name="b")]
+    assert mgr.start(auto_calibrate.AutoCalibrationBatchRequest(arms=arms))["success"] is True
+
+    mgr.stop_and_wait(timeout=5)
+
+    status = mgr.get_status()
+    assert status["active"] is False
+    assert {a["status"] for a in status["arms"]} == {"stopped"}
+    assert sorted(released) == ["/dev/a", "/dev/b"]
+    assert procs["/dev/a"].terminated and procs["/dev/b"].terminated
+
+
+def test_batch_stop_and_wait_when_idle_is_a_no_op() -> None:
+    mgr = auto_calibrate.AutoCalibrationBatchManager()
+    mgr.stop_and_wait(timeout=5)
+    assert mgr.get_status()["active"] is False
+
+
+def test_batch_stop_and_wait_races_manual_batch_stop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A manual 'Stop batch' button click and server shutdown's stop_and_wait()
+    can hit the same batch manager at nearly the same instant — the frontend
+    poll loop isn't gated on shutdown. Each arm's own lock must still let only
+    one of the two callers actually start that arm's stop escalation; the
+    loser must not terminate the process a second time or release its torque
+    a second time, and stop_and_wait() must still block until every arm's
+    escalation has genuinely finished, whichever caller started it."""
+    terminate_calls = {"/dev/a": 0, "/dev/b": 0}
+    released: list[str] = []
+
+    class CountingProc(StoppableFakeProc):
+        def __init__(self, port: str) -> None:
+            super().__init__()
+            self._port = port
+
+        def terminate(self) -> None:
+            terminate_calls[self._port] += 1
+            super().terminate()
+
+    monkeypatch.setattr(auto_calibrate, "_calibration_name_taken", lambda dt, stem: False)
+    monkeypatch.setattr(
+        auto_calibrate,
+        "_release_arm_torque",
+        lambda port: (released.append(port), [])[1],
+    )
+    monkeypatch.setattr(auto_calibrate, "_STOP_GRACE_S", 0.2)
+    monkeypatch.setattr(auto_calibrate, "_STOP_KILL_WAIT_S", 0.2)
+
+    procs = {"/dev/a": CountingProc("/dev/a"), "/dev/b": CountingProc("/dev/b")}
+    monkeypatch.setattr(auto_calibrate.subprocess, "Popen", lambda *a, **k: procs[_port_of(a)])
+
+    mgr = auto_calibrate.AutoCalibrationBatchManager()
+    arms = [_arm(port="/dev/a", name="a"), _arm(port="/dev/b", name="b")]
+    assert mgr.start(auto_calibrate.AutoCalibrationBatchRequest(arms=arms))["success"] is True
+
+    start_barrier = threading.Barrier(2)
+
+    def _manual_stop() -> None:
+        start_barrier.wait()
+        mgr.stop()  # the frontend "Stop" button
+
+    def _shutdown_stop() -> None:
+        start_barrier.wait()
+        mgr.stop_and_wait(timeout=5)  # server shutdown_event()
+
+    manual_thread = threading.Thread(target=_manual_stop)
+    shutdown_thread = threading.Thread(target=_shutdown_stop)
+    manual_thread.start()
+    shutdown_thread.start()
+    manual_thread.join(timeout=5)
+    shutdown_thread.join(timeout=5)
+    assert not manual_thread.is_alive() and not shutdown_thread.is_alive()
+
+    status = mgr.get_status()
+    assert status["active"] is False
+    assert {a["status"] for a in status["arms"]} == {"stopped"}
+    assert terminate_calls == {"/dev/a": 1, "/dev/b": 1}
+    assert sorted(released) == ["/dev/a", "/dev/b"]
 
 
 def test_batch_stop_when_idle_is_rejected() -> None:
