@@ -5,6 +5,7 @@ import {
   RotateCcw,
   SkipForward,
   Play,
+  Pause,
   Volume2,
   VolumeX,
 } from "lucide-react";
@@ -73,6 +74,10 @@ interface BackendStatus {
   session_elapsed_seconds?: number;
   session_ended?: boolean;
   dataset_repo_id?: string;
+  // True only during the reset phase, while a pause is active. Distinct from
+  // the unrelated `paused`/`streamsPaused` naming used by camera-preview
+  // components elsewhere — see CameraConfiguration.tsx.
+  paused?: boolean;
   // True when the session saved zero episodes and its dataset directory was
   // discarded (see record.py). The exit handoff shows a "nothing was saved"
   // variant when this is set.
@@ -88,6 +93,8 @@ interface BackendStatus {
     stop_recording: boolean;
     exit_early: boolean;
     rerecord_episode: boolean;
+    pause_recording: boolean;
+    resume_recording: boolean;
   };
 }
 
@@ -116,6 +123,7 @@ const RecordingSessionDialog: React.FC<{
   const [logs, setLogs] = useState("");
 
   const [optimisticPhase, setOptimisticPhase] = useState<Phase | null>(null);
+  const [optimisticPaused, setOptimisticPaused] = useState<boolean | null>(null);
   // The two explicit exits while a session is live: Done (finish + keep) and
   // Quit (end without saving / discard). Each gets its own confirm dialog.
   const [showDoneConfirm, setShowDoneConfirm] = useState(false);
@@ -214,6 +222,8 @@ const RecordingSessionDialog: React.FC<{
   // without tearing itself down on every state change.
   const optimisticPhaseRef = useRef(optimisticPhase);
   optimisticPhaseRef.current = optimisticPhase;
+  const optimisticPausedRef = useRef(optimisticPaused);
+  optimisticPausedRef.current = optimisticPaused;
   const rerecordTickRef = useRef(rerecordTick);
   rerecordTickRef.current = rerecordTick;
 
@@ -257,6 +267,11 @@ const RecordingSessionDialog: React.FC<{
         const currentOptimistic = optimisticPhaseRef.current;
         if (currentOptimistic && status.current_phase === currentOptimistic) {
           setOptimisticPhase(null);
+        }
+
+        const currentOptimisticPaused = optimisticPausedRef.current;
+        if (currentOptimisticPaused !== null && status.paused === currentOptimisticPaused) {
+          setOptimisticPaused(null);
         }
 
         const real = status.current_phase as Phase;
@@ -406,6 +421,66 @@ const RecordingSessionDialog: React.FC<{
       });
     }
   }, [backendStatus, optimisticPhase, baseUrl, fetchWithHeaders, toast]);
+
+  const handlePauseRecording = useCallback(async () => {
+    if (!backendStatus?.available_controls.pause_recording) return;
+    if (optimisticPaused !== null) return;
+
+    setOptimisticPaused(true);
+
+    try {
+      const response = await fetchWithHeaders(
+        `${baseUrl}/recording-pause`,
+        { method: "POST" }
+      );
+      if (!response.ok) {
+        const data = await response.json();
+        setOptimisticPaused(null);
+        toast({
+          title: "Error",
+          description: data.message,
+          variant: "destructive",
+        });
+      }
+    } catch (error) {
+      setOptimisticPaused(null);
+      toast({
+        title: "Connection Error",
+        description: "Could not connect to the backend server.",
+        variant: "destructive",
+      });
+    }
+  }, [backendStatus, optimisticPaused, baseUrl, fetchWithHeaders, toast]);
+
+  const handleResumeRecording = useCallback(async () => {
+    if (!backendStatus?.available_controls.resume_recording) return;
+    if (optimisticPaused !== null) return;
+
+    setOptimisticPaused(false);
+
+    try {
+      const response = await fetchWithHeaders(
+        `${baseUrl}/recording-resume`,
+        { method: "POST" }
+      );
+      if (!response.ok) {
+        const data = await response.json();
+        setOptimisticPaused(null);
+        toast({
+          title: "Error",
+          description: data.message,
+          variant: "destructive",
+        });
+      }
+    } catch (error) {
+      setOptimisticPaused(null);
+      toast({
+        title: "Connection Error",
+        description: "Could not connect to the backend server.",
+        variant: "destructive",
+      });
+    }
+  }, [backendStatus, optimisticPaused, baseUrl, fetchWithHeaders, toast]);
 
   const handleRerecordEpisode = useCallback(async () => {
     if (!backendStatus?.available_controls.rerecord_episode) return;
@@ -583,6 +658,9 @@ const RecordingSessionDialog: React.FC<{
 
   const realPhase = backendStatus?.current_phase as Phase;
   const currentPhase: Phase = optimisticPhase ?? realPhase;
+  const isRecordingPaused =
+    currentPhase === "resetting" &&
+    (optimisticPaused ?? backendStatus?.paused ?? false);
   const currentEpisode = backendStatus?.current_episode ?? 1;
   const totalEpisodes =
     backendStatus?.total_episodes ?? recordingConfig.num_episodes;
@@ -613,7 +691,7 @@ const RecordingSessionDialog: React.FC<{
 
   const getStatusText = () => {
     if (currentPhase === "recording") return `RECORDING EPISODE ${currentEpisode}`;
-    if (currentPhase === "resetting") return "RESET — GET READY";
+    if (currentPhase === "resetting") return isRecordingPaused ? "RESET PAUSED" : "RESET — GET READY";
     // Finer "preparing" substeps (and terminal states) the backend now reports
     // (record.py). These aren't in the Phase-narrowed set that drives the
     // recording/resetting colors, so read the raw backend string: they render
@@ -746,6 +824,21 @@ const RecordingSessionDialog: React.FC<{
                       item. Backspace mirrors the button (a deliberate delete
                       gesture — see the keydown handler note). */}
                   <div className="flex gap-3">
+                    {currentPhase === "resetting" && (
+                      <Button
+                        onClick={isRecordingPaused ? handleResumeRecording : handlePauseRecording}
+                        disabled={
+                          isRecordingPaused
+                            ? !backendStatus.available_controls.resume_recording
+                            : !backendStatus.available_controls.pause_recording
+                        }
+                        variant="outline"
+                        className="py-6 text-lg font-semibold border-border bg-transparent text-foreground hover:bg-muted disabled:opacity-50"
+                      >
+                        <Pause className="w-5 h-5 mr-2" />
+                        {isRecordingPaused ? "Resume" : "Pause"}
+                      </Button>
+                    )}
                     <Button
                       onClick={handleExitEarly}
                       disabled={
