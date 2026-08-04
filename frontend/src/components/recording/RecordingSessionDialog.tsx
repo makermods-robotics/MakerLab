@@ -74,10 +74,15 @@ interface BackendStatus {
   session_elapsed_seconds?: number;
   session_ended?: boolean;
   dataset_repo_id?: string;
-  // True only during the reset phase, while a pause is active. Distinct from
-  // the unrelated `paused`/`streamsPaused` naming used by camera-preview
-  // components elsewhere — see CameraConfiguration.tsx.
+  // True only during the reset phase, while a pause is actively freezing it.
+  // Distinct from the unrelated `paused`/`streamsPaused` naming used by
+  // camera-preview components elsewhere — see CameraConfiguration.tsx.
   paused?: boolean;
+  // True whenever a pause is set at all, including one armed during the
+  // recording phase for the upcoming reset gap (not yet actually freezing
+  // anything). Drives the Pause/Resume toggle, which is available in both
+  // the recording and resetting phases.
+  pause_armed?: boolean;
   // True when the session saved zero episodes and its dataset directory was
   // discarded (see record.py). The exit handoff shows a "nothing was saved"
   // variant when this is set.
@@ -459,6 +464,16 @@ const RecordingSessionDialog: React.FC<{
           description: data.message,
           variant: "destructive",
         });
+      } else if ((optimisticPhase ?? backendStatus?.current_phase) === "recording") {
+        // Pausing mid-episode only arms the pause — it has no effect until
+        // the reset gap actually begins (see handle_pause_recording in
+        // record.py). Say so, since the button/status otherwise give no
+        // visible feedback during the recording phase.
+        toast({
+          title: "Pause armed",
+          description:
+            "The episode keeps recording. It'll pause once the reset phase starts.",
+        });
       }
     } catch (error) {
       setOptimisticPaused(null);
@@ -468,7 +483,7 @@ const RecordingSessionDialog: React.FC<{
         variant: "destructive",
       });
     }
-  }, [backendStatus, optimisticPaused, baseUrl, fetchWithHeaders, toast]);
+  }, [backendStatus, optimisticPaused, optimisticPhase, baseUrl, fetchWithHeaders, toast]);
 
   const handleResumeRecording = useCallback(async () => {
     if (!backendStatus?.available_controls.resume_recording) return;
@@ -501,6 +516,18 @@ const RecordingSessionDialog: React.FC<{
       });
     }
   }, [backendStatus, optimisticPaused, baseUrl, fetchWithHeaders, toast]);
+
+  // ENTER-key equivalent of the Pause/Resume button: toggles based on
+  // whichever of pause/resume is currently active, mirroring the button's
+  // own ternary so the keybind and click always agree.
+  const handleTogglePause = useCallback(() => {
+    const active = optimisticPaused ?? backendStatus?.pause_armed ?? false;
+    if (active) {
+      handleResumeRecording();
+    } else {
+      handlePauseRecording();
+    }
+  }, [optimisticPaused, backendStatus, handleResumeRecording, handlePauseRecording]);
 
   const handleRerecordEpisode = useCallback(async () => {
     if (!backendStatus?.available_controls.rerecord_episode) return;
@@ -621,15 +648,17 @@ const RecordingSessionDialog: React.FC<{
     onExitRef.current();
   }, [backendStatus, recordingConfig, baseUrl, fetchWithHeaders]);
 
-  // Re-record is keyboard-driven again, on BACKSPACE (explicit user request;
-  // the old ArrowLeft binding was removed because a back-gesture keystroke
-  // discarding the in-progress episode felt accidental — Backspace is a
-  // deliberate "delete" gesture, and the handler still preventDefaults so it
-  // can never double as browser back-navigation).
+  // Re-record is keyboard-driven on DELETE (and Backspace, for keyboards/
+  // muscle memory where Delete sends Backspace — explicit user request; the
+  // old ArrowLeft binding was removed because a back-gesture keystroke
+  // discarding the in-progress episode felt accidental — Delete/Backspace is
+  // a deliberate "delete" gesture, and the handler still preventDefaults so
+  // it can never double as browser back-navigation). ENTER toggles Pause/Resume.
   const anyExitDialogOpen = showDoneConfirm || showQuitConfirm;
   const handlersRef = useRef({
     handleExitEarly,
     handleRerecordEpisode,
+    handleTogglePause,
     requestDone,
     anyExitDialogOpen,
   });
@@ -637,6 +666,7 @@ const RecordingSessionDialog: React.FC<{
     handlersRef.current = {
       handleExitEarly,
       handleRerecordEpisode,
+      handleTogglePause,
       requestDone,
       anyExitDialogOpen,
     };
@@ -659,11 +689,14 @@ const RecordingSessionDialog: React.FC<{
       if (e.key === " " || e.code === "Space" || e.key === "ArrowRight") {
         e.preventDefault();
         handlersRef.current.handleExitEarly();
-      } else if (e.key === "Backspace") {
+      } else if (e.key === "Backspace" || e.key === "Delete") {
         // Deliberate delete gesture: discard and re-record the current episode.
         // preventDefault also guarantees it never acts as browser back-nav.
         e.preventDefault();
         handlersRef.current.handleRerecordEpisode();
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        handlersRef.current.handleTogglePause();
       } else if (e.key === "Escape") {
         if (handlersRef.current.anyExitDialogOpen) return;
         // Escape = finish & keep (the least destructive exit). Quit is an
@@ -678,9 +711,13 @@ const RecordingSessionDialog: React.FC<{
 
   const realPhase = backendStatus?.current_phase as Phase;
   const currentPhase: Phase = optimisticPhase ?? realPhase;
-  const isRecordingPaused =
-    currentPhase === "resetting" &&
-    (optimisticPaused ?? backendStatus?.paused ?? false);
+  // Phase-independent: true whether a pause is actively freezing the reset
+  // gap right now, or merely armed during the recording phase for the gap
+  // that follows. Drives the Pause/Resume button toggle in both phases.
+  const isPauseActive = optimisticPaused ?? backendStatus?.pause_armed ?? false;
+  // Narrower: true only while the reset gap is ACTUALLY frozen (used for
+  // the "RESET PAUSED" status text, which only makes sense during resetting).
+  const isRecordingPaused = currentPhase === "resetting" && isPauseActive;
   const currentEpisode = backendStatus?.current_episode ?? 1;
   const totalEpisodes =
     backendStatus?.total_episodes ?? recordingConfig.num_episodes;
@@ -839,31 +876,16 @@ const RecordingSessionDialog: React.FC<{
                     />
                   </div>
 
-                  {/* Primary advance + re-record side by side: retaking a bad take
-                      is a first-class action during collection, not a hidden menu
-                      item. Backspace mirrors the button (a deliberate delete
-                      gesture — see the keydown handler note). */}
-                  <div className="flex gap-3">
-                    {currentPhase === "resetting" && (
-                      <Button
-                        onClick={isRecordingPaused ? handleResumeRecording : handlePauseRecording}
-                        disabled={
-                          (isRecordingPaused
-                            ? !backendStatus.available_controls.resume_recording
-                            : !backendStatus.available_controls.pause_recording) ||
-                          optimisticPaused !== null
-                        }
-                        variant="outline"
-                        className="py-6 text-lg font-semibold border-border bg-transparent text-foreground hover:bg-muted disabled:opacity-50"
-                      >
-                        {isRecordingPaused ? (
-                          <Play className="w-5 h-5 mr-2" />
-                        ) : (
-                          <Pause className="w-5 h-5 mr-2" />
-                        )}
-                        {isRecordingPaused ? "Resume" : "Pause"}
-                      </Button>
-                    )}
+                  {/* Primary advance full-width on its own row, with Pause and
+                      Re-record sharing a secondary row below — keeps the row
+                      count fixed at two-per-line regardless of how many
+                      secondary controls are visible, so it can never overflow
+                      the dialog width the way a single three-across row did.
+                      Retaking a bad take is a first-class action during
+                      collection, not a hidden menu item; ENTER mirrors Pause,
+                      DELETE/Backspace mirrors Re-record (see the keydown
+                      handler note). */}
+                  <div className="flex flex-col gap-3">
                     <Button
                       onClick={handleExitEarly}
                       disabled={
@@ -871,7 +893,7 @@ const RecordingSessionDialog: React.FC<{
                         optimisticPhase !== null ||
                         currentPhase === "completed"
                       }
-                      className={`flex-1 text-white font-semibold py-6 text-lg disabled:opacity-50 ${phaseColor.button}`}
+                      className={`w-full text-white font-semibold py-6 text-lg disabled:opacity-50 ${phaseColor.button}`}
                     >
                       <PrimaryIcon className="w-5 h-5 mr-2" />
                       {primaryLabel}
@@ -879,16 +901,39 @@ const RecordingSessionDialog: React.FC<{
                         <span className="ml-3 px-2 py-0.5 rounded text-xs font-mono bg-white/20 text-white/90">SPACE / →</span>
                       )}
                     </Button>
-                    <Button
-                      onClick={handleRerecordEpisode}
-                      disabled={!backendStatus.available_controls.rerecord_episode}
-                      variant="outline"
-                      className="py-6 text-lg font-semibold border-border bg-transparent text-foreground hover:bg-muted disabled:opacity-50"
-                    >
-                      <RotateCcw className="w-5 h-5 mr-2" />
-                      Re-record
-                      <span className="ml-3 px-2 py-0.5 rounded text-xs font-mono bg-muted text-muted-foreground">⌫</span>
-                    </Button>
+                    <div className="flex gap-3">
+                      {(currentPhase === "recording" || currentPhase === "resetting") && (
+                        <Button
+                          onClick={isPauseActive ? handleResumeRecording : handlePauseRecording}
+                          disabled={
+                            (isPauseActive
+                              ? !backendStatus.available_controls.resume_recording
+                              : !backendStatus.available_controls.pause_recording) ||
+                            optimisticPaused !== null
+                          }
+                          variant="outline"
+                          className="flex-1 py-4 text-base font-semibold border-border bg-transparent text-foreground hover:bg-muted disabled:opacity-50"
+                        >
+                          {isPauseActive ? (
+                            <Play className="w-4 h-4 mr-2" />
+                          ) : (
+                            <Pause className="w-4 h-4 mr-2" />
+                          )}
+                          {isPauseActive ? "Resume" : "Pause"}
+                          <span className="ml-3 px-2 py-0.5 rounded text-xs font-mono bg-muted text-muted-foreground">ENTER</span>
+                        </Button>
+                      )}
+                      <Button
+                        onClick={handleRerecordEpisode}
+                        disabled={!backendStatus.available_controls.rerecord_episode}
+                        variant="outline"
+                        className="flex-1 py-4 text-base font-semibold border-border bg-transparent text-foreground hover:bg-muted disabled:opacity-50"
+                      >
+                        <RotateCcw className="w-4 h-4 mr-2" />
+                        Re-record
+                        <span className="ml-3 px-2 py-0.5 rounded text-xs font-mono bg-muted text-muted-foreground">DEL</span>
+                      </Button>
+                    </div>
                   </div>
                 </>
               )}
