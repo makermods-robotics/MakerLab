@@ -1,12 +1,12 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://github.com/makermods-robotics/MakerLab/raw/main/frontend/public/makermods/logo-mark-white.png" />
-    <source media="(prefers-color-scheme: light)" srcset="https://github.com/makermods-robotics/MakerLab/raw/main/frontend/public/makermods/logo-mark.png" />
-    <img src="https://github.com/makermods-robotics/MakerLab/raw/main/frontend/public/makermods/logo-mark.png" alt="MakerMods" height="64" />
+    <source media="(prefers-color-scheme: dark)" srcset="https://github.com/makermods-robotics/makermodslab/raw/main/frontend/public/makermods/logo-mark-white.png" />
+    <source media="(prefers-color-scheme: light)" srcset="https://github.com/makermods-robotics/makermodslab/raw/main/frontend/public/makermods/logo-mark.png" />
+    <img src="https://github.com/makermods-robotics/makermodslab/raw/main/frontend/public/makermods/logo-mark.png" alt="MakerMods" height="64" />
   </picture>
 </p>
 
-<h1 align="center">MakerLab</h1>
+<h1 align="center">MakerMods Lab</h1>
 
 <p align="center">
   <b>A web interface for <a href="https://github.com/huggingface/lerobot">LeRobot</a>, built for the SO-101 leader/follower arm.</b>
@@ -20,7 +20,7 @@
 
 ---
 
-MakerLab puts the full LeRobot workflow into one browser tab:
+MakerMods Lab puts the full LeRobot workflow into one browser tab:
 
 - Calibrate, teleoperate, record, train, and replay — plug in your arm, open the app, and go. No CLI gymnastics, no keyboard prompts.
 - Hardware-safety guards, bimanual support, and a more guided setup and training flow than upstream.
@@ -29,7 +29,7 @@ Built by [makermods-robotics](https://github.com/makermods-robotics) and forked 
 
 ## Demo
 
-![MakerLab demo](https://raw.githubusercontent.com/makermods-robotics/MakerLab/assets/readme-demo/demo.gif)
+![MakerMods Lab demo](https://raw.githubusercontent.com/makermods-robotics/makermodslab/assets/readme-demo/demo.gif)
 
 ## Quick Start
 
@@ -38,30 +38,30 @@ Requires Python ≥ 3.12 and [uv](https://docs.astral.sh/uv/).
 **Just want to use it?** One line, no clone:
 
 ```bash
-uv tool install "git+https://github.com/makermods-robotics/MakerLab"
-makerlab            # serves the UI + API on :8000, opens your browser
+uv tool install "git+https://github.com/makermods-robotics/makermodslab"
+makermodslab            # serves the UI + API on :8000, opens your browser
 ```
 
 **Want to change the code?** Clone and install editable — your edits take effect on the next run, no reinstall needed:
 
 ```bash
-git clone https://github.com/makermods-robotics/MakerLab
-cd MakerLab
+git clone https://github.com/makermods-robotics/makermodslab
+cd makermodslab
 uv venv --python 3.12
 uv pip install -e .
-.venv/bin/makerlab            # first launch also links `makerlab` onto your PATH
+.venv/bin/makermodslab            # first launch also links `makermodslab` onto your PATH
 ```
 
 That first launch symlinks the command into `~/.local/bin`, so from then on you can run it from anywhere:
 
 ```bash
-makerlab            # run the app: built UI + API on :8000
-makerlab --dev      # hack on it: Vite hot reload on :8080 + auto-reloading API on :8000
+makermodslab            # run the app: built UI + API on :8000
+makermodslab --dev      # hack on it: Vite hot reload on :8080 + auto-reloading API on :8000
 ```
 
 ## What you can do
 
-At a glance, MakerLab wraps the following LeRobot workflow steps:
+At a glance, MakerMods Lab wraps the following LeRobot workflow steps:
 
 <div align="center">
   <table>
@@ -96,7 +96,7 @@ At a glance, MakerLab wraps the following LeRobot workflow steps:
   </table>
 </div>
 
-## What MakerLab adds
+## What MakerMods Lab adds
 
 Opinionated extensions on top of the core workflow above.
 
@@ -136,7 +136,7 @@ Not letting a wiring mistake break a servo:
 ## Community
 
 - **[Discord](https://discord.gg/q8Dzzpym3f):** chat with the LeRobot community.
-- **[GitHub Issues](https://github.com/makermods-robotics/MakerLab/issues):** bug reports, feature requests.
+- **[GitHub Issues](https://github.com/makermods-robotics/makermodslab/issues):** bug reports, feature requests.
 
 ## Contribute
 
@@ -150,7 +150,7 @@ uv pip install -e ".[dev]"
 Work in hot-reload mode:
 
 ```bash
-makerlab --dev
+makermodslab --dev
 ```
 
 Vite on `:8080`, uvicorn `--reload` on `:8000` — frontend and backend edits reload live.
@@ -167,8 +167,8 @@ Leave `frontend/dist/` alone — CI rebuilds and commits it on merge to `main`.
 
 ## Team
 
-MakerLab is maintained by [makermods-robotics](https://github.com/makermods-robotics).
+MakerMods Lab is maintained by [makermods-robotics](https://github.com/makermods-robotics).
 
 ## License
 
-MakerLab is released under the [Apache 2.0 License](LICENSE).
+MakerMods Lab is released under the [Apache 2.0 License](LICENSE).
