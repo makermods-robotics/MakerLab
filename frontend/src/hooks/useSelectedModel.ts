@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 
-const KEY = "makerlab.selectedModel";
+const KEY = "makermodslab.selectedModel";
 
 /**
  * The model chosen on the home page's Models panel, persisted so it survives

@@ -429,7 +429,7 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
     if (needsUpload) {
       setUploadError(null);
       setIsStarting(true);
-      const err = await startUpload([], false /* public: MakerLab uploads are public by default */);
+      const err = await startUpload([], false /* public: MakerMods Lab uploads are public by default */);
       if (err) {
         setUploadError(err);
         setIsStarting(false);

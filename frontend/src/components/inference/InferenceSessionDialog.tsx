@@ -110,7 +110,7 @@ const InferenceSessionDialog: React.FC<{
     onLeave: () => {
       stopInference(baseUrl, fetchWithHeaders).catch(() => {});
     },
-    beaconFlagKey: "makerlab:inference-stopped",
+    beaconFlagKey: "makermodslab:inference-stopped",
   });
 
   useEffect(() => {

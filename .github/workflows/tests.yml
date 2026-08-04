@@ -24,7 +24,7 @@ on:
     branches:
       - main
     paths:
-      - "makerlab/**"
+      - "makermodslab/**"
       - "tests/**"
       - ".github/workflows/tests.yml"
       - "pyproject.toml"
@@ -32,7 +32,7 @@ on:
     branches:
       - main
     paths:
-      - "makerlab/**"
+      - "makermodslab/**"
       - "tests/**"
       - ".github/workflows/tests.yml"
       - "pyproject.toml"
@@ -68,7 +68,7 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
 
-      - name: Install makerlab + test extras
+      - name: Install MakerMods Lab + test extras
         run: pip install -e ".[test]"
 
       - name: Run pytest

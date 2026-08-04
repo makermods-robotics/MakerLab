@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 import { useToast } from "@/hooks/use-toast";
 
-const FLAG = "makerlab:teleop-stopped";
+const FLAG = "makermodslab:teleop-stopped";
 
 /**
  * One-time confirmation that teleoperation was stopped during the previous
