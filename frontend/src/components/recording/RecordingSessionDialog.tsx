@@ -272,6 +272,16 @@ const RecordingSessionDialog: React.FC<{
         const currentOptimisticPaused = optimisticPausedRef.current;
         if (currentOptimisticPaused !== null && status.paused === currentOptimisticPaused) {
           setOptimisticPaused(null);
+        } else if (
+          currentOptimisticPaused !== null &&
+          status.current_phase !== "resetting"
+        ) {
+          // Second line of defense: pause/resume is only meaningful during
+          // the reset phase, so once the real phase has moved past it, no
+          // failure mode (refused request, missed poll, race with the phase
+          // ending) can leave optimisticPaused wedged for the rest of the
+          // session — clear it regardless of whether it was ever confirmed.
+          setOptimisticPaused(null);
         }
 
         const real = status.current_phase as Phase;
@@ -433,8 +443,13 @@ const RecordingSessionDialog: React.FC<{
         `${baseUrl}/recording-pause`,
         { method: "POST" }
       );
-      if (!response.ok) {
-        const data = await response.json();
+      const data = await response.json();
+      // The backend returns HTTP 200 with { success: false } for a
+      // legitimately refused pause (e.g. the reset phase ended just as the
+      // request landed — a real, expected race). Treat that the same as a
+      // network error: roll the optimistic state back so a refused request
+      // never wedges the button.
+      if (!response.ok || !data.success) {
         setOptimisticPaused(null);
         toast({
           title: "Error",
@@ -463,8 +478,10 @@ const RecordingSessionDialog: React.FC<{
         `${baseUrl}/recording-resume`,
         { method: "POST" }
       );
-      if (!response.ok) {
-        const data = await response.json();
+      const data = await response.json();
+      // See handlePauseRecording: a refused resume also comes back as HTTP
+      // 200 + { success: false }, not just a non-ok status.
+      if (!response.ok || !data.success) {
         setOptimisticPaused(null);
         toast({
           title: "Error",
@@ -828,14 +845,19 @@ const RecordingSessionDialog: React.FC<{
                       <Button
                         onClick={isRecordingPaused ? handleResumeRecording : handlePauseRecording}
                         disabled={
-                          isRecordingPaused
+                          (isRecordingPaused
                             ? !backendStatus.available_controls.resume_recording
-                            : !backendStatus.available_controls.pause_recording
+                            : !backendStatus.available_controls.pause_recording) ||
+                          optimisticPaused !== null
                         }
                         variant="outline"
                         className="py-6 text-lg font-semibold border-border bg-transparent text-foreground hover:bg-muted disabled:opacity-50"
                       >
-                        <Pause className="w-5 h-5 mr-2" />
+                        {isRecordingPaused ? (
+                          <Play className="w-5 h-5 mr-2" />
+                        ) : (
+                          <Pause className="w-5 h-5 mr-2" />
+                        )}
                         {isRecordingPaused ? "Resume" : "Pause"}
                       </Button>
                     )}
