@@ -1,0 +1,77 @@
+# Builds the frontend on every pull request, so a lockfile or source change that
+# breaks the build is caught *before* it reaches main.
+#
+# Why this exists: build_frontend.yml only runs on push to main, so until this
+# workflow the first thing to run `npm ci` on Linux was the job that fires after
+# a merge. Its failure is silent — frontend/dist just never gets rebuilt and prod
+# keeps serving the previous bundle. That has bitten us three times (e345e61,
+# 944cb05, c18d42c), each a different flavour of the same root cause: a lockfile
+# generated on a developer's machine that ubuntu-latest cannot install.
+#
+# `npm ci` is the real check here. It is the identical command build_frontend.yml
+# runs, on the identical runner, so green here means green there. It fails when
+# the lockfile is out of sync with package.json, when platform-specific optional
+# deps (esbuild, rollup, @emnapi/*) were pruned by an `npm install` on macOS, and
+# when a dependency simply cannot be fetched.
+#
+# Deliberately NOT path-filtered. Two reasons:
+#   1. A required status check that is path-filtered never reports on PRs that
+#      skip it, and GitHub blocks the merge waiting for a check that will never
+#      arrive.
+#   2. Lockfile churn most often arrives as an accident inside an unrelated PR —
+#      c18d42c was a rename commit that swept up local npm churn. Running on
+#      every PR is what catches that.
+
+name: Frontend
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38  # v6
+        with:
+          # Must match build_frontend.yml. Vite 8 requires ^20.19.0 or >=22.12.0;
+          # on Node 18 `npm run build` fails and dist silently stops updating.
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      # The load-bearing step. If the lockfile is broken, this is where it shows.
+      - name: Install (npm ci)
+        run: npm ci
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      # Non-blocking: `npm run lint` currently reports 3 pre-existing errors, all
+      # `require()`-style imports in tailwind.config.ts, plus 24 warnings. Per
+      # CLAUDE.md we do not fix pre-existing lint unrelated to a change, so this
+      # surfaces regressions in the log without failing the gate on day one.
+      # Clear the tailwind.config.ts errors and this can become blocking.
+      - name: Lint (non-blocking)
+        run: npm run lint
+        continue-on-error: true
+
+      - name: Build
+        run: npm run build
