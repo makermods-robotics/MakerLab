@@ -22,7 +22,7 @@ class FakeRobot:
     """Stand-in for a connected SO-101 follower.
 
     Records every method call on `self.calls` so tests can assert on it.
-    Methods are deliberately the minimum surface MakerLab actually invokes.
+    Methods are deliberately the minimum surface MakerMods Lab actually invokes.
     """
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:

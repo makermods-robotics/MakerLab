@@ -13,7 +13,7 @@ const Logo: React.FC<LogoProps> = ({
 }) => {
   return <div className={cn("flex items-center gap-2", className)}>
       <img src={logoMark} alt="MakerMods" className="h-7 w-auto" />
-      {!iconOnly && <span className="font-bold text-foreground text-2xl">MakerLab</span>}
+      {!iconOnly && <span className="font-bold text-foreground text-2xl">MakerMods Lab</span>}
     </div>;
 };
 

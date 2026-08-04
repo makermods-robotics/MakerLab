@@ -11,12 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for makerlab.calibrate — manager initial state, request schema, and the
+"""Tests for makermodslab.calibrate — manager initial state, request schema, and the
 post-recording centering guard."""
 
 from __future__ import annotations
 
-from makerlab.calibrate import final_motor_ranges, find_off_center_joints
+from makermodslab.calibrate import final_motor_ranges, find_off_center_joints
 
 
 def test_final_motor_ranges_forces_wrist_roll_full_turn() -> None:
@@ -31,7 +31,7 @@ def test_final_motor_ranges_forces_wrist_roll_full_turn() -> None:
 
 
 def test_calibration_request_dataclass_round_trip() -> None:
-    from makerlab.calibrate import CalibrationRequest
+    from makermodslab.calibrate import CalibrationRequest
 
     req = CalibrationRequest(
         device_type="teleop",
@@ -45,7 +45,7 @@ def test_calibration_request_dataclass_round_trip() -> None:
 
 
 def test_calibration_manager_starts_idle() -> None:
-    from makerlab.calibrate import CalibrationManager, CalibrationStatus
+    from makermodslab.calibrate import CalibrationManager, CalibrationStatus
 
     mgr = CalibrationManager()
     status = mgr.get_status()
@@ -63,7 +63,7 @@ def test_calibration_manager_starts_idle() -> None:
 
 def test_calibration_manager_rejects_double_start_via_message() -> None:
     """When calibration_active is True, start_calibration returns success=False."""
-    from makerlab.calibrate import CalibrationManager, CalibrationRequest
+    from makermodslab.calibrate import CalibrationManager, CalibrationRequest
 
     mgr = CalibrationManager()
     mgr.status.calibration_active = True  # simulate already running
@@ -78,9 +78,9 @@ def test_calibration_manager_rejects_double_start_via_message() -> None:
 def test_start_calibration_blocked_when_teleoperation_active(monkeypatch) -> None:
     """Calibration must refuse to start while teleop owns the same serial
     bus, rather than opening a second connection on a live port."""
-    from makerlab.calibrate import CalibrationManager, CalibrationRequest
+    from makermodslab.calibrate import CalibrationManager, CalibrationRequest
 
-    monkeypatch.setattr("makerlab.teleoperate.teleoperation_active", True)
+    monkeypatch.setattr("makermodslab.teleoperate.teleoperation_active", True)
     mgr = CalibrationManager()
     result = mgr.start_calibration(
         CalibrationRequest(device_type="teleop", port="/dev/null", config_file="x")
@@ -90,9 +90,9 @@ def test_start_calibration_blocked_when_teleoperation_active(monkeypatch) -> Non
 
 
 def test_start_calibration_blocked_when_recording_active(monkeypatch) -> None:
-    from makerlab.calibrate import CalibrationManager, CalibrationRequest
+    from makermodslab.calibrate import CalibrationManager, CalibrationRequest
 
-    monkeypatch.setattr("makerlab.record.recording_active", True)
+    monkeypatch.setattr("makermodslab.record.recording_active", True)
     mgr = CalibrationManager()
     result = mgr.start_calibration(
         CalibrationRequest(device_type="teleop", port="/dev/null", config_file="x")
@@ -102,9 +102,9 @@ def test_start_calibration_blocked_when_recording_active(monkeypatch) -> None:
 
 
 def test_start_calibration_blocked_when_inference_active(monkeypatch) -> None:
-    from makerlab.calibrate import CalibrationManager, CalibrationRequest
+    from makermodslab.calibrate import CalibrationManager, CalibrationRequest
 
-    monkeypatch.setattr("makerlab.rollout.inference_active", True)
+    monkeypatch.setattr("makermodslab.rollout.inference_active", True)
     mgr = CalibrationManager()
     result = mgr.start_calibration(
         CalibrationRequest(device_type="teleop", port="/dev/null", config_file="x")
@@ -114,9 +114,9 @@ def test_start_calibration_blocked_when_inference_active(monkeypatch) -> None:
 
 
 def test_start_calibration_blocked_when_auto_calibration_active(monkeypatch) -> None:
-    from makerlab.calibrate import CalibrationManager, CalibrationRequest
+    from makermodslab.calibrate import CalibrationManager, CalibrationRequest
 
-    monkeypatch.setattr("makerlab.auto_calibrate.auto_calibration_manager.status.active", True)
+    monkeypatch.setattr("makermodslab.auto_calibrate.auto_calibration_manager.status.active", True)
     mgr = CalibrationManager()
     result = mgr.start_calibration(
         CalibrationRequest(device_type="teleop", port="/dev/null", config_file="x")
@@ -126,9 +126,9 @@ def test_start_calibration_blocked_when_auto_calibration_active(monkeypatch) -> 
 
 
 def test_start_calibration_blocked_when_wiggle_active(monkeypatch) -> None:
-    from makerlab.calibrate import CalibrationManager, CalibrationRequest
+    from makermodslab.calibrate import CalibrationManager, CalibrationRequest
 
-    monkeypatch.setattr("makerlab.wiggle.wiggle_active", True)
+    monkeypatch.setattr("makermodslab.wiggle.wiggle_active", True)
     mgr = CalibrationManager()
     result = mgr.start_calibration(
         CalibrationRequest(device_type="teleop", port="/dev/null", config_file="x")
@@ -143,8 +143,8 @@ def test_start_calibration_refuses_existing_config_without_overwrite(tmp_lerobot
     file is silently clobbered, and no hardware is touched."""
     from pathlib import Path
 
-    from makerlab.calibrate import CalibrationManager, CalibrationRequest
-    from makerlab.utils import config as cfg
+    from makermodslab.calibrate import CalibrationManager, CalibrationRequest
+    from makermodslab.utils import config as cfg
 
     (Path(cfg.LEADER_CONFIG_PATH) / "taken.json").write_text("{}")
 

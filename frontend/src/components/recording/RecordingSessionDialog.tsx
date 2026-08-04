@@ -194,7 +194,7 @@ const RecordingSessionDialog: React.FC<{
     confirmMessage: leaveDiscardMessage(resume),
     beaconUrl: `${baseUrl}/stop-recording?discard=true`,
     onLeave: stopRecordingForLeave,
-    beaconFlagKey: "makerlab:recording-stopped",
+    beaconFlagKey: "makermodslab:recording-stopped",
   });
 
   // Start recording session when the dialog mounts. The ref guard prevents

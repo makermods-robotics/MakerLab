@@ -74,7 +74,7 @@ export const robotSetupGap = (
   return parts.join(" and ");
 };
 
-const SELECTED_KEY = "makerlab.selectedRobot";
+const SELECTED_KEY = "makermodslab.selectedRobot";
 
 const readSelected = (): string | null => {
   try {

@@ -389,7 +389,7 @@ interface CameraStreamBoxProps {
  * could only map to a cv2 index by localizedName — and two cameras of the same
  * model share that name, so the mapping was a coin flip that swapped between
  * refreshes. Streaming by index shows exactly the device the recorder will
- * open, and is the only preview that works when makerlab runs on a headless
+ * open, and is the only preview that works when MakerMods Lab runs on a headless
  * host. `uniqueId` re-anchors the index server-side across replugs.
  *
  * Pausing (recording start / modal close) unmounts the stream so cv2 can grab

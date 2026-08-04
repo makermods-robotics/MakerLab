@@ -17,12 +17,12 @@ const DiscordIcon: React.FC<{ className?: string }> = ({ className }) => (
 
 const links = [
   {
-    href: "https://github.com/makermods-robotics/MakerLab",
+    href: "https://github.com/makermods-robotics/makermodslab",
     label: "GitHub",
     Icon: Github,
   },
   {
-    href: "https://github.com/makermods-robotics/MakerLab",
+    href: "https://github.com/makermods-robotics/makermodslab",
     label: "Documentation",
     Icon: BookOpen,
   },
