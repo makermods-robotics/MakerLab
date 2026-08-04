@@ -74,7 +74,7 @@ def test_shutdown_stops_active_auto_calibration(monkeypatch: pytest.MonkeyPatch)
     SIGTERM -> wait -> torque-release sequence runs end to end through
     shutdown_event(), the same way test_shutdown_stops_active_inference
     exercises the inference path."""
-    from makerlab import auto_calibrate as ac
+    from makermodslab import auto_calibrate as ac
 
     class _FakeAutocalProc:
         def __init__(self) -> None:
