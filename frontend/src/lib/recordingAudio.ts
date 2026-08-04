@@ -1,4 +1,4 @@
-const MUTE_KEY = "makerlab.recording.muted";
+const MUTE_KEY = "makermodslab.recording.muted";
 
 let ctx: AudioContext | null = null;
 

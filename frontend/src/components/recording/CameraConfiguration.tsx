@@ -18,7 +18,8 @@ import {
 } from "@/components/ui/collapsible";
 import { useToast } from "@/hooks/use-toast";
 import { useAvailableCameras } from "@/hooks/useAvailableCameras";
-import { useCameraStream } from "@/hooks/useCameraStream";
+import BackendCameraStream from "@/components/BackendCameraStream";
+import { isCameraConnected } from "@/lib/cameraResolve";
 
 // Sentinels distinguish "leave unset" (auto-detect / platform default) from an
 // explicit choice. Radix Select disallows an empty-string value, so we map these
@@ -43,6 +44,10 @@ export interface CameraConfig {
   type: string;
   camera_index?: number; // cv2 index — what the recorder opens
   device_id: string; // Browser deviceId matched to the cv2 index by AVFoundation localizedName
+  // Stable OS device identity (AVFoundation uniqueID). The authoritative link
+  // to the physical camera: cv2 indices shift on replug and device names can
+  // collide (two "KD-USB Cameras"), but this survives both.
+  unique_id?: string;
   width: number;
   height: number;
   fps?: number;
@@ -86,16 +91,28 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
     : undefined;
 
   // cv2's AVFoundation order is uniqueID-sorted, so plugging/unplugging a
-  // device between sessions shifts indices. The browser device_id stays
-  // stable per-origin, so use it to refresh each seeded camera's
-  // camera_index — otherwise the recorder opens the wrong physical device
-  // and the dropdown's "already added" check guards a stale index.
+  // device between sessions shifts indices. Refresh each seeded camera's
+  // camera_index by unique_id (exact physical identity) when the record has
+  // one, falling back to the browser device_id for older records — otherwise
+  // the recorder opens the wrong physical device and the dropdown's "already
+  // added" check guards a stale index.
+  //
+  // device_id alone is a COIN FLIP when two cameras share a name (twin
+  // "KD-USB Cameras"): the deviceId↔index pairing is decided by
+  // enumerateDevices() order, which is unrelated to the uniqueID sort and not
+  // stable across refreshes. Anchoring on unique_id is what stops this effect
+  // from silently rewriting the recorder's index to the other camera.
   useEffect(() => {
     if (availableCameras.length === 0 || cameras.length === 0) return;
     let changed = false;
     const refreshed = cameras.map((cam) => {
-      if (!cam.device_id) return cam;
-      const match = availableCameras.find((m) => m.deviceId === cam.device_id);
+      const match =
+        (cam.unique_id
+          ? availableCameras.find((m) => m.uniqueId === cam.unique_id)
+          : undefined) ??
+        (cam.device_id
+          ? availableCameras.find((m) => m.deviceId === cam.device_id)
+          : undefined);
       if (match && match.index !== cam.camera_index) {
         changed = true;
         return { ...cam, camera_index: match.index };
@@ -135,11 +152,13 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
       return;
     }
 
-    // Block duplicates by either cv2 index or browser deviceId — a stale
+    // Block duplicates by unique_id, cv2 index, or browser deviceId — a stale
     // camera_index in a seeded camera can otherwise let the same physical
-    // device sneak in under a different index.
+    // device sneak in under a different index. unique_id is checked first
+    // because it's the only one that can't alias between twin cameras.
     const isDuplicate = cameras.some(
       (cam) =>
+        (selectedCamera.uniqueId && cam.unique_id === selectedCamera.uniqueId) ||
         cam.camera_index === selectedCamera.index ||
         (selectedCamera.deviceId && cam.device_id === selectedCamera.deviceId),
     );
@@ -158,6 +177,7 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
       type: "opencv",
       camera_index: selectedCamera.index,
       device_id: selectedCamera.deviceId,
+      unique_id: selectedCamera.uniqueId,
       width: 640,
       height: 480,
       fps: 30,
@@ -281,7 +301,8 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div className="bg-card rounded-lg border border-border overflow-hidden">
               <CameraStreamBox
-                deviceId={selectedCamera.deviceId}
+                cameraIndex={selectedCamera.index}
+                uniqueId={selectedCamera.uniqueId}
                 paused={streamsPaused}
               />
             </div>
@@ -331,6 +352,7 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
               <CameraPreview
                 key={camera.id}
                 camera={camera}
+                connected={isCameraConnected(camera, availableCameras)}
                 paused={streamsPaused}
                 onRemove={() => removeCamera(camera.id)}
                 onUpdate={(updates) => updateCamera(camera.id, updates)}
@@ -351,43 +373,47 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
 };
 
 interface CameraStreamBoxProps {
-  deviceId: string;
+  cameraIndex?: number;
+  uniqueId?: string;
   paused: boolean;
+  /** Shown when there's no index to stream. Distinguishes "nothing picked yet"
+   * (dropdown preview) from "this configured camera is gone" (camera card). */
+  emptyLabel?: string;
 }
 
 /** Live preview for a camera. Used both for the pre-add preview (as soon as
  * a camera is picked in the dropdown) and for each configured camera's card.
- * A camera with a browser deviceId match streams via getUserMedia (the hook
- * stops the stream on deviceId change and on unmount); a camera without a
- * browser match shows the "No browser match" placeholder. Pausing (recording
- * start / modal close) drops the getUserMedia stream so cv2 can grab the
- * device. */
+ *
+ * Streams from the BACKEND by cv2 index (GET /camera-preview/{index}), not via
+ * getUserMedia. The browser identifies cameras by deviceId, which the frontend
+ * could only map to a cv2 index by localizedName — and two cameras of the same
+ * model share that name, so the mapping was a coin flip that swapped between
+ * refreshes. Streaming by index shows exactly the device the recorder will
+ * open, and is the only preview that works when MakerMods Lab runs on a headless
+ * host. `uniqueId` re-anchors the index server-side across replugs.
+ *
+ * Pausing (recording start / modal close) unmounts the stream so cv2 can grab
+ * the device; the backend also force-releases previews on the record path. */
 const CameraStreamBox: React.FC<CameraStreamBoxProps> = ({
-  deviceId,
+  cameraIndex,
+  uniqueId,
   paused,
+  emptyLabel = "No camera selected",
 }) => {
-  const { videoRef, hasError: streamError } = useCameraStream(deviceId, paused);
-
-  const showVideo = !paused && deviceId && !streamError;
+  const showStream = !paused && cameraIndex !== undefined;
   return (
     <div className="aspect-[4/3] bg-muted relative">
-      {showVideo ? (
-        <video
-          ref={videoRef}
-          autoPlay
-          muted
-          playsInline
+      {showStream ? (
+        <BackendCameraStream
+          cameraIndex={cameraIndex}
+          uniqueId={uniqueId}
           className="w-full h-full object-cover"
         />
       ) : (
         <div className="w-full h-full flex flex-col items-center justify-center">
           <VideoOff className="w-8 h-8 text-muted-foreground mb-2" />
           <span className="text-muted-foreground text-sm">
-            {paused
-              ? "Preview paused"
-              : deviceId
-              ? "Preview failed"
-              : "No browser match"}
+            {paused ? "Preview paused" : emptyLabel}
           </span>
         </div>
       )}
@@ -397,6 +423,10 @@ const CameraStreamBox: React.FC<CameraStreamBoxProps> = ({
 
 interface CameraPreviewProps {
   camera: CameraConfig;
+  /** False when this camera's unique_id is verifiably absent from the current
+   * enumeration — the tile must show "disconnected", never a wrong device: a
+   * stale camera_index now points at whatever took its place. */
+  connected: boolean;
   paused: boolean;
   onRemove: () => void;
   onUpdate: (updates: Partial<CameraConfig>) => void;
@@ -404,6 +434,7 @@ interface CameraPreviewProps {
 
 const CameraPreview: React.FC<CameraPreviewProps> = ({
   camera,
+  connected,
   paused,
   onRemove,
   onUpdate,
@@ -411,8 +442,10 @@ const CameraPreview: React.FC<CameraPreviewProps> = ({
   return (
     <div className="bg-card rounded-lg border border-border overflow-hidden">
       <CameraStreamBox
-        deviceId={camera.device_id}
+        cameraIndex={connected ? camera.camera_index : undefined}
+        uniqueId={camera.unique_id}
         paused={paused}
+        emptyLabel="Camera disconnected — reconnect it or rescan"
       />
 
       {/* Camera Info */}

@@ -35,7 +35,7 @@ import {
   AvailableCamera,
   useAvailableCameras,
 } from "@/hooks/useAvailableCameras";
-import { useCameraStream } from "@/hooks/useCameraStream";
+import BackendCameraStream from "@/components/BackendCameraStream";
 
 interface Props {
   open: boolean;
@@ -49,15 +49,19 @@ const DEFAULT_FPS = 30;
 
 const cameraKey = (cam: AvailableCamera) => String(cam.index);
 
-/** Small getUserMedia preview for verifying which physical camera a role binds
- * to. `paused` drops the browser stream so the rollout subprocess can open the
- * same device via OpenCV without contending. */
-const CameraThumbnail: React.FC<{ deviceId: string; paused: boolean }> = ({
-  deviceId,
-  paused,
-}) => {
-  const { videoRef, hasError } = useCameraStream(deviceId, paused);
-  if (paused || hasError || !deviceId) {
+/** Small preview for verifying which physical camera a role binds to.
+ *
+ * Streams from the backend by cv2 index — the live feed at exactly the index
+ * the rollout will open, independent of any browser deviceId match. That match
+ * was by localizedName, so twin cameras ("KD-USB Cameras" x2) paired
+ * arbitrarily and the front/wrist tiles swapped footage between refreshes.
+ * `paused` unmounts the stream so the rollout subprocess can claim the device. */
+const CameraThumbnail: React.FC<{
+  cameraIndex?: number;
+  uniqueId?: string;
+  paused: boolean;
+}> = ({ cameraIndex, uniqueId, paused }) => {
+  if (paused || cameraIndex === undefined) {
     return (
       <div className="w-32 h-24 bg-muted rounded border border-border flex flex-col items-center justify-center">
         <VideoOff className="w-5 h-5 text-muted-foreground mb-1" />
@@ -67,12 +71,11 @@ const CameraThumbnail: React.FC<{ deviceId: string; paused: boolean }> = ({
       </div>
     );
   }
+  // BackendCameraStream owns its own failure/retry UI.
   return (
-    <video
-      ref={videoRef}
-      autoPlay
-      muted
-      playsInline
+    <BackendCameraStream
+      cameraIndex={cameraIndex}
+      uniqueId={uniqueId}
       className="w-32 h-24 object-cover rounded border border-border bg-muted"
     />
   );
@@ -84,7 +87,7 @@ const CameraThumbnail: React.FC<{ deviceId: string; paused: boolean }> = ({
  *
  * `feature` is the checkpoint's camera key exactly as it comes back from
  * `get_policy_config_summary` (the suffix after `observation.images.`). For a
- * bimanual checkpoint recorded through makerlab, lerobot's BiSOFollower parks every
+ * bimanual checkpoint recorded through MakerMods Lab, lerobot's BiSOFollower parks every
  * camera on the LEFT arm and auto-prefixes each feature with `left_` when it
  * writes the dataset — so a camera the user named `front` at record time becomes
  * the feature `left_front`.
@@ -122,7 +125,7 @@ const ARM_PREFIX_RE = /^(left|right)_/;
  * Guard against collisions: if two features would strip to the same bare name
  * (a checkpoint carrying BOTH `left_x` and `right_x`, or a bare `x` alongside
  * `left_x`), fall back to the FULL feature name for every colliding entry —
- * correctness over cosmetics. makerlab can't produce `right_*` checkpoints today,
+ * correctness over cosmetics. MakerMods Lab can't produce `right_*` checkpoints today,
  * so this is a defensive branch for externally-recorded bimanual checkpoints;
  * it must not silently mis-bind them.
  */
@@ -286,9 +289,18 @@ const InferenceModal: React.FC<Props> = ({
           (c) => c.name.toLowerCase() === m.display.toLowerCase(),
         );
         if (!robotCam) continue;
-        const live = robotCam.device_id
-          ? availableCameras.find((c) => c.deviceId === robotCam.device_id)
-          : availableCameras.find((c) => c.index === robotCam.camera_index);
+        // Resolve by unique_id first: it names the physical device exactly.
+        // device_id is a coin flip when two cameras share a name (the browser
+        // match is by localizedName), and camera_index goes stale on replug —
+        // both are fallbacks for records saved before unique_id was stored.
+        const live =
+          (robotCam.unique_id
+            ? availableCameras.find((c) => c.uniqueId === robotCam.unique_id)
+            : undefined) ??
+          (robotCam.device_id
+            ? availableCameras.find((c) => c.deviceId === robotCam.device_id)
+            : undefined) ??
+          availableCameras.find((c) => c.index === robotCam.camera_index);
         if (live) {
           next[m.requestKey] = cameraKey(live);
           changed = true;
@@ -637,10 +649,11 @@ const InferenceModal: React.FC<Props> = ({
                           )}
                         </SelectContent>
                       </Select>
-                      {/* getUserMedia preview so the user can verify which
-                          physical camera this role binds to. */}
+                      {/* Backend preview at the exact cv2 index this role
+                          binds to, so the tile can't disagree with the run. */}
                       <CameraThumbnail
-                        deviceId={selectedCamera?.deviceId ?? ""}
+                        cameraIndex={selectedCamera?.index}
+                        uniqueId={selectedCamera?.uniqueId}
                         paused={submitting}
                       />
                     </div>

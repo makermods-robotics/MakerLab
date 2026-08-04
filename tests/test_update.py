@@ -19,7 +19,7 @@ import json
 
 import pytest
 
-from makerlab import update
+from makermodslab import update
 
 
 @pytest.fixture(autouse=True)

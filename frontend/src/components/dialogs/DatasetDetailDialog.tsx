@@ -487,7 +487,7 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="flex h-[85vh] max-w-6xl flex-col gap-0 overflow-hidden p-0">
         <DialogHeader className="shrink-0 space-y-0 border-b border-border px-6 py-4 text-left">
-          <p className="eyebrow">MakerLab Dataset Viewer</p>
+          <p className="eyebrow">MakerMods Lab Dataset Viewer</p>
           <DialogTitle className="break-all pt-1 font-mono text-base font-semibold">
             {repoId}
           </DialogTitle>

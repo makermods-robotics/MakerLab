@@ -965,7 +965,7 @@ training = [
 ]
 
 [[package]]
-name = "makerlab"
+name = "makermodslab"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
