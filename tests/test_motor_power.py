@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for makerlab.motor_power — percent→register mapping, the mocked-bus
+"""Tests for makermodslab.motor_power — percent→register mapping, the mocked-bus
 apply path (mirrors the FakeRobot/FakeBus patterns in tests/mocks.py), and
 the one-shot supply-voltage read (hardware mocked, like tests/test_wiggle.py)."""
 
@@ -68,7 +68,7 @@ class _FakeBimanual:
 
 
 def test_torque_limit_from_percent_scales_and_clamps() -> None:
-    from makerlab.motor_power import torque_limit_from_percent
+    from makermodslab.motor_power import torque_limit_from_percent
 
     assert torque_limit_from_percent(100) == 1000
     assert torque_limit_from_percent(55) == 550
@@ -85,7 +85,7 @@ def test_torque_limit_from_percent_scales_and_clamps() -> None:
 def test_reset_torque_limit_reseeds_ram_from_eeprom_per_motor() -> None:
     """Every motor's RAM Torque_Limit is restored to its own EEPROM
     Max_Torque_Limit — the exact power-on state (stock lerobot torque)."""
-    from makerlab.motor_power import reset_torque_limit
+    from makermodslab.motor_power import reset_torque_limit
 
     bus = _FakeBus(
         ["shoulder_pan", "elbow_flex", "gripper"],
@@ -105,7 +105,7 @@ def test_reset_torque_limit_reseeds_ram_from_eeprom_per_motor() -> None:
 def test_reset_torque_limit_failure_warns_but_does_not_abort() -> None:
     """One bad motor must not stop the others, and the failure surfaces as a
     warning message (that motor keeps its previous limit) — never an exception."""
-    from makerlab.motor_power import reset_torque_limit
+    from makermodslab.motor_power import reset_torque_limit
 
     bus = _FakeBus(["shoulder_pan", "elbow_flex", "gripper"], fail=("elbow_flex",))
     warnings = reset_torque_limit(_FakeArm(bus))
@@ -119,7 +119,7 @@ def test_reset_torque_limit_failure_warns_but_does_not_abort() -> None:
 
 
 def test_reset_torque_limit_covers_both_bimanual_arms() -> None:
-    from makerlab.motor_power import reset_torque_limit
+    from makermodslab.motor_power import reset_torque_limit
 
     left = _FakeBus(["gripper"], port="/dev/left", max_torque={"gripper": 500})
     right = _FakeBus(["gripper"], port="/dev/right", max_torque={"gripper": 500})
@@ -131,7 +131,7 @@ def test_reset_torque_limit_covers_both_bimanual_arms() -> None:
 
 
 def test_reset_torque_limit_handles_none_device() -> None:
-    from makerlab.motor_power import reset_torque_limit
+    from makermodslab.motor_power import reset_torque_limit
 
     assert reset_torque_limit(None) == []
 
@@ -144,7 +144,7 @@ def test_reset_torque_limit_handles_none_device() -> None:
 
 
 def test_clear_goal_velocity_zeroes_every_follower_motor() -> None:
-    from makerlab.motor_power import clear_goal_velocity
+    from makermodslab.motor_power import clear_goal_velocity
 
     bus = _FakeBus(["shoulder_pan", "elbow_flex", "gripper"])
     warnings = clear_goal_velocity(_FakeArm(bus))
@@ -160,7 +160,7 @@ def test_clear_goal_velocity_zeroes_every_follower_motor() -> None:
 
 
 def test_clear_goal_velocity_covers_both_bimanual_arms() -> None:
-    from makerlab.motor_power import clear_goal_velocity
+    from makermodslab.motor_power import clear_goal_velocity
 
     left = _FakeBus(["gripper"], port="/dev/left")
     right = _FakeBus(["gripper"], port="/dev/right")
@@ -175,7 +175,7 @@ def test_clear_goal_velocity_failure_warns_but_does_not_abort() -> None:
     """One bad motor must not stop the others, and the failure surfaces as a
     warning message (the motor keeps its leftover cap) — never an exception, so
     the session start still proceeds."""
-    from makerlab.motor_power import clear_goal_velocity
+    from makermodslab.motor_power import clear_goal_velocity
 
     bus = _FakeBus(["shoulder_pan", "elbow_flex", "gripper"], fail=("elbow_flex",))
     warnings = clear_goal_velocity(_FakeArm(bus))
@@ -189,7 +189,7 @@ def test_clear_goal_velocity_failure_warns_but_does_not_abort() -> None:
 
 
 def test_clear_goal_velocity_handles_none_device() -> None:
-    from makerlab.motor_power import clear_goal_velocity
+    from makermodslab.motor_power import clear_goal_velocity
 
     assert clear_goal_velocity(None) == []
 
@@ -198,10 +198,10 @@ def test_session_request_models_have_no_motor_power_field() -> None:
     """The torque slider drives AUTO-CALIBRATION only; session requests
     (teleop/record/inference) no longer carry a motor_power knob. A stale
     client still sending the field is ignored, not an error."""
-    from makerlab.auto_calibrate import AutoCalibrationBatchRequest, AutoCalibrationRequest
-    from makerlab.record import RecordingRequest
-    from makerlab.rollout import InferenceRequest
-    from makerlab.teleoperate import TeleoperateRequest
+    from makermodslab.auto_calibrate import AutoCalibrationBatchRequest, AutoCalibrationRequest
+    from makermodslab.record import RecordingRequest
+    from makermodslab.rollout import InferenceRequest
+    from makermodslab.teleoperate import TeleoperateRequest
 
     for model in (TeleoperateRequest, RecordingRequest, InferenceRequest):
         assert "motor_power" not in model.model_fields
@@ -222,14 +222,14 @@ def test_session_request_models_have_no_motor_power_field() -> None:
 
 def test_voltage_from_raw_scales_tenths_of_a_volt() -> None:
     """Present_Voltage is in 0.1 V units (121 raw = 12.1 V)."""
-    from makerlab.motor_power import voltage_from_raw
+    from makermodslab.motor_power import voltage_from_raw
 
     assert voltage_from_raw(121) == 12.1
     assert voltage_from_raw(0) == 0.0
 
 
 async def test_read_supply_voltage_rejects_empty_port() -> None:
-    from makerlab.motor_power import read_supply_voltage
+    from makermodslab.motor_power import read_supply_voltage
 
     result = await read_supply_voltage("   ")
     assert result == {"success": False, "message": "No port provided."}
@@ -237,7 +237,7 @@ async def test_read_supply_voltage_rejects_empty_port() -> None:
 
 def test_supply_voltage_endpoint_success(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     # Stub the blocking hardware call so the happy path runs without a device.
-    monkeypatch.setattr("makerlab.motor_power._read_voltage_sync", lambda port: 12.1)
+    monkeypatch.setattr("makermodslab.motor_power._read_voltage_sync", lambda port: 12.1)
 
     response = client.get("/supply-voltage", params={"port": "/dev/fake"})
     assert response.status_code == 200
@@ -250,7 +250,7 @@ def test_supply_voltage_endpoint_reports_hardware_failure(
     def boom(port: str) -> float:
         raise RuntimeError("no device on port")
 
-    monkeypatch.setattr("makerlab.motor_power._read_voltage_sync", boom)
+    monkeypatch.setattr("makermodslab.motor_power._read_voltage_sync", boom)
 
     response = client.get("/supply-voltage", params={"port": "/dev/fake"})
     # Logical failures stay HTTP 200 with success=False (like other handlers).

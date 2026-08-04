@@ -19,7 +19,7 @@ import { ModelItem } from "./modelsApi";
  * works offline.
  */
 
-const FLAG_KEY = "makerlab:mock-hub";
+const FLAG_KEY = "makermodslab:mock-hub";
 
 // `?mockHub=1|0` toggles the flag once at module load. sessionStorage, not
 // localStorage: mock mode must never outlive the tab that asked for it — an
@@ -101,7 +101,7 @@ const job = (j: Partial<JobRecord> & Pick<JobRecord, "id" | "name">): JobRecord 
   display_name: null,
   state: "done",
   config: cfg(`${USER}/sock_2_only_merged`, "act", 10_000),
-  output_dir: `/tmp/makerlab_mock/${j.id}`,
+  output_dir: `/tmp/makermodslab_mock/${j.id}`,
   started_at: NOW - D,
   ended_at: NOW - D + 2 * H,
   exit_code: 0,
@@ -121,7 +121,7 @@ const localCkpts = (id: string, steps: number[]): JobCheckpoint[] =>
   steps.map((step) => ({
     step,
     source: "local",
-    ref: `/tmp/makerlab_mock/${id}/checkpoints/${step}/pretrained_model`,
+    ref: `/tmp/makermodslab_mock/${id}/checkpoints/${step}/pretrained_model`,
   }));
 
 const hubCkpts = (repo: string, steps: number[]): JobCheckpoint[] =>

@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for makerlab.auto_calibrate — subprocess manager (process mocked)."""
+"""Tests for makermodslab.auto_calibrate — subprocess manager (process mocked)."""
 
 from __future__ import annotations
 
@@ -21,8 +21,8 @@ import threading
 
 import pytest
 
-import makerlab.auto_calibrate as auto_calibrate
-from makerlab.vendor.feetech_autocal import auto_calibrate_script as acs
+import makermodslab.auto_calibrate as auto_calibrate
+from makermodslab.vendor.feetech_autocal import auto_calibrate_script as acs
 
 
 class StoppableFakeProc:
@@ -68,7 +68,7 @@ def _start_with_fake_proc(
     monkeypatch: pytest.MonkeyPatch, proc: StoppableFakeProc, released_ports: list[str]
 ):
     """Start a manager on a fake process, with the fallback release recorded."""
-    import makerlab.auto_calibrate as ac
+    import makermodslab.auto_calibrate as ac
 
     popen_kwargs: dict = {}
 
@@ -98,9 +98,9 @@ def _join_stop(mgr) -> None:
 def test_auto_calibration_blocked_when_teleoperation_active(monkeypatch: pytest.MonkeyPatch) -> None:
     """Auto-calibration must refuse to start while teleop owns the same
     serial bus, rather than opening a second connection on a live port."""
-    import makerlab.auto_calibrate as ac
+    import makermodslab.auto_calibrate as ac
 
-    monkeypatch.setattr("makerlab.teleoperate.teleoperation_active", True)
+    monkeypatch.setattr("makermodslab.teleoperate.teleoperation_active", True)
     mgr = ac.AutoCalibrationManager()
     result = mgr.start(ac.AutoCalibrationRequest(device_type="robot", port="/dev/arm", config_file="c"))
     assert result["success"] is False
@@ -108,9 +108,9 @@ def test_auto_calibration_blocked_when_teleoperation_active(monkeypatch: pytest.
 
 
 def test_auto_calibration_blocked_when_recording_active(monkeypatch: pytest.MonkeyPatch) -> None:
-    import makerlab.auto_calibrate as ac
+    import makermodslab.auto_calibrate as ac
 
-    monkeypatch.setattr("makerlab.record.recording_active", True)
+    monkeypatch.setattr("makermodslab.record.recording_active", True)
     mgr = ac.AutoCalibrationManager()
     result = mgr.start(ac.AutoCalibrationRequest(device_type="robot", port="/dev/arm", config_file="c"))
     assert result["success"] is False
@@ -118,9 +118,9 @@ def test_auto_calibration_blocked_when_recording_active(monkeypatch: pytest.Monk
 
 
 def test_auto_calibration_blocked_when_inference_active(monkeypatch: pytest.MonkeyPatch) -> None:
-    import makerlab.auto_calibrate as ac
+    import makermodslab.auto_calibrate as ac
 
-    monkeypatch.setattr("makerlab.rollout.inference_active", True)
+    monkeypatch.setattr("makermodslab.rollout.inference_active", True)
     mgr = ac.AutoCalibrationManager()
     result = mgr.start(ac.AutoCalibrationRequest(device_type="robot", port="/dev/arm", config_file="c"))
     assert result["success"] is False
@@ -128,9 +128,9 @@ def test_auto_calibration_blocked_when_inference_active(monkeypatch: pytest.Monk
 
 
 def test_auto_calibration_blocked_when_calibration_active(monkeypatch: pytest.MonkeyPatch) -> None:
-    import makerlab.auto_calibrate as ac
+    import makermodslab.auto_calibrate as ac
 
-    monkeypatch.setattr("makerlab.calibrate.calibration_manager.status.calibration_active", True)
+    monkeypatch.setattr("makermodslab.calibrate.calibration_manager.status.calibration_active", True)
     mgr = ac.AutoCalibrationManager()
     result = mgr.start(ac.AutoCalibrationRequest(device_type="robot", port="/dev/arm", config_file="c"))
     assert result["success"] is False
@@ -138,9 +138,9 @@ def test_auto_calibration_blocked_when_calibration_active(monkeypatch: pytest.Mo
 
 
 def test_auto_calibration_blocked_when_wiggle_active(monkeypatch: pytest.MonkeyPatch) -> None:
-    import makerlab.auto_calibrate as ac
+    import makermodslab.auto_calibrate as ac
 
-    monkeypatch.setattr("makerlab.wiggle.wiggle_active", True)
+    monkeypatch.setattr("makermodslab.wiggle.wiggle_active", True)
     mgr = ac.AutoCalibrationManager()
     result = mgr.start(ac.AutoCalibrationRequest(device_type="robot", port="/dev/arm", config_file="c"))
     assert result["success"] is False
@@ -148,7 +148,7 @@ def test_auto_calibration_blocked_when_wiggle_active(monkeypatch: pytest.MonkeyP
 
 
 def test_auto_calibration_rejects_bad_device() -> None:
-    import makerlab.auto_calibrate as ac
+    import makermodslab.auto_calibrate as ac
 
     mgr = ac.AutoCalibrationManager()
     result = mgr.start(ac.AutoCalibrationRequest(device_type="bogus", port="/dev/x", config_file="c"))
@@ -156,7 +156,7 @@ def test_auto_calibration_rejects_bad_device() -> None:
 
 
 def test_auto_calibration_rejects_empty_port() -> None:
-    import makerlab.auto_calibrate as ac
+    import makermodslab.auto_calibrate as ac
 
     mgr = ac.AutoCalibrationManager()
     result = mgr.start(ac.AutoCalibrationRequest(device_type="robot", port="", config_file="c"))
@@ -164,7 +164,7 @@ def test_auto_calibration_rejects_empty_port() -> None:
 
 
 def test_auto_calibration_status_idle() -> None:
-    import makerlab.auto_calibrate as ac
+    import makermodslab.auto_calibrate as ac
 
     status = ac.AutoCalibrationManager().get_status()
     assert status["status"] == "idle"
@@ -176,7 +176,7 @@ def test_auto_calibration_launches_captures_logs_and_completes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A successful subprocess run captures its stdout and ends 'completed'."""
-    import makerlab.auto_calibrate as ac
+    import makermodslab.auto_calibrate as ac
 
     class FakeProc:
         def __init__(self) -> None:
@@ -287,7 +287,7 @@ def test_stop_surfaces_failed_torque_release(
 ) -> None:
     """When the fallback release fails, the status must end terminal (not
     frozen) with an unmistakable torque warning for the UI."""
-    import makerlab.auto_calibrate as ac
+    import makermodslab.auto_calibrate as ac
 
     proc = StoppableFakeProc(ignore_sigterm=True)
     released: list[str] = []
@@ -435,7 +435,7 @@ def test_completed_during_grace_keeps_file(monkeypatch: pytest.MonkeyPatch, tmp_
 
 
 def test_release_arm_torque_disables_all_motors(monkeypatch: pytest.MonkeyPatch) -> None:
-    import makerlab.auto_calibrate as ac
+    import makermodslab.auto_calibrate as ac
 
     class _FakeReleaseBus:
         instances: list[_FakeReleaseBus] = []
@@ -821,7 +821,7 @@ def test_stop_sequence_budget_stays_inside_sigterm_grace() -> None:
 
 
 def test_release_arm_torque_reports_connect_failure(monkeypatch: pytest.MonkeyPatch) -> None:
-    import makerlab.auto_calibrate as ac
+    import makermodslab.auto_calibrate as ac
 
     class _DeadBus:
         def __init__(self, port: str, motors: dict) -> None:
@@ -886,7 +886,7 @@ def _join_batch(mgr) -> None:
 def test_batch_blocked_when_teleoperation_active(monkeypatch: pytest.MonkeyPatch) -> None:
     """A batch launch must refuse up front (before starting any arm) while
     teleop owns a serial bus, rather than partially launching some arms."""
-    monkeypatch.setattr("makerlab.teleoperate.teleoperation_active", True)
+    monkeypatch.setattr("makermodslab.teleoperate.teleoperation_active", True)
     mgr = auto_calibrate.AutoCalibrationBatchManager()
     arms = [_arm(port="/dev/a", name="n1")]
     result = mgr.start(auto_calibrate.AutoCalibrationBatchRequest(arms=arms))
@@ -896,7 +896,7 @@ def test_batch_blocked_when_teleoperation_active(monkeypatch: pytest.MonkeyPatch
 
 
 def test_batch_blocked_when_calibration_active(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("makerlab.calibrate.calibration_manager.status.calibration_active", True)
+    monkeypatch.setattr("makermodslab.calibrate.calibration_manager.status.calibration_active", True)
     mgr = auto_calibrate.AutoCalibrationBatchManager()
     arms = [_arm(port="/dev/a", name="n1")]
     result = mgr.start(auto_calibrate.AutoCalibrationBatchRequest(arms=arms))
@@ -905,7 +905,7 @@ def test_batch_blocked_when_calibration_active(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_batch_blocked_when_wiggle_active(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("makerlab.wiggle.wiggle_active", True)
+    monkeypatch.setattr("makermodslab.wiggle.wiggle_active", True)
     mgr = auto_calibrate.AutoCalibrationBatchManager()
     arms = [_arm(port="/dev/a", name="n1")]
     result = mgr.start(auto_calibrate.AutoCalibrationBatchRequest(arms=arms))

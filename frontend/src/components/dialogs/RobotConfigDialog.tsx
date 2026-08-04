@@ -602,7 +602,7 @@ const RobotConfigWindow = ({
         (e) => console.error("Failed to stop calibration on leave:", e),
       );
     },
-    beaconFlagKey: "makerlab:calibration-stopped",
+    beaconFlagKey: "makermodslab:calibration-stopped",
   });
 
   const pollStatus = async () => {
@@ -1214,21 +1214,21 @@ const RobotConfigWindow = ({
 
   // --- Auto-calibration torque (per-robot, persisted) --------------------
   // The backend stores motor_power as a PERCENT of full torque (10-100; see
-  // makerlab/utils/config.py clamp_motor_power). It is the torque the
+  // makermodslab/utils/config.py clamp_motor_power). It is the torque the
   // AUTO-CALIBRATION subprocess drives the arm at (threaded through as its
-  // --torque-limit = percent × 10; see makerlab/auto_calibrate.py). Regular
+  // --torque-limit = percent × 10; see makermodslab/auto_calibrate.py). Regular
   // sessions (teleop/record/skill runs) run at stock LeRobot torque and
   // ignore this value. The UI below is expressed in RAW Torque_Limit register
   // units (0-1000) — the same scale as the vendored script's
   // DEFAULT_TORQUE_LIMIT = 380 — so operators can reason in one vocabulary.
   // We convert raw<->percent at the edges and persist a percent.
-  const TORQUE_LIMIT_PER_PERCENT = 10; // must match makerlab/motor_power.py
-  const MOTOR_POWER_MIN_PERCENT = 10; // must match makerlab/utils/config.py
-  const MOTOR_POWER_MAX_PERCENT = 100; // must match makerlab/utils/config.py
+  const TORQUE_LIMIT_PER_PERCENT = 10; // must match makermodslab/motor_power.py
+  const MOTOR_POWER_MIN_PERCENT = 10; // must match makermodslab/utils/config.py
+  const MOTOR_POWER_MAX_PERCENT = 100; // must match makermodslab/utils/config.py
   const TORQUE_LIMIT_MIN = MOTOR_POWER_MIN_PERCENT * TORQUE_LIMIT_PER_PERCENT; // 100
   const TORQUE_LIMIT_MAX = MOTOR_POWER_MAX_PERCENT * TORQUE_LIMIT_PER_PERCENT; // 1000
   // The vendored script's own operating torque, shown as a reference marker.
-  const DEFAULT_TORQUE_LIMIT_REF = 380; // makerlab/vendor/.../calibration_defaults.py
+  const DEFAULT_TORQUE_LIMIT_REF = 380; // makermodslab/vendor/.../calibration_defaults.py
 
   // Local slider position (in PERCENT). Held as a draft and committed to the
   // robot record only on Save; an auto-calibration START sends the current
