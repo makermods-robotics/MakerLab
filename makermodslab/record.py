@@ -193,9 +193,15 @@ saved_episodes = 0  # Track how many episodes have been saved
 current_phase = "preparing"  # Track current phase: "preparing", "recording", "resetting", "completed"
 phase_start_time = None  # Track when current phase started
 # Total time spent paused during the CURRENT reset phase, credited on resume
-# (see handle_resume_recording). Reset to 0.0 whenever a new reset phase
-# begins (both reset-phase call sites in record_with_web_events) so pause
-# time from an earlier episode's gap never leaks into a later one.
+# (see handle_resume_recording). Reset to 0.0 at the start of every new reset
+# phase (both reset-phase call sites in record_with_web_events) AND at the
+# following recording-phase entry (top of the while loop in
+# record_with_web_events), so a leftover value from a finished reset phase
+# never leaks into the next episode's phase_elapsed_seconds. Consumers
+# (handle_recording_status) must ALSO gate their use of this value on
+# current_phase == "resetting" — the two resets alone aren't sufficient,
+# since this is a stateless global any thread's status read can observe
+# between the reset-phase end and the next reset-phase start.
 paused_accum_seconds: float = 0.0
 # Wall-clock time.time() the current pause began; None while not paused. Kept
 # separate from the reset loop's own internal perf_counter()-based pacing —
@@ -770,6 +776,17 @@ def handle_exit_early() -> dict[str, Any]:
     """Handle exit early request - replaces right arrow key"""
     if not recording_active or recording_events is None:
         return {"success": False, "message": "No recording session is active"}
+    if _reset_paused():
+        # Design decision: skip-to-next-episode is disabled while paused (the
+        # operator must explicitly resume first). Enforced here, not just in
+        # the advertised available_controls.exit_early, since the frontend's
+        # gate is 1-second-stale via polling and this closes that race at
+        # its root.
+        return {
+            "success": False,
+            "message": "Cannot skip to next episode while the reset phase is paused",
+            "current_phase": current_phase,
+        }
     recording_events["exit_early"] = True
     # Tracking flag that record_loop won't reset, so the worker can tell
     # "user pressed skip" from "control_time_s elapsed naturally".
@@ -839,9 +856,16 @@ def handle_resume_recording() -> dict[str, Any]:
 
 
 def _reset_paused() -> bool:
-    """True only while a live session is genuinely paused (defensive against
-    recording_events being None between sessions)."""
-    return bool(recording_events and recording_events.get("paused", False))
+    """True only while a live session is genuinely paused DURING THE RESET
+    PHASE. Phase-gated (not just an events-dict flag check) so a stale
+    paused=True left over from a reset loop that exited without clearing it
+    (e.g. via exit_early) can never leak into a later phase's
+    available_controls or status — see the loop-exit cleanup in
+    record_with_web_events, which is defense in depth on top of this gate,
+    not a substitute for it."""
+    return bool(
+        recording_events and current_phase == "resetting" and recording_events.get("paused", False)
+    )
 
 
 def handle_recording_status() -> dict[str, Any]:
@@ -937,9 +961,16 @@ def handle_recording_status() -> dict[str, Any]:
         # Add phase timing information
         if phase_start_time:
             status["phase_start_time"] = phase_start_time
-            elapsed = time.time() - phase_start_time - paused_accum_seconds
-            if pause_started_at is not None:
-                elapsed -= time.time() - pause_started_at
+            elapsed = time.time() - phase_start_time
+            # Only the reset phase ever accumulates paused time; gate the
+            # adjustment on phase so a leftover paused_accum_seconds/
+            # pause_started_at from a finished reset phase (this is a
+            # stateless read of module globals, so it can race a phase
+            # transition) never corrupts the recording phase's countdown.
+            if current_phase == "resetting":
+                elapsed -= paused_accum_seconds
+                if pause_started_at is not None:
+                    elapsed -= time.time() - pause_started_at
             status["phase_elapsed_seconds"] = int(elapsed)
 
             # Add phase time limits
@@ -1287,10 +1318,12 @@ def _reset_loop_with_pause(
     this loop enforces no timeout of its own.
 
     Never blocks on an unbounded wait while paused: sleeps one control tick
-    at a time and rechecks events["exit_early"] every iteration BEFORE the
-    pause check (stop_recording also sets exit_early — see
-    handle_stop_recording), so Stop remains responsive within about one tick
-    even while paused.
+    at a time and rechecks events["exit_early"]/events["stop_recording"] every
+    iteration BEFORE the pause check, so Stop remains responsive within about
+    one tick even while paused. handle_stop_recording always sets both flags
+    together, so the stop_recording check is redundant in practice today —
+    it's here so this loop's own contract (matching the design spec: check
+    both every tick) doesn't depend on caller discipline.
     """
     from lerobot.utils.robot_utils import precise_sleep
 
@@ -1301,8 +1334,11 @@ def _reset_loop_with_pause(
     while timestamp < control_time_s:
         start_loop_t = time.perf_counter()
 
-        if events["exit_early"]:
+        if events.get("exit_early", False):
             events["exit_early"] = False
+            break
+
+        if events.get("stop_recording", False):
             break
 
         if events.get("paused", False):
@@ -1592,6 +1628,12 @@ def record_with_web_events(
             # RECORDING PHASE - with dataset (matches original record.py exactly)
             current_phase = "recording"
             phase_start_time = time.time()
+            # Defense in depth alongside the phase gate in handle_recording_status:
+            # a reset phase's pause bookkeeping must never survive into the
+            # recording phase that follows it, whether this is the very first
+            # recording phase of the session or the one after a reset gap.
+            paused_accum_seconds = 0.0
+            pause_started_at = None
             logger.info(f"Starting recording phase for episode {current_episode}")
             logger.info(f"Events state at start of recording phase: {web_events}")
             print(
@@ -1696,6 +1738,13 @@ def record_with_web_events(
                     control_time_s=cfg.dataset.reset_time_s,
                 )
 
+                # The loop may have exited (e.g. via exit_early/stop) while
+                # still paused. Clear the actual pause state here rather than
+                # relying solely on the phase-aware _reset_paused() gate, so a
+                # paused flag can never survive past this reset phase's end.
+                web_events["paused"] = False
+                pause_started_at = None
+
                 logger.info(f"Reset phase completed - events state: {web_events}")
 
                 # Check if reset was interrupted by exit_early
@@ -1763,6 +1812,13 @@ def record_with_web_events(
                     robot_action_processor=robot_action_processor,
                     control_time_s=cfg.dataset.reset_time_s,
                 )
+
+                # The loop may have exited (e.g. via exit_early/stop) while
+                # still paused. Clear the actual pause state here rather than
+                # relying solely on the phase-aware _reset_paused() gate, so a
+                # paused flag can never survive past this reset phase's end.
+                web_events["paused"] = False
+                pause_started_at = None
 
                 logger.info(f"Reset phase completed - events state: {web_events}")
 

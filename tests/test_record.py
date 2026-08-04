@@ -671,6 +671,105 @@ def test_recording_status_never_exposes_pause_during_recording_phase(
     assert status["available_controls"]["resume_recording"] is False
 
 
+def test_recording_status_does_not_leak_paused_time_into_recording_phase(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression test for the Critical leak: a leftover paused_accum_seconds
+    from a finished reset phase must NOT reduce phase_elapsed_seconds once
+    current_phase has moved on to "recording" — this is the test that would
+    have caught the bug where the subtraction applied unconditionally to
+    every phase instead of being gated on current_phase == "resetting"."""
+    import makermodslab.record as record
+
+    monkeypatch.setattr(record.time, "time", lambda: 1000.0)
+    monkeypatch.setattr(record, "recording_active", True)
+    monkeypatch.setattr(record, "current_phase", "recording")
+    monkeypatch.setattr(record, "phase_start_time", 990.0)  # phase began 10s ago
+    monkeypatch.setattr(record, "recording_start_time", 900.0)
+    monkeypatch.setattr(record, "current_episode", 2)
+    monkeypatch.setattr(record, "saved_episodes", 1)
+    monkeypatch.setattr(
+        record,
+        "recording_config",
+        type("Cfg", (), {"dataset_repo_id": "tester/ds", "num_episodes": 2, "episode_time_s": 60})(),
+    )
+    # Leftover from the reset phase that just ended, not yet cleared —
+    # exactly the pre-fix world this test guards against.
+    monkeypatch.setattr(record, "paused_accum_seconds", 4.0)
+    monkeypatch.setattr(record, "pause_started_at", None)
+    monkeypatch.setattr(
+        record, "recording_events", {"paused": False, "exit_early": False, "stop_recording": False}
+    )
+
+    status = record.handle_recording_status()
+
+    # 10s since phase start; the leftover 4s must NOT be subtracted now that
+    # current_phase is "recording" (pre-fix this would have read 6).
+    assert status["phase_elapsed_seconds"] == 10
+
+
+def test_recording_status_paused_predicate_is_phase_gated(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stale paused=True left in recording_events (e.g. a reset loop that
+    exited via exit_early without clearing it) must not leak past the reset
+    phase: both `paused` and the pause-related available_controls must read
+    as unpaused once current_phase has moved on, even with the dict flag
+    still stale-True."""
+    import makermodslab.record as record
+
+    monkeypatch.setattr(record, "recording_active", True)
+    monkeypatch.setattr(record, "current_phase", "recording")
+    monkeypatch.setattr(record, "phase_start_time", None)
+    monkeypatch.setattr(record, "recording_config", None)
+    monkeypatch.setattr(record, "paused_accum_seconds", 0.0)
+    monkeypatch.setattr(record, "pause_started_at", None)
+    monkeypatch.setattr(
+        record, "recording_events", {"paused": True, "exit_early": False, "stop_recording": False}
+    )
+
+    status = record.handle_recording_status()
+
+    assert status["paused"] is False
+    assert status["available_controls"]["exit_early"] is True
+    assert status["available_controls"]["pause_recording"] is False
+    assert status["available_controls"]["resume_recording"] is False
+
+
+def test_handle_exit_early_refused_while_paused_in_reset_phase(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Skip-to-next-episode must be refused server-side while the reset phase
+    is paused (design decision: skip is disabled while paused) — this closes
+    the race at its root rather than relying only on the advisory frontend
+    available_controls gate, which is up to 1s stale via polling."""
+    import makermodslab.record as record
+
+    events = {"stop_recording": False, "exit_early": False, "paused": True}
+    monkeypatch.setattr(record, "recording_active", True)
+    monkeypatch.setattr(record, "recording_events", events)
+    monkeypatch.setattr(record, "current_phase", "resetting")
+
+    result = record.handle_exit_early()
+
+    assert result["success"] is False
+    assert events["exit_early"] is False
+
+
+def test_handle_exit_early_allowed_when_resetting_and_not_paused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sanity check: the new pause guard on handle_exit_early must not block
+    the ordinary skip-to-next-episode path when nothing is paused."""
+    import makermodslab.record as record
+
+    events = {"stop_recording": False, "exit_early": False, "paused": False}
+    monkeypatch.setattr(record, "recording_active", True)
+    monkeypatch.setattr(record, "recording_events", events)
+    monkeypatch.setattr(record, "current_phase", "resetting")
+
+    result = record.handle_exit_early()
+
+    assert result["success"] is True
+    assert events["exit_early"] is True
+
+
 class _FakePauseTeleop:
     def __init__(self) -> None:
         self.get_action_calls = 0
@@ -1021,7 +1120,12 @@ def _run_record_session(
     # No teleop device: keep the return path follower-only and simple.
     cfg.teleop = None
 
-    web_events = {"exit_early": False, "stop_recording": False, "rerecord_episode": False}
+    web_events = {
+        "exit_early": False,
+        "stop_recording": False,
+        "rerecord_episode": False,
+        "paused": False,
+    }
     error: Exception | None = None
     try:
         record.record_with_web_events(cfg, web_events)
