@@ -2641,22 +2641,32 @@ async def shutdown_event():
 
     # Stop any active recording - handled by recording module cleanup
 
-    # An in-flight inference run's `lerobot-rollout` subprocess is a real
-    # child process, independent of this one — it keeps driving the follower
-    # under its policy even after we exit unless we terminate it ourselves.
-    # This fires on a graceful SIGTERM (a plain `kill <pid>`, or uvicorn
-    # `--reload` tearing down the worker process on a file change), which is
-    # exactly when nothing else is left to stop it. handle_stop_inference()
-    # is a no-op (409) when idle, so this is safe to call unconditionally.
-    # It can block for several seconds waiting on the subprocess, so it runs
-    # in a thread instead of directly on the event loop — otherwise it would
-    # freeze all other async work (including this same shutdown sequence)
-    # for however long the wait takes. Any failure here is caught so it can't
-    # stop the broadcast-thread cleanup below from running too.
-    try:
-        await asyncio.to_thread(handle_stop_inference)
-    except Exception:
-        logger.exception("Failed to stop inference during shutdown")
+    # Auto-calibration (drives the arm under torque, writes servo EEPROM on
+    # success) and an in-flight inference run (`lerobot-rollout` driving the
+    # follower under a policy) each run their own real, independent
+    # subprocess(es) that don't stop just because this process does. A server
+    # shutdown (a plain `kill <pid>`, or uvicorn `--reload` restarting on a
+    # file change) would otherwise leave them running unsupervised — the arm
+    # energized under an unreachable auto-cal subprocess, or the follower
+    # still being driven by a policy nobody can stop from the API anymore.
+    # stop_and_wait()/handle_stop_inference() are the same stops each
+    # feature's own Stop control uses, but block until actually confirmed
+    # stopped instead of just kicking it off — safe to wait here since this
+    # is a one-time shutdown step, not a UI action waiting on a poll loop.
+    # None of these three are mutually exclusive with each other, so more
+    # than one can be active at once — stop them all concurrently (each can
+    # take up to ~30s) rather than one after another, or the worst case
+    # triples for no reason. Each is a no-op when idle.
+    results = await asyncio.gather(
+        asyncio.to_thread(auto_calibration_manager.stop_and_wait),
+        asyncio.to_thread(auto_calibration_batch_manager.stop_and_wait),
+        asyncio.to_thread(handle_stop_inference),
+        return_exceptions=True,
+    )
+    labels = ("auto-calibration", "auto-calibration batch", "inference")
+    for label, result in zip(labels, results, strict=True):
+        if isinstance(result, Exception):
+            logger.exception(f"Failed to stop {label} during shutdown", exc_info=result)
 
     if manager:
         manager.stop_broadcast_thread()
