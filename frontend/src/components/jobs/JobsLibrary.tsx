@@ -364,6 +364,14 @@ const JobsLibrary: React.FC<JobsLibraryProps> = ({ open, onOpenChange }) => {
                 {selected ? (
                   selected.kind === "job" ? (
                     <JobCard
+                      // Remount on every run switch: JobCard holds per-run
+                      // state (its lineage checkpoint list and the selected
+                      // checkpoint ref) that its fetch effect only replaces
+                      // once the new run's fetch resolves. Without a key the
+                      // instance is reused and, in that window, Run /
+                      // Continue / Resume / Download would act on the PREVIOUS
+                      // run while the header already shows the new one.
+                      key={selected.key}
                       job={selected.job}
                       onStop={stop}
                       onDelete={remove}
