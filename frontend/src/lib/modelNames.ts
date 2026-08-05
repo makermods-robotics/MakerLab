@@ -52,3 +52,36 @@ export function splitDedupeSuffix(name: string): {
   if (!match) return { base: name, suffix: null };
   return { base: match[1], suffix: match[2] };
 }
+
+/**
+ * A dedupe suffix's shape when it is a timestamp: `YYYY-MM-DD` or
+ * `YYYY-MM-DD HH:MM` — the ladder `utils/naming.imported_name_suffixes` /
+ * `iso_time_suffixes` walk, as `splitDedupeSuffix` hands it back (parentheses
+ * already stripped). Anchored and fully specified so nothing else can match:
+ * the same ladder ends in a namespace (`lerobot`) or a bare ordinal (`2`) when
+ * no timestamp separates the collision, and neither has a year to drop.
+ */
+const DEDUPE_DATE_SUFFIX_RE = /^\d{4}-(\d{2}-\d{2}(?: \d{2}:\d{2})?)$/;
+
+/**
+ * The DISPLAY form of a dedupe suffix: the same suffix with its year dropped.
+ *
+ * The suffix is the only thing telling two same-titled cards apart, so it is
+ * the half that must render whole (DisplayName makes it `shrink-0` for exactly
+ * that reason) — but at a narrow card width the full `2026-07-31 17:35` leaves
+ * the base name almost nothing, and something has to give. The year is what
+ * gives: it is the least distinguishing field in it (a collision is between two
+ * imports of the same task, which nearly always happened in the same year, and
+ * the hh:mm is what actually separates two runs on one day). Dropping it buys
+ * ~5 characters for the base. The year stays reachable: dropping it counts as
+ * shortening, so the hover title carries the untouched name.
+ *
+ * The residual risk this trades for that room: two runs exactly a year apart
+ * now read identically until hovered. Only the timestamp shapes are touched —
+ * an ordinal or namespace suffix has no year to drop and passes through
+ * verbatim — and the backend's stored suffix is untouched either way.
+ */
+export function displayDedupeSuffix(suffix: string): string {
+  const match = DEDUPE_DATE_SUFFIX_RE.exec(suffix);
+  return match ? match[1] : suffix;
+}
