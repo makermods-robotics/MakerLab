@@ -80,6 +80,47 @@ def _policy_hub_flags() -> list[str]:
     return ["--policy.private", "false", "--policy.tags", tag_list]
 
 
+# Which optimizer knobs each policy type actually exposes on ITS OWN config.
+#
+# Why this exists: the form always runs with `use_policy_training_preset true`,
+# and lerobot's TrainPipelineConfig.validate() then REPLACES the whole optimizer
+# with `active_cfg.get_optimizer_preset()` (configs/train.py:249-253) on every
+# fresh run. So `--optimizer.*` flags are silently discarded — the only way to
+# influence the optimizer is to set the POLICY fields the preset is built from
+# (`ACTConfig.get_optimizer_preset()` -> `AdamWConfig(lr=self.optimizer_lr,
+# weight_decay=self.optimizer_weight_decay)`), i.e. `--policy.optimizer_lr`.
+#
+# Gating is load-bearing, not cosmetic: draccus fails at CLI PARSE time when
+# given a `--policy.<field>` the selected policy config doesn't declare, so
+# emitting an unsupported knob kills the run before training starts. And the
+# /policy-optimizer-defaults payload can NOT be used to derive this — both
+# AdamWConfig and AdamConfig carry a `grad_clip_norm` field regardless of
+# whether the policy exposes an `optimizer_grad_clip_norm` knob.
+#
+# Derived by dataclass introspection of the pinned lerobot (see the `lerobot`
+# commit pin in pyproject.toml): for each policy in the form's
+# POLICY_TYPE_OPTIONS, `dataclasses.fields(make_policy_config(<type>))`.
+# Re-verify after a pin bump. Unknown/absent policy types fall back to lr-only.
+#
+# Notable: `gaussian_actor` exposes NONE of the three (its preset is a
+# MultiAdamConfig built from per-group settings), so it gets an empty set.
+_POLICY_OPTIMIZER_FIELDS: dict[str, frozenset[str]] = {
+    "act": frozenset({"lr", "weight_decay"}),
+    "diffusion": frozenset({"lr", "weight_decay"}),
+    "pi0": frozenset({"lr", "weight_decay", "grad_clip_norm"}),
+    "smolvla": frozenset({"lr", "weight_decay", "grad_clip_norm"}),
+    "tdmpc": frozenset({"lr"}),
+    "vqbet": frozenset({"lr", "weight_decay"}),
+    "pi0_fast": frozenset({"lr", "weight_decay", "grad_clip_norm"}),
+    "gaussian_actor": frozenset(),
+}
+
+# Conservative fallback for a policy type not in the table (e.g. one added to
+# the form ahead of this table, or an old persisted config). `optimizer_lr` is
+# the one knob every action policy in the pin declares.
+_DEFAULT_POLICY_OPTIMIZER_FIELDS = frozenset({"lr"})
+
+
 def _resolve_device(device: str | None) -> str:
     """Resolve the requested training device to a concrete backend.
 
@@ -222,6 +263,27 @@ class TrainingRequest(BaseModel):
         return text
 
 
+def _policy_optimizer_flags(request: "TrainingRequest") -> list[str]:
+    """`--policy.optimizer_*` flags for the knobs this policy actually exposes.
+
+    Fresh runs only — see `_POLICY_OPTIMIZER_FIELDS` above for why these replace
+    the inert `--optimizer.*` flags, and why unsupported knobs must be dropped
+    rather than passed through. A value the policy can't accept is silently
+    skipped: the user's stored config keeps it (so switching back to a policy
+    that does support it restores the value) but it never reaches argv.
+    """
+    supported = _POLICY_OPTIMIZER_FIELDS.get(request.policy_type, _DEFAULT_POLICY_OPTIMIZER_FIELDS)
+    flags: list[str] = []
+    for name, value in (
+        ("lr", request.optimizer_lr),
+        ("weight_decay", request.optimizer_weight_decay),
+        ("grad_clip_norm", request.optimizer_grad_clip_norm),
+    ):
+        if value is not None and name in supported:
+            flags.extend([f"--policy.optimizer_{name}", str(value)])
+    return flags
+
+
 def build_training_command(
     request: TrainingRequest, output_dir: str, python_executable: str = "python"
 ) -> list[str]:
@@ -349,15 +411,15 @@ def build_training_command(
     cmd.extend(["--eval.batch_size", str(request.eval_batch_size)])
     cmd.extend(["--eval.use_async_envs", "true" if request.eval_use_async_envs else "false"])
 
-    # Optimizer
-    if request.optimizer_type:
-        cmd.extend(["--optimizer.type", request.optimizer_type])
-    if request.optimizer_lr is not None:
-        cmd.extend(["--optimizer.lr", str(request.optimizer_lr)])
-    if request.optimizer_weight_decay is not None:
-        cmd.extend(["--optimizer.weight_decay", str(request.optimizer_weight_decay)])
-    if request.optimizer_grad_clip_norm is not None:
-        cmd.extend(["--optimizer.grad_clip_norm", str(request.optimizer_grad_clip_norm)])
+    # Optimizer. Routed through the POLICY config, never `--optimizer.*`: with
+    # the training preset on (always, below) lerobot overwrites the whole
+    # optimizer from `active_cfg.get_optimizer_preset()`, so every `--optimizer.*`
+    # flag is discarded before the first step. `request.optimizer_type` is
+    # deliberately NOT emitted — the optimizer CLASS is fixed by the policy's
+    # preset (AdamW for act/smolvla/pi0/pi0_fast, Adam for diffusion/vqbet/tdmpc)
+    # and is not overridable; the field survives on the request only because
+    # persisted job configs and the resume prefill read it. See MT43.
+    cmd.extend(_policy_optimizer_flags(request))
 
     # Advanced
     cmd.extend(["--use_policy_training_preset", "true" if request.use_policy_training_preset else "false"])
