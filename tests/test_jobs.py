@@ -974,3 +974,185 @@ def test_local_start_skips_hub_preflight(tmp_path) -> None:
 
     get_status.assert_not_called()
     assert record.runner == "local"
+
+
+# ── Imported-model card titles ───────────────────────────────────────────────
+# The name an imported record is born with, and how the registry keeps two of
+# them apart. The derivation rules themselves live in tests/test_naming.py.
+
+
+def _hub_reg(monkeypatch, tmp_path, root="root"):
+    """A registry whose Hub probe always reports a root-level checkpoint, so a
+    hub import succeeds offline."""
+    from makermodslab.jobs import JobRegistry
+
+    class FakeApi:
+        def list_repo_files(self, repo_id, repo_type):
+            return ["config.json", "model.safetensors"]
+
+    monkeypatch.setattr("makermodslab.jobs.shared_hf_api", lambda: FakeApi())
+    return JobRegistry(tmp_path / root)
+
+
+def test_imported_name_is_the_derived_task_not_the_repo_id(monkeypatch, tmp_path) -> None:
+    """No "Imported ·" prefix (the card's provenance chip already says it) and
+    no namespace or policy token (the policy row says that) — just the task, so
+    the title's pixels go to the one thing nothing else on the card states."""
+    reg = _hub_reg(monkeypatch, tmp_path)
+    rec = reg.register_imported("makermods/smolvla_makermods_orange_box_2026-08-03_12-53-30")
+
+    assert rec.name == "orange_box"
+    assert "Imported" not in rec.name
+
+
+def test_imported_name_from_a_local_dir(tmp_path) -> None:
+    from makermodslab.jobs import JobRegistry
+
+    model = tmp_path / "smolvla_me_orange_box_2026-08-03_12-53-30"
+    _make_pretrained(model)
+    reg = JobRegistry(tmp_path / "root")
+    # No namespace on a path, so only the policy token and the timestamp go.
+    assert reg.register_imported(str(model)).name == "me_orange_box"
+
+
+def test_imported_name_keeps_a_community_repo_name(monkeypatch, tmp_path) -> None:
+    """A repo with no generated timestamp was named by a human, so nothing but
+    the namespace is dropped — the card falls back to a middle-ellipsized
+    basename rather than guessing at structure that isn't there."""
+    reg = _hub_reg(monkeypatch, tmp_path)
+    assert reg.register_imported("lerobot/smolvla_base").name == "smolvla_base"
+
+
+def test_explicit_import_name_wins_over_the_derivation(monkeypatch, tmp_path) -> None:
+    """POST /jobs/import may carry a name. It's the user's, so neither the
+    derivation nor the collision pass may overwrite it."""
+    reg = _hub_reg(monkeypatch, tmp_path)
+    rec = reg.register_imported(
+        "makermods/smolvla_makermods_orange_box_2026-08-03_12-53-30",
+        name="Orange picker v2",
+    )
+    assert rec.name == "Orange picker v2"
+
+    reg2 = _hub_reg(monkeypatch, tmp_path)  # reload from disk
+    assert reg2.get(rec.id).name == "Orange picker v2"
+
+
+def test_rename_alias_survives_the_collision_pass(monkeypatch, tmp_path) -> None:
+    """A user-set display_name always wins on the card; re-deriving `name`
+    underneath it must not disturb the alias."""
+    reg = _hub_reg(monkeypatch, tmp_path)
+    rec = reg.register_imported("makermods/smolvla_makermods_orange_box_2026-08-03_12-53-30")
+    reg.rename(rec.id, "Orange picker")
+
+    reg2 = _hub_reg(monkeypatch, tmp_path)
+    reloaded = reg2.get(rec.id)
+    assert reloaded.display_name == "Orange picker"
+    assert reloaded.name == "orange_box"
+
+
+def test_two_imports_of_one_task_are_disambiguated(monkeypatch, tmp_path) -> None:
+    """Both titles derive to "orange_box". BOTH cards get the timestamp back as
+    a suffix — leaving the first bare would make it the ambiguous one."""
+    reg = _hub_reg(monkeypatch, tmp_path)
+    a = reg.register_imported("makermods/smolvla_makermods_orange_box_2026-08-03_12-53-30")
+    b = reg.register_imported("makermods/act_makermods_orange_box_2026-08-05_09-00-00")
+
+    names = {r.id: r.name for r in reg.list(limit=100)}
+    assert names[a.id] == "orange_box (2026-08-03)"
+    assert names[b.id] == "orange_box (2026-08-05)"
+
+
+def test_same_day_imports_escalate_to_the_time(monkeypatch, tmp_path) -> None:
+    reg = _hub_reg(monkeypatch, tmp_path)
+    a = reg.register_imported("makermods/smolvla_makermods_orange_box_2026-08-03_12-53-30")
+    b = reg.register_imported("makermods/act_makermods_orange_box_2026-08-03_18-04-00")
+
+    names = {r.id: r.name for r in reg.list(limit=100)}
+    assert names[a.id] == "orange_box (2026-08-03 12:53)"
+    assert names[b.id] == "orange_box (2026-08-03 18:04)"
+
+
+def test_collision_suffixes_are_recomputed_not_accumulated(monkeypatch, tmp_path) -> None:
+    """The pass is idempotent: it re-derives from the source every time, so a
+    reload (or a third import) never stacks "(date) (date)" onto a title."""
+    reg = _hub_reg(monkeypatch, tmp_path)
+    reg.register_imported("makermods/smolvla_makermods_orange_box_2026-08-03_12-53-30")
+    reg.register_imported("makermods/act_makermods_orange_box_2026-08-05_09-00-00")
+
+    reg2 = _hub_reg(monkeypatch, tmp_path)
+    reg3 = _hub_reg(monkeypatch, tmp_path)
+    assert sorted(r.name for r in reg3.list(limit=100)) == sorted(r.name for r in reg2.list(limit=100))
+    assert all(r.name.count("(") <= 1 for r in reg3.list(limit=100))
+
+
+def test_legacy_imported_name_is_re_derived_on_load(monkeypatch, tmp_path) -> None:
+    """Records written before titles were derived carry the old
+    "Imported · <repo id>" name. Boot upgrades them in place, so the fix reaches
+    the cards already in the user's library and not only the next import."""
+    from makermodslab.jobs import JobRecord, JobRegistry
+    from makermodslab.train import TrainingRequest
+
+    root = tmp_path / "root"
+    job_dir = root / "smolvla_imported_2026-08-03_12-53-30"
+    job_dir.mkdir(parents=True)
+    legacy = JobRecord(
+        id=job_dir.name,
+        name="Imported · makermods/smolvla_makermods_orange_box_2026-08-03_12-53-30",
+        state="done",
+        config=TrainingRequest(dataset_repo_id="(imported)", policy_type="smolvla"),
+        output_dir="",
+        started_at=1.0,
+        ended_at=1.0,
+        runner="imported",
+        hf_repo_id="makermods/smolvla_makermods_orange_box_2026-08-03_12-53-30",
+    )
+    (job_dir / "job.json").write_text(legacy.model_dump_json(indent=2))
+
+    reg = JobRegistry(root)
+    assert reg.get(legacy.id).name == "orange_box"
+    # Persisted, not just fixed in memory.
+    assert _json.loads((job_dir / "job.json").read_text())["name"] == "orange_box"
+
+
+
+
+def _typed_hub_reg(monkeypatch, tmp_path, policy_by_repo, root="root"):
+    """`_hub_reg` plus a readable checkpoint config, so each import lands with a
+    real `config.policy_type` — the field the card's Policy row renders, and the
+    one the collision pass groups on."""
+    reg = _hub_reg(monkeypatch, tmp_path, root=root)
+    monkeypatch.setattr(
+        "makermodslab.jobs._read_checkpoint_config",
+        # A hub checkpoint's ref is "<repo_id>@root" (see _list_imported_hub).
+        lambda ckpt: {"type": policy_by_repo[ckpt.ref.split("@", 1)[0]]},
+    )
+    return reg
+
+
+def test_two_policies_of_one_task_are_not_disambiguated(monkeypatch, tmp_path) -> None:
+    """Both derive to "orange_box", but one card says ACT and the other SmolVLA
+    a line below the title — they are already told apart, so a date suffix would
+    only crowd out the task name it is meant to clarify."""
+    act_repo = "makermods/act_makermods_orange_box_2026-08-05_09-00-00"
+    smolvla_repo = "makermods/smolvla_makermods_orange_box_2026-08-03_12-53-30"
+    reg = _typed_hub_reg(monkeypatch, tmp_path, {act_repo: "act", smolvla_repo: "smolvla"})
+    a = reg.register_imported(smolvla_repo)
+    b = reg.register_imported(act_repo)
+
+    names = {r.id: r.name for r in reg.list(limit=100)}
+    assert names[a.id] == "orange_box"
+    assert names[b.id] == "orange_box"
+
+
+def test_two_imports_of_one_task_and_policy_are_still_disambiguated(monkeypatch, tmp_path) -> None:
+    """Same task AND same policy: nothing on either card separates them, so the
+    timestamp the title dropped comes back on both."""
+    early = "makermods/smolvla_makermods_orange_box_2026-08-03_12-53-30"
+    late = "makermods/smolvla_makermods_orange_box_2026-08-05_09-00-00"
+    reg = _typed_hub_reg(monkeypatch, tmp_path, {early: "smolvla", late: "smolvla"})
+    a = reg.register_imported(early)
+    b = reg.register_imported(late)
+
+    names = {r.id: r.name for r in reg.list(limit=100)}
+    assert names[a.id] == "orange_box (2026-08-03)"
+    assert names[b.id] == "orange_box (2026-08-05)"

@@ -30,6 +30,7 @@ import {
   Upload,
 } from "lucide-react";
 import MetaRows from "@/components/library/MetaRows";
+import DisplayName from "@/components/library/DisplayName";
 import { useApi } from "@/contexts/ApiContext";
 import { useStudio } from "@/contexts/StudioContext";
 import { useToast } from "@/hooks/use-toast";
@@ -543,12 +544,10 @@ const JobCard: React.FC<Props> = ({
           </div>
         </div>
         <div>
-          <div
-            className="text-foreground font-semibold truncate"
-            title={displayName}
-          >
-            {displayName}
-          </div>
+          <DisplayName
+            name={displayName}
+            className="text-foreground font-semibold"
+          />
           {/* When aliased, keep the true identity visible: the run id for
               trainings (imported models already show their repo id / path in
               the subtitle below). */}

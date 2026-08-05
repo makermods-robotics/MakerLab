@@ -11,6 +11,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import MetaRows from "@/components/library/MetaRows";
+import { middleEllipsis } from "@/lib/modelNames";
 import { HubModel, deleteHubModel } from "@/lib/jobsApi";
 import { ApiError } from "@/lib/apiClient";
 import { useApi } from "@/contexts/ApiContext";
@@ -167,9 +168,15 @@ const HubModelCard: React.FC<Props> = ({ model, onDeleted, onAction }) => {
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [acting, setActing] = useState<"inference" | "finetune" | null>(null);
   const url = `https://huggingface.co/${model.repo_id}`;
-  const shortName = model.repo_id.includes("/")
-    ? model.repo_id.split("/").slice(1).join("/")
-    : model.repo_id;
+  // Same title rule as the imported card next to it in the grid: namespace off
+  // (the subtitle below repeats the full repo id), and shortened from the
+  // middle rather than the end, since an uploaded repo's tail is its timestamp
+  // — the only thing separating two uploads of the same task.
+  const shortName = middleEllipsis(
+    model.repo_id.includes("/")
+      ? model.repo_id.split("/").slice(1).join("/")
+      : model.repo_id,
+  );
 
   const runAction = async (
     e: React.MouseEvent,

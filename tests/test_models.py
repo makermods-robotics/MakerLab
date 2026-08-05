@@ -19,8 +19,10 @@ are seeded into a temp outputs/train via a fresh JobRegistry."""
 
 from __future__ import annotations
 
+import contextlib
 import json
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -326,6 +328,476 @@ def test_list_all_models_infers_pinned_model_policy_type_from_name(registry) -> 
     assert row["hf_repo_id"] == "makermods/smolvla_makermods_sock_2026-07-08_01-47-15"
     assert row["saved_custom"] is True
     assert row["policy_type"] == "smolvla"
+
+
+# ---------------------------------------------------------------------------
+# list_all_models — naming a repo-keyed row after the run that produced it.
+# ---------------------------------------------------------------------------
+
+
+def _seed_cloud_run(
+    registry,
+    job_id: str,
+    *,
+    repo_id: str,
+    state: str = "done",
+    started_at: float = 1.0,
+    policy_type: str = "smolvla",
+    dataset: str = "makermods/eraser",
+    steps: int = 20000,
+    display_name: str | None = None,
+) -> None:
+    """Register a cloud JobRecord publishing to `repo_id`. No local checkpoint:
+    a cloud run's artifacts live on the Hub, so it never appears in
+    list_local_models — only as the identity behind a Hub-keyed row."""
+    from makermodslab.jobs import JobRecord
+    from makermodslab.train import TrainingRequest
+
+    registry._records[job_id] = JobRecord(
+        id=job_id,
+        name=job_id,
+        display_name=display_name,
+        state=state,
+        config=TrainingRequest(dataset_repo_id=dataset, policy_type=policy_type, steps=steps),
+        output_dir="",
+        started_at=started_at,
+        ended_at=started_at + 1.0,
+        runner="hf_cloud",
+        hf_repo_id=repo_id,
+    )
+
+
+class _NoHubFiles:
+    """HfApi stand-in for the registry's per-record checkpoint count: an empty
+    repo listing, so seeding cloud records costs no network."""
+
+    def list_repo_files(self, repo_id, repo_type):
+        return []
+
+
+def _sandboxed_listing(hub_rows: list[dict[str, Any]]):
+    """The patches every list_all_models test needs to stay off the network and
+    off the developer's real pinned/hidden-model files."""
+    return (
+        patch("makermodslab.models.list_hub_models", return_value=hub_rows),
+        patch("makermodslab.models.get_saved_custom_models", return_value=[]),
+        patch("makermodslab.models.get_hidden_models", return_value=set()),
+        patch("makermodslab.jobs.shared_hf_api", return_value=_NoHubFiles()),
+    )
+
+
+_SHARED_REPO = "makermods/smolvla_eraser_2026-07-31_17-35-54"
+
+
+def test_list_all_models_names_repo_row_after_the_run_that_finished(registry, tmp_lerobot_home) -> None:
+    """MT12's user-facing symptom: a cloud resume reuses its PARENT's output
+    repo, so a resume chain shares one repo named after run #1. /models keys Hub
+    entries by repo_id, so the run that actually finished had no entry under its
+    own name — the only row was the parent's, with null steps/dataset. The row
+    now carries the finishing run's identity while its routing keys (id /
+    repo_id / hf_repo_id) stay the repo id."""
+    from makermodslab.models import list_all_models
+
+    _seed_cloud_run(registry, "run_17-35-54", repo_id=_SHARED_REPO, state="failed", started_at=100.0)
+    _seed_cloud_run(registry, "run_20-31-48", repo_id=_SHARED_REPO, state="failed", started_at=200.0)
+    # The one that reached its 20k target — newer AND done, so it names the repo.
+    _seed_cloud_run(registry, "run_22-40-15", repo_id=_SHARED_REPO, state="done", started_at=300.0)
+
+    hub_rows = [{"repo_id": _SHARED_REPO, "last_modified": None, "private": False}]
+    with contextlib.ExitStack() as stack:
+        for cm in _sandboxed_listing(hub_rows):
+            stack.enter_context(cm)
+        result = list_all_models()
+
+    row = next(r for r in result if r["repo_id"] == _SHARED_REPO)
+    assert row["name"] == "run_22-40-15"
+    # Identity is untouched — every request (info / download / deploy) routes on it.
+    assert row["id"] == _SHARED_REPO
+    assert row["hf_repo_id"] == _SHARED_REPO
+    assert row["source"] == "hub"
+    # Detail the Hub listing had no way to know.
+    assert row["steps"] == 20000
+    assert row["dataset"] == "makermods/eraser"
+    assert row["policy_type"] == "smolvla"
+
+
+def test_list_all_models_repo_row_prefers_done_over_newer_unfinished(registry, tmp_lerobot_home) -> None:
+    """A later resume attempt that failed does not get to name the repo: the run
+    that reached "done" published the policy sitting at the repo root."""
+    from makermodslab.models import list_all_models
+
+    _seed_cloud_run(registry, "finished", repo_id=_SHARED_REPO, state="done", started_at=100.0)
+    _seed_cloud_run(registry, "later_crash", repo_id=_SHARED_REPO, state="failed", started_at=999.0)
+
+    hub_rows = [{"repo_id": _SHARED_REPO, "last_modified": None, "private": False}]
+    with contextlib.ExitStack() as stack:
+        for cm in _sandboxed_listing(hub_rows):
+            stack.enter_context(cm)
+        result = list_all_models()
+
+    assert next(r for r in result if r["repo_id"] == _SHARED_REPO)["name"] == "finished"
+
+
+def test_list_all_models_repo_row_uses_display_name_when_renamed(registry, tmp_lerobot_home) -> None:
+    """A renamed run shows its alias — the same display_name/name precedence the
+    local rows and the job cards use."""
+    from makermodslab.models import list_all_models
+
+    _seed_cloud_run(
+        registry, "raw_run_id", repo_id=_SHARED_REPO, state="done", display_name="Eraser placing v3"
+    )
+    hub_rows = [{"repo_id": _SHARED_REPO, "last_modified": None, "private": False}]
+    with contextlib.ExitStack() as stack:
+        for cm in _sandboxed_listing(hub_rows):
+            stack.enter_context(cm)
+        result = list_all_models()
+
+    assert next(r for r in result if r["repo_id"] == _SHARED_REPO)["name"] == "Eraser placing v3"
+
+
+def test_list_all_models_repo_row_falls_back_to_newest_when_none_done(registry, tmp_lerobot_home) -> None:
+    """No run in the chain finished (all failed/interrupted): the newest one
+    still names the repo — it is the last thing that wrote to it."""
+    from makermodslab.models import list_all_models
+
+    _seed_cloud_run(registry, "older", repo_id=_SHARED_REPO, state="failed", started_at=100.0)
+    _seed_cloud_run(registry, "newest", repo_id=_SHARED_REPO, state="interrupted", started_at=400.0)
+
+    hub_rows = [{"repo_id": _SHARED_REPO, "last_modified": None, "private": False}]
+    with contextlib.ExitStack() as stack:
+        for cm in _sandboxed_listing(hub_rows):
+            stack.enter_context(cm)
+        result = list_all_models()
+
+    row = next(r for r in result if r["repo_id"] == _SHARED_REPO)
+    assert row["name"] == "newest"
+    # Never finished and never reported a step ⇒ no step count invented.
+    assert row["steps"] is None
+
+
+def test_list_all_models_local_checkpoint_detail_wins_over_job_identity(registry, tmp_lerobot_home) -> None:
+    """A local run collapsed into its Hub row already owns the row's name and
+    checkpoint-derived detail; the run-identity pass must not overwrite it."""
+    from makermodslab.models import list_all_models
+
+    _seed_run(
+        registry,
+        "pushed_run",
+        state="done",
+        dataset="user/pick",
+        steps=250,
+        hf_repo_id="user/hub_model",
+    )
+    hub_rows = [{"repo_id": "user/hub_model", "last_modified": None, "private": False}]
+    with contextlib.ExitStack() as stack:
+        for cm in _sandboxed_listing(hub_rows):
+            stack.enter_context(cm)
+        result = list_all_models()
+
+    row = next(r for r in result if r["repo_id"] == "user/hub_model")
+    assert row["source"] == "both"
+    assert row["name"] == "run pushed_run"  # the local row's name, not re-derived
+    assert row["steps"] == 250  # the checkpoint's real step, not the config target
+    assert row["id"] == "pushed_run"
+
+
+def test_list_all_models_repo_row_ignores_imported_records(registry, tmp_lerobot_home) -> None:
+    """Re-importing a repo registers a POINTER to it, whose config is a
+    placeholder (dataset "(imported)", the default 10000 steps) and which is
+    always done + newest. It must not outrank the run that trained the weights,
+    or the row would advertise a step count and dataset nobody trained on."""
+    from makermodslab.jobs import JobRecord
+    from makermodslab.models import list_all_models
+    from makermodslab.train import TrainingRequest
+
+    _seed_cloud_run(registry, "real_run", repo_id=_SHARED_REPO, state="done", started_at=100.0)
+    registry._records["smolvla_imported_x"] = JobRecord(
+        id="smolvla_imported_x",
+        name="smolvla_imported_x",
+        state="done",
+        config=TrainingRequest(dataset_repo_id="(imported)", policy_type="smolvla", steps=10000),
+        output_dir="",
+        started_at=900.0,  # newest, and done — would win without the guard
+        runner="imported",
+        hf_repo_id=_SHARED_REPO,
+    )
+
+    hub_rows = [{"repo_id": _SHARED_REPO, "last_modified": None, "private": False}]
+    with contextlib.ExitStack() as stack:
+        for cm in _sandboxed_listing(hub_rows):
+            stack.enter_context(cm)
+        result = list_all_models()
+
+    row = next(r for r in result if r["repo_id"] == _SHARED_REPO)
+    assert row["name"] == "real_run"
+    assert row["steps"] == 20000
+    assert row["dataset"] == "makermods/eraser"
+
+
+def test_list_all_models_reduces_a_generated_run_name_to_the_task(registry, tmp_lerobot_home) -> None:
+    """An auto-generated run name is "{POLICY} · {dataset}" (jobs.start). Both
+    halves are printed elsewhere on the row — policy_type and dataset each have
+    their own field — so the title line keeps only the task: policy prefix and
+    dataset namespace both peeled."""
+    from makermodslab.models import list_all_models
+
+    _seed_cloud_run(registry, "generated", repo_id=_SHARED_REPO, state="done")
+    registry._records["generated"].name = "SMOLVLA · makermods/eraser_place"
+    hub_rows = [{"repo_id": _SHARED_REPO, "last_modified": None, "private": False}]
+    with contextlib.ExitStack() as stack:
+        for cm in _sandboxed_listing(hub_rows):
+            stack.enter_context(cm)
+        result = list_all_models()
+
+    row = next(r for r in result if r["repo_id"] == _SHARED_REPO)
+    assert row["name"] == "eraser_place"
+    # Neither fact is lost, just moved to where each is rendered once.
+    assert row["policy_type"] == "smolvla"
+    assert row["dataset"] == "makermods/eraser"
+
+
+def test_list_all_models_keeps_a_generated_name_whose_dataset_has_no_namespace(
+    registry, tmp_lerobot_home
+) -> None:
+    """A dataset id with no "/" is already the task — nothing to peel off it."""
+    from makermodslab.models import list_all_models
+
+    _seed_cloud_run(registry, "bare", repo_id=_SHARED_REPO, state="done")
+    registry._records["bare"].name = "ACT · eraser_place"
+    hub_rows = [{"repo_id": _SHARED_REPO, "last_modified": None, "private": False}]
+    with contextlib.ExitStack() as stack:
+        for cm in _sandboxed_listing(hub_rows):
+            stack.enter_context(cm)
+        result = list_all_models()
+
+    assert next(r for r in result if r["repo_id"] == _SHARED_REPO)["name"] == "eraser_place"
+
+
+def test_list_all_models_keeps_a_user_name_that_contains_the_separator(registry, tmp_lerobot_home) -> None:
+    """Only the GENERATED shape is peeled. A job_name the user typed keeps every
+    word, even when it contains " · " — the head isn't a policy type."""
+    from makermodslab.models import list_all_models
+
+    _seed_cloud_run(registry, "typed", repo_id=_SHARED_REPO, state="done")
+    registry._records["typed"].name = "Monday · eraser retrain"
+    hub_rows = [{"repo_id": _SHARED_REPO, "last_modified": None, "private": False}]
+    with contextlib.ExitStack() as stack:
+        for cm in _sandboxed_listing(hub_rows):
+            stack.enter_context(cm)
+        result = list_all_models()
+
+    assert next(r for r in result if r["repo_id"] == _SHARED_REPO)["name"] == ("Monday · eraser retrain")
+
+
+def test_list_all_models_leaves_untracked_repo_row_alone(registry, tmp_lerobot_home) -> None:
+    """A Hub repo no tracked run publishes to keeps the repo id as its name —
+    the enrichment is a fill-in, never a rewrite of unknown rows."""
+    from makermodslab.models import list_all_models
+
+    _seed_cloud_run(registry, "other_run", repo_id="makermods/some_other_repo", state="done")
+    hub_rows = [{"repo_id": "user/untracked", "last_modified": None, "private": False}]
+    with contextlib.ExitStack() as stack:
+        for cm in _sandboxed_listing(hub_rows):
+            stack.enter_context(cm)
+        result = list_all_models()
+
+    row = next(r for r in result if r["repo_id"] == "user/untracked")
+    assert row["name"] == "user/untracked"
+    assert row["steps"] is None
+
+
+def test_list_all_models_separates_two_runs_that_share_a_name(registry, tmp_lerobot_home) -> None:
+    """The reported case: retraining one task publishes a SECOND repo, and both
+    rows take the same auto-generated run name ("SMOLVLA · ns/task", from
+    jobs.start, peeled to "ns/task" by the enrichment) — the picker then showed
+    one label twice with nothing on either row to say which is which. The rows'
+    last-modified dates break the tie; the routing keys stay untouched."""
+    from makermodslab.models import list_all_models
+
+    shared_name = "SMOLVLA · makermods/eraser_place_unblurry_real"
+    # What the enrichment renders: the task alone — policy prefix and dataset
+    # namespace both dropped (each has its own field on the row).
+    shown = "eraser_place_unblurry_real"
+    long_repo = "makermods/smolvla_makermods_eraser_place_unblurry_real_2026-07-31_17-35-54"
+    short_repo = "makermods/smolvla_makermods_eraser_place_unblurry_real_2026-08-02_12-22-54"
+    _seed_cloud_run(registry, "run_long", repo_id=long_repo, state="done", steps=20000)
+    _seed_cloud_run(registry, "run_short", repo_id=short_repo, state="done", steps=5500)
+    registry._records["run_long"].name = shared_name
+    registry._records["run_short"].name = shared_name
+
+    hub_rows = [
+        {"repo_id": long_repo, "last_modified": "2026-07-31T17:35:54Z", "private": False},
+        {"repo_id": short_repo, "last_modified": "2026-08-02T12:22:54Z", "private": False},
+    ]
+    with contextlib.ExitStack() as stack:
+        for cm in _sandboxed_listing(hub_rows):
+            stack.enter_context(cm)
+        result = list_all_models()
+
+    by_repo = {r["repo_id"]: r for r in result}
+    assert by_repo[long_repo]["name"] == f"{shown} (2026-07-31)"
+    assert by_repo[short_repo]["name"] == f"{shown} (2026-08-02)"
+    assert by_repo[long_repo]["hf_repo_id"] == long_repo
+    assert by_repo[short_repo]["hf_repo_id"] == short_repo
+
+
+def test_list_all_models_same_day_collision_escalates_to_the_time(registry, tmp_lerobot_home) -> None:
+    """Two runs of one task on one day: the date alone doesn't separate them, so
+    the next rung of the ladder is used for BOTH rows."""
+    from makermodslab.models import list_all_models
+
+    shared_name = "SMOLVLA · makermods/eraser_place_unblurry_real"
+    shown = "eraser_place_unblurry_real"
+    a_repo = "makermods/smolvla_a_2026-07-31_17-35-54"
+    b_repo = "makermods/smolvla_b_2026-07-31_12-22-54"
+    _seed_cloud_run(registry, "run_a", repo_id=a_repo, state="done")
+    _seed_cloud_run(registry, "run_b", repo_id=b_repo, state="done")
+    registry._records["run_a"].name = shared_name
+    registry._records["run_b"].name = shared_name
+
+    hub_rows = [
+        {"repo_id": a_repo, "last_modified": "2026-07-31T17:35:54Z", "private": False},
+        {"repo_id": b_repo, "last_modified": "2026-07-31T12:22:54Z", "private": False},
+    ]
+    with contextlib.ExitStack() as stack:
+        for cm in _sandboxed_listing(hub_rows):
+            stack.enter_context(cm)
+        result = list_all_models()
+
+    by_repo = {r["repo_id"]: r for r in result}
+    assert by_repo[a_repo]["name"] == f"{shown} (2026-07-31 17:35)"
+    assert by_repo[b_repo]["name"] == f"{shown} (2026-07-31 12:22)"
+
+
+def test_list_all_models_does_not_separate_two_policies_of_one_task(registry, tmp_lerobot_home) -> None:
+    """An ACT and a SmolVLA of one task both enrich to the same title, but the
+    row already carries `policy_type` in its own field — the card's Policy row
+    separates them. Suffixing would spend the title line restating that, and
+    would suggest the pair differs by when it ran rather than by what it is."""
+    from makermodslab.models import list_all_models
+
+    act_repo = "makermods/act_makermods_eraser_place_2026-07-31_17-35-54"
+    smolvla_repo = "makermods/smolvla_makermods_eraser_place_2026-08-02_12-22-54"
+    _seed_cloud_run(registry, "run_act", repo_id=act_repo, state="done", policy_type="act")
+    _seed_cloud_run(registry, "run_smolvla", repo_id=smolvla_repo, state="done", policy_type="smolvla")
+    registry._records["run_act"].name = "ACT · makermods/eraser_place"
+    registry._records["run_smolvla"].name = "SMOLVLA · makermods/eraser_place"
+
+    hub_rows = [
+        {"repo_id": act_repo, "last_modified": "2026-07-31T17:35:54Z", "private": False},
+        {"repo_id": smolvla_repo, "last_modified": "2026-08-02T12:22:54Z", "private": False},
+    ]
+    with contextlib.ExitStack() as stack:
+        for cm in _sandboxed_listing(hub_rows):
+            stack.enter_context(cm)
+        result = list_all_models()
+
+    by_repo = {r["repo_id"]: r for r in result}
+    assert by_repo[act_repo]["name"] == "eraser_place"
+    assert by_repo[smolvla_repo]["name"] == "eraser_place"
+    # The fact that separates them is rendered where it belongs.
+    assert by_repo[act_repo]["policy_type"] == "act"
+    assert by_repo[smolvla_repo]["policy_type"] == "smolvla"
+
+
+def test_list_all_models_still_separates_two_runs_of_one_policy(registry, tmp_lerobot_home) -> None:
+    """The policy key narrows collisions rather than abolishing them: two
+    SmolVLA runs of one task are still two rows nothing else tells apart."""
+    from makermodslab.models import list_all_models
+
+    a_repo = "makermods/smolvla_makermods_eraser_place_2026-07-31_17-35-54"
+    b_repo = "makermods/smolvla_makermods_eraser_place_2026-08-02_12-22-54"
+    _seed_cloud_run(registry, "run_a", repo_id=a_repo, state="done", policy_type="smolvla")
+    _seed_cloud_run(registry, "run_b", repo_id=b_repo, state="done", policy_type="smolvla")
+    registry._records["run_a"].name = "SMOLVLA · makermods/eraser_place"
+    registry._records["run_b"].name = "SMOLVLA · makermods/eraser_place"
+
+    hub_rows = [
+        {"repo_id": a_repo, "last_modified": "2026-07-31T17:35:54Z", "private": False},
+        {"repo_id": b_repo, "last_modified": "2026-08-02T12:22:54Z", "private": False},
+    ]
+    with contextlib.ExitStack() as stack:
+        for cm in _sandboxed_listing(hub_rows):
+            stack.enter_context(cm)
+        result = list_all_models()
+
+    by_repo = {r["repo_id"]: r for r in result}
+    assert by_repo[a_repo]["name"] == "eraser_place (2026-07-31)"
+    assert by_repo[b_repo]["name"] == "eraser_place (2026-08-02)"
+
+
+def test_list_all_models_suffix_prefers_the_name_stamp_over_last_modified(registry, tmp_lerobot_home) -> None:
+    """The disambiguator is WHEN THE RUN RAN, and the repo name carries that
+    verbatim. `last_modified` does not: it moves on any push to the repo — a
+    re-push of the same weights, a README edit, a later checkpoint upload — so
+    two runs weeks apart can both report a date in September and read, next to
+    each other, as simply wrong. The name's stamp never moves."""
+    from makermodslab.models import list_all_models
+
+    july_repo = "makermods/smolvla_makermods_eraser_place_2026-07-31_17-35-54"
+    august_repo = "makermods/smolvla_makermods_eraser_place_2026-08-02_12-22-54"
+    _seed_cloud_run(registry, "run_july", repo_id=july_repo, state="done")
+    _seed_cloud_run(registry, "run_august", repo_id=august_repo, state="done")
+    registry._records["run_july"].name = "SMOLVLA · makermods/eraser_place"
+    registry._records["run_august"].name = "SMOLVLA · makermods/eraser_place"
+
+    # Both repos re-pushed on the same later day: last_modified would date both
+    # rows to September, and the date rung wouldn't even separate them.
+    hub_rows = [
+        {"repo_id": july_repo, "last_modified": "2026-09-20T10:00:00Z", "private": False},
+        {"repo_id": august_repo, "last_modified": "2026-09-20T11:00:00Z", "private": False},
+    ]
+    with contextlib.ExitStack() as stack:
+        for cm in _sandboxed_listing(hub_rows):
+            stack.enter_context(cm)
+        result = list_all_models()
+
+    by_repo = {r["repo_id"]: r for r in result}
+    assert by_repo[july_repo]["name"] == "eraser_place (2026-07-31)"
+    assert by_repo[august_repo]["name"] == "eraser_place (2026-08-02)"
+
+
+def test_list_all_models_suffix_falls_back_to_last_modified_without_a_stamp(
+    registry, tmp_lerobot_home
+) -> None:
+    """A repo whose name carries no run stamp — a hand-named upload, a community
+    repo — has only last_modified to offer, so that is what it uses."""
+    from makermodslab.models import list_all_models
+
+    v1_repo = "makermods/eraser_place_v1"
+    v2_repo = "makermods/eraser_place_v2"
+    _seed_cloud_run(registry, "run_v1", repo_id=v1_repo, state="done")
+    _seed_cloud_run(registry, "run_v2", repo_id=v2_repo, state="done")
+    registry._records["run_v1"].name = "SMOLVLA · makermods/eraser_place"
+    registry._records["run_v2"].name = "SMOLVLA · makermods/eraser_place"
+
+    hub_rows = [
+        {"repo_id": v1_repo, "last_modified": "2026-07-31T17:35:54Z", "private": False},
+        {"repo_id": v2_repo, "last_modified": "2026-08-02T12:22:54Z", "private": False},
+    ]
+    with contextlib.ExitStack() as stack:
+        for cm in _sandboxed_listing(hub_rows):
+            stack.enter_context(cm)
+        result = list_all_models()
+
+    by_repo = {r["repo_id"]: r for r in result}
+    assert by_repo[v1_repo]["name"] == "eraser_place (2026-07-31)"
+    assert by_repo[v2_repo]["name"] == "eraser_place (2026-08-02)"
+
+
+def test_list_all_models_leaves_unique_names_alone(registry, tmp_lerobot_home) -> None:
+    """The collision pass is a no-op on a listing with no duplicates — a row
+    never acquires a date it doesn't need to be distinguishable."""
+    from makermodslab.models import list_all_models
+
+    _seed_cloud_run(registry, "solo_run", repo_id=_SHARED_REPO, state="done")
+    hub_rows = [{"repo_id": _SHARED_REPO, "last_modified": "2026-07-31T17:35:54Z", "private": False}]
+    with contextlib.ExitStack() as stack:
+        for cm in _sandboxed_listing(hub_rows):
+            stack.enter_context(cm)
+        result = list_all_models()
+
+    assert next(r for r in result if r["repo_id"] == _SHARED_REPO)["name"] == "solo_run"
 
 
 # ---------------------------------------------------------------------------

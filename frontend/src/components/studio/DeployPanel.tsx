@@ -40,6 +40,7 @@ import {
 import { JobRecord, getJob, jobDisplayName, listJobs } from "@/lib/jobsApi";
 import { ModelItem, getModels } from "@/lib/modelsApi";
 import { findJobForModel, importSourceForModel } from "@/lib/inferenceLaunch";
+import DisplayName from "@/components/library/DisplayName";
 import CheckpointDropdown from "@/components/jobs/CheckpointDropdown";
 import ModelsLibrary from "@/components/jobs/ModelsLibrary";
 import ImportModelModal from "@/components/jobs/ImportModelModal";
@@ -657,7 +658,7 @@ const DeployPanel: React.FC = () => {
             >
               <PanelEntryDot className="bg-sky-500" />
               {selectedSkillLabel ? (
-                <span className="min-w-0 truncate">{selectedSkillLabel}</span>
+                <DisplayName name={selectedSkillLabel} className="min-w-0" />
               ) : (
                 <SelectValue placeholder="Pick a skill" />
               )}
@@ -674,7 +675,7 @@ const DeployPanel: React.FC = () => {
               ) : (
                 models.map((m) => (
                   <SelectItem key={m.id} value={m.id}>
-                    <span className="truncate">{m.name}</span>
+                    <DisplayName name={m.name} className="min-w-0" />
                     <span className="ml-2 text-[10px] uppercase tracking-wide text-muted-foreground">
                       {m.source === "hub"
                         ? "hub"
