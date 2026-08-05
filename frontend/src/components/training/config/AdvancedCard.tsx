@@ -3,16 +3,9 @@ import { Input } from "@/components/ui/input";
 import { NumberInput } from "@/components/ui/number-input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { AdvancedSection } from "@/components/studio/panel/primitives";
 import { cn } from "@/lib/utils";
-import { ConfigComponentProps } from "../types";
+import { ConfigComponentProps, POLICY_TYPE_OPTIONS } from "../types";
 import { useApi } from "@/contexts/ApiContext";
 import { isValidTimeout } from "@/lib/jobTimeout";
 
@@ -46,6 +39,42 @@ const OPTIMIZER_LABELS: Record<string, string> = {
   sgd: "SGD",
   multi_adam: "Multi Adam",
 };
+
+type OptimizerKnob = "lr" | "weight_decay" | "grad_clip_norm";
+
+/**
+ * Which optimizer knobs each policy actually exposes — the mirror of
+ * `_POLICY_OPTIMIZER_FIELDS` in makermodslab/train.py. Keep the two in sync.
+ *
+ * Training always runs with the policy training preset on, so lerobot rebuilds
+ * the optimizer from the POLICY config's own `optimizer_*` fields and discards
+ * anything sent to the `--optimizer.*` namespace. The backend therefore emits
+ * `--policy.optimizer_<knob>`, and only for knobs the selected policy declares
+ * (an unknown one makes the CLI parser reject the run outright). A knob missing
+ * here would silently do nothing, so the input is hidden rather than shown as a
+ * control that can't take effect.
+ *
+ * This can NOT be derived from /policy-optimizer-defaults: that endpoint
+ * reports the preset OBJECT's fields, and both AdamW and Adam presets carry a
+ * grad_clip_norm regardless of whether the policy exposes a knob for it.
+ */
+const POLICY_OPTIMIZER_KNOBS: Record<string, readonly OptimizerKnob[]> = {
+  act: ["lr", "weight_decay"],
+  diffusion: ["lr", "weight_decay"],
+  pi0: ["lr", "weight_decay", "grad_clip_norm"],
+  smolvla: ["lr", "weight_decay", "grad_clip_norm"],
+  tdmpc: ["lr"],
+  vqbet: ["lr", "weight_decay"],
+  pi0_fast: ["lr", "weight_decay", "grad_clip_norm"],
+  // Its preset is a MultiAdam built from per-group settings — no scalar knobs.
+  gaussian_actor: [],
+};
+
+// Matches the backend's fallback for a policy type absent from the table.
+const DEFAULT_OPTIMIZER_KNOBS: readonly OptimizerKnob[] = ["lr"];
+
+const policyShortLabel = (value: string): string =>
+  POLICY_TYPE_OPTIONS.find((o) => o.value === value)?.label || value;
 
 /** Advanced-parameters section of the training form. Uses the shared
  * AdvancedSection, so its trigger is the same eyebrow-level control as the
@@ -91,6 +120,14 @@ const AdvancedCard: React.FC<ConfigComponentProps> = ({
   const defaultOptimizerLabel = d
     ? OPTIMIZER_LABELS[d.optimizer] ?? d.optimizer
     : null;
+
+  // The optimizer CLASS is fixed by the policy preset and cannot be overridden
+  // from the CLI, so it is shown, not chosen. Which scalar knobs remain
+  // adjustable is likewise a property of the policy.
+  const knobs =
+    POLICY_OPTIMIZER_KNOBS[config.policy_type] ?? DEFAULT_OPTIMIZER_KNOBS;
+  const has = (k: OptimizerKnob) => knobs.includes(k);
+  const policyLabel = policyShortLabel(config.policy_type);
 
   // Cloud-only "Job timeout": the raw string drives both the input and the
   // (mirror-of-backend) inline validity check. Blank = HF Jobs default (2h).
@@ -153,64 +190,74 @@ const AdvancedCard: React.FC<ConfigComponentProps> = ({
         <section className="space-y-3">
           <SectionHeading>Optimizer</SectionHeading>
           <div className="space-y-2">
-            <Label htmlFor="optimizer_type">Optimizer</Label>
-            <Select
-              value={config.optimizer_type || "adam"}
-              onValueChange={(value) => updateConfig("optimizer_type", value)}
-            >
-              <SelectTrigger id="optimizer_type">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="adam">Adam</SelectItem>
-                <SelectItem value="adamw">AdamW</SelectItem>
-                <SelectItem value="sgd">SGD</SelectItem>
-                <SelectItem value="multi_adam">Multi Adam</SelectItem>
-              </SelectContent>
-            </Select>
-            {defaultOptimizerLabel && (
-              <p className="text-xs text-muted-foreground">
-                Policy default: {defaultOptimizerLabel}
-              </p>
-            )}
+            <Label>Optimizer</Label>
+            <p className="text-sm">
+              {defaultOptimizerLabel ?? "Set by the policy preset"}
+            </p>
+            <p className="text-xs text-muted-foreground">
+              {defaultOptimizerLabel
+                ? `Set by the ${policyLabel} policy preset — the optimizer class isn't adjustable.`
+                : "The policy preset picks the optimizer class; it isn't adjustable."}
+            </p>
           </div>
-          <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
-            <div className="space-y-2">
-              <Label htmlFor="optimizer_lr">Learning rate</Label>
-              <NumberInput
-                id="optimizer_lr"
-                integer={false}
-                step="0.0001"
-                value={config.optimizer_lr}
-                onChange={(v) => updateConfig("optimizer_lr", v)}
-                placeholder={lrPlaceholder}
-              />
+          {knobs.length === 0 ? (
+            <p className="text-xs text-muted-foreground">
+              The {policyLabel} preset builds its optimizer from per-parameter-group
+              settings, so there are no learning-rate or weight-decay knobs to set here.
+            </p>
+          ) : (
+            <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
+              {has("lr") && (
+                <div className="space-y-2">
+                  <Label htmlFor="optimizer_lr">Learning rate</Label>
+                  <NumberInput
+                    id="optimizer_lr"
+                    integer={false}
+                    step="0.0001"
+                    value={config.optimizer_lr}
+                    onChange={(v) => updateConfig("optimizer_lr", v)}
+                    placeholder={lrPlaceholder}
+                  />
+                </div>
+              )}
+              {has("weight_decay") && (
+                <div className="space-y-2">
+                  <Label htmlFor="optimizer_weight_decay">Weight decay</Label>
+                  <NumberInput
+                    id="optimizer_weight_decay"
+                    integer={false}
+                    step="0.0001"
+                    value={config.optimizer_weight_decay}
+                    onChange={(v) => updateConfig("optimizer_weight_decay", v)}
+                    placeholder={wdPlaceholder}
+                  />
+                </div>
+              )}
+              {has("grad_clip_norm") && (
+                <div className="space-y-2">
+                  <Label htmlFor="optimizer_grad_clip_norm">
+                    Gradient clipping
+                  </Label>
+                  <NumberInput
+                    id="optimizer_grad_clip_norm"
+                    integer={false}
+                    step="0.0001"
+                    value={config.optimizer_grad_clip_norm}
+                    onChange={(v) =>
+                      updateConfig("optimizer_grad_clip_norm", v)
+                    }
+                    placeholder={gradPlaceholder}
+                  />
+                </div>
+              )}
             </div>
-            <div className="space-y-2">
-              <Label htmlFor="optimizer_weight_decay">Weight decay</Label>
-              <NumberInput
-                id="optimizer_weight_decay"
-                integer={false}
-                step="0.0001"
-                value={config.optimizer_weight_decay}
-                onChange={(v) => updateConfig("optimizer_weight_decay", v)}
-                placeholder={wdPlaceholder}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="optimizer_grad_clip_norm">
-                Gradient clipping
-              </Label>
-              <NumberInput
-                id="optimizer_grad_clip_norm"
-                integer={false}
-                step="0.0001"
-                value={config.optimizer_grad_clip_norm}
-                onChange={(v) => updateConfig("optimizer_grad_clip_norm", v)}
-                placeholder={gradPlaceholder}
-              />
-            </div>
-          </div>
+          )}
+          {knobs.length > 0 && !has("grad_clip_norm") && (
+            <p className="text-xs text-muted-foreground">
+              The {policyLabel} policy exposes no gradient-clipping setting
+              {has("weight_decay") ? "" : " or weight decay"}.
+            </p>
+          )}
         </section>
 
         {/* Logging & Checkpointing */}
