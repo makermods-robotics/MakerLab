@@ -7,8 +7,16 @@ import MonitoringStats from "@/components/training/monitoring/MonitoringStats";
 import TrainingLogs from "@/components/training/monitoring/TrainingLogs";
 
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
-import { Loader2, Play, Square, Trash2, ArrowLeft } from "lucide-react";
+import {
+  Loader2,
+  Play,
+  Square,
+  Trash2,
+  ArrowLeft,
+  Upload as UploadIcon,
+} from "lucide-react";
 
 import {
   JobRecord,
@@ -22,6 +30,9 @@ import {
 import { JobCheckpoint, listJobCheckpoints } from "@/lib/checkpointsApi";
 import CheckpointDropdown from "@/components/jobs/CheckpointDropdown";
 import { useStudio } from "@/contexts/StudioContext";
+import { uploadModel } from "@/lib/modelsApi";
+import { ApiError } from "@/lib/apiClient";
+import { useCanUpload } from "@/hooks/useCanUpload";
 
 const POLL_INTERVAL_MS = 1000;
 const MAX_LOG_LINES = 5000;
@@ -76,12 +87,15 @@ const TrainingJobDialog: React.FC<{
   const { toast } = useToast();
 
   const { openStudio } = useStudio();
+  const canUpload = useCanUpload();
   const [job, setJob] = useState<JobRecord | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const logContainerRef = useRef<HTMLDivElement>(null);
   const [checkpoints, setCheckpoints] = useState<JobCheckpoint[]>([]);
   const [selectedStep, setSelectedStep] = useState<number | null>(null);
+  const [repoId, setRepoId] = useState("");
+  const [uploading, setUploading] = useState(false);
 
   // Seed logs from the persistent on-disk file once on mount, so closing and
   // reopening the dialog (or coming in fresh on a finished/interrupted job)
@@ -232,6 +246,50 @@ const TrainingJobDialog: React.FC<{
     }
   };
 
+  const handleUpload = async () => {
+    if (!job) return;
+    setUploading(true);
+    try {
+      const res = await uploadModel(
+        baseUrl,
+        fetchWithHeaders,
+        job.id,
+        repoId.trim() || undefined,
+      );
+      toast({
+        title: "Uploaded to Hub",
+        description: (
+          <span>
+            {res.repo_id} is now on the Hub.{" "}
+            <a
+              href={res.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="underline font-medium"
+            >
+              View model
+            </a>
+          </span>
+        ),
+      });
+      const next = await getJob(baseUrl, fetchWithHeaders, job.id);
+      setJob(next);
+    } catch (e) {
+      toast({
+        title: "Upload failed",
+        description:
+          e instanceof ApiError && e.detail
+            ? e.detail
+            : e instanceof Error
+              ? e.message
+              : String(e),
+        variant: "destructive",
+      });
+    } finally {
+      setUploading(false);
+    }
+  };
+
   const isRunning = job?.state === "running";
 
   const backButton = (
@@ -292,18 +350,16 @@ const TrainingJobDialog: React.FC<{
                         Local
                       </span>
                     )}
-                    {job.runner === "hf_cloud" &&
-                      job.hf_repo_id &&
-                      job.state === "done" && (
-                        <a
-                          href={`https://huggingface.co/${job.hf_repo_id}`}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="text-xs text-primary hover:underline"
-                        >
-                          View on Hub ↗
-                        </a>
-                      )}
+                    {job.hf_repo_id && (
+                      <a
+                        href={`https://huggingface.co/${job.hf_repo_id}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-xs text-primary hover:underline"
+                      >
+                        View on Hub ↗
+                      </a>
+                    )}
                     {job.wandb_run_url && (
                       <a
                         href={job.wandb_run_url}
@@ -385,6 +441,31 @@ const TrainingJobDialog: React.FC<{
                 </>
               )}
             </div>
+            {!isRunning && checkpoints.length > 0 && !job.hf_repo_id && canUpload && (
+              <div className="flex items-center gap-3 rounded-md border border-border bg-card p-4">
+                <span className="eyebrow">Publish to Hub</span>
+                <Input
+                  value={repoId}
+                  onChange={(e) => setRepoId(e.target.value)}
+                  placeholder="namespace/repo-name (optional)"
+                  className="h-9 max-w-xs text-xs"
+                  disabled={uploading}
+                />
+                <Button onClick={handleUpload} disabled={uploading} size="sm">
+                  {uploading ? (
+                    <>
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                      Uploading…
+                    </>
+                  ) : (
+                    <>
+                      <UploadIcon className="mr-2 h-4 w-4" />
+                      Upload to Hub
+                    </>
+                  )}
+                </Button>
+              </div>
+            )}
             <TrainingLogs logs={logs} logContainerRef={logContainerRef} />
           </div>
         )}
