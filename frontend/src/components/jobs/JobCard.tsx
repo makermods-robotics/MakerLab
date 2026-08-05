@@ -17,6 +17,7 @@ import {
   jobDisplayName,
   renameJob,
 } from "@/lib/jobsApi";
+import { runTaskTitle } from "@/lib/modelNames";
 import {
   Square,
   Trash2,
@@ -111,6 +112,13 @@ const JobCard: React.FC<Props> = ({
   // Alias-aware display name; the true identity (run id / hub repo id) stays
   // visible as muted subtext when an alias is set.
   const displayName = jobDisplayName(job);
+  // What the title line RENDERS: a generated run name peeled to the task it
+  // learned. The policy is already on the Policy meta row below and the dataset
+  // on its own, so the widest line stops repeating them. Everything else on
+  // this card keeps `displayName` — the rename dialog prefills and compares
+  // against what the run is really called, never the peeled label — and the
+  // title's hover reveals it too (DisplayName's `full`).
+  const taskTitle = runTaskTitle(displayName);
   const importedSource = job.hf_repo_id || job.output_dir;
   const stateLabel = isImported ? "Imported" : present.label;
   const isStarting = isRunning && job.metrics.total_steps === 0;
@@ -580,7 +588,8 @@ const JobCard: React.FC<Props> = ({
         </div>
         <div>
           <DisplayName
-            name={displayName}
+            name={taskTitle}
+            full={displayName}
             className="text-foreground font-semibold"
           />
           {/* When aliased, keep the true identity visible: the run id for

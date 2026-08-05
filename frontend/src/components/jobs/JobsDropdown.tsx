@@ -20,6 +20,11 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
+import { runTaskTitle } from "@/lib/modelNames";
+import {
+  policyTypeDisplayName,
+  policyTypeShortLabel,
+} from "@/components/training/types";
 import {
   HubJob,
   JobRecord,
@@ -76,7 +81,17 @@ const stagePresentation: Record<string, Presentation> = {
 };
 
 interface Described {
+  /** What the title line RENDERS: a generated run name peeled to its task. */
   name: string;
+  /** What the title line MEANS: the untouched name, for the hover title. Equal
+   * to `name` whenever nothing was peeled. */
+  fullName: string;
+  /** The run's policy, as a chip label — read off the record's own
+   * `config.policy_type`, never inferred from the name. Null only when the
+   * record states no policy (a Hub-only job). */
+  policyLabel: string | null;
+  /** Hover text for that chip: the policy's full display name. */
+  policyTitle: string;
   present: Presentation;
   when: string;
   whereLabel: string;
@@ -99,8 +114,16 @@ function describeEntry(entry: JobsEntry): Described {
       color: "text-muted-foreground",
       Icon: HelpCircle,
     };
+    // A Hub-only job is named by its image/space, never by the "{POLICY} · {ds}"
+    // shape, and nothing here knows what policy it trains — so no peel and no
+    // chip.
+    const hubName =
+      job.docker_image ?? job.space_id ?? `Job ${job.id.slice(0, 12)}…`;
     return {
-      name: job.docker_image ?? job.space_id ?? `Job ${job.id.slice(0, 12)}…`,
+      name: hubName,
+      fullName: hubName,
+      policyLabel: null,
+      policyTitle: "",
       present,
       when: relativeTime(entry.time),
       whereLabel: job.flavor ?? "Hub",
@@ -121,8 +144,23 @@ function describeEntry(entry: JobsEntry): Described {
   const target = job.config?.steps || job.metrics.total_steps || 0;
   const current = job.metrics.current_step;
   const pct = target > 0 ? Math.min(100, (current / target) * 100) : 0;
+  // Peel the generated "{POLICY} · {namespace}/{task}" down to the task. A
+  // rename, an import or a human-typed name is returned untouched.
+  const fullName = jobDisplayName(job);
+  const name = runTaskTitle(fullName);
+  // The policy chip reads the record's OWN config, not the peel: a run names
+  // its policy in `config.policy_type` whatever it is called, so a human-named
+  // run ({name}_{timestamp}, the only shape new runs have) and an import state
+  // their policy here exactly like a generated name does. Gating this on "did
+  // the title lose a policy token?" left every named run's policy column blank
+  // while the detail card below it (JobCard's Policy meta row, same field) had
+  // the value all along.
+  const policyType = job.config?.policy_type;
   return {
-    name: jobDisplayName(job),
+    name,
+    fullName,
+    policyLabel: policyType ? policyTypeShortLabel(policyType) : null,
+    policyTitle: policyType ? policyTypeDisplayName(policyType) : "",
     present,
     when: relativeTime(
       job.ended_at != null ? job.ended_at * 1000 : (job.started_at ?? 0) * 1000,
@@ -153,6 +191,10 @@ const canResumeEntry = (entry: JobsEntry): boolean =>
   entry.job.checkpoint_count > 0;
 
 const COL_STATE = "w-[4.75rem] shrink-0";
+// The run's policy. Always occupies its column — a row whose record names no
+// policy (a Hub-only job) leaves it empty rather than shifting where/when out
+// of alignment with the rows around it.
+const COL_POLICY = "w-[4rem] shrink-0";
 const COL_WHERE = "w-[4.5rem] shrink-0";
 const COL_WHEN = "w-[3.5rem] shrink-0 text-right";
 
@@ -175,7 +217,10 @@ interface RowProps {
 }
 
 /**
- * One run: state · name · where · when, plus the row-level primary actions.
+ * One run: state · task · policy · where · when, plus the row-level primary
+ * actions. The name column carries the TASK alone (the policy moved to its own
+ * chip, the dataset namespace is dropped) so rows of one policy+namespace stop
+ * reading identically once the column truncates.
  * Everything else about the run (rename, monitor, checkpoint picker, Run,
  * Continue/Resume-from-step, Download, delete) lives in the detail card the
  * selection drives.
@@ -228,11 +273,19 @@ const JobsRow: React.FC<RowProps> = ({
           />
           <span className="truncate">{d.present.label}</span>
         </span>
+        {/* The hover title is the FULL name — the peel is a display shortening,
+            so the exact identity stays one hover away. */}
         <span
           className="min-w-0 flex-1 truncate text-foreground"
-          title={d.name}
+          title={d.fullName}
         >
           {d.name}
+        </span>
+        <span
+          className={cn(COL_POLICY, "truncate text-muted-foreground")}
+          title={d.policyTitle || undefined}
+        >
+          {d.policyLabel}
         </span>
         <span
           className={cn(
@@ -446,7 +499,7 @@ const JobsDropdown: React.FC<JobsDropdownProps> = ({
                 </span>
                 <span
                   className="min-w-0 flex-1 truncate text-sm font-medium text-foreground"
-                  title={d.name}
+                  title={d.fullName}
                 >
                   {d.name}
                 </span>
