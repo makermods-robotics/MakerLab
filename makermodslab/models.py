@@ -261,19 +261,28 @@ def list_local_models() -> list[dict[str, Any]]:
     return out
 
 
-def _find_local_record(model_id: str) -> JobRecord | None:
-    """The completed local-run registry record for `model_id`, or None.
+def _find_local_record(model_id: str, *, allow_incomplete: bool = False) -> JobRecord | None:
+    """The local-run registry record for `model_id`, or None.
 
-    None when the id is unknown, isn't a local run, isn't done, or left no
-    checkpoint — the same qualification `list_local_models` applies, so callers
-    (info / upload / delete) agree on what a "local model" is."""
+    None when the id is unknown, isn't a local run, left no checkpoint, or —
+    unless `allow_incomplete` — isn't done. `allow_incomplete=True` (used only
+    by `upload_local_model`) additionally accepts `failed`/`interrupted` runs
+    that saved a checkpoint before dying; it still refuses a `running` run,
+    whose checkpoint could still be mid-write. `get_model_info` uses the
+    strict default, matching `list_local_models`'s own separate done-only
+    gate — only the upload path is relaxed."""
     from .jobs import JobNotFoundError
 
     try:
         record = job_registry.get(model_id)
     except JobNotFoundError:
         return None
-    if record.runner != "local" or record.state != "done":
+    if record.runner != "local":
+        return None
+    if allow_incomplete:
+        if record.state == "running":
+            return None
+    elif record.state != "done":
         return None
     if _final_checkpoint_dir(record) is None:
         return None
@@ -904,11 +913,11 @@ def upload_local_model(model_id: str, repo_id: str | None = None) -> dict[str, A
     if hf_hub_offline():
         raise ModelError(400, "The Hub is offline — you can't upload a model right now.")
 
-    record = _find_local_record(model_id)
+    record = _find_local_record(model_id, allow_incomplete=True)
     if record is None:
         raise ModelError(
             404,
-            f"No completed local model with a saved checkpoint found for {model_id!r}.",
+            f"No local model with a saved checkpoint found for {model_id!r}.",
         )
     pretrained_dir = _final_checkpoint_dir(record)
     assert pretrained_dir is not None  # _find_local_record guarantees it
