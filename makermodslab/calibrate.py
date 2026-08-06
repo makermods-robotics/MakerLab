@@ -164,6 +164,31 @@ class CalibrationManager:
         self._maxes = {}
         self._homing_offsets = {}
         self._current_request: CalibrationRequest | None = None
+        # Rollback baseline for a cancelled/failed run (see _calibration_worker
+        # and _cleanup_device): the servo's Homing_Offset and Min/Max_Position_Limit
+        # values as they stood before this session's _step_homing touched them
+        # (reset_calibration() zeroes/maxes out all three, not just the homing
+        # offset), and whether the run reached a real commit (on-disk file
+        # written) that supersedes them.
+        self._original_homing_offsets: dict[str, int] = {}
+        self._original_min_position_limits: dict[str, int] = {}
+        self._original_max_position_limits: dict[str, int] = {}
+        self._calibration_committed = False
+        # Guards _cleanup_device's body against two *callers of
+        # _cleanup_device* overlapping — whichever thread arrives second finds
+        # self.device already None and no-ops. That is a narrower guarantee
+        # than "no concurrent bus access": the actual hazard it exists for is
+        # in stop_calibration_process, where join(timeout=5.0) can expire
+        # while the worker thread is still alive and mid read/write on the
+        # bus (e.g. blocked in a sync_read retry inside
+        # _step_range_recording). The request-handling thread then forces a
+        # cleanup call — restoring registers and disconnecting — while the
+        # worker thread may still be actively using that same device. This
+        # lock only prevents that forced cleanup from double-running against
+        # the worker's own eventual _cleanup_and_finish; it does not, and
+        # cannot, stop the worker's un-locked bus I/O from overlapping the
+        # forced restore+disconnect.
+        self._cleanup_lock = threading.Lock()
 
         # Initialize logging
         init_logging()
@@ -300,6 +325,10 @@ class CalibrationManager:
                 self._mins = {}
                 self._maxes = {}
                 self._homing_offsets = {}
+                self._original_homing_offsets = {}
+                self._original_min_position_limits = {}
+                self._original_max_position_limits = {}
+                self._calibration_committed = False
 
                 self._update_status(
                     calibration_active=True,
@@ -414,6 +443,35 @@ class CalibrationManager:
                 logger.info("Calibration stopped after device connection")
                 self._cleanup_and_finish("Calibration cancelled")
                 return
+
+            # Capture the servo's current Homing_Offset and Min/Max_Position_Limit
+            # as the rollback baseline BEFORE _step_homing runs — it calls
+            # reset_calibration(), which immediately zeroes Homing_Offset and
+            # Min_Position_Limit and maxes out Max_Position_Limit in EEPROM for
+            # every motor on the bus, so this is the last point the prior
+            # (possibly still-in-use) values are readable. If the run is
+            # cancelled or errors before _complete_calibration commits new
+            # values to disk, _cleanup_device restores this baseline so the
+            # servo never diverges from the last-saved calibration file.
+            #
+            # A failed read here isn't caught locally: the device is freshly
+            # connected and nothing has been written yet, so there's nothing
+            # cheaper to retry into. Letting it propagate to this method's own
+            # except Exception below aborts the run with a clear error instead
+            # of silently proceeding with no rollback safety net for the one
+            # run that most needs it.
+            self._original_homing_offsets = {
+                motor: self.device.bus.read("Homing_Offset", motor, normalize=False)
+                for motor in self.device.bus.motors
+            }
+            self._original_min_position_limits = {
+                motor: self.device.bus.read("Min_Position_Limit", motor, normalize=False)
+                for motor in self.device.bus.motors
+            }
+            self._original_max_position_limits = {
+                motor: self.device.bus.read("Max_Position_Limit", motor, normalize=False)
+                for motor in self.device.bus.motors
+            }
 
             # Start Step 1: Homing
             self._step_homing()
@@ -673,6 +731,10 @@ class CalibrationManager:
 
         logger.info(f"Calibration saved to {self.device.calibration_fpath}")
 
+        # EEPROM and the on-disk file now agree — nothing left for
+        # _cleanup_device to roll back, regardless of what happens below.
+        self._calibration_committed = True
+
         # Robot-record write-back: if this calibration was launched from a tile,
         # update the robot's port + config field for the side that was just calibrated.
         request = self._current_request
@@ -706,13 +768,56 @@ class CalibrationManager:
 
     def _cleanup_device(self):
         """Clean up device connection"""
-        try:
-            if self.device:
-                logger.info("Disconnecting device...")
-                self.device.disconnect()
-                self.device = None
-        except Exception as e:
-            logger.error(f"Error disconnecting device: {e}")
+        # Serializes against a concurrent forced cleanup from
+        # stop_calibration_process (see its comment, and _cleanup_lock's
+        # docstring in __init__): only the first caller does real work, a
+        # second concurrent call finds self.device already None below.
+        with self._cleanup_lock:
+            try:
+                if self.device:
+                    # A run that never committed (cancelled, or errored before
+                    # _complete_calibration saved) may have already pushed new
+                    # Homing_Offset, Min_Position_Limit, and Max_Position_Limit
+                    # values to the servo in _step_homing (reset_calibration()
+                    # touches all three). Left as-is, the servo would permanently
+                    # diverge from the last-saved calibration file — the next
+                    # session's arm-identity check would then either hard-refuse
+                    # to start or, worse, silently decode positions against a
+                    # stale offset. Restore the pre-calibration baseline so a
+                    # cancelled run leaves the physical arm exactly as it found it.
+                    #
+                    # Each motor's write is its own try/except: one motor's write
+                    # failing must not abort the writes still queued for the
+                    # remaining motors, which would otherwise leave the arm
+                    # partially rolled back — some motors restored, others still
+                    # diverged — which is worse than leaving all of them diverged,
+                    # since it is much harder to notice and diagnose.
+                    if not self._calibration_committed and self._original_homing_offsets:
+                        logger.info(
+                            "Calibration did not complete — restoring pre-calibration "
+                            f"homing offsets: {self._original_homing_offsets}, "
+                            f"min position limits: {self._original_min_position_limits}, "
+                            f"max position limits: {self._original_max_position_limits}"
+                        )
+                        for register, baseline in (
+                            ("Homing_Offset", self._original_homing_offsets),
+                            ("Min_Position_Limit", self._original_min_position_limits),
+                            ("Max_Position_Limit", self._original_max_position_limits),
+                        ):
+                            for motor, value in baseline.items():
+                                try:
+                                    self.device.bus.write(register, motor, value)
+                                except Exception as e:
+                                    logger.error(
+                                        f"Failed to restore {register}={value} for {motor} "
+                                        f"after cancelled calibration: {e}"
+                                    )
+
+                    logger.info("Disconnecting device...")
+                    self.device.disconnect()
+                    self.device = None
+            except Exception as e:
+                logger.error(f"Error disconnecting device: {e}")
 
 
 # Global calibration manager instance
