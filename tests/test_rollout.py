@@ -26,6 +26,14 @@ import threading
 
 import pytest
 
+from makermodslab.eval_protocol import (
+    CMD_EPISODE,
+    CMD_QUIT,
+    CMD_STOP,
+    REASON_DURATION,
+    REASON_STOPPED,
+)
+
 
 @pytest.fixture(autouse=True)
 def _reset_rollout_globals(monkeypatch: pytest.MonkeyPatch):
@@ -1397,11 +1405,13 @@ def test_run_inference_startup_local_ref_skips_download_phase(monkeypatch, tmp_p
 # ---------------------------------------------------------------------------
 # Multi-episode EVALUATION mode
 #
-# Pure helpers (clamping, accuracy math, verdict classification), the request
-# schema, the status-payload shape, and the idle/mutex branches of the two new
-# endpoints. The subprocess happy path stays deliberately untested (per
-# CLAUDE.md) — the one exception is a fully-stubbed exit finalisation, which is
-# pure bookkeeping over a fake Popen and touches no hardware.
+# Pure helpers (clamping, accuracy math, verdict classification, protocol
+# parsing), the request schema, the status-payload shape, the orchestrator state
+# machine driven over a fake runner pipe, and the idle/mutex branches of the two
+# new endpoints. Nothing here spawns a process or touches hardware: the eval
+# runner is never executed, only stood in for. Per CLAUDE.md the subprocess
+# happy path stays untested — what IS tested is the bookkeeping either side of
+# it, which is where the verdicts and the crash containment live.
 # ---------------------------------------------------------------------------
 
 
@@ -1411,8 +1421,46 @@ class _ExitedProc:
     def __init__(self, rc: int = 0) -> None:
         self.returncode = rc
         self.pid = 4242
+        # A dead process has no usable command pipe — writing to it is exactly
+        # how the orchestrator discovers the runner is gone.
+        self.stdin = None
 
     def poll(self) -> int:
+        return self.returncode
+
+
+class _CommandPipe:
+    """A subprocess `stdin` that records the command lines written to it."""
+
+    def __init__(self, sink: list[str]) -> None:
+        self._sink = sink
+
+    def write(self, data: bytes) -> None:
+        self._sink.append(data.decode().strip())
+
+    def flush(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
+class _FakeRunner:
+    """A live `makermodslab.eval_runner` subprocess stand-in.
+
+    Unlike `_ExitedProc` it is ALIVE (`poll()` → None) and stays alive across
+    episodes, which is the property the redesign turns on: a live process no
+    longer implies a live episode, so the tests drive episode boundaries through
+    the protocol handlers rather than by pretending a process exited. Every
+    command the orchestrator sends lands in `.commands`."""
+
+    def __init__(self, rc: int | None = None) -> None:
+        self.pid = 4242
+        self.returncode = rc
+        self.commands: list[str] = []
+        self.stdin = _CommandPipe(self.commands)
+
+    def poll(self) -> int | None:
         return self.returncode
 
 
@@ -1427,22 +1475,37 @@ def _eval_request(episodes: int = 3):
     )
 
 
-def _arm_eval_session(monkeypatch, rollout, episodes: int = 3, *, running: bool = True, rc: int = 0):
-    """Put the module into a mid-eval state with an already-exited subprocess."""
+def _arm_eval_session(
+    monkeypatch,
+    rollout,
+    episodes: int = 3,
+    *,
+    running: bool = True,
+    proc=None,
+):
+    """Put the module into a mid-eval state with a live runner.
+
+    `running` is whether an EPISODE is in flight, which is now independent of
+    whether the runner process is up — pass `proc=None` for the (recoverable)
+    state left behind by a runner that died."""
     session = rollout._EvalSession(request=_eval_request(episodes), episodes_total=episodes)
     session.policy_path = "/tmp/policy"
     session.robot_args = ["--robot.type=so101_follower"]
+    session.episode_running = running
     monkeypatch.setattr(rollout, "_eval_session", session)
     monkeypatch.setattr(rollout, "inference_active", True)
     monkeypatch.setattr(rollout, "_inference_started_at", 1000.0)
-    monkeypatch.setattr(rollout, "_inference_rollout_started_at", 1005.0)
+    monkeypatch.setattr(rollout, "_inference_rollout_started_at", 1005.0 if running else None)
     monkeypatch.setattr(
         rollout,
         "_inference_meta",
-        {"phase": rollout.PHASE_RUNNING, "policy_ref": "user/repo@checkpoints/000050", "duration_s": 60},
+        {
+            "phase": rollout.PHASE_RUNNING if running else rollout.PHASE_RESETTING,
+            "policy_ref": "user/repo@checkpoints/000050",
+            "duration_s": 60,
+        },
     )
-    if running:
-        monkeypatch.setattr(rollout, "_inference_proc", _ExitedProc(rc))
+    monkeypatch.setattr(rollout, "_inference_proc", _FakeRunner() if (proc is None and running) else proc)
     return session
 
 
@@ -1614,11 +1677,14 @@ def test_start_inference_guard_failure_clears_the_eval_session(monkeypatch) -> N
 
 
 def test_episode_timeout_parks_the_session_in_the_reset_phase(monkeypatch) -> None:
-    """A clean exit scores a FAILURE and keeps the session (and its hold on the
-    inference slot + cameras) alive for the reset."""
+    """An episode that runs out its duration scores a FAILURE and keeps the
+    session — and its hold on the inference slot, the cameras AND the loaded
+    policy — alive for the reset."""
     from makermodslab import rollout
 
-    _arm_eval_session(monkeypatch, rollout, episodes=3, rc=0)
+    _arm_eval_session(monkeypatch, rollout, episodes=3)
+    runner = rollout._inference_proc
+    rollout._on_episode_ended(REASON_DURATION)
     status = rollout.handle_inference_status()
 
     assert status["phase"] == rollout.PHASE_RESETTING
@@ -1628,14 +1694,27 @@ def test_episode_timeout_parks_the_session_in_the_reset_phase(monkeypatch) -> No
     assert status["accuracy"] is None
     # The slot stays claimed through the reset — recording/teleop stay blocked.
     assert rollout.inference_active is True
-    assert rollout._inference_proc is None
+    # And so does the runner: the whole point is that the next episode does not
+    # re-pay the policy load. It is only told to QUIT once the session is over.
+    assert rollout._inference_proc is runner
+    assert runner.commands == []
 
 
 def test_early_stop_scores_the_episode_a_success(monkeypatch) -> None:
+    """The success button asks the runner to end the episode — no signal, no
+    kill — and the verdict lands when the runner reports the end."""
     from makermodslab import rollout
 
-    session = _arm_eval_session(monkeypatch, rollout, episodes=3, rc=-15)
-    session.stop_requested = True
+    session = _arm_eval_session(monkeypatch, rollout, episodes=3)
+    runner = rollout._inference_proc
+
+    assert rollout.handle_stop_episode()["success"] is True
+    assert runner.commands == [CMD_STOP]
+    assert session.stop_requested is True
+    # Still running until the runner says otherwise — nothing was scored yet.
+    assert session.results == []
+
+    rollout._on_episode_ended(REASON_STOPPED)
     status = rollout.handle_inference_status()
 
     assert status["episode_results"] == ["success"]
@@ -1644,9 +1723,29 @@ def test_early_stop_scores_the_episode_a_success(monkeypatch) -> None:
     assert session.stop_requested is False
 
 
-def test_crashed_episode_parks_with_the_error_visible(monkeypatch) -> None:
-    """A crash is neither success nor failure: it parks in the reset phase with
-    the mined error so the user can continue or abort."""
+def test_episode_end_reason_stopped_scores_a_success_without_the_flag(monkeypatch) -> None:
+    """The reason IS the STOP we sent, so it stands on its own — a lost flag
+    can't turn the user's success into a timeout."""
+    from makermodslab import rollout
+
+    _arm_eval_session(monkeypatch, rollout, episodes=3)
+    rollout._on_episode_ended(REASON_STOPPED)
+    assert rollout.handle_inference_status()["episode_results"] == ["success"]
+
+
+def test_episode_end_with_no_episode_in_flight_is_ignored(monkeypatch) -> None:
+    """A duplicate/late end line must not append a phantom verdict."""
+    from makermodslab import rollout
+
+    session = _arm_eval_session(monkeypatch, rollout, episodes=3, running=False, proc=_FakeRunner())
+    rollout._on_episode_ended(REASON_DURATION)
+    assert session.results == []
+
+
+def test_crashed_runner_parks_the_episode_with_the_error_visible(monkeypatch) -> None:
+    """A crash is neither success nor failure: the in-flight episode is scored
+    `error` and the session parks in the reset phase with the error on show, so
+    the user can continue (paying one reload) or abort."""
     from makermodslab import rollout
 
     monkeypatch.setattr(
@@ -1654,8 +1753,11 @@ def test_crashed_episode_parks_with_the_error_visible(monkeypatch) -> None:
         "_extract_error_from_log",
         lambda p: "DeviceNotConnectedError: could not connect to the follower bus",
     )
-    _arm_eval_session(monkeypatch, rollout, episodes=3, rc=1)
+    _arm_eval_session(monkeypatch, rollout, episodes=3)
+    runner = rollout._inference_proc
     monkeypatch.setattr(rollout, "_inference_rollout_started_at", None)
+
+    rollout._handle_runner_exit(runner, 1)
 
     status = rollout.handle_inference_status()
     assert status["episode_results"] == ["error"]
@@ -1664,13 +1766,65 @@ def test_crashed_episode_parks_with_the_error_visible(monkeypatch) -> None:
     assert "DeviceNotConnectedError" in status["error"]
     # The existing error taxonomy still applies to an episode-level crash.
     assert status["hint"]
+    # The dead runner is dropped, which is what makes the continue respawn.
+    assert rollout._inference_proc is None
+
+
+def test_crashed_runner_prefers_its_own_error_line(monkeypatch) -> None:
+    """The runner's ERROR event is the exception itself; log mining is a
+    heuristic over a traceback, so the event wins when both exist."""
+    from makermodslab import rollout
+
+    monkeypatch.setattr(rollout, "_extract_error_from_log", lambda p: "mined from the log tail")
+    _arm_eval_session(monkeypatch, rollout, episodes=3)
+    runner = rollout._inference_proc
+
+    rollout._on_runner_error("RuntimeError: the gripper stalled")
+    rollout._handle_runner_exit(runner, 1)
+
+    assert rollout.handle_inference_status()["error"] == "RuntimeError: the gripper stalled"
+
+
+def test_runner_death_during_a_reset_keeps_the_session_recoverable(monkeypatch) -> None:
+    """Nothing to score — but the user has to learn that continuing now costs a
+    reload, and the tally must survive."""
+    from makermodslab import rollout
+
+    monkeypatch.setattr(rollout, "_extract_error_from_log", lambda p: "OSError: the port vanished")
+    session = _arm_eval_session(monkeypatch, rollout, episodes=4, running=False, proc=_FakeRunner())
+    session.results.extend(["success", "failure"])
+    runner = rollout._inference_proc
+
+    rollout._handle_runner_exit(runner, 1)
+    status = rollout.handle_inference_status()
+
+    assert status["episode_results"] == ["success", "failure"]  # no phantom verdict
+    assert status["phase"] == rollout.PHASE_RESETTING
+    assert status["inference_active"] is True
+    assert "OSError" in status["error"]
+    assert rollout._inference_proc is None
+
+
+def test_expected_runner_exit_after_quit_is_not_scored(monkeypatch) -> None:
+    """An abort asks the runner to quit; that exit must not be read as a crash
+    and score the episode the abort deliberately left unscored."""
+    from makermodslab import rollout
+
+    session = _arm_eval_session(monkeypatch, rollout, episodes=3)
+    runner = rollout._inference_proc
+    session.quitting = True
+
+    rollout._handle_runner_exit(runner, 0)
+    assert session.results == []
 
 
 def test_last_episode_finishes_the_session_with_accuracy(monkeypatch) -> None:
     from makermodslab import rollout
 
-    session = _arm_eval_session(monkeypatch, rollout, episodes=3, rc=0)
+    session = _arm_eval_session(monkeypatch, rollout, episodes=3)
+    runner = rollout._inference_proc
     session.results.extend(["success", "success"])
+    rollout._on_episode_ended(REASON_DURATION)
     status = rollout.handle_inference_status()
 
     assert status["phase"] == rollout.PHASE_FINISHED
@@ -1683,14 +1837,17 @@ def test_last_episode_finishes_the_session_with_accuracy(monkeypatch) -> None:
     # The slot is released for the next session.
     assert rollout.inference_active is False
     assert rollout._eval_session is None
+    # And the runner is sent home rather than left holding the bus and cameras.
+    assert runner.commands == [CMD_QUIT]
 
 
 def test_finished_eval_payload_is_idempotent_across_polls(monkeypatch) -> None:
     """Several surfaces poll concurrently; the summary must survive every one."""
     from makermodslab import rollout
 
-    session = _arm_eval_session(monkeypatch, rollout, episodes=2, rc=0)
+    session = _arm_eval_session(monkeypatch, rollout, episodes=2)
     session.results.append("success")
+    rollout._on_episode_ended(REASON_DURATION)
     first = rollout.handle_inference_status()
     second = rollout.handle_inference_status()
     third = rollout.handle_inference_status()
@@ -1703,8 +1860,9 @@ def test_finished_eval_payload_is_idempotent_across_polls(monkeypatch) -> None:
 def test_accuracy_excludes_errors_in_the_finished_payload(monkeypatch) -> None:
     from makermodslab import rollout
 
-    session = _arm_eval_session(monkeypatch, rollout, episodes=3, rc=0)
+    session = _arm_eval_session(monkeypatch, rollout, episodes=3)
     session.results.extend(["success", "error"])
+    rollout._on_episode_ended(REASON_DURATION)
     status = rollout.handle_inference_status()
 
     assert status["episode_results"] == ["success", "error", "failure"]
@@ -1732,10 +1890,22 @@ def test_stop_episode_refuses_outside_eval_mode(monkeypatch) -> None:
 
 
 def test_stop_episode_refuses_while_parked_in_a_reset(monkeypatch) -> None:
+    """The runner is still ALIVE between episodes, so a live process is no
+    longer proof an episode is running — `episode_running` is."""
     from makermodslab import rollout
 
-    _arm_eval_session(monkeypatch, rollout, episodes=3, running=False)
-    monkeypatch.setattr(rollout, "_inference_meta", {"phase": rollout.PHASE_RESETTING})
+    _arm_eval_session(monkeypatch, rollout, episodes=3, running=False, proc=_FakeRunner())
+    result = rollout.handle_stop_episode()
+    assert result["success"] is False
+    assert result["status_code"] == 409
+
+
+def test_stop_episode_reports_a_dead_runner_instead_of_claiming_success(monkeypatch) -> None:
+    """A success can't be recorded against a runner that isn't there to end the
+    episode — the crash path will score it an error instead."""
+    from makermodslab import rollout
+
+    _arm_eval_session(monkeypatch, rollout, episodes=3, proc=_ExitedProc(1))
     result = rollout.handle_stop_episode()
     assert result["success"] is False
     assert result["status_code"] == 409
@@ -1759,37 +1929,28 @@ def test_next_episode_refuses_while_an_episode_is_still_running(monkeypatch) -> 
     assert result["status_code"] == 409
 
 
-def test_next_episode_spawns_with_the_cached_policy_and_robot_args(monkeypatch) -> None:
-    """Continuing costs one spawn: no re-download and no second arm preflight,
-    so the session's resolved path + `--robot.*` args are reused verbatim."""
+def test_next_episode_on_a_live_runner_costs_one_command(monkeypatch) -> None:
+    """The headline of the redesign: continuing does NOT spawn anything. The
+    policy is still resident and the bus and cameras are still open, so the
+    whole cost is one line on the runner's stdin."""
     from makermodslab import rollout
 
-    session = _arm_eval_session(monkeypatch, rollout, episodes=3, running=False)
+    session = _arm_eval_session(monkeypatch, rollout, episodes=3, running=False, proc=_FakeRunner())
+    runner = rollout._inference_proc
     session.results.append("failure")
     session.error = "old crash"
     session.hint = "old hint"
-    monkeypatch.setattr(
-        rollout,
-        "_inference_meta",
-        {"phase": rollout.PHASE_RESETTING, "policy_ref": "user/repo@checkpoints/000050", "duration_s": 60},
-    )
-    monkeypatch.setattr(rollout.threading, "Thread", _SyncThread)
 
-    launched = {}
+    def _explode(*a, **k):
+        raise AssertionError("continuing must not spawn a process")
 
-    def _fake_launch(request, policy_path, robot_args):
-        launched["policy_path"] = policy_path
-        launched["robot_args"] = robot_args
-        proc = _ExitedProc(0)
-        proc.stdout = _EmptyStdout()
-        return proc, io.StringIO(), __import__("pathlib").Path("/tmp/ep2.log")
-
-    monkeypatch.setattr(rollout, "_launch_rollout_subprocess", _fake_launch)
+    monkeypatch.setattr(rollout, "_launch_eval_runner", _explode)
+    monkeypatch.setattr(rollout, "_launch_rollout_subprocess", _explode)
 
     result = rollout.handle_next_episode()
     assert result["success"] is True
-    assert launched["policy_path"] == "/tmp/policy"
-    assert launched["robot_args"] == ["--robot.type=so101_follower"]
+    assert runner.commands == [CMD_EPISODE]
+    assert rollout._inference_proc is runner
     # The previous episode's crash banner is cleared on continue.
     assert session.error is None
     assert session.hint is None
@@ -1798,13 +1959,111 @@ def test_next_episode_spawns_with_the_cached_policy_and_robot_args(monkeypatch) 
     assert rollout._inference_rollout_started_at is None
 
 
+def test_next_episode_respawns_a_dead_runner_and_carries_the_tally(monkeypatch) -> None:
+    """Crash containment: a runner that died costs ONE reload, not the session.
+    The resolved policy path and preflighted `--robot.*` args are reused
+    verbatim — no re-download, no second arm-identity pass — and the tally so
+    far is carried forward."""
+    from makermodslab import rollout
+
+    session = _arm_eval_session(monkeypatch, rollout, episodes=3, running=False, proc=None)
+    session.results.append("error")
+    monkeypatch.setattr(rollout.threading, "Thread", _SyncThread)
+
+    launched = {}
+
+    def _fake_launch(request, policy_path, robot_args):
+        launched["policy_path"] = policy_path
+        launched["robot_args"] = robot_args
+        proc = _FakeRunner()
+        proc.stdout = _EmptyStdout()
+        return proc, io.StringIO(), __import__("pathlib").Path("/tmp/ep2.log")
+
+    monkeypatch.setattr(rollout, "_launch_eval_runner", _fake_launch)
+    # The pump would otherwise reap the fake proc and fire crash containment.
+    monkeypatch.setattr(rollout, "_handle_runner_exit", lambda proc, rc: None)
+
+    result = rollout.handle_next_episode()
+    assert result["success"] is True
+    assert launched["policy_path"] == "/tmp/policy"
+    assert launched["robot_args"] == ["--robot.type=so101_follower"]
+    assert session.results == ["error"]
+    # The episode is PENDING, not started: the respawned runner has to finish
+    # loading first, and its READY is what issues the command.
+    assert session.episode_pending is True
+    assert rollout._inference_meta["log_path"] == "/tmp/ep2.log"
+
+
+def test_runner_ready_issues_the_pending_episode(monkeypatch) -> None:
+    from makermodslab import rollout
+
+    session = _arm_eval_session(monkeypatch, rollout, episodes=3, running=False, proc=_FakeRunner())
+    runner = rollout._inference_proc
+    session.episode_pending = True
+
+    rollout._on_runner_ready()
+    assert runner.commands == [CMD_EPISODE]
+    assert rollout._inference_meta["phase"] == rollout.PHASE_STARTING
+
+
+def test_runner_ready_stays_idle_when_no_episode_is_pending(monkeypatch) -> None:
+    """A READY from a respawn the user hasn't continued from — or one that lands
+    after an abort — must not put the arm in motion."""
+    from makermodslab import rollout
+
+    session = _arm_eval_session(monkeypatch, rollout, episodes=3, running=False, proc=_FakeRunner())
+    runner = rollout._inference_proc
+    session.episode_pending = False
+    rollout._on_runner_ready()
+    assert runner.commands == []
+
+    session.episode_pending = True
+    session.quitting = True
+    rollout._on_runner_ready()
+    assert runner.commands == []
+
+
+def test_episode_started_flips_the_phase_to_running(monkeypatch) -> None:
+    from makermodslab import rollout
+
+    session = _arm_eval_session(monkeypatch, rollout, episodes=3, running=False, proc=_FakeRunner())
+    session.episode_pending = True
+
+    rollout._on_episode_started()
+    assert session.episode_running is True
+    assert session.episode_pending is False
+    assert rollout._inference_meta["phase"] == rollout.PHASE_RUNNING
+    assert rollout._inference_rollout_started_at is not None
+
+
+def test_stop_inference_quits_the_runner_instead_of_signalling_it(monkeypatch) -> None:
+    """Abort mid-episode: the runner is asked to wind down so the follower still
+    eases home, and the in-flight episode stays deliberately unscored."""
+    from makermodslab import rollout
+
+    session = _arm_eval_session(monkeypatch, rollout, episodes=5)
+    session.results.extend(["success", "failure"])
+    runner = rollout._inference_proc
+    quit_calls = []
+    monkeypatch.setattr(rollout, "_quit_runner", lambda proc: quit_calls.append(proc))
+
+    result = rollout.handle_stop_inference()
+    assert result["success"] is True
+    assert quit_calls == [runner]
+    assert session.quitting is True
+
+    status = rollout.handle_inference_status()
+    assert status["phase"] == rollout.PHASE_ABORTED
+    assert status["episode_results"] == ["success", "failure"]  # the cut episode isn't scored
+    assert status["accuracy"] is None
+
+
 def test_stop_inference_aborts_an_eval_parked_in_a_reset(monkeypatch) -> None:
     """Abort reports the partial tally and deliberately claims NO accuracy."""
     from makermodslab import rollout
 
-    session = _arm_eval_session(monkeypatch, rollout, episodes=5, running=False)
+    session = _arm_eval_session(monkeypatch, rollout, episodes=5, running=False, proc=None)
     session.results.extend(["success", "failure"])
-    monkeypatch.setattr(rollout, "_inference_meta", {"phase": rollout.PHASE_RESETTING})
 
     result = rollout.handle_stop_inference()
     assert result["success"] is True
@@ -1829,3 +2088,217 @@ def test_stop_inference_still_ends_a_single_run_the_old_way(monkeypatch) -> None
     assert result["success"] is True
     assert rollout.inference_active is False
     assert rollout._last_result is None
+
+
+# ---------------------------------------------------------------------------
+# Eval-runner line protocol + argv (makermodslab/eval_protocol.py)
+#
+# Pure string handling, no process anywhere near it. The runner itself is NEVER
+# executed by the suite — it drives real servos.
+# ---------------------------------------------------------------------------
+
+
+def test_protocol_round_trips_an_event_and_its_payload() -> None:
+    from makermodslab.eval_protocol import format_event, parse_event
+
+    line = format_event("EPISODE_ENDED", "reason=duration")
+    assert parse_event(line) == ("EPISODE_ENDED", "reason=duration")
+    assert parse_event(format_event("READY")) == ("READY", "")
+
+
+def test_protocol_collapses_a_multiline_payload_onto_one_line() -> None:
+    """A traceback in an ERROR payload must not split one event across several
+    lines — the reader is line-oriented and would read the tail as junk."""
+    from makermodslab.eval_protocol import format_event, parse_event
+
+    line = format_event("ERROR", "RuntimeError: boom\n  File 'x.py', line 3\n")
+    assert "\n" not in line
+    event, payload = parse_event(line)
+    assert event == "ERROR"
+    assert payload.startswith("RuntimeError: boom")
+
+
+def test_protocol_ignores_ordinary_log_lines() -> None:
+    from makermodslab.eval_protocol import parse_event
+
+    assert parse_event("INFO 2026-07-31 Connecting robot (so101_follower)...\n") is None
+    assert parse_event("") is None
+
+
+def test_protocol_finds_an_event_appended_to_a_log_line() -> None:
+    """The runner's logging handler shares the pipe; a record flushed without
+    its newline must not swallow the event behind it."""
+    from makermodslab.eval_protocol import parse_event
+
+    assert parse_event("INFO some log MAKERMODSLAB-EVAL EPISODE_STARTED") == ("EPISODE_STARTED", "")
+
+
+def test_protocol_reason_parsing_is_conservative() -> None:
+    """An unrecognised (or renamed) reason yields "" rather than a guess: the
+    orchestrator must not score an episode off a reason it doesn't understand."""
+    from makermodslab.eval_protocol import parse_episode_end_reason
+
+    assert parse_episode_end_reason("reason=stopped") == "stopped"
+    assert parse_episode_end_reason("elapsed=30 reason=duration") == "duration"
+    assert parse_episode_end_reason("") == ""
+    assert parse_episode_end_reason("something-else") == ""
+
+
+def test_unknown_episode_end_reason_scores_a_failure_not_a_success(monkeypatch) -> None:
+    """Degrade the way the pre-runner code did — an episode that ended without
+    the user calling it a success is a failure — rather than inventing a verdict."""
+    from makermodslab import rollout
+
+    _arm_eval_session(monkeypatch, rollout, episodes=3)
+    rollout._on_episode_ended("")
+    assert rollout.handle_inference_status()["episode_results"] == ["failure"]
+
+
+def test_eval_runner_and_rollout_argv_share_every_flag() -> None:
+    """One flag list, two entry points. A flag added for the single-episode path
+    must never be missing from the eval runner's."""
+    from makermodslab.rollout import _build_eval_runner_cmd, _build_rollout_cmd
+
+    request = _eval_request(4)
+    args = ("/local/pretrained_model", ["--robot.type=so101_follower", "--robot.port=/dev/ttyUSB0"])
+    rollout_cmd = _build_rollout_cmd(request, *args)
+    runner_cmd = _build_eval_runner_cmd(request, *args)
+
+    assert rollout_cmd[1:3] == ["-m", "lerobot.scripts.lerobot_rollout"]
+    assert runner_cmd[1:3] == ["-m", "makermodslab.eval_runner"]
+    assert rollout_cmd[3:] == runner_cmd[3:]
+    assert "--return_to_initial_position=true" in runner_cmd
+    assert "--strategy.type=base" in runner_cmd
+
+
+def test_eval_start_spawns_the_runner_with_stdin_left_open(monkeypatch, tmp_path) -> None:
+    """Eval mode gets ONE long-lived runner whose stdin is the command channel;
+    the single-episode path still gets `lerobot-rollout` with stdin closed."""
+    from makermodslab import rollout
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(rollout, "_preflight_arm_identity", lambda *a, **k: [])
+    monkeypatch.setattr(rollout, "_preflight_motor_registers", lambda *a, **k: [])
+    monkeypatch.setattr(rollout, "setup_follower_calibration_file", lambda name: name)
+    monkeypatch.setattr(rollout, "_resolve_policy_path", lambda ref, report=None: "/local/model")
+    monkeypatch.setattr(rollout, "_detect_device", lambda: "cpu")
+    monkeypatch.setattr(rollout, "_policy_ref_is_valid", lambda ref: True)
+    monkeypatch.setattr(rollout.camera_preview_manager, "stop_all", lambda: None)
+    monkeypatch.setattr(rollout.threading, "Thread", _SyncThread)
+    monkeypatch.setattr(rollout, "_pump_runner_stdout", lambda proc, log: None)
+
+    captured: dict = {}
+
+    class _FakeStdin:
+        def __init__(self) -> None:
+            self.written = b""
+            self.closed = False
+
+        def write(self, data: bytes) -> None:
+            self.written += data
+
+        def flush(self) -> None:
+            pass
+
+        def close(self) -> None:
+            self.closed = True
+
+    class _FakeProc:
+        pid = 9999
+
+        def __init__(self, cmd, **kwargs):
+            captured["cmd"] = cmd
+            self.stdin = _FakeStdin()
+            self.stdout = _EmptyStdout()
+            captured["stdin"] = self.stdin
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(rollout.subprocess, "Popen", _FakeProc)
+
+    assert rollout.handle_start_inference(_eval_request(6))["success"] is True
+    assert captured["cmd"][1:3] == ["-m", "makermodslab.eval_runner"]
+    # The command channel has to stay open — closing it is what a one-shot
+    # rollout does, and it would make every later EPISODE unsendable.
+    assert captured["stdin"].closed is False
+    assert captured["stdin"].written == b"\n"
+    # Episode 1 is pending: it is issued when the runner reports READY, after
+    # the one-time policy load.
+    assert rollout._eval_session.episode_pending is True
+    assert rollout._eval_session.episode_running is False
+
+
+def test_single_episode_start_still_spawns_lerobot_rollout(monkeypatch, tmp_path) -> None:
+    """`eval_episodes == 1` is untouched by the redesign: same module, and stdin
+    closed straight after the calibration seed."""
+    from makermodslab import rollout
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(rollout, "_preflight_arm_identity", lambda *a, **k: [])
+    monkeypatch.setattr(rollout, "_preflight_motor_registers", lambda *a, **k: [])
+    monkeypatch.setattr(rollout, "setup_follower_calibration_file", lambda name: name)
+    monkeypatch.setattr(rollout, "_resolve_policy_path", lambda ref, report=None: "/local/model")
+    monkeypatch.setattr(rollout, "_detect_device", lambda: "cpu")
+    monkeypatch.setattr(rollout, "_policy_ref_is_valid", lambda ref: True)
+    monkeypatch.setattr(rollout.camera_preview_manager, "stop_all", lambda: None)
+    monkeypatch.setattr(rollout.threading, "Thread", _SyncThread)
+
+    captured: dict = {}
+
+    class _FakeStdin:
+        def __init__(self) -> None:
+            self.written = b""
+            self.closed = False
+
+        def write(self, data: bytes) -> None:
+            self.written += data
+
+        def flush(self) -> None:
+            pass
+
+        def close(self) -> None:
+            self.closed = True
+
+    class _FakeProc:
+        pid = 9999
+
+        def __init__(self, cmd, **kwargs):
+            captured["cmd"] = cmd
+            self.stdin = _FakeStdin()
+            self.stdout = _EmptyStdout()
+            captured["stdin"] = self.stdin
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(rollout.subprocess, "Popen", _FakeProc)
+
+    assert rollout.handle_start_inference(_eval_request(1))["success"] is True
+    assert captured["cmd"][1:3] == ["-m", "lerobot.scripts.lerobot_rollout"]
+    assert captured["stdin"].closed is True
+    assert rollout._eval_session is None
+
+
+def test_runner_death_before_the_first_episode_fails_the_session(monkeypatch) -> None:
+    """A bad policy path / missing camera / busy bus kills the runner before any
+    episode starts. That is a startup failure, not an evaluation with one bad
+    episode — parking in a reset would offer a continue that can only fail the
+    same way."""
+    from makermodslab import rollout
+
+    monkeypatch.setattr(rollout, "_extract_error_from_log", lambda p: "FileNotFoundError: no such checkpoint")
+    session = _arm_eval_session(monkeypatch, rollout, episodes=4, running=False, proc=_FakeRunner())
+    session.episode_pending = True
+    runner = rollout._inference_proc
+
+    rollout._handle_runner_exit(runner, 1)
+
+    status = rollout.handle_inference_status()
+    assert status["phase"] == rollout.PHASE_ERROR
+    assert status["outcome"] == "failed"
+    assert status["inference_active"] is False
+    assert "FileNotFoundError" in status["error"]
+    assert rollout._eval_session is None
+    # Idempotent, like every other terminal payload.
+    assert rollout.handle_inference_status()["phase"] == rollout.PHASE_ERROR
