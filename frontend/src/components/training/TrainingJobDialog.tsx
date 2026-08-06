@@ -8,7 +8,13 @@ import TrainingLogs from "@/components/training/monitoring/TrainingLogs";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import {
   Loader2,
   Play,
@@ -33,6 +39,7 @@ import { useStudio } from "@/contexts/StudioContext";
 import { uploadModel } from "@/lib/modelsApi";
 import { ApiError } from "@/lib/apiClient";
 import { useCanUpload } from "@/hooks/useCanUpload";
+import { useHfAuth } from "@/contexts/HfAuthContext";
 
 const POLL_INTERVAL_MS = 1000;
 const MAX_LOG_LINES = 5000;
@@ -88,6 +95,8 @@ const TrainingJobDialog: React.FC<{
 
   const { openStudio } = useStudio();
   const canUpload = useCanUpload();
+  const { auth } = useHfAuth();
+  const username = auth.status === "authenticated" ? auth.username : null;
   const [job, setJob] = useState<JobRecord | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [logs, setLogs] = useState<LogEntry[]>([]);
@@ -96,6 +105,7 @@ const TrainingJobDialog: React.FC<{
   const [selectedStep, setSelectedStep] = useState<number | null>(null);
   const [repoId, setRepoId] = useState("");
   const [uploading, setUploading] = useState(false);
+  const [publishOpen, setPublishOpen] = useState(false);
 
   // Seed logs from the persistent on-disk file once on mount, so closing and
   // reopening the dialog (or coming in fresh on a finished/interrupted job)
@@ -256,6 +266,7 @@ const TrainingJobDialog: React.FC<{
         job.id,
         repoId.trim() || undefined,
       );
+      setPublishOpen(false);
       toast({
         title: "Uploaded to Hub",
         description: (
@@ -449,28 +460,78 @@ const TrainingJobDialog: React.FC<{
               )}
             </div>
             {!isRunning && checkpoints.length > 0 && !job.hf_repo_id && canUpload && (
-              <div className="flex items-center gap-3 rounded-md border border-border bg-card p-4">
-                <span className="eyebrow">Publish to Hub</span>
-                <Input
-                  value={repoId}
-                  onChange={(e) => setRepoId(e.target.value)}
-                  placeholder="namespace/repo-name (optional)"
-                  className="h-9 max-w-xs text-xs"
-                  disabled={uploading}
-                />
-                <Button onClick={handleUpload} disabled={uploading} size="sm">
-                  {uploading ? (
-                    <>
-                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                      Uploading…
-                    </>
-                  ) : (
-                    <>
-                      <UploadIcon className="mr-2 h-4 w-4" />
-                      Upload to Hub
-                    </>
-                  )}
-                </Button>
+              <div className="flex items-center justify-between gap-3 rounded-md border border-border bg-card p-4">
+                <div className="min-w-0">
+                  <span className="eyebrow">Publish to Hub</span>
+                  <p className="mt-0.5 text-xs text-muted-foreground">
+                    Share this run's final checkpoint as a public model on the
+                    Hub.
+                  </p>
+                </div>
+                <Popover open={publishOpen} onOpenChange={setPublishOpen}>
+                  <PopoverTrigger asChild>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={uploading}
+                      className="h-8 shrink-0 gap-1.5 border-teal-500/50 text-teal-700 hover:bg-teal-500/10 dark:text-teal-300"
+                    >
+                      {uploading ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <UploadIcon className="h-3.5 w-3.5" />
+                      )}
+                      {uploading ? "Uploading…" : "Upload to Hub"}
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent align="end" className="w-72 text-xs">
+                    <div className="space-y-3">
+                      <div className="space-y-1">
+                        <Label
+                          htmlFor={`publish-repo-id-${jobId}`}
+                          className="font-normal text-muted-foreground"
+                        >
+                          Repo name (optional)
+                        </Label>
+                        <Input
+                          id={`publish-repo-id-${jobId}`}
+                          value={repoId}
+                          onChange={(e) => setRepoId(e.target.value)}
+                          placeholder={
+                            username ? `${username}/${jobId}` : "namespace/repo-name"
+                          }
+                          className="h-7 text-xs"
+                          disabled={uploading}
+                        />
+                        <p className="leading-snug text-muted-foreground">
+                          Leave blank to publish under your namespace as{" "}
+                          <span className="font-mono">
+                            {username ? `${username}/${jobId}` : jobId}
+                          </span>
+                          .
+                        </p>
+                      </div>
+                      <Button
+                        size="sm"
+                        onClick={handleUpload}
+                        disabled={uploading}
+                        className="h-7 w-full gap-1 text-xs"
+                      >
+                        {uploading ? (
+                          <>
+                            <Loader2 className="h-3 w-3 animate-spin" />
+                            Uploading…
+                          </>
+                        ) : (
+                          <>
+                            <UploadIcon className="h-3 w-3" />
+                            Confirm & upload
+                          </>
+                        )}
+                      </Button>
+                    </div>
+                  </PopoverContent>
+                </Popover>
               </div>
             )}
             <TrainingLogs logs={logs} logContainerRef={logContainerRef} />
