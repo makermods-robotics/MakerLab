@@ -36,7 +36,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import shutil
 import threading
 import time
@@ -64,6 +63,14 @@ from .utils.config import (
     with_makermodslab_tag,
 )
 from .utils.hf_auth import cached_whoami, hf_hub_offline, shared_hf_api
+from .utils.naming import (
+    KNOWN_POLICY_TYPES,
+    POLICY_TYPES_BY_LENGTH as _POLICY_TYPES_BY_LENGTH,
+    RUN_REPO_TIMESTAMP_RE,
+    dedupe_display_names,
+    imported_name_suffixes,
+    iso_time_suffixes,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -74,29 +81,9 @@ _LOCAL_MODEL_SCAN_LIMIT = 500
 # A repo qualifies as a MakerMods Lab-relevant model if it carries the `lerobot` library
 # tag (what push_to_hub stamps) OR its name matches the MakerMods Lab run-repo pattern
 # (a "_<timestamp>" suffix). Same union as server.py's _list_author_models.
-_RUN_REPO_RE = re.compile(r"_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$")
-
-# Canonical policy types lerobot can load — mirrors the registry in
-# lerobot/policies/factory.py (get_policy_class / make_policy_config). Defined
-# once here as the single source of truth for recognizing a Hub repo's policy
-# type from its tags / name / card; update alongside lerobot pin bumps.
-KNOWN_POLICY_TYPES = {
-    "tdmpc",
-    "diffusion",
-    "act",
-    "multi_task_dit",
-    "vqbet",
-    "pi0",
-    "pi05",
-    "gaussian_actor",
-    "smolvla",
-    "wall_x",
-    "pi0_fast",
-}
-
-# Longest-first for name-prefix matching, so a shorter type can never shadow a
-# longer one it prefixes (pi0 must not swallow a pi0_fast_... repo name).
-_POLICY_TYPES_BY_LENGTH = sorted(KNOWN_POLICY_TYPES, key=len, reverse=True)
+# The pattern itself now lives in utils/naming.py, which also derives titles from
+# it — one definition, so a repo that reads as generated to one reads so to both.
+_RUN_REPO_RE = RUN_REPO_TIMESTAMP_RE
 
 
 def _hub_policy_type(tags: list[str] | None, repo_name: str) -> str | None:
@@ -523,6 +510,193 @@ def list_hub_models() -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
+def _job_run_steps(record: JobRecord) -> int | None:
+    """How many steps the run behind a Hub repo actually trained.
+
+    A run that reached "done" trained to its configured target, and
+    `config.steps` is that target in GLOBAL steps even for a resumed run —
+    prefer it, because the metrics tail can stop short of the end (the last log
+    lines are parsed at log_freq granularity, and a terminal transition can drop
+    the final one). Otherwise the run stopped early, so the last step its metrics
+    observed is the honest number. None when neither is known: the row keeps the
+    listing's null rather than invent one.
+    """
+    if record.state == "done" and record.config.steps:
+        return record.config.steps
+    if record.metrics.current_step:
+        return record.metrics.current_step
+    return None
+
+
+def _job_outranks(candidate: JobRecord, incumbent: JobRecord) -> bool:
+    """Ranking used to pick which run identifies a shared output repo: a run
+    that reached "done" beats one that didn't (it is the one that published the
+    final policy at the repo root), and among equals the later-started run
+    wins (the deepest link of a resume chain)."""
+    candidate_done = candidate.state == "done"
+    incumbent_done = incumbent.state == "done"
+    if candidate_done != incumbent_done:
+        return candidate_done
+    return candidate.started_at > incumbent.started_at
+
+
+def _jobs_by_hub_repo() -> dict[str, JobRecord]:
+    """Tracked runs keyed by the Hub repo they publish to, one run per repo.
+
+    A cloud resume REUSES its parent's output repo (hf_cloud sets
+    `policy_repo_id = resume_from_hub_repo`), so an N-deep resume chain shares a
+    single repo named after run #1 — and the Hub listing, which keys on repo_id,
+    then has no row under the name of the run that actually finished. Collapse
+    each repo to the run that best identifies it (see _job_outranks).
+
+    IMPORTED records are skipped: an import REGISTERS an existing repo rather
+    than producing it, so its config is a placeholder (dataset_repo_id
+    "(imported)", the default step count) and its auto-generated name says less
+    than the repo id does. They are also always "done" and usually the newest
+    record for their repo, so ranking them would let a placeholder outrank the
+    run that actually trained the weights.
+
+    Reads the registry, never mutates it. The scan limit matches
+    list_local_models so the two passes share the registry's per-record
+    checkpoint-count work (and, for cloud records, its 30s Hub cache) instead of
+    doubling it."""
+    best: dict[str, JobRecord] = {}
+    for record in job_registry.list(limit=_LOCAL_MODEL_SCAN_LIMIT):
+        repo_id = record.hf_repo_id
+        if not repo_id or record.runner == "imported":
+            continue
+        incumbent = best.get(repo_id)
+        if incumbent is None or _job_outranks(record, incumbent):
+            best[repo_id] = record
+    return best
+
+
+def _run_identity_name(record: JobRecord) -> str:
+    """A run's human name peeled down to the TASK it learned.
+
+    jobs.start auto-generates an unnamed run's name as
+    "{POLICY} · {dataset_repo_id}" — "SMOLVLA · makermods/eraser_place". Both
+    halves of that are stated elsewhere on every surface that renders it: the
+    row carries `policy_type` in its own field and `dataset` (the full repo id,
+    namespace included) in another, so the title line — the widest and the first
+    to truncate — spends its pixels on facts printed twice. Peel both:
+
+      "SMOLVLA · makermods/eraser_place"  ->  "eraser_place"
+
+    which converges model-card naming on one philosophy: the task identity,
+    policy-free and namespace-free. Imported titles already read this way
+    (utils.naming.derive_imported_title), and the retired "Imported · " prefix
+    (jobs._LEGACY_IMPORT_NAME_PREFIX) went for the same reason.
+
+    Only the GENERATED shape is peeled, and only when the head is a policy type
+    we recognize — a user-typed job_name that happens to contain " · " keeps
+    every word, and so does a name whose head isn't a policy. The namespace peel
+    is gated behind that same check, so it can never eat a slash out of a name a
+    human wrote. A rename (`display_name`) never reaches here; the caller
+    prefers it outright.
+
+    Two datasets that share a task name across namespaces (a/pick and b/pick)
+    now render one label twice — that is what _dedupe_listing_names exists for,
+    and its date suffix separates them.
+    """
+    head, separator, tail = record.name.partition(" · ")
+    if not (separator and tail and head.lower() in KNOWN_POLICY_TYPES):
+        return record.name
+    # The tail is a dataset repo id: keep the segment after the namespace. A
+    # bare name with no slash is already the task.
+    _namespace, slash, task = tail.partition("/")
+    return task if slash and task else tail
+
+
+def _enrich_repo_rows_from_jobs(merged: dict[str, dict[str, Any]]) -> None:
+    """Give each repo-keyed row the identity of the run that produced it.
+
+    Applies only to rows still named after their repo id — i.e. rows no local
+    checkpoint has claimed (a "both" collapse from a local run already put the
+    run's own name and detail there, and local always wins). That covers the
+    hub-only rows, hub rows flipped to "both" by a downloaded copy, and pinned
+    rows the Hub listing didn't return.
+
+    Identity fields are NOT touched: `id`, `repo_id` and `hf_repo_id` route
+    every request (info / download / pin / hide / deploy) and a resume chain's
+    repo keeps the name of run #1 on the Hub. Only the human-facing `name` is
+    replaced, plus the detail fields the repo listing could not know — filled in
+    only where they are still null, so a checkpoint-derived value always wins.
+    """
+    by_repo = _jobs_by_hub_repo()
+    if not by_repo:
+        return
+    for row in merged.values():
+        repo_id = row.get("hf_repo_id")
+        if not repo_id or row.get("name") != repo_id:
+            continue
+        record = by_repo.get(repo_id)
+        if record is None:
+            continue
+        row["name"] = record.display_name or _run_identity_name(record)
+        if row.get("policy_type") is None:
+            row["policy_type"] = record.config.policy_type or None
+        if row.get("dataset") is None:
+            row["dataset"] = record.config.dataset_repo_id or None
+        if row.get("steps") is None:
+            row["steps"] = _job_run_steps(record)
+
+
+def _row_dedupe_suffixes(row: dict[str, Any]) -> list[str]:
+    """The disambiguator ladder for one listing row, least → most specific.
+
+    Prefers the run timestamp embedded in the row's own NAME — every repo a
+    MakerMods Lab run publishes to carries the `_<date>_<time>` tail its run id
+    was generated with — over the Hub's `last_modified`. The two usually agree,
+    and where they disagree the name is the one the user means: last_modified
+    moves whenever anything is pushed to the repo (a re-push of the same
+    weights, a README edit, a later checkpoint upload), so a row could acquire a
+    date months after the run it labels and read as simply wrong next to its
+    sibling. The name's stamp is when the run STARTED and never moves.
+
+    Falls back to last_modified for a row whose name carries no stamp — a
+    community repo, a hand-named upload — which is the only signal there is.
+    Both ladders come from utils.naming, so a name-derived suffix and a
+    time-derived one are formatted identically and can disambiguate each other.
+    """
+    source = str(row.get("hf_repo_id") or row.get("id") or "")
+    if source and _RUN_REPO_RE.search(source.rsplit("/", 1)[-1]):
+        return imported_name_suffixes(source)
+    return iso_time_suffixes(row.get("last_modified"))
+
+
+def _dedupe_listing_names(merged: dict[str, dict[str, Any]]) -> None:
+    """Make the listing's display names unique, in place.
+
+    Run names are auto-generated from policy + dataset (jobs.start →
+    "SMOLVLA · ns/task", which the enrichment peels down to "task" — see
+    _run_identity_name), so retraining one task — a longer run, a different
+    seed — produces a SECOND row with a byte-identical name. Naming rows after
+    their run (see _enrich_repo_rows_from_jobs) makes that collision visible in
+    the picker, where two rows then read as duplicates of each other with
+    nothing on either to say which is which.
+
+    Disambiguate least-specific first (see _row_dedupe_suffixes for where the
+    date comes from, and dedupe_display_names, which escalates to date + time
+    and falls back to an ordinal if even that ties). Runs over EVERY row, not
+    just the enriched ones — two local runs of one policy on one dataset collide
+    the same way and never went near the enrichment.
+
+    Rows are grouped by (name, policy_type), so an ACT and a SmolVLA of one task
+    are NOT suffixed: the Policy row on the card already separates them, and a
+    date there would imply the difference between the two is when they ran.
+    Identity fields are left alone, on the same rule as the enrichment: only
+    `name` is display.
+    """
+    rows = list(merged.values())
+    resolved = dedupe_display_names(
+        [(str(row.get("name") or ""), _row_dedupe_suffixes(row)) for row in rows],
+        group_keys=[row.get("policy_type") for row in rows],
+    )
+    for row, name in zip(rows, resolved, strict=True):
+        row["name"] = name
+
+
 def list_all_models() -> list[dict[str, Any]]:
     """Merged listing: local completed runs + Hub policy repos, with a `source`.
 
@@ -531,6 +705,11 @@ def list_all_models() -> list[dict[str, Any]]:
     local-only run is "local". Mirrors list_all_datasets's merge/dedup/sort and
     its resilience: the Hub half is best-effort (list_hub_models never raises),
     so a Hub outage degrades to local-only rather than crashing.
+
+    A row still named after its repo id is then named after the tracked run that
+    produced it (see _enrich_repo_rows_from_jobs) — a repo id names a run only
+    by accident, and never names the right one for a cloud resume chain, which
+    publishes every link into the FIRST run's repo.
 
     Cached for up to _LISTING_CACHE_TTL_S so repeated startup/nav loads reuse a
     recent listing; a mutation invalidates the cache (see
@@ -650,6 +829,21 @@ def list_all_models() -> list[dict[str, Any]]:
             existing["source"] = "both"
             existing["hf_repo_id"] = repo_id
             existing["saved_custom"] = True
+
+    # Name the repo-keyed rows after the run that produced them, now that every
+    # source has merged in. A tracked run whose output repo is shared with its
+    # resume chain (or simply never collapsed into a local row) would otherwise
+    # reach the picker as a bare repo id with null steps/dataset — under the
+    # name of the FIRST run in the chain, never the one that finished. Runs
+    # after the merge and before the hidden filter so it can't resurrect a
+    # hidden row, and so local-checkpoint detail always wins (see the helper).
+    _enrich_repo_rows_from_jobs(merged)
+
+    # Then separate the rows the naming above left indistinguishable: two runs
+    # of one policy on one dataset carry the same auto-generated name, so the
+    # picker would show the same label twice. Immediately after the enrichment
+    # so it sees the final names, and still before the hidden filter.
+    _dedupe_listing_names(merged)
 
     # Hidden models ("removed from list") are filtered LAST — after the
     # hub/local/downloaded merge and the pin fold — so a hidden id can't

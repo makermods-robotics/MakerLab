@@ -41,6 +41,11 @@ from pydantic import BaseModel
 from .train import TrainingRequest
 from .utils.config import is_valid_robot_name
 from .utils.hf_auth import shared_hf_api
+from .utils.naming import (
+    dedupe_display_names,
+    derive_imported_title,
+    imported_name_suffixes,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -890,6 +895,35 @@ def _normalize_import_source(source: str) -> str:
     return src.rstrip("/")
 
 
+# What register_imported used to auto-name a card before titles were derived
+# ("Imported · makermods/smolvla_makermods_orange_box_2026-08-03_12-53-30"). The
+# prefix duplicated the card's own provenance chip and pushed the one useful
+# segment — the task — past the truncation. Recognized so existing records
+# re-derive on load instead of keeping a name no new import would produce.
+_LEGACY_IMPORT_NAME_PREFIX = "Imported · "
+
+
+def _auto_imported_name(record: JobRecord) -> str | None:
+    """The title an imported record's source derives to, or None to leave it be.
+
+    Returns None for a record whose `name` the CALLER chose (POST /jobs/import
+    takes an optional name): an explicit name is the user's, and re-deriving
+    would silently throw it away. Everything the auto-namer has ever produced is
+    recognizable — the legacy prefixed form, the bare derived title, and a
+    derived title carrying a collision suffix — so the test is precise rather
+    than a guess about which names look generated.
+    """
+    source = record.hf_repo_id or record.output_dir
+    if record.runner != "imported" or not source:
+        return None
+    derived = derive_imported_title(source)
+    if record.name.startswith(_LEGACY_IMPORT_NAME_PREFIX):
+        return derived
+    if record.name == derived or record.name.startswith(f"{derived} ("):
+        return derived
+    return None
+
+
 def _paths_are_same_dir(a: str, b: str) -> bool:
     """True when two path strings refer to the same directory on disk.
 
@@ -986,6 +1020,9 @@ class JobRegistry:
         self._migrate_legacy_cwd_jobs()
         self._load_from_disk()
         self._dedupe_imported_records()
+        # After the dedupe, so a collapsed duplicate can't be counted as a
+        # colliding title and drag a suffix onto the card that survived it.
+        self._resolve_imported_names()
         self._start_watchdog()
 
     def _migrate_legacy_cwd_jobs(self) -> None:
@@ -1312,11 +1349,9 @@ class JobRegistry:
             resolved = str(local_path.resolve())
             ckpts = _list_imported_local(resolved)
             output_dir, hf_repo_id = resolved, None
-            label = local_path.name or resolved
         else:
             ckpts = _list_imported_hub(shared_hf_api(), src)
             output_dir, hf_repo_id = "", src
-            label = src
 
         if not ckpts:
             raise ValueError(
@@ -1336,7 +1371,10 @@ class JobRegistry:
             job_id = self._unique_job_id(policy_type, "imported")
             record = JobRecord(
                 id=job_id,
-                name=name or f"Imported · {label}",
+                # Identity only — no "Imported ·" prefix (the card's own
+                # provenance chip says that) and no namespace or policy token
+                # (the policy row says that). See derive_imported_title.
+                name=name or derive_imported_title(hf_repo_id or output_dir),
                 state="done",
                 config=TrainingRequest(dataset_repo_id="(imported)", policy_type=policy_type),
                 output_dir=output_dir,
@@ -1347,6 +1385,10 @@ class JobRegistry:
             )
             self._records[job_id] = record
             self._persist(record, force=True)
+        # Two imports of one task derive the same title; re-run over the whole
+        # set (not just the newcomer) so BOTH cards get a disambiguator and
+        # neither is left as the bare, ambiguous-looking one.
+        self._resolve_imported_names()
         self._notify_change()
         return record
 
@@ -1698,6 +1740,49 @@ class JobRegistry:
                     keeper.hf_repo_id or keeper.output_dir,
                     "" if removed else " — pointer dropped from the registry only",
                 )
+
+    def _resolve_imported_names(self) -> None:
+        """Re-derive every auto-named imported record's title, collisions and all.
+
+        Idempotent and whole-set by design, which is what lets it run both at
+        boot and after each import: the title is recomputed from the source each
+        time, so a record named before titles were derived ("Imported · …") is
+        upgraded, and a suffix added to break a collision is recomputed rather
+        than accumulated. Records the user named — explicitly at import, or via
+        `rename`, which writes `display_name` and always wins on the card — are
+        never touched (see _auto_imported_name).
+
+        Collisions are counted per (title, policy type), the pair a card
+        actually renders: an ACT and a SmolVLA of one task read as two rows
+        already, because the Policy row below the title says so. Grouping on the
+        stored `config.policy_type` rather than a re-derivation keeps the rule
+        honest — when the import could not read a policy type, the two cards
+        really are indistinguishable and really do need the suffix.
+
+        Oldest-first so the disambiguated labels are stable across restarts and
+        don't depend on which record happened to be read from disk first.
+        """
+        with self._lock:
+            records = sorted(
+                (r for r in self._records.values() if r.runner == "imported"),
+                key=lambda r: (r.started_at, r.id),
+            )
+        targets: builtins.list[JobRecord] = []
+        entries: builtins.list[tuple[str, builtins.list[str]]] = []
+        for record in records:
+            derived = _auto_imported_name(record)
+            if derived is None:
+                continue
+            targets.append(record)
+            entries.append((derived, imported_name_suffixes(record.hf_repo_id or record.output_dir)))
+
+        resolved_names = dedupe_display_names(entries, group_keys=[r.config.policy_type for r in targets])
+        for record, resolved in zip(targets, resolved_names, strict=True):
+            if record.name == resolved:
+                continue
+            logger.info("Renamed imported model %s: %r -> %r", record.id, record.name, resolved)
+            record.name = resolved
+            self._write_meta(record)
 
     def _start_watchdog(self) -> None:
         self._watchdog_thread = threading.Thread(
