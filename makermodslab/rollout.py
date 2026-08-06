@@ -43,6 +43,7 @@ from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
 
 from .arm_identity import ArmIdentityError, ArmSlot, verify_devices
 from .camera_preview import camera_preview_manager
+from .jobs import download_hub_checkpoint_ref
 from .motor_power import clear_goal_velocity, reset_torque_limit
 from .record import _DEFAULT_FOURCC
 from .utils.config import (
@@ -131,6 +132,10 @@ _state_lock = threading.Lock()
 # cooperative cancellation checkpoint inside _prepare_robot), so it's a
 # bounded wait-and-report rather than a true force-release.
 _STARTUP_STOP_JOIN_TIMEOUT_S = 5.0
+# The two hub-ref shapes /jobs/{id}/checkpoints hands out. Kept here for the
+# cheap no-network shape check below; the DOWNLOAD they imply lives once, in
+# jobs.download_hub_checkpoint_ref, so inference and fine-tune resolve a ref
+# identically.
 _HUB_REF_RE = re.compile(r"^(?P<repo>[^@]+)@checkpoints/(?P<step_dir>\d+)$")
 _HUB_ROOT_REF_RE = re.compile(r"^(?P<repo>[^@]+)@root$")
 # lerobot prints this once per run, the moment its main control loop is
@@ -335,49 +340,28 @@ def _resolve_policy_path(policy_ref: str, report: Callable[[int, int | None], No
     When ``report`` is given, snapshot_download streams byte progress through it
     (see make_snapshot_progress_tqdm) so the inference page can show a real
     download bar. Local refs never download, so they never report and never flip
-    the phase."""
+    the phase.
+
+    The download itself (which patterns each ref shape pulls, and what path it
+    yields) lives in jobs.download_hub_checkpoint_ref, shared with the fine-tune
+    path so a ref resolves to the same weights whoever asks. This wrapper owns
+    only what is inference-specific: the local-dir short-circuit, the
+    downloading_model phase, and the progress hook."""
     if Path(policy_ref).is_dir():
         # A local checkpoint — nothing to fetch, so no downloading_model phase.
         return policy_ref
-    from huggingface_hub import snapshot_download
+    if not _policy_ref_is_valid(policy_ref):
+        raise ValueError(f"Unrecognised policy ref: {policy_ref!r}")
 
-    # A Hub ref: snapshot_download may pull hundreds of MB and take minutes.
+    # A Hub ref: the download may pull hundreds of MB and take minutes.
     # Announce it (downloading_model phase) so the UI names the wait, and feed
     # byte progress through the tqdm hook when a reporter is supplied. Set only on
     # the download paths (not the local branch above), and only when a session is
     # live (_set_phase no-ops otherwise), so this helper stays safe to call from
     # the unit tests.
-    dl_kwargs: dict[str, Any] = {}
-    if report is not None:
-        dl_kwargs["tqdm_class"] = make_snapshot_progress_tqdm(report)
-    m = _HUB_REF_RE.match(policy_ref)
-    if m:
-        repo_id, step_dir = m.group("repo"), m.group("step_dir")
-        _set_phase(PHASE_DOWNLOADING_MODEL)
-        local_root = snapshot_download(
-            repo_id=repo_id,
-            repo_type="model",
-            allow_patterns=[f"checkpoints/{step_dir}/pretrained_model/*"],
-            **dl_kwargs,
-        )
-        return str(Path(local_root) / "checkpoints" / step_dir / "pretrained_model")
-    m = _HUB_ROOT_REF_RE.match(policy_ref)
-    if m:
-        _set_phase(PHASE_DOWNLOADING_MODEL)
-        # A '@root' ref means the repo root IS the pretrained_model, but a repo
-        # can still carry a checkpoints/ sub-tree (per-step snapshots) and a
-        # training_state/ dir (optimizer/scheduler state) alongside it — neither
-        # is needed to run inference and both can be multi-GB. Exclude them so a
-        # flat-model download over a slow link only pulls the root pretrained
-        # files (config.json, model.safetensors, …), mirroring the tight
-        # allow_patterns scoping of the checkpoint case above.
-        return snapshot_download(
-            repo_id=m.group("repo"),
-            repo_type="model",
-            ignore_patterns=["checkpoints/**", "training_state/**"],
-            **dl_kwargs,
-        )
-    raise ValueError(f"Unrecognised policy ref: {policy_ref!r}")
+    _set_phase(PHASE_DOWNLOADING_MODEL)
+    tqdm_class = make_snapshot_progress_tqdm(report) if report is not None else None
+    return download_hub_checkpoint_ref(policy_ref, tqdm_class=tqdm_class)
 
 
 def _arm_count_mismatch(mode: str, checkpoint_state_dim: int | None) -> str | None:

@@ -34,7 +34,7 @@ from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from queue import Empty, Queue
-from typing import Literal, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel
 
@@ -702,10 +702,16 @@ def _resolve_finetune_pretrained_path(source: JobRecord, step: int | None) -> st
       * imported local / normal local run → a `local` ref that is the absolute
         pretrained_model dir; returned directly (e.g. a flat imported dir
         becomes a step-0 checkpoint whose ref is the dir itself).
-      * imported hub / cloud run → a `hub` ref ('repo@checkpoints/<step>' or
-        'repo@root'); we return the plain repo id (the root model). lerobot's
-        pretrained_path takes a repo id, not a sub-path, so a specific hub
-        sub-step can't be targeted — see the limitation note below.
+      * imported hub / cloud run at a specific step → the step-suffixed hub ref
+        'repo@checkpoints/<step_dir>', VERBATIM. lerobot can't load a hub
+        sub-path directly, so the ref is materialized into a real directory
+        before the trainer starts — host-side by localize_pretrained_path for a
+        local run, pod-side by the HF Jobs wrapper for a cloud one. This
+        function does not download: it names the checkpoint, and the caller
+        materializes it wherever the trainer will run (MT2).
+      * imported hub / cloud run whose checkpoint is the whole repo ('repo@root')
+        → the plain repo id. The root IS the pretrained_model, which lerobot
+        resolves by itself, so there is nothing to materialize.
 
     Raises ValueError (→ HTTP 400) with a user-facing message when the source
     has no usable checkpoint.
@@ -734,12 +740,15 @@ def _resolve_finetune_pretrained_path(source: JobRecord, step: int | None) -> st
     if chosen.source == "local":
         # chosen.ref is the absolute pretrained_model dir lerobot loads directly.
         return chosen.ref
-    # Hub ref: 'repo@checkpoints/<step_dir>' or 'repo@root'. lerobot's
-    # pretrained_path accepts a repo id (root model), not a sub-step path, so we
-    # hand back the repo portion. Fine-tuning from a specific hub sub-step isn't
-    # supported here — it uses whatever weights live at the repo root.
-    repo_id = chosen.ref.split("@", 1)[0]
-    return repo_id
+    if _HUB_ROOT_REF_RE.match(chosen.ref):
+        # The repo root IS the model; lerobot loads a repo id as-is, so hand back
+        # the repo portion and let it fetch. Nothing to materialize.
+        return chosen.ref.split("@", 1)[0]
+    # A specific step: keep the whole ref. Truncating it here is what MT2 was —
+    # the run silently trained from repo-ROOT weights while the UI reported the
+    # step the user picked. The ref is turned into a directory downstream, on
+    # whichever machine will run the trainer.
+    return chosen.ref
 
 
 _CLOUD_CKPT_TTL_SECONDS = 30.0
@@ -815,6 +824,89 @@ _LANGUAGE_CONDITIONED_POLICY_TYPES = {"smolvla", "pi0", "pi0_fast", "pi05"}
 
 _HUB_CKPT_REF_RE = re.compile(r"^(?P<repo>[^@]+)@checkpoints/(?P<step_dir>\d+)$")
 _HUB_ROOT_REF_RE = re.compile(r"^(?P<repo>[^@]+)@root$")
+
+# What a hub ref names inside the snapshot, once downloaded.
+_HUB_CKPT_SUBDIR = "pretrained_model"
+
+
+def download_hub_checkpoint_ref(ref: str, *, tqdm_class=None) -> str:
+    """Download the model a hub checkpoint ref names; return its local dir.
+
+    THE resolution rule for a hub ref, shared by every consumer so a ref means
+    one thing everywhere:
+
+      * 'repo@checkpoints/<step_dir>' → only that step's ``pretrained_model/``
+        is pulled, and the returned path is that directory. lerobot's
+        ``pretrained_path`` addresses a local dir or a repo ROOT and has no
+        subfolder argument (``PreTrainedConfig.from_pretrained`` hands the id
+        straight to ``hf_hub_download``), so materializing the sub-path here is
+        the only way a specific step can be loaded at all.
+      * 'repo@root' → the whole repo IS the pretrained_model; ``checkpoints/**``
+        and ``training_state/**`` are excluded because neither is needed to load
+        the policy and both can be multi-GB.
+
+    ``tqdm_class`` is forwarded to snapshot_download for byte-progress reporting
+    (the inference page's download bar). This function itself has no session or
+    UI state — callers own their own progress/phase reporting — so it is safe to
+    call from a training request without touching a live rollout.
+
+    Raises ValueError for anything that isn't a hub ref. Downloads can take
+    minutes and pull GBs: never call it while holding a lock others need.
+    """
+    # Imported at CALL time, not module scope, so that patching
+    # `huggingface_hub.snapshot_download` intercepts it — the seam the inference
+    # download tests already use, and the same reason _read_checkpoint_config
+    # re-imports hf_hub_download.
+    from huggingface_hub import snapshot_download
+
+    dl_kwargs: dict[str, Any] = {}
+    if tqdm_class is not None:
+        dl_kwargs["tqdm_class"] = tqdm_class
+    m = _HUB_CKPT_REF_RE.match(ref)
+    if m:
+        repo_id, step_dir = m.group("repo"), m.group("step_dir")
+        local_root = snapshot_download(
+            repo_id=repo_id,
+            repo_type="model",
+            allow_patterns=[f"checkpoints/{step_dir}/{_HUB_CKPT_SUBDIR}/*"],
+            **dl_kwargs,
+        )
+        return str(Path(local_root) / "checkpoints" / step_dir / _HUB_CKPT_SUBDIR)
+    m = _HUB_ROOT_REF_RE.match(ref)
+    if m:
+        return snapshot_download(
+            repo_id=m.group("repo"),
+            repo_type="model",
+            ignore_patterns=["checkpoints/**", "training_state/**"],
+            **dl_kwargs,
+        )
+    raise ValueError(f"Unrecognised policy ref: {ref!r}")
+
+
+def localize_pretrained_path(pretrained_path: str) -> str:
+    """Make a ``--policy.pretrained_path`` value loadable by a LOCAL trainer.
+
+    A step-suffixed hub ref is materialized here, on this machine, into the real
+    directory lerobot will load (see download_hub_checkpoint_ref). Everything
+    else passes through untouched: an absolute local dir is already what lerobot
+    wants, and a bare repo id is a repo ROOT, which lerobot resolves itself —
+    downloading it here would just duplicate the trainer's own fetch.
+
+    The cloud twin of this call happens IN the container (the HF Jobs wrapper
+    materializes the same ref pod-side and rewrites the argv), because a host
+    path means nothing on the pod. One rule, two execution sites.
+
+    A failed download becomes a ValueError (→ HTTP 400) naming the checkpoint,
+    like every other user-facing refusal on the start path — the alternative is
+    a raw Hub exception surfacing as a 500 with nothing actionable in it."""
+    if not _HUB_CKPT_REF_RE.match(pretrained_path):
+        return pretrained_path
+    try:
+        return download_hub_checkpoint_ref(pretrained_path)
+    except Exception as exc:
+        raise ValueError(
+            f"Could not download the base checkpoint {pretrained_path!r} to fine-tune from: {exc}"
+        ) from exc
 
 
 def _read_checkpoint_config(ckpt: JobCheckpoint) -> dict[str, object]:
@@ -1122,6 +1214,25 @@ class JobRegistry:
 
     # -- public API --
 
+    def _assert_no_running_local(self, target: JobTarget) -> None:
+        """Raise JobAlreadyRunningError if a local training is already running.
+
+        Local trainings are bounded by this machine's GPU/USB resources, so at
+        most one runs at a time. Cloud trainings each get their own remote
+        container, so any number can be in flight in parallel.
+
+        Takes NO lock, so it is callable both inside and outside the registry's
+        critical section (self._lock is a plain Lock — re-entering it would
+        deadlock). Iterates a snapshot, so a concurrent mutation can't break the
+        walk. `start` calls it twice on purpose: once early to fail fast, and
+        once under the lock that inserts the record — the latter is the one that
+        actually enforces the invariant."""
+        if target.runner != "local":
+            return
+        for r in list(self._records.values()):
+            if r.state == "running" and r.runner == "local":
+                raise JobAlreadyRunningError(r.id)
+
     def list(self, limit: int = 10) -> builtins.list[JobRecord]:
         with self._lock:
             records = list(self._records.values())
@@ -1161,40 +1272,63 @@ class JobRegistry:
             if get_hub_status(config.dataset_repo_id).get("status") == "local_only":
                 raise DatasetNotOnHubError(config.dataset_repo_id)
 
-        with self._lock:
-            # Local trainings are bounded by this machine's GPU/USB resources,
-            # so at most one runs at a time. Cloud trainings each get their
-            # own remote container, so any number can be in flight in parallel.
-            if target.runner == "local":
-                for r in self._records.values():
-                    if r.state == "running" and r.runner == "local":
-                        raise JobAlreadyRunningError(r.id)
+        # Resume and fine-tune are distinct and mutually exclusive: resume
+        # continues optimizer+step from a checkpoint (needs training_state);
+        # fine-tune starts a FRESH run whose weights are init'd from a
+        # checkpoint (weights-only is fine). Reject the nonsensical combo up
+        # front rather than letting one silently win.
+        if config.resume and config.finetune_from_job_id:
+            raise ValueError(
+                "A run can't both resume and fine-tune. Resume continues an "
+                "existing run's optimizer/step; fine-tune starts a fresh run "
+                "from a checkpoint's weights."
+            )
 
-            # Resume and fine-tune are distinct and mutually exclusive: resume
-            # continues optimizer+step from a checkpoint (needs training_state);
-            # fine-tune starts a FRESH run whose weights are init'd from a
-            # checkpoint (weights-only is fine). Reject the nonsensical combo up
-            # front rather than letting one silently win.
-            if config.resume and config.finetune_from_job_id:
-                raise ValueError(
-                    "A run can't both resume and fine-tune. Resume continues an "
-                    "existing run's optimizer/step; fine-tune starts a fresh run "
-                    "from a checkpoint's weights."
-                )
+        # Fail fast on the local-run mutex before any of the (possibly slow)
+        # pretrained-path work below. Re-checked under the lock at record
+        # creation — THAT is the authoritative check; this one only spares a
+        # doomed request a needless download.
+        self._assert_no_running_local(target)
 
+        # ------------------------------------------------------------------
+        # Pretrained-path resolution runs OUTSIDE the registry lock.
+        #
+        # It reads the Hub (the source's checkpoint listing) and, for a local
+        # run, DOWNLOADS the base checkpoint — minutes and gigabytes.
+        # self._lock is taken by list / get / stop / delete, so holding it
+        # across that would freeze the whole job interface (the MT23 coupling).
+        # Nothing is registered yet either way, so a bad selection still fails
+        # with no orphaned record; the registry lookup it needs takes the lock
+        # briefly on its own.
+        # ------------------------------------------------------------------
+        if config.finetune_from_job_id:
             # Fine-tune: turn the selected source run + step into the
             # pretrained_path lerobot loads weights from. A fresh run (resume
-            # stays false); no training_state required. Resolved under the lock
-            # and before the record so a bad selection fails with no orphan.
-            if config.finetune_from_job_id:
+            # stays false); no training_state required.
+            with self._lock:
                 source = self._records.get(config.finetune_from_job_id)
-                if source is None:
-                    raise ValueError(
-                        f"Fine-tune source {config.finetune_from_job_id!r} not found."
-                    )
-                config.policy_pretrained_path = _resolve_finetune_pretrained_path(
-                    source, config.finetune_from_step
+            if source is None:
+                raise ValueError(
+                    f"Fine-tune source {config.finetune_from_job_id!r} not found."
                 )
+            config.policy_pretrained_path = _resolve_finetune_pretrained_path(
+                source, config.finetune_from_step
+            )
+
+        if config.policy_pretrained_path and not config.resume and target.runner == "local":
+            # A step-suffixed hub ref becomes the real directory the local
+            # trainer loads. A cloud run keeps the ref: its container
+            # materializes the same ref pod-side (see the HF Jobs wrapper),
+            # because a host path is meaningless there.
+            config.policy_pretrained_path = localize_pretrained_path(
+                config.policy_pretrained_path
+            )
+
+        with self._lock:
+            # Authoritative local-run mutex: re-checked here, under the lock
+            # that also inserts the record, so two concurrent starts can't both
+            # pass. (The pre-flight copy above is only a fail-fast.)
+            self._assert_no_running_local(target)
 
             # Resume: turn the selected source run + step into the config_path
             # lerobot needs. Do this under the lock (source lookup) and before

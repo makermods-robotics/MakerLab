@@ -1347,3 +1347,221 @@ def test_start_still_resumes_a_cloud_run_on_the_cloud(tmp_path, monkeypatch) -> 
     assert record.config.resume is True
     assert record.config.resume_from_hub_repo == "user/some-model"
     assert record.config.resume_from_hub_step == "000100"
+
+
+# ---------------------------------------------------------------------------
+# MT2 — fine-tuning a selected Hub step must actually train from THAT step.
+# The resolver used to return `ref.split("@")[0]`, so a picked step silently
+# became repo-ROOT weights. One rule now: a step-suffixed ref names the
+# checkpoint, and whoever will run the trainer materializes it — host-side for a
+# local run, in the container for a cloud one.
+# ---------------------------------------------------------------------------
+
+
+def _fake_snapshot(tmp_path: Path, seen: dict):
+    """A snapshot_download stand-in that records its kwargs and lays down the
+    tree the real one would (so the caller's path arithmetic is exercised)."""
+
+    def _download(**kwargs):
+        seen.update(kwargs)
+        root = tmp_path / "snapshot"
+        for pattern in kwargs.get("allow_patterns") or []:
+            (root / pattern.rsplit("/", 1)[0]).mkdir(parents=True, exist_ok=True)
+        root.mkdir(parents=True, exist_ok=True)
+        return str(root)
+
+    return _download
+
+
+def test_download_hub_checkpoint_ref_scopes_to_the_selected_step(monkeypatch, tmp_path) -> None:
+    """Only that step's pretrained_model/ is pulled, and the returned path is
+    that directory — the whole point being that lerobot cannot address a Hub
+    sub-path itself."""
+    from makermodslab.jobs import download_hub_checkpoint_ref
+
+    seen: dict = {}
+    monkeypatch.setattr("huggingface_hub.snapshot_download", _fake_snapshot(tmp_path, seen))
+
+    out = download_hub_checkpoint_ref("user/repo@checkpoints/000500")
+
+    assert seen["repo_id"] == "user/repo"
+    assert seen["allow_patterns"] == ["checkpoints/000500/pretrained_model/*"]
+    assert out.endswith("/checkpoints/000500/pretrained_model")
+
+
+def test_download_hub_checkpoint_ref_root_skips_the_heavy_trees(monkeypatch, tmp_path) -> None:
+    """A '@root' ref is the whole repo, minus the per-step snapshots and
+    optimizer state — neither is needed to load the policy and both can be GBs."""
+    from makermodslab.jobs import download_hub_checkpoint_ref
+
+    seen: dict = {}
+    monkeypatch.setattr("huggingface_hub.snapshot_download", _fake_snapshot(tmp_path, seen))
+
+    out = download_hub_checkpoint_ref("user/repo@root")
+
+    assert seen["repo_id"] == "user/repo"
+    assert seen["ignore_patterns"] == ["checkpoints/**", "training_state/**"]
+    assert out == str(tmp_path / "snapshot")
+
+
+def test_download_hub_checkpoint_ref_rejects_a_non_ref() -> None:
+    from makermodslab.jobs import download_hub_checkpoint_ref
+
+    with pytest.raises(ValueError, match="Unrecognised policy ref"):
+        download_hub_checkpoint_ref("just-a-repo-id")
+
+
+def test_localize_pretrained_path_passes_through_non_step_values(monkeypatch, tmp_path) -> None:
+    """A local dir and a bare repo id are already loadable — lerobot resolves a
+    repo root itself, so materializing one here would only duplicate its fetch."""
+    from makermodslab.jobs import localize_pretrained_path
+
+    def _no_downloads(**kwargs):
+        raise AssertionError("nothing to materialize for a non-step value")
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", _no_downloads)
+    assert localize_pretrained_path("user/some-model") == "user/some-model"
+    assert localize_pretrained_path(str(tmp_path)) == str(tmp_path)
+
+
+def test_localize_pretrained_path_reports_a_failed_download(monkeypatch) -> None:
+    """A Hub failure becomes a 400-shaped ValueError naming the checkpoint,
+    rather than a raw Hub exception surfacing as a 500."""
+    from makermodslab.jobs import localize_pretrained_path
+
+    def _boom(**kwargs):
+        raise RuntimeError("hub down")
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", _boom)
+    with pytest.raises(ValueError, match="Could not download the base checkpoint") as excinfo:
+        localize_pretrained_path("user/repo@checkpoints/003000")
+    assert "hub down" in str(excinfo.value)
+
+
+def test_resolve_finetune_pretrained_path_keeps_the_selected_step(monkeypatch) -> None:
+    """MT2 core: the step the user picked survives resolution. It used to be
+    truncated to the repo id here, which is repo-ROOT weights."""
+    from makermodslab.jobs import _resolve_finetune_pretrained_path
+
+    files = _hub_checkpoint_files("001000") + _hub_checkpoint_files("005000")
+    monkeypatch.setattr("makermodslab.jobs.shared_hf_api", lambda: _FakeHubApi(files))
+
+    assert _resolve_finetune_pretrained_path(_cloud_record(), 1000) == "user/act_ds_2026@checkpoints/001000"
+    # step=None still means "the latest", now equally un-truncated.
+    assert _resolve_finetune_pretrained_path(_cloud_record(), None) == "user/act_ds_2026@checkpoints/005000"
+
+
+def test_resolve_finetune_pretrained_path_root_ref_stays_a_repo_id(tmp_path) -> None:
+    """An imported repo whose ROOT is the model needs no materialization —
+    lerobot loads a repo id directly, so handing it the bare id avoids a
+    pointless download."""
+    from unittest.mock import patch
+
+    from makermodslab.jobs import JobRecord, _resolve_finetune_pretrained_path
+    from makermodslab.train import TrainingRequest
+
+    record = JobRecord(
+        id="imported-src",
+        name="imported",
+        state="done",
+        config=TrainingRequest(dataset_repo_id="(imported)", policy_type="act"),
+        output_dir="",
+        started_at=0.0,
+        runner="imported",
+        hf_repo_id="user/flat_model",
+    )
+    with patch(
+        "makermodslab.jobs.shared_hf_api",
+        lambda: _FakeHubApi(["config.json", "model.safetensors"]),
+    ):
+        assert _resolve_finetune_pretrained_path(record, None) == "user/flat_model"
+
+
+def _cloud_finetune_source(reg, repo_id: str = "user/act_ds_2026"):
+    """A tracked cloud run in `reg` whose weights live on the Hub."""
+    from makermodslab.jobs import JobRecord
+    from makermodslab.train import TrainingRequest
+
+    record = JobRecord(
+        id="cloud-src",
+        name="cloud src",
+        state="done",
+        config=TrainingRequest(dataset_repo_id="user/ds", policy_type="act", steps=10000),
+        output_dir="",
+        started_at=0.0,
+        runner="hf_cloud",
+        hf_repo_id=repo_id,
+    )
+    reg._records[record.id] = record
+    return record
+
+
+def test_finetune_start_local_materializes_the_selected_step(monkeypatch, tmp_path) -> None:
+    """LOCAL target: the ref becomes a real directory on this machine before the
+    trainer starts, and that directory is the SELECTED step."""
+    from unittest.mock import MagicMock
+
+    from makermodslab.jobs import JobRegistry, JobTarget
+    from makermodslab.train import TrainingRequest
+
+    seen: dict = {}
+    monkeypatch.setattr(
+        "makermodslab.jobs.shared_hf_api", lambda: _FakeHubApi(_hub_checkpoint_files("003000"))
+    )
+    monkeypatch.setattr("huggingface_hub.snapshot_download", _fake_snapshot(tmp_path, seen))
+
+    reg = JobRegistry(tmp_path / "root")
+    source = _cloud_finetune_source(reg)
+    fake_runner = MagicMock()
+    fake_runner.pid.return_value = 4242
+    monkeypatch.setattr("makermodslab.jobs.LocalJobRunner", lambda *a, **k: fake_runner)
+
+    record = reg.start(
+        TrainingRequest(
+            dataset_repo_id="user/ds",
+            policy_type="act",
+            finetune_from_job_id=source.id,
+            finetune_from_step=3000,
+        ),
+        JobTarget(runner="local"),
+    )
+
+    resolved = record.config.policy_pretrained_path
+    assert "@" not in resolved  # materialized, not a ref
+    assert resolved.endswith("/checkpoints/003000/pretrained_model")
+    assert seen["allow_patterns"] == ["checkpoints/003000/pretrained_model/*"]
+
+
+def test_finetune_start_cloud_keeps_the_step_ref(monkeypatch, tmp_path) -> None:
+    """CLOUD target: the ref is passed through untouched — a host path means
+    nothing on the pod, so the container materializes the same ref itself. The
+    host must NOT download the weights for a run that happens elsewhere."""
+    from unittest.mock import MagicMock
+
+    from makermodslab.jobs import JobRegistry, JobTarget
+    from makermodslab.train import TrainingRequest
+
+    def _no_downloads(**kwargs):
+        raise AssertionError("the host must not download a cloud run's base weights")
+
+    monkeypatch.setattr(
+        "makermodslab.jobs.shared_hf_api", lambda: _FakeHubApi(_hub_checkpoint_files("003000"))
+    )
+    monkeypatch.setattr("huggingface_hub.snapshot_download", _no_downloads)
+    monkeypatch.setattr("makermodslab.datasets.get_hub_status", lambda repo_id: {"status": "on_hub"})
+    monkeypatch.setattr("makermodslab.runners.hf_cloud.HfCloudJobRunner", lambda *a, **k: MagicMock())
+
+    reg = JobRegistry(tmp_path / "root")
+    source = _cloud_finetune_source(reg)
+
+    record = reg.start(
+        TrainingRequest(
+            dataset_repo_id="user/ds",
+            policy_type="act",
+            finetune_from_job_id=source.id,
+            finetune_from_step=3000,
+        ),
+        JobTarget(runner="hf_cloud", flavor="a10g-small"),
+    )
+
+    assert record.config.policy_pretrained_path == "user/act_ds_2026@checkpoints/003000"

@@ -253,6 +253,19 @@ def test_localize_rejects_local_pretrained_path_but_allows_hub_id() -> None:
     assert hub.policy_pretrained_path == "user/some-model"
 
 
+def test_localize_allows_a_step_suffixed_hub_pretrained_ref() -> None:
+    """MT2, cloud half: fine-tuning from a SPECIFIC Hub step travels as the ref
+    'repo@checkpoints/<step_dir>' — the wrapper materializes it pod-side, the
+    same way cloud resume already downloads its parent checkpoint. It must reach
+    the container verbatim, not be rejected as a host path and not be rewritten
+    here (a host path would be meaningless on the pod)."""
+    from makermodslab.runners.hf_cloud import localize_config_for_cloud
+
+    config = _request(policy_pretrained_path="user/some-model@checkpoints/003000")
+    localize_config_for_cloud(config, "t4-small")  # no raise
+    assert config.policy_pretrained_path == "user/some-model@checkpoints/003000"
+
+
 # -- in-container installer ladder (the image's uv venv ships no pip) --
 
 
@@ -327,6 +340,74 @@ def test_wrapper_source_handles_resume_download() -> None:
     assert "snapshot_download" in WRAPPER_SOURCE
     assert "training_state" in WRAPPER_SOURCE
     assert "seen.add(step_dir)" in WRAPPER_SOURCE
+
+
+def test_wrapper_source_materializes_a_step_suffixed_finetune_base() -> None:
+    """MT2, container half: a --policy.pretrained_path naming a Hub STEP is
+    downloaded pod-side and rewritten to that local dir before the trainer runs.
+
+    Two properties the block must keep:
+      * it pulls ONLY that step's pretrained_model/ (weights-only — fine-tuning
+        needs no training_state/), and
+      * it uses the snapshot cache rather than <output_dir>/checkpoints/, which
+        the uploader watches — a base checkpoint copied there would be
+        republished as if this run had produced it.
+
+    Source-level assertions: the block is top-level wrapper code (like the
+    resume download it mirrors), so it has no import seam to exec against. The
+    argv rewrite it depends on IS unit-tested below."""
+    from makermodslab.runners.hf_cloud import WRAPPER_SOURCE
+
+    compile(WRAPPER_SOURCE, "<hf-jobs-wrapper>", "exec")
+    assert '_arg("--policy.pretrained_path")' in WRAPPER_SOURCE
+    assert '_set_arg("--policy.pretrained_path", str(base_dir))' in WRAPPER_SOURCE
+    assert 'allow_patterns=[f"checkpoints/{step_dir}/pretrained_model/*"]' in WRAPPER_SOURCE
+    # Never staged under the watched output dir.
+    assert 'base_dir = Path(local_root) / "checkpoints" / step_dir / "pretrained_model"' in WRAPPER_SOURCE
+
+
+def _wrapper_argv_helpers(trainer_argv: list[str]):
+    """Exec the wrapper's own `_arg` / `_set_arg` over `trainer_argv`.
+
+    Sliced out of WRAPPER_SOURCE by name and given the globals the wrapper would
+    have, so a drift between the template and these tests fails loudly instead
+    of silently testing a host-side paraphrase."""
+    from makermodslab.runners.hf_cloud import WRAPPER_SOURCE
+
+    namespace: dict = {"trainer_argv": trainer_argv}
+    for name in ("_arg", "_set_arg"):
+        match = re.search(rf"^def {name}\(.*?(?=^\S)", WRAPPER_SOURCE, re.MULTILINE | re.DOTALL)
+        assert match, f"{name} not found in WRAPPER_SOURCE"
+        exec(compile(match.group(0), "<hf-jobs-wrapper>", "exec"), namespace)  # noqa: S102
+    return namespace["_arg"], namespace["_set_arg"]
+
+
+def test_wrapper_set_arg_rewrites_both_argv_spellings() -> None:
+    """The rewrite must hit whichever form the argv builder used, and touch
+    nothing else — this is what turns a Hub ref only the pod can resolve into a
+    real path for the trainer."""
+    joined = ["--policy.type=act", "--policy.pretrained_path=user/repo@checkpoints/003000", "--steps=10"]
+    arg, set_arg = _wrapper_argv_helpers(joined)
+    assert arg("--policy.pretrained_path") == "user/repo@checkpoints/003000"
+    assert set_arg("--policy.pretrained_path", "/tmp/base") is True
+    assert joined == ["--policy.type=act", "--policy.pretrained_path=/tmp/base", "--steps=10"]
+
+    split = ["--policy.pretrained_path", "user/repo@checkpoints/003000", "--steps", "10"]
+    arg, set_arg = _wrapper_argv_helpers(split)
+    assert arg("--policy.pretrained_path") == "user/repo@checkpoints/003000"
+    assert set_arg("--policy.pretrained_path", "/tmp/base") is True
+    assert split == ["--policy.pretrained_path", "/tmp/base", "--steps", "10"]
+
+
+def test_wrapper_set_arg_reports_a_missing_flag() -> None:
+    """A bare-repo-id fine-tune (or no fine-tune at all) leaves the argv alone;
+    the wrapper treats an unexpected miss as a hard error rather than launching
+    a run that trains from the wrong weights."""
+    argv = ["--policy.type=act"]
+    arg, set_arg = _wrapper_argv_helpers(argv)
+    assert arg("--policy.pretrained_path") is None
+    assert set_arg("--policy.pretrained_path", "/tmp/base") is False
+    assert argv == ["--policy.type=act"]
 
 
 def test_cloud_resume_argv_keeps_lineage_in_parent_repo() -> None:

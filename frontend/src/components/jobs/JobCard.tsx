@@ -377,15 +377,20 @@ const JobCard: React.FC<Props> = ({
   };
 
   // Fine-tune: start a FRESH run whose weights are initialized from this
-  // (imported) model's checkpoint. Unlike Continue (which needs optimizer/step
-  // state and is local-only), fine-tuning works from weights-only imports —
-  // which is exactly what imported models are. Gate on an imported source with
-  // a selectable checkpoint.
+  // model's checkpoint. Unlike Continue (which needs optimizer/step state and
+  // is local-only), fine-tuning is weights-only, so it works from ANY source
+  // that has a checkpoint — the user's own local and cloud runs included.
+  //
+  // The old gate also required runner === "imported". That was a workaround for
+  // MT2, where a hub step-ref was truncated to the bare repo id and a fine-tune
+  // of a cloud run silently trained from ROOT weights instead of the step the
+  // user picked; excluding cloud runs (and, collaterally, local ones) hid the
+  // bug rather than fixing it. jobs._resolve_finetune_pretrained_path now
+  // branches on all three runners and keeps a step-suffixed hub ref verbatim
+  // for the trainer's host to materialize, so there is nothing left to guard:
+  // gate on state and checkpoints only.
   const canFinetune =
-    selectedJob.runner === "imported" &&
-    !isRunning &&
-    lineageCheckpoints.length > 0 &&
-    selectedStep != null;
+    !isRunning && lineageCheckpoints.length > 0 && selectedStep != null;
 
   // No dialog and no route jump: fine-tuning opens the Train panel's
   // "Start a new training" form with the base skill (and the dropdown's
