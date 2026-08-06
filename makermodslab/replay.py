@@ -152,7 +152,11 @@ def handle_start_replay(request: ReplayRequest, websocket_manager=None) -> dict[
                 "message": "A gripper wiggle is currently in progress. Wait for it to finish.",
             }
         if replay_active:
-            return {"success": False, "status_code": 409, "message": "Replay is already active. Stop it first."}
+            return {
+                "success": False,
+                "status_code": 409,
+                "message": "Replay is already active. Stop it first.",
+            }
         if replay_thread is not None and replay_thread.is_alive():
             return {
                 "success": False,

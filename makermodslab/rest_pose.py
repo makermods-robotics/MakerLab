@@ -193,7 +193,9 @@ def _run_return_loop(
         now = time.monotonic()
         if positions:
             if normalize:
-                distances = {m: abs(float(positions[m]) - float(t)) for m, t in targets.items() if m in positions}
+                distances = {
+                    m: abs(float(positions[m]) - float(t)) for m, t in targets.items() if m in positions
+                }
             else:
                 distances = {m: abs(int(positions[m]) - int(t)) for m, t in targets.items() if m in positions}
             remaining = sum(distances.values())
