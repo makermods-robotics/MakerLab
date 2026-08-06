@@ -590,6 +590,11 @@ _TRAIN_CONFIG_NAME = "train_config.json"
 _HUB_TRAINING_STATE_FILE = "training_state/training_step.json"
 
 
+# Plain-language names for the runner ids, so a user-facing refusal reads like
+# the Compute control the user actually clicked rather than an internal literal.
+_RUNNER_LABELS = {"local": "Local — your machine", "hf_cloud": "Hugging Face Cloud"}
+
+
 def _resolve_cloud_resume(source: JobRecord, step: int | None) -> tuple[str, str]:
     """Return (repo_id, step_dir) identifying the Hub checkpoint a cloud run
     should resume from (`step` = None ⇒ the latest available on the Hub).
@@ -1202,6 +1207,46 @@ class JobRegistry:
                         raise ValueError(
                             f"Resume source {config.resume_from_job_id!r} not found."
                         )
+                    # A completed run is not resumable — on ANY runner, and
+                    # regardless of how the request got here (the UI hides the
+                    # button; this catches a direct API call).
+                    #
+                    # Resume restores the optimizer AND the LR schedule's
+                    # position, and a run that reached its target has spent its
+                    # schedule: SmolVLA's preset cosine-decays to a 2.5e-6 floor
+                    # over a fixed 30k-step horizon, so continuing past the
+                    # target trains at floor LR. The loss chart flattens and
+                    # reads as convergence while the run is barely learning —
+                    # the failure is silent, which is why this refuses rather
+                    # than warns. Fine-tune starts a fresh schedule from the
+                    # same weights, which is the intended way to build on a
+                    # completed run.
+                    if source.state == "done":
+                        raise ValueError(
+                            f"Run {source.id!r} already reached its step target, so there is "
+                            "nothing to resume — its learning-rate schedule is finished and a "
+                            "continuation would train at the schedule's floor. Fine-tune from "
+                            "its final checkpoint instead."
+                        )
+                    # A resume continues on the PARENT'S runner, full stop.
+                    # Neither cross direction works today (F7): cloud→local
+                    # points --config_path at a host directory that only ever
+                    # existed inside the pod, so the run dies at startup; and
+                    # local→cloud is worse — the pod has no access to the host
+                    # checkpoint, so it silently restarts from step 0 while the
+                    # record calls itself a resume. The form pins the Compute
+                    # control on a resume; this is the defense-in-depth half,
+                    # for a direct API call that flips it anyway.
+                    #
+                    # Only local/hf_cloud parents reach here: an imported record
+                    # is created with state="done", so the refusal above already
+                    # took it (imported models are fine-tune sources, never
+                    # resume sources).
+                    if source.runner != target.runner:
+                        raise ValueError(
+                            "Cross-runner resume isn't supported yet — this run continues on "
+                            f"{_RUNNER_LABELS.get(source.runner, source.runner)}. (F7)"
+                        )
                     if source.runner == "hf_cloud":
                         # An HF Job is immutable once ended: resuming a cloud run
                         # launches a NEW cloud job that continues from the parent's
@@ -1221,8 +1266,8 @@ class JobRegistry:
                 elif not config.config_path:
                     raise ValueError(
                         "Resume is on but no source checkpoint was selected. Use "
-                        '"Continue" on a completed local run rather than toggling '
-                        "resume manually."
+                        '"Continue" on a local run that stopped short of its step '
+                        "target rather than toggling resume manually."
                     )
 
             job_id = self._unique_job_id(config.policy_type, config.dataset_repo_id)

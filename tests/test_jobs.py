@@ -1156,3 +1156,194 @@ def test_two_imports_of_one_task_and_policy_are_still_disambiguated(monkeypatch,
     names = {r.id: r.name for r in reg.list(limit=100)}
     assert names[a.id] == "orange_box (2026-08-03)"
     assert names[b.id] == "orange_box (2026-08-05)"
+
+
+# ── Resume is only for a run that stopped short ──────────────────────────────
+# A completed run's LR schedule is spent (SmolVLA's preset cosine-decays to a
+# 2.5e-6 floor over a fixed 30k-step horizon), so a continuation trains at floor
+# LR and the flat loss curve reads as convergence. The UI hides the button; this
+# is the backend half, which also catches a direct API call. Blanket by
+# decision — no per-policy exceptions.
+
+
+def _hub_checkpoint_files(step_dir: str) -> list[str]:
+    """The repo paths a complete cloud checkpoint publishes."""
+    return [
+        f"checkpoints/{step_dir}/pretrained_model/config.json",
+        f"checkpoints/{step_dir}/pretrained_model/model.safetensors",
+        f"checkpoints/{step_dir}/pretrained_model/train_config.json",
+        f"checkpoints/{step_dir}/training_state/training_step.json",
+        f"checkpoints/{step_dir}/training_state/optimizer_state.safetensors",
+    ]
+
+
+def _resumable_source(tmp_path, state: str, *, job_id: str = "src", steps: int = 200):
+    """A local run record with one real, fully-saved checkpoint at step 100."""
+    from makermodslab.jobs import JobRecord, JobRegistry
+    from makermodslab.train import TrainingRequest
+
+    run_dir = tmp_path / job_id / "run"
+    run_dir.mkdir(parents=True)
+    _make_checkpoint(run_dir, 100)
+    reg = JobRegistry(tmp_path / "root")
+    reg._records[job_id] = JobRecord(
+        id=job_id,
+        name="run",
+        state=state,
+        config=TrainingRequest(dataset_repo_id="user/ds", policy_type="act", steps=steps),
+        output_dir=str(run_dir),
+        started_at=0.0,
+        runner="local",
+    )
+    return reg
+
+
+def _resume_request(job_id: str = "src"):
+    from makermodslab.train import TrainingRequest
+
+    return TrainingRequest(
+        dataset_repo_id="user/ds",
+        policy_type="act",
+        resume=True,
+        resume_from_job_id=job_id,
+    )
+
+
+def test_start_refuses_to_resume_a_completed_run(tmp_path) -> None:
+    """The point of the gate: a `done` source is refused with a 400-shaped
+    ValueError that names fine-tuning as the way forward. No record created."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobTarget
+
+    reg = _resumable_source(tmp_path, "done")
+    with (
+        patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: MagicMock()),
+        pytest.raises(ValueError, match="already reached its step target"),
+    ):
+        reg.start(_resume_request(), JobTarget(runner="local"))
+
+    assert [r.id for r in reg.list(limit=10)] == ["src"]
+
+
+def test_start_refuses_to_resume_a_completed_cloud_run(tmp_path) -> None:
+    """The refusal is on the source's STATE, not its runner, so it lands before
+    the local/cloud branch and covers both."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobTarget
+
+    reg = _resumable_source(tmp_path, "done")
+    reg._records["src"].runner = "hf_cloud"
+    reg._records["src"].hf_repo_id = "user/some-model"
+    with (
+        patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: MagicMock()),
+        pytest.raises(ValueError, match="already reached its step target"),
+    ):
+        reg.start(_resume_request(), JobTarget(runner="local"))
+
+
+@pytest.mark.parametrize("state", ["interrupted", "failed"])
+def test_start_still_resumes_a_run_that_stopped_short(tmp_path, state) -> None:
+    """The gate must not swallow the case resume exists for: a run that ended
+    below its target still resumes, and still resolves its --config_path."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobTarget
+
+    reg = _resumable_source(tmp_path, state)
+    fake_runner = MagicMock()
+    fake_runner.pid.return_value = 4242
+    with patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: fake_runner):
+        record = reg.start(_resume_request(), JobTarget(runner="local"))
+
+    assert record.config.resume is True
+    assert record.config.config_path.endswith("train_config.json")
+    assert "checkpoints/100" in record.config.config_path
+
+
+# ── …and only on the runner it stopped on ────────────────────────────────────
+# Cross-runner resume isn't implemented (F7) and both directions fail badly:
+# cloud→local hands lerobot a --config_path that only ever existed inside the
+# pod (MT4), local→cloud silently restarts from step 0 while recording itself as
+# a resume (MT42). The form pins the Compute control; these cover the
+# defense-in-depth half, which catches a direct API call that flips it anyway.
+# Reuses the section's helpers above; a cloud parent is the same record with its
+# runner/repo flipped, exactly as the done-source pair does it.
+
+
+def _cloud_parent(reg, *, job_id: str = "src"):
+    """Turn a `_resumable_source` record into a cloud run in place."""
+    reg._records[job_id].runner = "hf_cloud"
+    reg._records[job_id].hf_repo_id = "user/some-model"
+    return reg
+
+
+def test_start_refuses_a_local_parent_resumed_on_the_cloud(tmp_path, monkeypatch) -> None:
+    """local parent → Cloud target (MT42). The refusal must name the parent's
+    runner, and must leave no record behind."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobTarget
+
+    reg = _resumable_source(tmp_path, "interrupted")
+    # The cloud dataset preflight sits ahead of the resume block; keep it happy
+    # (and off the network) so the cross-runner refusal is what we observe.
+    monkeypatch.setattr("makermodslab.datasets.get_hub_status", lambda repo_id: {"status": "on_hub"})
+    with (
+        patch("makermodslab.runners.hf_cloud.HfCloudJobRunner", lambda *a, **k: MagicMock()),
+        pytest.raises(ValueError, match="Cross-runner resume isn't supported yet") as excinfo,
+    ):
+        reg.start(_resume_request(), JobTarget(runner="hf_cloud", flavor="t4-small"))
+
+    assert "Local" in str(excinfo.value)
+    assert [r.id for r in reg.list(limit=10)] == ["src"]
+
+
+def test_start_refuses_a_cloud_parent_resumed_locally(tmp_path, monkeypatch) -> None:
+    """cloud parent → Local target (MT4). Refused BEFORE _resolve_cloud_resume
+    would go to the Hub — the exploding api stand-in is the assertion that the
+    guard lands first."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobTarget
+
+    def _no_hub():
+        raise AssertionError("cross-runner resume reached the Hub")
+
+    reg = _cloud_parent(_resumable_source(tmp_path, "interrupted"))
+    monkeypatch.setattr("makermodslab.jobs.shared_hf_api", _no_hub)
+    with (
+        patch("makermodslab.jobs.LocalJobRunner", lambda *a, **k: MagicMock()),
+        pytest.raises(ValueError, match="Cross-runner resume isn't supported yet") as excinfo,
+    ):
+        reg.start(_resume_request(), JobTarget(runner="local"))
+
+    assert "Hugging Face Cloud" in str(excinfo.value)
+    # Read the registry directly: `list` counts a cloud record's checkpoints,
+    # which would itself call the stand-in above.
+    assert list(reg._records) == ["src"]
+
+
+def test_start_still_resumes_a_cloud_run_on_the_cloud(tmp_path, monkeypatch) -> None:
+    """The other half of the gate: a same-runner cloud resume is untouched and
+    still resolves the parent's Hub checkpoint. (local→local is covered by
+    test_start_still_resumes_a_run_that_stopped_short above.)"""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobTarget
+
+    reg = _cloud_parent(_resumable_source(tmp_path, "interrupted"))
+    monkeypatch.setattr(
+        "makermodslab.jobs.shared_hf_api",
+        lambda: _FakeHubApi(_hub_checkpoint_files("000100")),
+    )
+    monkeypatch.setattr("makermodslab.datasets.get_hub_status", lambda repo_id: {"status": "on_hub"})
+    fake_runner = MagicMock()
+    fake_runner.hf_job_id.return_value = "hfjob-1"
+    with patch("makermodslab.runners.hf_cloud.HfCloudJobRunner", lambda *a, **k: fake_runner):
+        record = reg.start(_resume_request(), JobTarget(runner="hf_cloud", flavor="t4-small"))
+
+    assert record.config.resume is True
+    assert record.config.resume_from_hub_repo == "user/some-model"
+    assert record.config.resume_from_hub_step == "000100"
