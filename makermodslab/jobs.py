@@ -243,6 +243,67 @@ def _resume_total_steps(config: TrainingRequest) -> int | None:
     return config.steps if config.resume else None
 
 
+def _resume_start_step(config: TrainingRequest) -> int | None:
+    """The GLOBAL step a resumed run starts at — the step of the checkpoint it
+    continues from. None for a fresh run (which starts at 0 by definition), and
+    None when nothing on the request names the checkpoint.
+
+    Complements _resume_total_steps rather than replacing it. Once lerobot's
+    tqdm bar exists, parse_metrics_into rebases off the bar's own total
+    (`resume_total − remaining_total + bar`), which is the better source
+    because it reflects the step lerobot ACTUALLY restored rather than what the
+    request asked for. This function covers the window BEFORE the first bar
+    frame — dataset scan, video-backend init, checkpoint load — which is many
+    seconds even on a small local dataset and minutes on a real one. See
+    _initial_metrics for why that window mattered.
+
+    `resume_from_step` is the request's own answer and is preferred. It is
+    None when the user resumed "the latest checkpoint": the resolvers
+    (_resolve_resume_config_path / _resolve_cloud_resume) pick the checkpoint
+    and write their choice back onto the config, so the fallbacks read the step
+    out of that — a zero-padded checkpoint dir name either way. A resume driven
+    by a hand-supplied `config_path` need not have that layout, hence the digit
+    check and the None it can still return.
+    """
+    if not config.resume:
+        return None
+    if config.resume_from_step is not None:
+        return config.resume_from_step
+    if config.resume_from_hub_step and config.resume_from_hub_step.isdigit():
+        return int(config.resume_from_hub_step)
+    if config.config_path:
+        # <output_dir>/checkpoints/<step_dir>/pretrained_model/train_config.json
+        step_dir = Path(config.config_path).parent.parent.name
+        if step_dir.isdigit():
+            return int(step_dir)
+    return None
+
+
+def _initial_metrics(config: TrainingRequest) -> TrainingMetrics:
+    """The metrics a job record starts life with.
+
+    A FRESH run starts at 0/0 — genuinely unknown until tqdm speaks, and the UI
+    reads total_steps == 0 as "Training starting…".
+
+    A RESUMED run does NOT start at zero, and saying so was the bug: for the
+    ~12s (small local dataset) to several minutes (real one) between launching
+    and lerobot's first tqdm frame, every progress reading in the app showed
+    the run at step 0 — a confident "0 / 60 · 0.0%" where the truth was
+    "10 / 60 · 16.7%". Worse, the monitoring chart treats a step going
+    BACKWARDS as a new run and clears its history, so the seeded parent-run
+    loss curve was wiped on mount by that same 0 before the first frame
+    restored it.
+
+    Seeding the known floor fixes every consumer at once, because they all read
+    these two fields. It is a floor, not a claim about progress: the parser
+    still owns the value from the first tqdm frame onwards.
+    """
+    start = _resume_start_step(config)
+    if start is None or not config.steps:
+        return TrainingMetrics()
+    return TrainingMetrics(current_step=start, total_steps=config.steps)
+
+
 def _read_log_metrics(
     path: Path, resume_total: int | None
 ) -> builtins.list[MetricsHistoryPoint]:
@@ -2023,6 +2084,10 @@ class JobRegistry:
                 started_at=time.time(),
                 runner=target.runner,
                 hf_flavor=target.flavor,
+                # Built AFTER the resume block above, which is what resolves a
+                # "latest checkpoint" request into a concrete step — see
+                # _initial_metrics / _resume_start_step.
+                metrics=_initial_metrics(config),
             )
 
             job_dir.mkdir(parents=True, exist_ok=True)

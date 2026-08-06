@@ -26,6 +26,43 @@ import { useStudio } from "@/contexts/StudioContext";
 const POLL_INTERVAL_MS = 1000;
 const MAX_LOG_LINES = 5000;
 
+/**
+ * Log lines the pre-step status strip must never speak for.
+ *
+ * `objc[<pid>]: Class … is implemented in both …` is the macOS Objective-C
+ * runtime's duplicate-class warning, written to stderr by the dylibs pyav
+ * bundles (libavdevice/libavformat) the moment the trainer imports them — that
+ * is, squarely inside the `current_step === 0` window this strip exists to
+ * narrate. It is harmless, it says nothing about progress, and at two absolute
+ * dylib paths it is among the longest lines the run ever emits, which is what
+ * let it crowd the header.
+ *
+ * Deliberately anchored and narrow: the runtime's own `objc[1234]:` prefix and
+ * nothing else. Matching the body instead ("implemented in both", "duplicate")
+ * would reach wider than the thing being suppressed and could swallow a real
+ * failure that happens to use those words.
+ *
+ * This is DISPLAY SELECTION, not log rewriting — the line is still in the raw
+ * log pane below, which is where a diagnostic like this belongs.
+ */
+const STATUS_NOISE_RE = /^objc\[\d+\]:/;
+
+/**
+ * The newest log line worth showing as status, or null when there is none.
+ *
+ * Walks backwards to the first line that is neither blank nor noise, so a
+ * burst of objc warnings reveals the last real message underneath them rather
+ * than blanking the strip. Blank lines are skipped for the same reason they
+ * would be useless as status text.
+ */
+function newestStatusLine(logs: LogEntry[]): string | null {
+  for (let i = logs.length - 1; i >= 0; i--) {
+    const message = logs[i]?.message ?? "";
+    if (message.trim() && !STATUS_NOISE_RE.test(message)) return message;
+  }
+  return null;
+}
+
 function jobToStatus(
   job: JobRecord | null,
   isStarting: boolean,
@@ -239,9 +276,11 @@ const TrainingJobDialog: React.FC<{
   // minutes a local fine-tune spends downloading its base checkpoint. The
   // backend writes that progress into the job's log, so surface the newest line
   // as a status strip until real steps arrive; it then gets out of the way.
+  // Newest USEFUL line — see newestStatusLine / STATUS_NOISE_RE: the trainer's
+  // start-up stderr is exactly what a blind tail would pick up here.
   const preStepStatus =
     isRunning && job.metrics.current_step === 0
-      ? (logs[logs.length - 1]?.message ?? null)
+      ? newestStatusLine(logs)
       : null;
 
   const backButton = (
@@ -353,10 +392,22 @@ const TrainingJobDialog: React.FC<{
               )}
             </div>
 
+            {/* One line, always — whatever the trainer prints. `truncate` on
+                its own is inert here: a flex item's `min-width` defaults to
+                `auto`, which for nowrap text resolves to the FULL text width,
+                so the span could never shrink and a long line escaped the box
+                instead of ellipsing inside it. `min-w-0 flex-1` is what makes
+                the clamp real, and it holds for any future long line, not just
+                objc's. `title` keeps the whole line one hover away. */}
             {preStepStatus ? (
               <div className="flex items-center gap-2 rounded-md border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
                 <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" />
-                <span className="truncate">{preStepStatus}</span>
+                <span
+                  className="min-w-0 flex-1 truncate"
+                  title={preStepStatus}
+                >
+                  {preStepStatus}
+                </span>
               </div>
             ) : null}
 

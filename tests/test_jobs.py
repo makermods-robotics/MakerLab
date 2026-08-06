@@ -284,6 +284,117 @@ def test_parse_metrics_into_fresh_run_ignores_resume_rebase() -> None:
     assert m.total_steps == 100
 
 
+def test_resume_start_step_prefers_the_requested_step() -> None:
+    """The request's own answer wins when it has one."""
+    from makermodslab.jobs import _resume_start_step
+    from makermodslab.train import TrainingRequest
+
+    cfg = TrainingRequest(
+        dataset_repo_id="user/ds",
+        policy_type="act",
+        resume=True,
+        resume_from_step=10,
+        config_path="/out/checkpoints/000010/pretrained_model/train_config.json",
+        steps=60,
+    )
+    assert _resume_start_step(cfg) == 10
+
+
+def test_resume_start_step_reads_the_resolved_checkpoint_when_latest_was_asked_for() -> None:
+    """Resuming "the latest checkpoint" leaves resume_from_step None — the step
+    then lives only in what the resolvers wrote back onto the config, which is a
+    zero-padded checkpoint dir on either runner."""
+    from makermodslab.jobs import _resume_start_step
+    from makermodslab.train import TrainingRequest
+
+    local = TrainingRequest(
+        dataset_repo_id="user/ds",
+        policy_type="act",
+        resume=True,
+        config_path="/out/checkpoints/000010/pretrained_model/train_config.json",
+        steps=60,
+    )
+    assert _resume_start_step(local) == 10
+
+    cloud = TrainingRequest(
+        dataset_repo_id="user/ds",
+        policy_type="act",
+        resume=True,
+        resume_from_hub_repo="user/out",
+        resume_from_hub_step="004000",
+        steps=15000,
+    )
+    assert _resume_start_step(cloud) == 4000
+
+
+def test_resume_start_step_is_none_when_nothing_names_the_checkpoint() -> None:
+    """A fresh run has no floor, and neither does a resume driven by a
+    hand-supplied config_path that isn't a checkpoint tree — both must return
+    None rather than invent a step."""
+    from makermodslab.jobs import _resume_start_step
+    from makermodslab.train import TrainingRequest
+
+    fresh = TrainingRequest(dataset_repo_id="user/ds", policy_type="act", steps=60)
+    assert _resume_start_step(fresh) is None
+
+    odd = TrainingRequest(
+        dataset_repo_id="user/ds",
+        policy_type="act",
+        resume=True,
+        config_path="/somewhere/custom/train_config.json",
+        steps=60,
+    )
+    assert _resume_start_step(odd) is None
+
+
+def test_initial_metrics_seeds_a_resumed_run_at_its_checkpoint_floor() -> None:
+    """Before lerobot's first tqdm frame a resumed run has no parsed metrics, and
+    reporting 0/0 there made every progress readout show a confident
+    "0 / 60 · 0.0%" for the whole (multi-second to multi-minute) startup window.
+    The floor is known from the request, so start there."""
+    from makermodslab.jobs import _initial_metrics
+    from makermodslab.train import TrainingRequest
+
+    cfg = TrainingRequest(
+        dataset_repo_id="user/ds",
+        policy_type="act",
+        resume=True,
+        resume_from_step=10,
+        steps=60,
+    )
+    m = _initial_metrics(cfg)
+    assert (m.current_step, m.total_steps) == (10, 60)
+    # A floor only — nothing is claimed about loss or ETA.
+    assert m.current_loss is None
+    assert m.eta_seconds is None
+
+
+def test_initial_metrics_leaves_a_fresh_run_at_zero() -> None:
+    """A fresh run really does start at 0, and total_steps == 0 is what the UI
+    reads as "Training starting…". Unchanged."""
+    from makermodslab.jobs import _initial_metrics
+    from makermodslab.train import TrainingRequest
+
+    cfg = TrainingRequest(dataset_repo_id="user/ds", policy_type="act", steps=60)
+    m = _initial_metrics(cfg)
+    assert (m.current_step, m.total_steps) == (0, 0)
+
+
+def test_initial_metrics_needs_a_step_target_to_seed() -> None:
+    """No configured target ⇒ no honest percentage, so don't half-seed."""
+    from makermodslab.jobs import _initial_metrics
+    from makermodslab.train import TrainingRequest
+
+    cfg = TrainingRequest(
+        dataset_repo_id="user/ds",
+        policy_type="act",
+        resume=True,
+        resume_from_step=10,
+        steps=0,
+    )
+    assert _initial_metrics(cfg).current_step == 0
+
+
 def test_read_metrics_history_stitches_resume_lineage(tmp_path) -> None:
     """A resumed run's curve is continuous across the whole lineage: the source
     run's points (0→100) are prepended to the resumed run's (150→200)."""
@@ -1157,6 +1268,78 @@ def test_two_imports_of_one_task_and_policy_are_still_disambiguated(monkeypatch,
     names = {r.id: r.name for r in reg.list(limit=100)}
     assert names[a.id] == "orange_box (2026-08-03)"
     assert names[b.id] == "orange_box (2026-08-05)"
+
+
+def test_start_seeds_a_resumed_records_progress_at_the_checkpoint_step(tmp_path) -> None:
+    """The record a resume starts must already read 4,000/15,000 — not 0/0.
+
+    The tqdm rebase only helps once lerobot's bar exists, and nothing fills the
+    gap before it: on a real local resume that window was 12s of a 69s run,
+    during which every progress readout in the app said step 0. The seed has to
+    be on the RECORD (not just the runner) so the persisted job.json, the /jobs
+    payload and the ~1Hz progress broadcast all carry it from the first tick."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobRegistry, JobTarget
+    from makermodslab.train import TrainingRequest
+
+    reg = JobRegistry(tmp_path / "root")
+    cfg = TrainingRequest(
+        dataset_repo_id="user/on_hub",
+        policy_type="act",
+        resume=True,
+        config_path="/somewhere/checkpoints/004000/pretrained_model/train_config.json",
+        steps=15000,
+    )
+    fake_runner = MagicMock()
+    fake_runner.hf_job_id.return_value = "job-xyz"
+    fake_runner.hf_job_url.return_value = None
+
+    with (
+        patch(
+            "makermodslab.datasets.get_hub_status",
+            return_value={"repo_id": "user/on_hub", "status": "on_hub", "url": "u"},
+        ),
+        patch(
+            "makermodslab.runners.hf_cloud.HfCloudJobRunner",
+            lambda *a, **k: fake_runner,
+        ),
+    ):
+        record = reg.start(cfg, JobTarget(runner="hf_cloud", flavor="t4-small"))
+
+    assert (record.metrics.current_step, record.metrics.total_steps) == (4000, 15000)
+    # And it survives to disk, which is what a reattach after a restart reloads.
+    persisted = _json.loads((tmp_path / "root" / record.id / "job.json").read_text())
+    assert persisted["metrics"]["current_step"] == 4000
+
+
+def test_start_leaves_a_fresh_records_progress_at_zero(tmp_path) -> None:
+    """The non-resumed path is untouched: 0/0 is correct there, and total_steps
+    == 0 is the signal the UI renders as "Training starting…"."""
+    from unittest.mock import MagicMock, patch
+
+    from makermodslab.jobs import JobRegistry, JobTarget
+    from makermodslab.train import TrainingRequest
+
+    reg = JobRegistry(tmp_path / "root")
+    cfg = TrainingRequest(dataset_repo_id="user/on_hub", policy_type="act", steps=15000)
+    fake_runner = MagicMock()
+    fake_runner.hf_job_id.return_value = "job-xyz"
+    fake_runner.hf_job_url.return_value = None
+
+    with (
+        patch(
+            "makermodslab.datasets.get_hub_status",
+            return_value={"repo_id": "user/on_hub", "status": "on_hub", "url": "u"},
+        ),
+        patch(
+            "makermodslab.runners.hf_cloud.HfCloudJobRunner",
+            lambda *a, **k: fake_runner,
+        ),
+    ):
+        record = reg.start(cfg, JobTarget(runner="hf_cloud", flavor="t4-small"))
+
+    assert (record.metrics.current_step, record.metrics.total_steps) == (0, 0)
 
 
 # ── Resume is only for a run that stopped short ──────────────────────────────

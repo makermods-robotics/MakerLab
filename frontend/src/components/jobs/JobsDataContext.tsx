@@ -4,6 +4,7 @@ import React, {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import { useApi } from "@/contexts/ApiContext";
@@ -122,27 +123,61 @@ export const JobsDataProvider: React.FC<{ children: React.ReactNode }> = ({
     };
   }, [refresh]);
 
-  const applyProgress = useCallback((snapshots: JobProgressSnapshot[]) => {
-    if (snapshots.length === 0) return;
-    setJobs((prev) => {
-      if (prev.length === 0) return prev;
-      const byId = new Map(snapshots.map((s) => [s.id, s]));
-      let mutated = false;
-      const next = prev.map((j) => {
-        const s = byId.get(j.id);
-        if (!s) return j;
-        mutated = true;
-        return {
-          ...j,
-          state: s.state,
-          metrics: s.metrics,
-          wandb_run_url: s.wandb_run_url,
-          checkpoint_count: s.checkpoint_count,
-        };
+  // Guards the reconciling refetch below. `healingRef` keeps the ~1Hz ticks
+  // that land while a refetch is in flight from stacking up identical fetches;
+  // `healedRef` caps each unknown id at one refetch for the life of the
+  // provider, so an id the refetch CAN'T produce doesn't refetch forever. That
+  // is a real case, not a hypothetical: /jobs is a capped page (LIMIT), so a
+  // long run with enough newer records after it is legitimately absent from
+  // the list while still reporting progress.
+  const healingRef = useRef(false);
+  const healedRef = useRef<Set<string>>(new Set());
+
+  const applyProgress = useCallback(
+    (snapshots: JobProgressSnapshot[]) => {
+      if (snapshots.length === 0) return;
+      // A snapshot for a job this provider has never heard of means the
+      // `jobs_changed` that announced it never landed — the broadcast is
+      // fire-and-forget (the server drops it outright when no connection is
+      // registered, and a socket can die without ever firing onclose), and
+      // nothing else re-reads /jobs while the studio stays mounted. Patching
+      // only known ids and silently dropping the rest is what made a run
+      // started from the Train panel's in-place form invisible until a page
+      // reload. Reconcile instead: the watchdog re-announces every running
+      // job each tick, so one refetch heals the list within about a second of
+      // the miss, whatever the miss's origin (this tab, another tab, the CLI).
+      const known = new Set(jobs.map((j) => j.id));
+      const unseen = snapshots
+        .map((s) => s.id)
+        .filter((id) => !known.has(id) && !healedRef.current.has(id));
+      if (unseen.length > 0 && !healingRef.current) {
+        for (const id of unseen) healedRef.current.add(id);
+        healingRef.current = true;
+        refresh().finally(() => {
+          healingRef.current = false;
+        });
+      }
+      setJobs((prev) => {
+        if (prev.length === 0) return prev;
+        const byId = new Map(snapshots.map((s) => [s.id, s]));
+        let mutated = false;
+        const next = prev.map((j) => {
+          const s = byId.get(j.id);
+          if (!s) return j;
+          mutated = true;
+          return {
+            ...j,
+            state: s.state,
+            metrics: s.metrics,
+            wandb_run_url: s.wandb_run_url,
+            checkpoint_count: s.checkpoint_count,
+          };
+        });
+        return mutated ? next : prev;
       });
-      return mutated ? next : prev;
-    });
-  }, []);
+    },
+    [jobs, refresh],
+  );
 
   useJobsChangedSignal(refresh, applyProgress);
 
