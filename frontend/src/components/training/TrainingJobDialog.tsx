@@ -16,6 +16,7 @@ import {
   getJobLogs,
   getJobLogFile,
   jobDisplayName,
+  jobStateLabel,
   stopJob,
   deleteJob,
 } from "@/lib/jobsApi";
@@ -370,8 +371,11 @@ const TrainingJobDialog: React.FC<{
                       {job.id}
                     </p>
                   ) : null}
+                  {/* The label, not the wire value: this line rendered the raw
+                      state, so a stopped run read "interrupted" here while the
+                      card behind the dialog called it something else. */}
                   <p className="text-xs text-muted-foreground">
-                    {job.state}
+                    {jobStateLabel(job.state)}
                     {job.error_message ? ` — ${job.error_message}` : ""}
                   </p>
                 </div>

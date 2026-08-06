@@ -11,7 +11,12 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { JobRecord, jobDisplayName, renameJob } from "@/lib/jobsApi";
+import {
+  JOB_STATE_LABELS,
+  JobRecord,
+  jobDisplayName,
+  renameJob,
+} from "@/lib/jobsApi";
 import {
   Square,
   Trash2,
@@ -66,11 +71,19 @@ const statePresentation: Record<
     Icon: React.ComponentType<{ className?: string }>;
   }
 > = {
-  running: { label: "Running", color: "text-ok", Icon: Loader2 },
-  done: { label: "Done", color: "text-muted-foreground", Icon: CheckCircle2 },
-  failed: { label: "Failed", color: "text-destructive", Icon: XCircle },
+  running: { label: JOB_STATE_LABELS.running, color: "text-ok", Icon: Loader2 },
+  done: {
+    label: JOB_STATE_LABELS.done,
+    color: "text-muted-foreground",
+    Icon: CheckCircle2,
+  },
+  failed: {
+    label: JOB_STATE_LABELS.failed,
+    color: "text-destructive",
+    Icon: XCircle,
+  },
   interrupted: {
-    label: "Interrupted",
+    label: JOB_STATE_LABELS.interrupted,
     color: "text-warn",
     Icon: AlertTriangle,
   },
