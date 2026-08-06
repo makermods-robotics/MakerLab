@@ -346,27 +346,50 @@ def test_resolve_policy_path_resolves_hub_root_ref(monkeypatch, tmp_path) -> Non
 _FAKE_POLICY_CONFIG = '{"type": "act"}'
 
 
-def _seed_models_store(monkeypatch, tmp_path, repo_id: str, *, step: str | None = None, flat: bool = False):
+def _seed_models_store(
+    monkeypatch,
+    tmp_path,
+    repo_id: str,
+    *,
+    step: str | None = None,
+    flat: bool = False,
+    weights: bool = True,
+):
     """Point models._local_models_root at a tmp dir and populate one repo in it.
 
-    `step` writes a `checkpoints/<step>/pretrained_model/config.json` tree (what
-    a training repo download looks like); `flat` writes a root `config.json`
-    (what a `@root` repo looks like). Both may be set, to build the ambiguous
-    tree the `@root` branch deliberately refuses. Returns the repo dir,
-    RESOLVED — _downloaded_model_dir resolves, and tmp_path is behind a symlink
-    on macOS."""
+    `step` writes a `checkpoints/<step>/pretrained_model` tree (what a training
+    repo download looks like); `flat` writes a root config (what a `@root` repo
+    looks like). Both may be set, to build the ambiguous tree the `@root` branch
+    deliberately refuses. Returns the repo dir, RESOLVED — _downloaded_model_dir
+    resolves, and tmp_path is behind a symlink on macOS.
+
+    `weights=False` reproduces an INTERRUPTED local_dir download: config plus the
+    pre/post-processor safetensors, but no `model.safetensors`. That is the exact
+    shape that bit the user — note it does contain `.safetensors` files, so any
+    check looking merely for "some safetensors" would still be fooled.
+    """
     import makermodslab.models as m
 
     store = tmp_path / "makermodslab_models"
     monkeypatch.setattr(m, "_local_models_root", lambda: store)
     repo_dir = store / repo_id
     repo_dir.mkdir(parents=True, exist_ok=True)
+
+    def _populate(d):
+        (d / "config.json").write_text(_FAKE_POLICY_CONFIG)
+        (d / "train_config.json").write_text(_FAKE_POLICY_CONFIG)
+        # Processor weights land early in a download and are NOT policy weights.
+        (d / "preprocessor.safetensors").write_text("processor")
+        (d / "postprocessor.safetensors").write_text("processor")
+        if weights:
+            (d / "model.safetensors").write_text("weights")
+
     if step is not None:
         pretrained = repo_dir / "checkpoints" / step / "pretrained_model"
         pretrained.mkdir(parents=True)
-        (pretrained / "config.json").write_text(_FAKE_POLICY_CONFIG)
+        _populate(pretrained)
     if flat:
-        (repo_dir / "config.json").write_text(_FAKE_POLICY_CONFIG)
+        _populate(repo_dir)
     return repo_dir.resolve()
 
 
@@ -2774,3 +2797,140 @@ def test_start_inference_clears_the_previous_runs_log_pointer(monkeypatch, tmp_p
 
     assert result["success"] is False
     assert rollout._last_log_path is None, "a new claim must not inherit the previous run's log"
+
+
+# ---------------------------------------------------------------------------
+# F6 store entries must hold LOADABLE WEIGHTS, not just a config.
+#
+# Live incident: the user's sock ACT model had a 68 KB store entry — an
+# interrupted local_dir download with config.json, train_config.json and both
+# processor safetensors, but no model.safetensors. F6's short-circuit served it,
+# and lerobot died with FileNotFoundError on the weights. Pre-F6 the hub path
+# would have downloaded and worked, so the short-circuit converted a silent
+# partial into a hard failure.
+# ---------------------------------------------------------------------------
+
+
+def test_local_store_refuses_a_weightless_checkpoint_ref(monkeypatch, tmp_path) -> None:
+    """The incident, at the `@checkpoints/<step>` branch that hit it."""
+    from makermodslab import rollout
+
+    _seed_models_store(monkeypatch, tmp_path, "user/repo", step="000050", weights=False)
+    _seed_hub_cache(monkeypatch, tmp_path)
+
+    assert rollout._local_store_policy_path("user/repo", "000050") is None, (
+        "a store entry with a config but no model.safetensors must fall through to the "
+        "download instead of being served as a usable checkpoint"
+    )
+
+
+def test_local_store_refuses_a_weightless_root_ref(monkeypatch, tmp_path) -> None:
+    """Same for the flat `@root` shape."""
+    from makermodslab import rollout
+
+    _seed_models_store(monkeypatch, tmp_path, "user/flat", flat=True, weights=False)
+    _seed_hub_cache(monkeypatch, tmp_path)
+
+    assert rollout._local_store_policy_path("user/flat", None) is None
+
+
+def test_weightless_store_entry_falls_through_to_the_hub(monkeypatch, tmp_path) -> None:
+    """End-to-end: the partial entry must not break inference, just be skipped.
+
+    This is the behaviour the incident should have had — resolve via the Hub, as
+    it did before F6 existed.
+    """
+    from makermodslab import rollout
+
+    _seed_models_store(monkeypatch, tmp_path, "user/repo", step="000050", weights=False)
+    _seed_hub_cache(monkeypatch, tmp_path)
+    fake_root = tmp_path / "snapshot"
+    fake_root.mkdir()
+    monkeypatch.setattr("huggingface_hub.snapshot_download", lambda **kw: str(fake_root))
+
+    result = rollout._resolve_policy_path("user/repo@checkpoints/000050")
+
+    assert result == str(fake_root / "checkpoints" / "000050" / "pretrained_model")
+
+
+def test_processor_safetensors_alone_do_not_count_as_weights(monkeypatch, tmp_path) -> None:
+    """The trap, pinned explicitly.
+
+    The broken tree DOES contain .safetensors files (pre/post-processor), so a
+    check for "any safetensors present" would have served it just the same. The
+    requirement is the POLICY weights specifically.
+    """
+    from makermodslab import models
+
+    _seed_models_store(monkeypatch, tmp_path, "user/repo", flat=True, weights=False)
+    repo_dir = tmp_path / "makermodslab_models" / "user" / "repo"
+
+    assert list(repo_dir.glob("*.safetensors")), "fixture precondition: safetensors ARE present"
+    assert models._has_loadable_weights(repo_dir) is False
+    assert models._resolve_pretrained_dir(repo_dir) is None
+
+
+def test_complete_store_entry_is_still_served(monkeypatch, tmp_path) -> None:
+    """Control: the fix must not stop F6 serving a COMPLETE local copy."""
+    from makermodslab import rollout
+
+    repo_dir = _seed_models_store(monkeypatch, tmp_path, "user/repo", step="000050")
+    _seed_hub_cache(monkeypatch, tmp_path)
+    _explode_snapshot_download(monkeypatch)
+
+    assert rollout._local_store_policy_path("user/repo", "000050") == str(
+        repo_dir / "checkpoints" / "000050" / "pretrained_model"
+    )
+
+
+def test_adapter_shaped_checkpoint_counts_as_loadable(tmp_path) -> None:
+    """A PEFT/LoRA adapter dir has no model.safetensors and is still loadable.
+
+    `make_policy`'s use_peft branch reads the adapter config and calls
+    `PeftModel.from_pretrained(policy, dir)`, pulling the BASE weights from the
+    adapter config's `base_model_name_or_path` — so requiring model.safetensors
+    unconditionally would make the user's pi05 LoRA repos vanish.
+    """
+    from makermodslab import models
+
+    d = tmp_path / "adapter"
+    d.mkdir()
+    (d / "config.json").write_text("{}")
+    (d / "adapter_config.json").write_text('{"base_model_name_or_path": "lerobot/pi05"}')
+    (d / "adapter_model.safetensors").write_text("lora")
+
+    assert models._has_loadable_weights(d) is True
+    assert models._resolve_pretrained_dir(d) == d
+
+
+def test_partial_adapter_dir_is_not_loadable(tmp_path) -> None:
+    """Half an adapter is not an adapter: PeftConfig.from_pretrained needs the
+    config, and there is nothing to load without the adapter weights."""
+    from makermodslab import models
+
+    d = tmp_path / "half_adapter"
+    d.mkdir()
+    (d / "config.json").write_text("{}")
+    (d / "adapter_model.safetensors").write_text("lora")  # no adapter_config.json
+
+    assert models._has_loadable_weights(d) is False
+
+
+def test_sharded_weights_are_not_accepted(tmp_path) -> None:
+    """The pinned lerobot cannot load sharded weights from a local dir.
+
+    `from_pretrained` joins SAFETENSORS_SINGLE_FILE and opens it — there is no
+    index-file branch — and the save side pins max_shard_size above the total so
+    output stays one file. Accepting shards would recreate this very bug: a tree
+    we call usable that lerobot then fails to open.
+    """
+    from makermodslab import models
+
+    d = tmp_path / "sharded"
+    d.mkdir()
+    (d / "config.json").write_text("{}")
+    (d / "model-00001-of-00002.safetensors").write_text("shard")
+    (d / "model-00002-of-00002.safetensors").write_text("shard")
+    (d / "model.safetensors.index.json").write_text("{}")
+
+    assert models._has_loadable_weights(d) is False

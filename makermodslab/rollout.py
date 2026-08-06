@@ -71,7 +71,12 @@ from .eval_protocol import (
     parse_event,
 )
 from .jobs import download_hub_checkpoint_ref, make_snapshot_progress_tqdm
-from .models import _downloaded_model_dir, _hub_cache_has_repo, _resolve_pretrained_dir
+from .models import (
+    _downloaded_model_dir,
+    _has_loadable_weights,
+    _hub_cache_has_repo,
+    _resolve_pretrained_dir,
+)
 from .motor_power import clear_goal_velocity, reset_torque_limit
 from .record import _DEFAULT_FOURCC
 from .utils.config import (
@@ -722,7 +727,13 @@ def _local_store_policy_path(repo_id: str, step_dir: str | None) -> str | None:
     resolved: Path | None = None
     if step_dir is not None:
         candidate = model_dir / "checkpoints" / step_dir / "pretrained_model"
-        if (candidate / "config.json").is_file():
+        # config.json alone is NOT enough: an interrupted local_dir download
+        # leaves the config and the processor safetensors behind but no policy
+        # weights, and serving that turns a silently-partial store entry into a
+        # FileNotFoundError deep inside lerobot. This branch addresses a specific
+        # step directly (it never goes through _resolve_pretrained_dir), so it
+        # has to ask the weights question itself.
+        if (candidate / "config.json").is_file() and _has_loadable_weights(candidate):
             resolved = candidate
     elif _resolve_pretrained_dir(model_dir) == model_dir:
         resolved = model_dir

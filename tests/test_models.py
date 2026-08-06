@@ -95,8 +95,12 @@ def _seed_run(
     pretrained = run_dir / "checkpoints" / str(steps) / "pretrained_model"
     if with_checkpoint:
         pretrained.mkdir(parents=True)
-        # _list_local_checkpoints requires pretrained_model/config.json.
+        # _list_local_checkpoints requires pretrained_model/config.json, and
+        # _resolve_pretrained_dir additionally requires the policy weights lerobot
+        # actually loads (model.safetensors) — a config-only tree is a partial
+        # download, not a checkpoint.
         (pretrained / "config.json").write_text(json.dumps({"type": policy_type}))
+        (pretrained / "model.safetensors").write_text("weights")
         (pretrained / "train_config.json").write_text(
             json.dumps(
                 {
@@ -1010,15 +1014,21 @@ def _make_model_checkpoint(
 ) -> Path:
     """Fabricate a checkpoint dir in one of the two recognized shapes: a root
     config.json ("root", what upload_local_model pushes) or a
-    checkpoints/<step>/pretrained_model tree ("tree")."""
+    checkpoints/<step>/pretrained_model tree ("tree").
+
+    Both shapes carry `model.safetensors`: `_resolve_pretrained_dir` requires the
+    weights lerobot actually loads, so a config-only tree is deliberately NOT a
+    usable checkpoint (it is what an interrupted download leaves behind)."""
     d = root / repo_id
     if shape == "root":
         d.mkdir(parents=True)
         (d / "config.json").write_text(json.dumps({"type": policy_type}))
+        (d / "model.safetensors").write_text("weights")
     else:
         p = d / "checkpoints" / str(step) / "pretrained_model"
         p.mkdir(parents=True)
         (p / "config.json").write_text(json.dumps({"type": policy_type}))
+        (p / "model.safetensors").write_text("weights")
     return d
 
 
@@ -1254,6 +1264,7 @@ def test_model_download_manager_completes_and_lands_locally(
         d = Path(local_dir)
         d.mkdir(parents=True)
         (d / "config.json").write_text(json.dumps({"type": "act"}))
+        (d / "model.safetensors").write_text("weights")
 
     monkeypatch.setattr(m, "snapshot_download", _fake_snapshot)
 
@@ -1496,6 +1507,7 @@ def test_model_download_uses_the_network_when_the_cache_is_empty(
         d = Path(local_dir)
         d.mkdir(parents=True, exist_ok=True)
         (d / "config.json").write_text(json.dumps({"type": "act"}))
+        (d / "model.safetensors").write_text("weights")
 
     monkeypatch.setattr(m, "snapshot_download", _fake_snapshot)
 
@@ -2127,3 +2139,61 @@ def test_delete_succeeds_when_inference_reads_other_path(
 
     result = delete_local_model("user/idle_policy")
     assert result["deleted"] is True
+
+
+def test_model_download_rejects_a_fetch_that_lands_without_weights(
+    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A download that ends weights-less is a FAILURE, not a usable model.
+
+    Reproduces the live incident at the download boundary: the fetch lands
+    config.json, train_config.json and both processor safetensors but no
+    model.safetensors — the 68 KB interrupted-download shape. The post-download
+    validation must catch it so the partial is cleaned up and the user is told,
+    rather than the entry sitting in the library until inference dies on
+    FileNotFoundError deep inside lerobot.
+    """
+    import makermodslab.models as m
+
+    def _fake_snapshot(repo_id, repo_type, local_dir, ignore_patterns=None):  # noqa: ARG001
+        d = Path(local_dir)
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "config.json").write_text(json.dumps({"type": "act"}))
+        (d / "train_config.json").write_text(json.dumps({"type": "act"}))
+        # Present, and deliberately NOT policy weights.
+        (d / "preprocessor.safetensors").write_text("processor")
+        (d / "postprocessor.safetensors").write_text("processor")
+
+    monkeypatch.setattr(m, "snapshot_download", _fake_snapshot)
+
+    mgr = _model_download_manager()
+    mgr.start("user/partial")
+    _join_download(mgr)
+
+    status = mgr.get_status()
+    assert status["state"] == "error"
+    assert not m.is_model_available_locally("user/partial")
+    # The partial dir is cleaned up, so it can't be mistaken for a complete copy.
+    assert not (tmp_lerobot_home / "makermodslab_models" / "user" / "partial").exists()
+
+
+def test_resolve_pretrained_dir_skips_a_half_written_newest_checkpoint(tmp_lerobot_home: Path) -> None:
+    """A checkpoint still being written must not hide the last complete one.
+
+    Training writes checkpoints/<step>/pretrained_model incrementally, so the
+    highest step can exist with a config and no weights for a while. The scan
+    walks down to the newest COMPLETE checkpoint instead of reporting the run
+    unusable.
+    """
+    import makermodslab.models as m
+
+    root = tmp_lerobot_home / "makermodslab_models" / "user" / "run"
+    good = root / "checkpoints" / "000100" / "pretrained_model"
+    good.mkdir(parents=True)
+    (good / "config.json").write_text(json.dumps({"type": "act"}))
+    (good / "model.safetensors").write_text("weights")
+    partial = root / "checkpoints" / "000200" / "pretrained_model"
+    partial.mkdir(parents=True)
+    (partial / "config.json").write_text(json.dumps({"type": "act"}))
+
+    assert m._resolve_pretrained_dir(root) == good.resolve()

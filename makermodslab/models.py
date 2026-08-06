@@ -304,6 +304,53 @@ def _local_models_root() -> Path:
     return root
 
 
+# The weights file lerobot's loader actually opens, and the one alternative
+# layout it accepts. Derived from the PINNED lerobot (v0.6.0), not guessed:
+#
+#   * Standard policy — `PreTrainedPolicy.from_pretrained` on a LOCAL dir does
+#     exactly `os.path.join(model_id, SAFETENSORS_SINGLE_FILE)` and hands it
+#     straight to `_load_as_safetensor` (policies/pretrained.py:195-198).
+#     `SAFETENSORS_SINGLE_FILE` is huggingface_hub's "model.safetensors".
+#   * SHARDED weights are deliberately NOT accepted. That local-dir branch has no
+#     index-file handling at all, and the save side pins `max_shard_size` above
+#     the total size specifically "so the output stays a single
+#     `model.safetensors`" (pretrained.py:157-159). Treating
+#     `model-00001-of-...` as usable would recreate this very bug — a tree we
+#     call loadable that lerobot then fails to open.
+#   * ADAPTER (PEFT/LoRA) repos are accepted, because `make_policy` has a real
+#     branch for them: with `use_peft`, it reads `PeftConfig.from_pretrained(dir)`
+#     and calls `PeftModel.from_pretrained(policy, dir)` (policies/factory.py:
+#     616-638), loading the BASE weights from the adapter config's
+#     `base_model_name_or_path`. So an adapter dir is complete without
+#     `model.safetensors`; what it must have is PEFT's own pair.
+#
+# NOT sufficient, and the trap this exists to close: "some *.safetensors is
+# present". A policy checkpoint also ships pre/post-processor safetensors, so an
+# interrupted download can carry several .safetensors files and still have no
+# policy weights at all.
+_POLICY_WEIGHTS_FILE = "model.safetensors"
+_ADAPTER_WEIGHTS_FILES = ("adapter_config.json", "adapter_model.safetensors")
+
+
+def _has_loadable_weights(pretrained_dir: Path) -> bool:
+    """True when `pretrained_dir` holds weights lerobot can actually load.
+
+    A `config.json` alone proves only that a download STARTED. An interrupted
+    `local_dir` download leaves a tree that looks complete to a config-only check
+    — config.json, train_config.json, both processor safetensors — and then dies
+    with FileNotFoundError on `model.safetensors` the moment inference runs. That
+    happened live: a 68 KB store entry served by the F6 short-circuit turned a
+    silently-partial download into a hard crash, where the pre-F6 path would have
+    re-downloaded and worked.
+    """
+    try:
+        if (pretrained_dir / _POLICY_WEIGHTS_FILE).is_file():
+            return True
+        return all((pretrained_dir / name).is_file() for name in _ADAPTER_WEIGHTS_FILES)
+    except OSError:
+        return False
+
+
 def _resolve_pretrained_dir(path: Path) -> Path | None:
     """The pretrained_model dir inside a downloaded/imported checkpoint dir, or
     None when `path` isn't a usable policy checkpoint.
@@ -314,12 +361,31 @@ def _resolve_pretrained_dir(path: Path) -> Path | None:
     ``config.json`` (the shape ``upload_local_model`` pushes). The returned dir
     is EXACTLY what rollout._resolve_policy_path consumes verbatim for a local
     ref, so `path` rows built from it are directly usable for inference.
+
+    "Usable" requires the POLICY WEIGHTS, not just a config (see
+    `_has_loadable_weights`). This is the single definition every consumer shares
+    — the /models listing, `is_model_available_locally`, `_fetch_model_snapshot`'s
+    post-download validation, `_cleanup_partial_model`, `import_local_model` and
+    the F6 local-store short-circuit in rollout all ask this one question — so a
+    weights-less tree is uniformly invisible rather than usable-here-and-broken-
+    there. A partial download therefore drops out of the listing instead of being
+    offered and then crashing mid-run.
+
+    In the checkpoints layout the scan walks from the highest step DOWN and takes
+    the first checkpoint with weights: a checkpoint still being written by a live
+    training run must not hide the last complete one. The returned path names its
+    own step, so there is no risk of the UI labelling one step's weights as
+    another's.
     """
     try:
         checkpoints = _list_local_checkpoints(str(path))
+        for checkpoint in reversed(checkpoints):
+            candidate = Path(checkpoint.ref)
+            if _has_loadable_weights(candidate):
+                return candidate
         if checkpoints:
-            return Path(checkpoints[-1].ref)
-        if (path / "config.json").is_file():
+            return None
+        if (path / "config.json").is_file() and _has_loadable_weights(path):
             return path
     except OSError:
         return None
