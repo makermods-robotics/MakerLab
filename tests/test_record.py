@@ -1787,17 +1787,22 @@ def test_delete_refusal_wording_is_action_neutral(tmp_lerobot_home, monkeypatch:
     assert result["message"].endswith("Stop it first.")
 
 
-def _stub_recording_request():
+def _stub_recording_request(**overrides):
+    """Minimal RecordingRequest for exercising handle_start_recording's
+    precondition checks — none of these reach real hardware. Pass keyword
+    overrides to vary a single field (e.g. an invalid dataset_repo_id)."""
     import makermodslab.record as record
 
-    return record.RecordingRequest(
-        leader_port="/dev/leader",
-        follower_port="/dev/follower",
-        leader_config="leader",
-        follower_config="follower",
-        dataset_repo_id="tester/ds",
-        single_task="pick",
-    )
+    fields = {
+        "leader_port": "/dev/leader",
+        "follower_port": "/dev/follower",
+        "leader_config": "leader",
+        "follower_config": "follower",
+        "dataset_repo_id": "tester/ds",
+        "single_task": "pick",
+    }
+    fields.update(overrides)
+    return record.RecordingRequest(**fields)
 
 
 def test_start_recording_blocked_when_calibration_active(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1811,6 +1816,7 @@ def test_start_recording_blocked_when_calibration_active(monkeypatch: pytest.Mon
     result = record.handle_start_recording(_stub_recording_request())
     assert result == {
         "success": False,
+        "status_code": 409,
         "message": "Calibration is currently active. Stop it first.",
     }
 
@@ -1824,6 +1830,7 @@ def test_start_recording_blocked_when_auto_calibration_active(monkeypatch: pytes
     result = record.handle_start_recording(_stub_recording_request())
     assert result == {
         "success": False,
+        "status_code": 409,
         "message": "Auto-calibration is currently active. Stop it first.",
     }
 
@@ -1837,6 +1844,7 @@ def test_start_recording_blocked_when_wiggle_active(monkeypatch: pytest.MonkeyPa
     result = record.handle_start_recording(_stub_recording_request())
     assert result == {
         "success": False,
+        "status_code": 409,
         "message": "A gripper wiggle is currently in progress. Wait for it to finish.",
     }
 
@@ -1883,6 +1891,109 @@ def test_start_recording_resume_skips_timestamp_stamp(monkeypatch: pytest.Monkey
     assert _start(resume=True) == "tester/existing_ds"
     monkeypatch.setattr(record, "recording_active", False)  # release the claim
     assert re.fullmatch(r"tester/existing_ds_\d{8}_\d{6}", _start(resume=False))
+
+
+# ---------------------------------------------------------------------------
+# R2 regression: every rejection branch inside handle_start_recording's
+# `with _state_lock:` block must carry a "status_code" the route layer can
+# turn into a real HTTPException (409 conflict / 400 bad request), instead of
+# a plain dict that FastAPI would default to HTTP 200 for. See
+# tests/test_server.py for the route-level (actual HTTP status) coverage.
+# ---------------------------------------------------------------------------
+
+
+def test_start_recording_rejects_with_409_when_recording_already_active(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import makermodslab.record as record
+    import makermodslab.rollout as rollout
+    import makermodslab.teleoperate as teleop
+
+    monkeypatch.setattr(record, "recording_active", True)
+    monkeypatch.setattr(record, "releasing", False)
+    monkeypatch.setattr(teleop, "teleoperation_active", False)
+    monkeypatch.setattr(rollout, "inference_active", False)
+
+    result = record.handle_start_recording(_stub_recording_request())
+
+    assert result["success"] is False
+    assert result["status_code"] == 409
+    assert "already active" in result["message"]
+
+
+def test_start_recording_rejects_with_409_while_previous_session_releases(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The "releasing" variant of the recording_active conflict is still a 409
+    (a client should retry shortly), not a 400."""
+    import makermodslab.record as record
+    import makermodslab.rollout as rollout
+    import makermodslab.teleoperate as teleop
+
+    monkeypatch.setattr(record, "recording_active", True)
+    monkeypatch.setattr(record, "releasing", True)
+    monkeypatch.setattr(teleop, "teleoperation_active", False)
+    monkeypatch.setattr(rollout, "inference_active", False)
+
+    result = record.handle_start_recording(_stub_recording_request())
+
+    assert result["success"] is False
+    assert result["status_code"] == 409
+    assert "still releasing" in result["message"]
+
+
+def test_start_recording_rejects_with_409_when_teleoperation_active(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import makermodslab.record as record
+    import makermodslab.rollout as rollout
+    import makermodslab.teleoperate as teleop
+
+    monkeypatch.setattr(record, "recording_active", False)
+    monkeypatch.setattr(teleop, "teleoperation_active", True)
+    monkeypatch.setattr(rollout, "inference_active", False)
+
+    result = record.handle_start_recording(_stub_recording_request())
+
+    assert result["success"] is False
+    assert result["status_code"] == 409
+    assert "Teleoperation is currently active" in result["message"]
+
+
+def test_start_recording_rejects_with_409_when_inference_active(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import makermodslab.record as record
+    import makermodslab.rollout as rollout
+    import makermodslab.teleoperate as teleop
+
+    monkeypatch.setattr(record, "recording_active", False)
+    monkeypatch.setattr(teleop, "teleoperation_active", False)
+    monkeypatch.setattr(rollout, "inference_active", True)
+
+    result = record.handle_start_recording(_stub_recording_request())
+
+    assert result["success"] is False
+    assert result["status_code"] == 409
+    assert "Inference is currently active" in result["message"]
+
+
+def test_start_recording_rejects_with_400_for_invalid_dataset_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import makermodslab.record as record
+    import makermodslab.rollout as rollout
+    import makermodslab.teleoperate as teleop
+
+    monkeypatch.setattr(record, "recording_active", False)
+    monkeypatch.setattr(teleop, "teleoperation_active", False)
+    monkeypatch.setattr(rollout, "inference_active", False)
+
+    result = record.handle_start_recording(_stub_recording_request(dataset_repo_id="too/many/slashes"))
+
+    assert result["success"] is False
+    assert result["status_code"] == 400
+    assert "'/'" in result["message"]
 
 
 # ---------------------------------------------------------------------------

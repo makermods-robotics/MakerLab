@@ -882,8 +882,18 @@ async def websocket_endpoint(websocket: WebSocket):
 
 @app.post("/start-recording")
 def start_recording(request: RecordingRequest):
-    """Start a dataset recording session"""
-    return handle_start_recording(request)
+    """Start a dataset recording session.
+
+    Refuses (409) if recording, teleoperation, inference, calibration,
+    auto-calibration, or a gripper wiggle is already active on this robot;
+    400 for a malformed dataset name."""
+    result = handle_start_recording(request)
+    if not result.get("success"):
+        raise HTTPException(
+            status_code=result.get("status_code", 500),
+            detail=result.get("message", "Failed to start recording"),
+        )
+    return result
 
 
 @app.post("/stop-recording")

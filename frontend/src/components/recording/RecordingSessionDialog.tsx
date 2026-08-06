@@ -380,10 +380,25 @@ const RecordingSessionDialog: React.FC<{
         // The backend rejected the start (e.g. 409 already-active, or a config
         // error) — no session is ours to stop, so keep the safety net from
         // firing a stop that would kill an unrelated in-flight session.
+        // A rejection now raises HTTPException, whose body carries the reason
+        // under "detail" (FastAPI's convention), not "message" — read both so
+        // the specific reason (already active / invalid name / etc.) still
+        // reaches the toast instead of falling back to the generic text.
+        // A 422 (request validation failure) puts an array of {loc,msg,type}
+        // in `detail` instead of a string — toast() renders description as a
+        // React node, so an unguarded array would crash the render.
         markHandled();
+        const detail =
+          typeof data.detail === "string"
+            ? data.detail
+            : Array.isArray(data.detail)
+              ? data.detail
+                  .map((d: { msg?: string }) => d?.msg ?? JSON.stringify(d))
+                  .join("; ")
+              : null;
         toast({
           title: "Error Starting Recording",
-          description: data.message || "Failed to start recording session.",
+          description: detail || data.message || "Failed to start recording session.",
           variant: "destructive",
         });
         onExitRef.current();
