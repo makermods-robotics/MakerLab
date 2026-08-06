@@ -199,6 +199,40 @@ def test_list_local_models_skips_non_local_runner(registry) -> None:
     assert list_local_models() == []
 
 
+def test_list_local_models_exposes_state_and_target_steps_for_interrupted_run(registry) -> None:
+    """An interrupted run kept in the library must be tellable apart from one
+    that finished normally: `steps` is the checkpoint's actual step, distinct
+    from `target_steps` (the run's configured target), and `state` carries
+    the terminal state. Without this a run interrupted at step 5000 of a
+    configured 10000 looks identical to one configured for (and that finished
+    at) exactly 5000 steps."""
+    from makermodslab.models import list_local_models
+
+    pretrained = _seed_run(registry, "interrupted_run", state="interrupted", steps=5000)
+    (pretrained / "train_config.json").write_text(
+        json.dumps({"policy": {"type": "act"}, "dataset": {"repo_id": "user/pick"}, "steps": 10000})
+    )
+
+    m = list_local_models()[0]
+    assert m["steps"] == 5000
+    assert m["target_steps"] == 10000
+    assert m["state"] == "interrupted"
+
+
+def test_list_local_models_target_steps_matches_steps_for_completed_run(registry) -> None:
+    """A run that trained to its configured target has steps == target_steps,
+    state == "done" — the case a bare `steps` count can't be told apart from
+    an interrupted run without the fields above."""
+    from makermodslab.models import list_local_models
+
+    _seed_run(registry, "done_run", state="done", steps=10000)
+
+    m = list_local_models()[0]
+    assert m["steps"] == 10000
+    assert m["target_steps"] == 10000
+    assert m["state"] == "done"
+
+
 # ---------------------------------------------------------------------------
 # list_all_models — hub/local merge + source badges.
 # ---------------------------------------------------------------------------
