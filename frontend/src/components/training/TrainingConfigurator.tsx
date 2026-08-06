@@ -680,6 +680,7 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
           packageName={policyExtra.packageName}
           installTarget={policyExtra.installTarget}
           installHint={policyExtra.installHint}
+          purpose="training"
         />
       )}
     </div>
