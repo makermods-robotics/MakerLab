@@ -178,6 +178,11 @@ def localize_config_for_cloud(config: TrainingRequest, flavor: str) -> None:
             "source checkpoint's train_config.json lives on this machine, not in "
             "the container. Resume a cloud run from its Hub output instead."
         )
+    # A fine-tune base is allowed to be a HUB ref — either a bare repo id (whose
+    # root lerobot resolves itself) or the step-suffixed 'repo@checkpoints/<step>'
+    # form, which the wrapper materializes pod-side before launching the trainer
+    # (the twin of the resume download above). What cannot work is a host path:
+    # the container has no view of this machine's disk.
     if config.policy_pretrained_path and Path(config.policy_pretrained_path).is_absolute():
         raise ValueError(
             "Fine-tuning a cloud job from a local checkpoint isn't supported — "
@@ -249,6 +254,23 @@ def _arg(name):
         if tok.startswith(name + "="):
             return tok.split("=", 1)[1]
     return None
+
+
+def _set_arg(name, value):
+    """Rewrite --name=foo / --name foo in trainer_argv in place. False if absent.
+
+    Mutates the list the trainer is launched with (Popen receives it directly),
+    which is how a Hub ref that only this pod can resolve becomes a real path.
+    Both spellings are handled because the value is written back in whichever
+    form the argv builder used."""
+    for i, tok in enumerate(trainer_argv):
+        if tok == name and i + 1 < len(trainer_argv):
+            trainer_argv[i + 1] = value
+            return True
+        if tok.startswith(name + "="):
+            trainer_argv[i] = name + "=" + value
+            return True
+    return False
 
 
 output_dir = _arg("--output_dir")
@@ -324,6 +346,44 @@ if resume_from:
     except Exception as exc:
         print(f"[wrapper] resume download failed: {exc}", flush=True)
         sys.exit(1)
+
+# Fine-tune from a specific Hub step: --policy.pretrained_path may carry the
+# ref 'repo@checkpoints/<step_dir>' instead of a path, because lerobot's
+# pretrained_path addresses a local dir or a repo ROOT and cannot express a
+# sub-path. Materialize it here — the pod-side twin of the host-side
+# jobs.localize_pretrained_path — and rewrite the argv to the real directory.
+# A bare repo id is left ALONE: lerobot resolves a repo root itself, and that
+# flow already works.
+#
+# Downloaded into the snapshot cache and used from there, NOT copied under
+# --output_dir like the resume tree: fine-tuning only READS these weights, and
+# anything under <output_dir>/checkpoints/ would be picked up by the uploader
+# below and republished as if this run had produced it.
+pretrained_ref = _arg("--policy.pretrained_path")
+if pretrained_ref:
+    m = re.match(r"^(?P<repo>[^@]+)@checkpoints/(?P<step_dir>\d+)$", pretrained_ref)
+    if m:
+        src_repo, step_dir = m.group("repo"), m.group("step_dir")
+        print(f"[wrapper] fine-tuning: downloading {src_repo}@checkpoints/{step_dir}", flush=True)
+        try:
+            from huggingface_hub import snapshot_download
+
+            local_root = snapshot_download(
+                repo_id=src_repo,
+                repo_type="model",
+                allow_patterns=[f"checkpoints/{step_dir}/pretrained_model/*"],
+            )
+            base_dir = Path(local_root) / "checkpoints" / step_dir / "pretrained_model"
+            if not (base_dir / "config.json").is_file():
+                print(f"[wrapper] fine-tune base has no config.json at {base_dir}", flush=True)
+                sys.exit(1)
+            if not _set_arg("--policy.pretrained_path", str(base_dir)):
+                print("[wrapper] could not rewrite --policy.pretrained_path", flush=True)
+                sys.exit(1)
+            print(f"[wrapper] fine-tune base ready at {base_dir}", flush=True)
+        except Exception as exc:
+            print(f"[wrapper] fine-tune base download failed: {exc}", flush=True)
+            sys.exit(1)
 
 stop_event = threading.Event()
 

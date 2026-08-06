@@ -43,6 +43,7 @@ import TrainingConfigurator, {
 } from "@/components/training/TrainingConfigurator";
 import TrainingJobDialog from "@/components/training/TrainingJobDialog";
 import JobsLibrary from "@/components/jobs/JobsLibrary";
+import { useJobsData } from "@/components/jobs/JobsDataContext";
 import DatasetPicker from "@/components/landing/DatasetPicker";
 import {
   LibrarySection,
@@ -125,6 +126,11 @@ const TrainPanel: React.FC = () => {
     refresh: refreshDatasets,
   } = useDatasets();
   const { selectedDataset, setSelectedDataset } = useSelectedDataset();
+  // Same registry state the jobs library below renders. The panel only needs
+  // the refetch: a launch from this form mutates the registry, and every other
+  // mutation the studio performs (stop, delete, rename, hub dismiss) already
+  // pulls the list afterwards rather than trusting the broadcast.
+  const { refresh: refreshJobs } = useJobsData();
 
   // The new-training form slides open in place; the jobs library folds to its
   // header while the form is open (still expandable by hand).
@@ -514,7 +520,18 @@ const TrainPanel: React.FC = () => {
               // Launch opens the monitor dialog over this panel (via
               // openJobMonitor in the configurator); fold the form back so
               // closing the dialog lands on the jobs library, not a stale form.
-              onStarted={() => toggleForm(false)}
+              //
+              // And pull the job list, because the new run has to be IN it:
+              // the panel never unmounts across a launch, so nothing else
+              // re-reads /jobs. A launch's only route into the list is
+              // otherwise the fire-and-forget `jobs_changed` broadcast; miss
+              // it once and the run stays invisible until the next mount
+              // (page reload). This is the same after-mutation refetch every
+              // other studio action (stop, delete, rename) already does.
+              onStarted={() => {
+                toggleForm(false);
+                refreshJobs();
+              }}
               actionsContainer={actionsEl}
             />
           </div>

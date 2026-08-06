@@ -34,10 +34,13 @@ from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from queue import Empty, Queue
-from typing import Literal, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
+from huggingface_hub import hf_hub_download
 from pydantic import BaseModel
+from tqdm.auto import tqdm as _base_tqdm
 
+from .datasets import CAMERA_FEATURE_PREFIX, read_dataset_features
 from .train import TrainingRequest
 from .utils.config import is_valid_robot_name
 from .utils.hf_auth import shared_hf_api
@@ -238,6 +241,67 @@ def _resume_total_steps(config: TrainingRequest) -> int | None:
     """The full step target to rebase a resumed run's tqdm bar against (see
     parse_metrics_into). None for a fresh run — its bar is already global."""
     return config.steps if config.resume else None
+
+
+def _resume_start_step(config: TrainingRequest) -> int | None:
+    """The GLOBAL step a resumed run starts at — the step of the checkpoint it
+    continues from. None for a fresh run (which starts at 0 by definition), and
+    None when nothing on the request names the checkpoint.
+
+    Complements _resume_total_steps rather than replacing it. Once lerobot's
+    tqdm bar exists, parse_metrics_into rebases off the bar's own total
+    (`resume_total − remaining_total + bar`), which is the better source
+    because it reflects the step lerobot ACTUALLY restored rather than what the
+    request asked for. This function covers the window BEFORE the first bar
+    frame — dataset scan, video-backend init, checkpoint load — which is many
+    seconds even on a small local dataset and minutes on a real one. See
+    _initial_metrics for why that window mattered.
+
+    `resume_from_step` is the request's own answer and is preferred. It is
+    None when the user resumed "the latest checkpoint": the resolvers
+    (_resolve_resume_config_path / _resolve_cloud_resume) pick the checkpoint
+    and write their choice back onto the config, so the fallbacks read the step
+    out of that — a zero-padded checkpoint dir name either way. A resume driven
+    by a hand-supplied `config_path` need not have that layout, hence the digit
+    check and the None it can still return.
+    """
+    if not config.resume:
+        return None
+    if config.resume_from_step is not None:
+        return config.resume_from_step
+    if config.resume_from_hub_step and config.resume_from_hub_step.isdigit():
+        return int(config.resume_from_hub_step)
+    if config.config_path:
+        # <output_dir>/checkpoints/<step_dir>/pretrained_model/train_config.json
+        step_dir = Path(config.config_path).parent.parent.name
+        if step_dir.isdigit():
+            return int(step_dir)
+    return None
+
+
+def _initial_metrics(config: TrainingRequest) -> TrainingMetrics:
+    """The metrics a job record starts life with.
+
+    A FRESH run starts at 0/0 — genuinely unknown until tqdm speaks, and the UI
+    reads total_steps == 0 as "Training starting…".
+
+    A RESUMED run does NOT start at zero, and saying so was the bug: for the
+    ~12s (small local dataset) to several minutes (real one) between launching
+    and lerobot's first tqdm frame, every progress reading in the app showed
+    the run at step 0 — a confident "0 / 60 · 0.0%" where the truth was
+    "10 / 60 · 16.7%". Worse, the monitoring chart treats a step going
+    BACKWARDS as a new run and clears its history, so the seeded parent-run
+    loss curve was wiped on mount by that same 0 before the first frame
+    restored it.
+
+    Seeding the known floor fixes every consumer at once, because they all read
+    these two fields. It is a floor, not a claim about progress: the parser
+    still owns the value from the first tqdm frame onwards.
+    """
+    start = _resume_start_step(config)
+    if start is None or not config.steps:
+        return TrainingMetrics()
+    return TrainingMetrics(current_step=start, total_steps=config.steps)
 
 
 def _read_log_metrics(
@@ -545,6 +609,93 @@ class TailingJobRunner:
             logger.exception("Tailing loop error: %s", exc)
 
 
+class PreparingJobRunner:
+    """Stand-in runner for a local job whose base checkpoint is still downloading.
+
+    A local fine-tune from a Hub checkpoint has to materialize multi-GB weights
+    before the trainer can start. That used to happen inside POST /jobs/training,
+    which blocked the request for minutes with nothing on screen. The record is
+    now created first (state "running") and the download runs in a background
+    thread; this object stands in for the real LocalJobRunner meanwhile, so the
+    registry's existing seams keep working with no special cases:
+
+      * `stream_log_lines` feeds the monitor's 1Hz /jobs/{id}/logs poll — that
+        is how download progress reaches the screen. `emit` is the writing end:
+        it appends to the SAME log.jsonl the trainer will append to next, so
+        the download is part of the run's log rather than a separate channel.
+      * `stop` records the user's cancel, which the materialize thread reads
+        between the download and the spawn (see
+        JobRegistry._materialize_then_start).
+      * `is_running` is deliberately always True. The registry ends this
+        runner's role by REPLACING it in `_runners` (handoff) or removing it
+        (finalisation), both under the registry lock. Answering False would let
+        a watchdog tick that raced the handoff finalise the job as failed while
+        the trainer it had just spawned kept running.
+
+    Not a real process: `returncode` is always None, and `start` is never called
+    (the registry constructs this runner directly).
+    """
+
+    def __init__(self, log_file_path: Path | None = None) -> None:
+        self._log_file_path = log_file_path
+        self._log_queue: Queue[LogLine] = Queue()
+        self._cancelled = threading.Event()
+
+    def emit(self, message: str) -> None:
+        """Append one line to the job's log, for the file and the live poll.
+
+        Opens and closes the file per line on purpose: this runs at most every
+        few seconds, and holding no handle keeps the file free for
+        LocalJobRunner to open in append mode at handoff."""
+        line = LogLine(timestamp=time.time(), message=message)
+        if self._log_file_path is not None:
+            try:
+                self._log_file_path.parent.mkdir(parents=True, exist_ok=True)
+                with self._log_file_path.open("a") as f:
+                    f.write(line.model_dump_json() + "\n")
+            except Exception as exc:  # pragma: no cover — best-effort persist
+                logger.exception("Error writing to log file: %s", exc)
+        # Same cap as LocalJobRunner: never grow unbounded if nobody polls.
+        if self._log_queue.qsize() >= 1000:
+            with contextlib.suppress(Empty):
+                self._log_queue.get_nowait()
+        self._log_queue.put(line)
+
+    def cancelled(self) -> bool:
+        return self._cancelled.is_set()
+
+    # -- JobRunner protocol --
+
+    def start(self, job_id: str, config: TrainingRequest, output_dir: str) -> None:
+        raise RuntimeError("PreparingJobRunner stands in for a runner; it starts nothing")
+
+    def stop(self) -> None:
+        # A huggingface_hub download can't be interrupted mid-flight, so this
+        # only records the intent; the materialize thread acts on it when the
+        # download returns.
+        self._cancelled.set()
+
+    def is_running(self) -> bool:
+        return True
+
+    def returncode(self) -> int | None:
+        return None
+
+    def stream_log_lines(self) -> list[LogLine]:
+        out: list[LogLine] = []
+        try:
+            while True:
+                out.append(self._log_queue.get_nowait())
+        except Empty:
+            pass
+        return out
+
+    def wandb_run_url(self) -> str | None:
+        # No trainer has run yet, so there is no run URL to capture. Present
+        # only because the watchdog asks every runner for one.
+        return None
+
+
 _PERSIST_THROTTLE_SECONDS = 1.0
 
 
@@ -588,6 +739,11 @@ _TRAIN_CONFIG_NAME = "train_config.json"
 # step). The cloud wrapper uploads the whole checkpoints/<step>/ entry, so both
 # subtrees land in the repo; this file is the cheapest existence probe.
 _HUB_TRAINING_STATE_FILE = "training_state/training_step.json"
+
+
+# Plain-language names for the runner ids, so a user-facing refusal reads like
+# the Compute control the user actually clicked rather than an internal literal.
+_RUNNER_LABELS = {"local": "Local — your machine", "hf_cloud": "Hugging Face Cloud"}
 
 
 def _resolve_cloud_resume(source: JobRecord, step: int | None) -> tuple[str, str]:
@@ -697,10 +853,16 @@ def _resolve_finetune_pretrained_path(source: JobRecord, step: int | None) -> st
       * imported local / normal local run → a `local` ref that is the absolute
         pretrained_model dir; returned directly (e.g. a flat imported dir
         becomes a step-0 checkpoint whose ref is the dir itself).
-      * imported hub / cloud run → a `hub` ref ('repo@checkpoints/<step>' or
-        'repo@root'); we return the plain repo id (the root model). lerobot's
-        pretrained_path takes a repo id, not a sub-path, so a specific hub
-        sub-step can't be targeted — see the limitation note below.
+      * imported hub / cloud run at a specific step → the step-suffixed hub ref
+        'repo@checkpoints/<step_dir>', VERBATIM. lerobot can't load a hub
+        sub-path directly, so the ref is materialized into a real directory
+        before the trainer starts — host-side by localize_pretrained_path for a
+        local run, pod-side by the HF Jobs wrapper for a cloud one. This
+        function does not download: it names the checkpoint, and the caller
+        materializes it wherever the trainer will run (MT2).
+      * imported hub / cloud run whose checkpoint is the whole repo ('repo@root')
+        → the plain repo id. The root IS the pretrained_model, which lerobot
+        resolves by itself, so there is nothing to materialize.
 
     Raises ValueError (→ HTTP 400) with a user-facing message when the source
     has no usable checkpoint.
@@ -729,12 +891,15 @@ def _resolve_finetune_pretrained_path(source: JobRecord, step: int | None) -> st
     if chosen.source == "local":
         # chosen.ref is the absolute pretrained_model dir lerobot loads directly.
         return chosen.ref
-    # Hub ref: 'repo@checkpoints/<step_dir>' or 'repo@root'. lerobot's
-    # pretrained_path accepts a repo id (root model), not a sub-step path, so we
-    # hand back the repo portion. Fine-tuning from a specific hub sub-step isn't
-    # supported here — it uses whatever weights live at the repo root.
-    repo_id = chosen.ref.split("@", 1)[0]
-    return repo_id
+    if _HUB_ROOT_REF_RE.match(chosen.ref):
+        # The repo root IS the model; lerobot loads a repo id as-is, so hand back
+        # the repo portion and let it fetch. Nothing to materialize.
+        return chosen.ref.split("@", 1)[0]
+    # A specific step: keep the whole ref. Truncating it here is what MT2 was —
+    # the run silently trained from repo-ROOT weights while the UI reported the
+    # step the user picked. The ref is turned into a directory downstream, on
+    # whichever machine will run the trainer.
+    return chosen.ref
 
 
 _CLOUD_CKPT_TTL_SECONDS = 30.0
@@ -811,6 +976,250 @@ _LANGUAGE_CONDITIONED_POLICY_TYPES = {"smolvla", "pi0", "pi0_fast", "pi05"}
 _HUB_CKPT_REF_RE = re.compile(r"^(?P<repo>[^@]+)@checkpoints/(?P<step_dir>\d+)$")
 _HUB_ROOT_REF_RE = re.compile(r"^(?P<repo>[^@]+)@root$")
 
+# What a hub ref names inside the snapshot, once downloaded.
+_HUB_CKPT_SUBDIR = "pretrained_model"
+
+
+def make_snapshot_progress_tqdm(
+    report: Callable[[int, int | None], None],
+) -> type[_base_tqdm]:
+    """A ``tqdm_class`` for ``snapshot_download`` that reports byte progress.
+
+    Lives here, next to ``download_hub_checkpoint_ref``, because both consumers
+    of a Hub download need it: the inference page's progress bar (rollout.py,
+    which imports it from this module) and the local fine-tune's
+    base-checkpoint download (JobRegistry._materialize_then_start). Verified
+    against the pinned huggingface_hub 1.21.0 contract:
+    ``snapshot_download(tqdm_class=cls)`` instantiates ``cls`` twice — a
+    file-count bar and ONE shared bytes bar (``unit="B"``). Both the plain-HTTP
+    and xet download paths funnel their chunk updates into that shared bar: as
+    each file's metadata arrives its size is added by mutating ``bar.total`` in
+    place followed by ``bar.refresh()``, and downloaded chunks arrive as
+    ``bar.update(n)``. So the recorder keys off ``unit == "B"``, hooks
+    ``update`` for bytes done, and hooks ``refresh`` as the signal that the
+    (growing) total changed. The total keeps growing while file metadata is
+    discovered, so percent can legitimately drop — honest, since the real total
+    isn't known upfront.
+
+    `report` is called from huggingface_hub's download worker threads, so an
+    implementation that touches shared state must do its own locking.
+
+    Subclasses the vanilla tqdm on purpose: huggingface_hub hands non-hf
+    subclasses full responsibility (no ``disable``/``name`` injection, no
+    HF_HUB_DISABLE_PROGRESS_BARS gating), so reporting can't be silently turned
+    off by env/log-level. The bar itself is force-disabled — nothing is drawn to
+    the server's stderr — which also means tqdm's own ``n`` never advances; bytes
+    are accumulated in ``_bytes_done`` instead. ``total`` IS still set and mutable
+    on a disabled tqdm, which is all ``refresh`` needs to read."""
+
+    class _ProgressTqdm(_base_tqdm):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            self._is_bytes_bar = kwargs.get("unit") == "B"
+            self._bytes_done = int(kwargs.get("initial") or 0)
+            kwargs["disable"] = True
+            super().__init__(*args, **kwargs)
+
+        def _report(self) -> None:
+            total = getattr(self, "total", None)
+            report(self._bytes_done, int(total) if total else None)
+
+        def update(self, n: float | None = 1) -> bool | None:
+            if self._is_bytes_bar:
+                if n:
+                    self._bytes_done += int(n)
+                self._report()
+            return super().update(n)
+
+        def refresh(self, *args: Any, **kwargs: Any) -> bool | None:
+            if self._is_bytes_bar:
+                self._report()
+            return super().refresh(*args, **kwargs)
+
+    return _ProgressTqdm
+
+
+def _format_bytes(n: int) -> str:
+    """Human byte size for a log line: 540 MB, 1.2 GB."""
+    if n >= 1024**3:
+        return f"{n / 1024**3:.1f} GB"
+    if n >= 1024**2:
+        return f"{n / 1024**2:.0f} MB"
+    if n >= 1024:
+        return f"{n / 1024:.0f} KB"
+    return f"{n} B"
+
+
+# Written to `error_message` when a fine-tune is stopped during its
+# base-checkpoint download — before any trainer existed, so there is no exit
+# code and no crash to report, and leaving the field None would show the user
+# nothing at all where the card says why the run ended.
+_PREPARE_STOPPED_MESSAGE = "Stopped at your request, before training started."
+
+
+# How far apart two download-progress log lines have to be to be worth writing.
+# Either condition is enough. snapshot_download calls back per CHUNK (thousands
+# of times for a multi-GB checkpoint) and every line is a JSON write plus a row
+# in the monitor's log panel, so an unthrottled hook would drown the log the
+# progress is meant to make readable.
+_DOWNLOAD_LOG_PERCENT_STEP = 5.0
+_DOWNLOAD_LOG_INTERVAL_SECONDS = 5.0
+
+
+class _DownloadProgressLogger:
+    """Turn snapshot_download's byte callbacks into occasional job-log lines.
+
+    Shaped for `make_snapshot_progress_tqdm`'s `report` contract, which fires
+    from several download worker threads at once — hence the lock, which also
+    keeps the emitted lines in ascending order.
+
+    A total of None (huggingface_hub is still discovering file sizes) is
+    reported as bytes-so-far rather than a fake percentage; the total also
+    grows as metadata arrives, so the percentage can legitimately go down."""
+
+    def __init__(self, emit: Callable[[str], None], label: str) -> None:
+        self._emit = emit
+        self._label = label
+        self._lock = threading.Lock()
+        self._last_at = 0.0
+        self._last_percent: float | None = None
+        self._last_bytes = 0
+
+    def __call__(self, bytes_done: int, bytes_total: int | None) -> None:
+        with self._lock:
+            if bytes_done <= self._last_bytes:
+                # A refresh with no new bytes (the total changed, or a bar was
+                # rebuilt). Nothing to say.
+                return
+            now = time.monotonic()
+            percent = (bytes_done / bytes_total * 100) if bytes_total else None
+            due = (now - self._last_at) >= _DOWNLOAD_LOG_INTERVAL_SECONDS
+            if percent is not None:
+                due = (
+                    due
+                    or self._last_percent is None
+                    or (percent - self._last_percent) >= _DOWNLOAD_LOG_PERCENT_STEP
+                )
+            if not due:
+                return
+            self._last_at = now
+            self._last_percent = percent
+            self._last_bytes = bytes_done
+            if percent is None:
+                message = f"Downloading base checkpoint {self._label} — {_format_bytes(bytes_done)} so far"
+            else:
+                message = (
+                    f"Downloading base checkpoint {self._label} — {percent:.0f}% "
+                    f"({_format_bytes(bytes_done)} / {_format_bytes(bytes_total or 0)})"
+                )
+            self._emit(message)
+
+
+def download_hub_checkpoint_ref(ref: str, *, tqdm_class=None) -> str:
+    """Download the model a hub checkpoint ref names; return its local dir.
+
+    THE resolution rule for a hub ref, shared by every consumer so a ref means
+    one thing everywhere:
+
+      * 'repo@checkpoints/<step_dir>' → only that step's ``pretrained_model/``
+        is pulled, and the returned path is that directory. lerobot's
+        ``pretrained_path`` addresses a local dir or a repo ROOT and has no
+        subfolder argument (``PreTrainedConfig.from_pretrained`` hands the id
+        straight to ``hf_hub_download``), so materializing the sub-path here is
+        the only way a specific step can be loaded at all.
+      * 'repo@root' → the whole repo IS the pretrained_model; ``checkpoints/**``
+        and ``training_state/**`` are excluded because neither is needed to load
+        the policy and both can be multi-GB.
+
+    ``tqdm_class`` is forwarded to snapshot_download for byte-progress reporting
+    (the inference page's download bar). This function itself has no session or
+    UI state — callers own their own progress/phase reporting — so it is safe to
+    call from a training request without touching a live rollout.
+
+    Raises ValueError for anything that isn't a hub ref. Downloads can take
+    minutes and pull GBs: never call it while holding a lock others need.
+    """
+    # Imported at CALL time, not module scope, so that patching
+    # `huggingface_hub.snapshot_download` intercepts it — the seam the inference
+    # download tests already use, and the same reason _read_checkpoint_config
+    # re-imports hf_hub_download.
+    from huggingface_hub import snapshot_download
+
+    dl_kwargs: dict[str, Any] = {}
+    if tqdm_class is not None:
+        dl_kwargs["tqdm_class"] = tqdm_class
+    m = _HUB_CKPT_REF_RE.match(ref)
+    if m:
+        repo_id, step_dir = m.group("repo"), m.group("step_dir")
+        local_root = snapshot_download(
+            repo_id=repo_id,
+            repo_type="model",
+            allow_patterns=[f"checkpoints/{step_dir}/{_HUB_CKPT_SUBDIR}/*"],
+            **dl_kwargs,
+        )
+        return str(Path(local_root) / "checkpoints" / step_dir / _HUB_CKPT_SUBDIR)
+    m = _HUB_ROOT_REF_RE.match(ref)
+    if m:
+        return snapshot_download(
+            repo_id=m.group("repo"),
+            repo_type="model",
+            ignore_patterns=["checkpoints/**", "training_state/**"],
+            **dl_kwargs,
+        )
+    raise ValueError(f"Unrecognised policy ref: {ref!r}")
+
+
+def needs_local_materialization(pretrained_path: str) -> bool:
+    """Would `localize_pretrained_path` have to DOWNLOAD this value?
+
+    The cheap predicate twin of that function's early return, so the start path
+    can decide — without touching the network — whether a job needs the
+    background materialization step (see JobRegistry.start). Keep the two in
+    step: anything this answers False for must pass straight through there."""
+    return bool(_HUB_CKPT_REF_RE.match(pretrained_path))
+
+
+def hub_ref_step_label(ref: str) -> str:
+    """The step directory a hub ref names ('012000'), for log lines. Falls back
+    to the whole ref when it isn't step-suffixed."""
+    m = _HUB_CKPT_REF_RE.match(ref)
+    return m.group("step_dir") if m else ref
+
+
+def hub_ref_repo_id(ref: str) -> str:
+    """The repo half of a hub ref, for log lines. The whole ref if unparseable."""
+    m = _HUB_CKPT_REF_RE.match(ref) or _HUB_ROOT_REF_RE.match(ref)
+    return m.group("repo") if m else ref
+
+
+def localize_pretrained_path(pretrained_path: str, *, tqdm_class=None) -> str:
+    """Make a ``--policy.pretrained_path`` value loadable by a LOCAL trainer.
+
+    A step-suffixed hub ref is materialized here, on this machine, into the real
+    directory lerobot will load (see download_hub_checkpoint_ref). Everything
+    else passes through untouched: an absolute local dir is already what lerobot
+    wants, and a bare repo id is a repo ROOT, which lerobot resolves itself —
+    downloading it here would just duplicate the trainer's own fetch.
+
+    The cloud twin of this call happens IN the container (the HF Jobs wrapper
+    materializes the same ref pod-side and rewrites the argv), because a host
+    path means nothing on the pod. One rule, two execution sites.
+
+    A failed download becomes a ValueError naming the checkpoint, rather than a
+    raw Hub exception with nothing actionable in it. On the local start path the
+    download no longer runs inside the request (see JobRegistry.start), so that
+    message is now written onto the job record's `error_message` instead of
+    becoming an HTTP 400 — same words, later delivery.
+
+    `tqdm_class` is forwarded to the download for byte-progress reporting."""
+    if not needs_local_materialization(pretrained_path):
+        return pretrained_path
+    try:
+        return download_hub_checkpoint_ref(pretrained_path, tqdm_class=tqdm_class)
+    except Exception as exc:
+        raise ValueError(
+            f"Could not download the base checkpoint {pretrained_path!r} to fine-tune from: {exc}"
+        ) from exc
+
 
 def _read_checkpoint_config(ckpt: JobCheckpoint) -> dict[str, object]:
     """Load the pretrained_model/config.json for one checkpoint.
@@ -858,6 +1267,331 @@ def _flat_feature_dim(feat: object) -> int | None:
         return int(shape[0])
     except (TypeError, ValueError):
         return None
+
+
+def read_pretrained_config(pretrained_path: str) -> dict[str, Any] | None:
+    """Read the whole ``config.json`` of the checkpoint at
+    ``--policy.pretrained_path``.
+
+    `pretrained_path` is whatever the run will be started from: an absolute
+    local ``pretrained_model`` directory, a Hub repo id whose ROOT holds the
+    model, or a step-suffixed hub ref ('repo@checkpoints/<step_dir>') that has
+    not been materialized yet — the checks that use this run BEFORE the
+    download, so that a contradicting pair is refused without first pulling
+    gigabytes.
+
+    Only the checkpoint's ``config.json`` is fetched in every case (a few KB).
+
+    Returns the parsed object, or None when it can't be read — missing file,
+    malformed JSON, private/absent repo, or no network. None means "not
+    established", never "fine": callers must treat it as a reason to stay
+    silent rather than a clean bill of health.
+    """
+    path = Path(pretrained_path)
+    if path.is_dir():
+        with contextlib.suppress(Exception), open(path / "config.json") as f:
+            loaded = json.load(f)
+            return loaded if isinstance(loaded, dict) else None
+        return None
+
+    # A step-suffixed ref addresses one checkpoint inside the repo; anything
+    # else is a repo id whose root holds the config.
+    m = _HUB_CKPT_REF_RE.match(pretrained_path)
+    if m:
+        repo_id = m.group("repo")
+        filename = f"checkpoints/{m.group('step_dir')}/{_HUB_CKPT_SUBDIR}/config.json"
+    else:
+        repo_id, filename = pretrained_path, "config.json"
+
+    with contextlib.suppress(Exception):
+        local = hf_hub_download(repo_id=repo_id, filename=filename, repo_type="model")
+        with open(local) as f:
+            loaded = json.load(f)
+            return loaded if isinstance(loaded, dict) else None
+    return None
+
+
+def read_pretrained_feature_space(
+    pretrained_path: str,
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """The checkpoint's ``(input_features, output_features)`` maps.
+
+    Read out of the same single read_pretrained_config fetch any other
+    checkpoint-side guard uses. These are the feature specs lerobot WOULD have
+    built the policy from had the run used ``--policy.path``; on MakerMods Lab's
+    launch path (``--policy.type`` + ``--policy.pretrained_path``) they are
+    never consulted, which is exactly why the preflight has to read them itself
+    (MT44).
+
+    Each map is ``{feature key: {"type": "STATE"|"VISUAL"|"ACTION", "shape":
+    [...]}}``; image shapes are CHW. None when the config can't be read or
+    carries neither map — "not established", not "fine". A config with only
+    one of the two yields the other as ``{}``, so a state-dim check can still
+    run when output_features is missing.
+    """
+    cfg = read_pretrained_config(pretrained_path)
+    if cfg is None:
+        return None
+    inputs = cfg.get("input_features")
+    outputs = cfg.get("output_features")
+    if not isinstance(inputs, dict) and not isinstance(outputs, dict):
+        return None
+    return (
+        inputs if isinstance(inputs, dict) else {},
+        outputs if isinstance(outputs, dict) else {},
+    )
+
+
+def _camera_features(features: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """The camera entries of a feature map, keyed by BARE camera name.
+
+    Both sides of the preflight name cameras the same way — the dataset's
+    ``meta/info.json`` and the checkpoint's ``config.json`` both use
+    ``observation.images.<name>`` — so stripping the prefix gives directly
+    comparable key sets. Every ``observation.images.*`` key counts here, video
+    and raw-image alike (unlike datasets._video_camera_names, which filters to
+    what the episode viewer can play): the trainer consumes both as camera
+    inputs, so both belong in the comparison.
+    """
+    return {
+        key[len(CAMERA_FEATURE_PREFIX) :]: spec
+        for key, spec in features.items()
+        if key.startswith(CAMERA_FEATURE_PREFIX) and isinstance(spec, dict)
+    }
+
+
+# A camera key a pretrained BASE ships as a placeholder rather than as the name
+# of a real mount: lerobot/smolvla_base's camera1/camera2/camera3. Matched
+# against the BARE tail (the observation.images. prefix already stripped).
+_PLACEHOLDER_CAMERA_RE = re.compile(r"^camera\d+$")
+
+
+def _is_placeholder_camera_set(names: set[str]) -> bool:
+    """True when EVERY camera key is a generic placeholder — the signature of a
+    pretrained base that was never tied to one rig. All-or-nothing on purpose: a
+    checkpoint mixing placeholders with real mounts (camera1 + wrist) is not a
+    generic base, so it does not qualify."""
+    return bool(names) and all(_PLACEHOLDER_CAMERA_RE.match(name) for name in names)
+
+
+def _image_height_width(spec: dict[str, Any]) -> tuple[int, int] | None:
+    """(height, width) of a camera feature, normalising the two shape
+    conventions this file has to compare.
+
+    A dataset's ``meta/info.json`` stores image shapes HWC — ``[480, 640, 3]``
+    with ``names: ["height", "width", "channels"]`` — while a policy
+    checkpoint's ``config.json`` stores them CHW — ``[3, 480, 640]``, no names
+    at all. Locate the channel axis by name when the spec carries names, else
+    by the only axis narrow enough to be channels (1 or 3), and return the
+    remaining two dims in order.
+
+    None when the shape isn't a 3-axis image or the channel axis is
+    ambiguous — the caller then simply doesn't compare resolutions, which in
+    phase 1 only costs a log line.
+    """
+    shape = spec.get("shape")
+    if not isinstance(shape, (list, tuple)) or len(shape) != 3:
+        return None
+
+    axis: int | None = None
+    names = spec.get("names")
+    if isinstance(names, (list, tuple)) and len(names) == 3:
+        for i, name in enumerate(names):
+            if isinstance(name, str) and name.strip().lower().rstrip("s") == "channel":
+                axis = i
+                break
+    if axis is None:
+        narrow = [i for i, dim in enumerate(shape) if dim in (1, 3)]
+        if len(narrow) != 1:
+            return None
+        axis = narrow[0]
+
+    try:
+        height, width = (int(dim) for i, dim in enumerate(shape) if i != axis)
+    except (TypeError, ValueError):
+        return None
+    return height, width
+
+
+def _describe_cameras(names: set[str]) -> str:
+    return ", ".join(sorted(names)) if names else "none"
+
+
+def _check_pretrained_feature_space(pretrained_path: str, dataset_repo_id: str) -> None:
+    """Reject a fine-tune whose checkpoint and dataset describe different robots.
+
+    Necessary because on MakerMods Lab's launch path (``--policy.type`` +
+    ``--policy.pretrained_path``) lerobot builds the policy FROM THE DATASET's
+    features and then loads the checkpoint's weights with ``strict=False``, so
+    it never compares the two. lerobot's own
+    ``validate_visual_features_consistency`` is a tautology here — it compares
+    the dataset against itself. Nothing downstream will notice the mismatch
+    (MT44).
+
+    What that costs, by class:
+
+    * STATE/ACTION WIDTH — ACT fails loudly but late, with a raw size-mismatch
+      traceback after the dataset download. SmolVLA/pi0/pi05 pad the
+      proprioceptive dims to 32, so a 6-dof checkpoint loads CLEANLY into a
+      12-dof (bimanual) run and trains garbage that is recorded as a
+      fine-tune. Refused.
+    * RENAMED CAMERAS — the same number of cameras under different keys (the
+      bimanual ``left_``-prefix case). Refused as a SELECTION mistake, not an
+      architectural one: ACT drives every camera through one shared backbone
+      (``ACT.backbone`` + a spatial-only position embedding, no per-camera
+      parameters) and SmolVLA through one shared vision tower, so the weights
+      would in fact carry over fine. What the rename actually signals is that
+      the dataset and the base model came from DIFFERENT RIGS — which in this
+      UI is never deliberate. Catching the bimanual ``left_``-prefix case is
+      the whole point of the rule.
+
+      The same rationale extends to camera sets that are FULLY DISJOINT at ANY
+      count (a 1-camera ``left`` dataset against a ``wrist``/``front``
+      checkpoint). Unequal counts would otherwise route that to the benign
+      count-change warning below, but zero overlap is not a sensor-suite
+      change: none of the checkpoint's visual inputs survive, its cameras are
+      all dropped and the dataset's all start from scratch. Same selection
+      mistake, so the same refusal.
+
+      ONE EXEMPTION — a GENERIC BASE. When every one of the CHECKPOINT's camera
+      keys is a placeholder (``camera1``/``camera2``/… — see
+      _is_placeholder_camera_set), the checkpoint was never tied to a rig at
+      all: ``lerobot/smolvla_base`` ships exactly that, and adapting it to a
+      named 3-camera rig is the CANONICAL SmolVLA fine-tune, not a mixup.
+      That case demotes to the warn path. The gate is checkpoint-side only —
+      a user's dataset always carries real mount names, so the dataset side
+      tells us nothing — and it is all-or-nothing, so a checkpoint mixing a
+      placeholder with a real mount stays refused. Phase 2 may replace this
+      exemption with an explicit confirm once there is a UI to confirm in.
+    * MISSING / EXTRA CAMERA, DIFFERENT RESOLUTION — legitimate choices
+      (ACT's shared backbone handles a changed sensor count; resolution only
+      moves the token count and VRAM). Phase 1 logs a warning; the
+      warn-and-confirm UI is phase 2. This path applies only when the two
+      sides SHARE at least one camera — with no overlap it is a different rig,
+      not a changed sensor suite, and the disjoint rule above refuses it.
+
+    Silent when either side can't be read, matching the neighbouring guards:
+    an unverifiable pair must not block a launch. Raises ValueError (→ HTTP
+    400) only on a contradiction we can actually prove.
+    """
+    # Checkpoint first: it is the side most often unreadable (a hub ref with no
+    # network, a hand-built path), and bailing here spares the dataset read.
+    feature_space = read_pretrained_feature_space(pretrained_path)
+    if feature_space is None:
+        return
+    ckpt_inputs, ckpt_outputs = feature_space
+
+    dataset_features = read_dataset_features(dataset_repo_id)
+    if not dataset_features:
+        return
+
+    # -- state / action width ------------------------------------------------
+    # The dataset's own dims are what lerobot will build the policy from, so a
+    # difference here is exactly the width the loaded weights won't fit.
+    for label, ckpt_feature, dataset_key in (
+        ("robot state", ckpt_inputs.get("observation.state"), "observation.state"),
+        ("action", ckpt_outputs.get("action"), "action"),
+    ):
+        ckpt_dim = _flat_feature_dim(ckpt_feature)
+        dataset_dim = _flat_feature_dim(dataset_features.get(dataset_key))
+        if ckpt_dim is None or dataset_dim is None or ckpt_dim == dataset_dim:
+            continue
+        raise ValueError(
+            f"The checkpoint this run starts from ({pretrained_path}) was trained "
+            f"with {ckpt_dim}-dim {label}, but the dataset {dataset_repo_id!r} "
+            f"records {dataset_dim}-dim {label} — a different robot (an SO-101 arm "
+            f"is 6 dims, a bimanual pair 12). Fine-tuning builds the policy from "
+            f"the DATASET and loads the checkpoint's weights into it without "
+            f"checking the widths, so the run would train from largely random "
+            f"weights while reporting itself as a fine-tune. Pick a dataset "
+            f"recorded on the same robot as this checkpoint, pick a base model "
+            f"trained on this robot, or train from scratch."
+        )
+
+    # -- cameras -------------------------------------------------------------
+    ckpt_cameras = _camera_features(ckpt_inputs)
+    dataset_cameras = _camera_features(dataset_features)
+    ckpt_names, dataset_names = set(ckpt_cameras), set(dataset_cameras)
+
+    renamed = ckpt_names != dataset_names and len(ckpt_names) == len(dataset_names)
+    # Zero overlap is the same selection mistake as a rename, at any count: none
+    # of the checkpoint's visual inputs survive. Equal-count disjoint sets fall
+    # to `renamed` first (its wording is accurate there), so this branch is in
+    # practice the unequal-count case the rename rule alone would let through.
+    disjoint = bool(ckpt_names) and bool(dataset_names) and ckpt_names.isdisjoint(dataset_names)
+    if (renamed or disjoint) and _is_placeholder_camera_set(ckpt_names):
+        # A generic base being bound to a named rig for the first time — the
+        # canonical smolvla_base fine-tune. Recorded, not refused.
+        logger.warning(
+            "Fine-tune feature space: checkpoint %s carries placeholder camera "
+            "names (%s); binding them to dataset %s's cameras (%s).",
+            pretrained_path,
+            _describe_cameras(ckpt_names),
+            dataset_repo_id,
+            _describe_cameras(dataset_names),
+        )
+    elif renamed:
+        raise ValueError(
+            f"The checkpoint this run starts from ({pretrained_path}) expects "
+            f"cameras {_describe_cameras(ckpt_names)}, but the dataset "
+            f"{dataset_repo_id!r} provides {_describe_cameras(dataset_names)} — "
+            f"the same number of cameras under different names. Cameras are "
+            f"matched by name, so the two were almost certainly recorded on "
+            f"different robots, and the fine-tune would be building on a base "
+            f"that never saw this rig. Pick a base model whose camera names "
+            f"match this dataset, or train from scratch."
+        )
+    elif disjoint:
+        raise ValueError(
+            f"The checkpoint this run starts from ({pretrained_path}) expects "
+            f"cameras {_describe_cameras(ckpt_names)}, but the dataset "
+            f"{dataset_repo_id!r} provides {_describe_cameras(dataset_names)} — "
+            f"no camera in common. Cameras are matched by name, so none of the "
+            f"checkpoint's visual inputs would survive: its cameras are dropped "
+            f"and the dataset's are trained from scratch, on a base that never "
+            f"saw this rig. Pick a base model whose camera names match this "
+            f"dataset, or train from scratch."
+        )
+    elif ckpt_names != dataset_names:
+        # Unequal counts: a real sensor-suite change, but a legitimate one.
+        # Phase 1 only records it (phase 2 asks the user to confirm).
+        missing = ckpt_names - dataset_names
+        extra = dataset_names - ckpt_names
+        if missing:
+            logger.warning(
+                "Fine-tune feature space: checkpoint %s expects camera(s) %s that "
+                "dataset %s does not provide; those inputs will be dropped.",
+                pretrained_path,
+                _describe_cameras(missing),
+                dataset_repo_id,
+            )
+        if extra:
+            logger.warning(
+                "Fine-tune feature space: dataset %s adds camera(s) %s the "
+                "checkpoint %s was not trained on; those inputs start from scratch.",
+                dataset_repo_id,
+                _describe_cameras(extra),
+                pretrained_path,
+            )
+
+    # Resolution differences on the cameras both sides DO share. Allowed —
+    # lerobot resizes/re-tokenizes — but it moves ACT's token count and VRAM,
+    # so it should not pass unrecorded.
+    resized = []
+    for name in sorted(ckpt_names & dataset_names):
+        ckpt_hw = _image_height_width(ckpt_cameras[name])
+        dataset_hw = _image_height_width(dataset_cameras[name])
+        if ckpt_hw is None or dataset_hw is None or ckpt_hw == dataset_hw:
+            continue
+        resized.append(f"{name} {ckpt_hw[0]}x{ckpt_hw[1]} -> {dataset_hw[0]}x{dataset_hw[1]}")
+    if resized:
+        logger.warning(
+            "Fine-tune feature space: checkpoint %s and dataset %s disagree on "
+            "camera resolution (%s); training proceeds at the dataset's size.",
+            pretrained_path,
+            dataset_repo_id,
+            "; ".join(resized),
+        )
 
 
 def _generate_job_id(policy_type: str, dataset_repo_id: str) -> str:
@@ -1001,6 +1735,12 @@ class JobRegistry:
         self._runners: dict[str, JobRunner] = {}
         self._last_persist_at: dict[str, float] = {}
 
+        # job_id -> the thread materializing that job's base checkpoint before
+        # its trainer can start (see _materialize_then_start). Entries are left
+        # behind once the thread finishes — a finished Thread object is inert
+        # and joinable, and dropping it would race a caller that wants to join.
+        self._prepare_threads: dict[str, threading.Thread] = {}
+
         self._stop_watchdog = threading.Event()
         self._watchdog_thread: threading.Thread | None = None
 
@@ -1117,6 +1857,25 @@ class JobRegistry:
 
     # -- public API --
 
+    def _assert_no_running_local(self, target: JobTarget) -> None:
+        """Raise JobAlreadyRunningError if a local training is already running.
+
+        Local trainings are bounded by this machine's GPU/USB resources, so at
+        most one runs at a time. Cloud trainings each get their own remote
+        container, so any number can be in flight in parallel.
+
+        Takes NO lock, so it is callable both inside and outside the registry's
+        critical section (self._lock is a plain Lock — re-entering it would
+        deadlock). Iterates a snapshot, so a concurrent mutation can't break the
+        walk. `start` calls it twice on purpose: once early to fail fast, and
+        once under the lock that inserts the record — the latter is the one that
+        actually enforces the invariant."""
+        if target.runner != "local":
+            return
+        for r in list(self._records.values()):
+            if r.state == "running" and r.runner == "local":
+                raise JobAlreadyRunningError(r.id)
+
     def list(self, limit: int = 10) -> builtins.list[JobRecord]:
         with self._lock:
             records = list(self._records.values())
@@ -1156,40 +1915,83 @@ class JobRegistry:
             if get_hub_status(config.dataset_repo_id).get("status") == "local_only":
                 raise DatasetNotOnHubError(config.dataset_repo_id)
 
-        with self._lock:
-            # Local trainings are bounded by this machine's GPU/USB resources,
-            # so at most one runs at a time. Cloud trainings each get their
-            # own remote container, so any number can be in flight in parallel.
-            if target.runner == "local":
-                for r in self._records.values():
-                    if r.state == "running" and r.runner == "local":
-                        raise JobAlreadyRunningError(r.id)
+        # Resume and fine-tune are distinct and mutually exclusive: resume
+        # continues optimizer+step from a checkpoint (needs training_state);
+        # fine-tune starts a FRESH run whose weights are init'd from a
+        # checkpoint (weights-only is fine). Reject the nonsensical combo up
+        # front rather than letting one silently win.
+        if config.resume and config.finetune_from_job_id:
+            raise ValueError(
+                "A run can't both resume and fine-tune. Resume continues an "
+                "existing run's optimizer/step; fine-tune starts a fresh run "
+                "from a checkpoint's weights."
+            )
 
-            # Resume and fine-tune are distinct and mutually exclusive: resume
-            # continues optimizer+step from a checkpoint (needs training_state);
-            # fine-tune starts a FRESH run whose weights are init'd from a
-            # checkpoint (weights-only is fine). Reject the nonsensical combo up
-            # front rather than letting one silently win.
-            if config.resume and config.finetune_from_job_id:
-                raise ValueError(
-                    "A run can't both resume and fine-tune. Resume continues an "
-                    "existing run's optimizer/step; fine-tune starts a fresh run "
-                    "from a checkpoint's weights."
-                )
+        # Fail fast on the local-run mutex before any of the (possibly slow)
+        # pretrained-path work below. Re-checked under the lock at record
+        # creation — THAT is the authoritative check; this one only spares a
+        # doomed request a needless download.
+        self._assert_no_running_local(target)
 
+        # ------------------------------------------------------------------
+        # Pretrained-path resolution runs OUTSIDE the registry lock.
+        #
+        # It reads the Hub (the source's checkpoint listing) — seconds at worst.
+        # self._lock is taken by list / get / stop / delete, so holding it
+        # across that would freeze the whole job interface (the MT23 coupling).
+        # Nothing is registered yet, so a bad selection still fails with no
+        # orphaned record; the registry lookup it needs takes the lock briefly
+        # on its own.
+        #
+        # What does NOT happen here any more is the multi-GB DOWNLOAD a local
+        # fine-tune needs. Every cheap refusal above and below stays synchronous
+        # (a bad request must still fail fast with a clear 400), but the
+        # materialization itself is deferred to a background thread that starts
+        # after the record exists — see the `deferred_hub_ref` branch below.
+        # ------------------------------------------------------------------
+        if config.finetune_from_job_id:
             # Fine-tune: turn the selected source run + step into the
             # pretrained_path lerobot loads weights from. A fresh run (resume
-            # stays false); no training_state required. Resolved under the lock
-            # and before the record so a bad selection fails with no orphan.
-            if config.finetune_from_job_id:
+            # stays false); no training_state required.
+            with self._lock:
                 source = self._records.get(config.finetune_from_job_id)
-                if source is None:
-                    raise ValueError(
-                        f"Fine-tune source {config.finetune_from_job_id!r} not found."
-                    )
-                config.policy_pretrained_path = _resolve_finetune_pretrained_path(
-                    source, config.finetune_from_step
+            if source is None:
+                raise ValueError(
+                    f"Fine-tune source {config.finetune_from_job_id!r} not found."
                 )
+            config.policy_pretrained_path = _resolve_finetune_pretrained_path(
+                source, config.finetune_from_step
+            )
+
+        deferred_hub_ref: str | None = None
+        if config.policy_pretrained_path and not config.resume:
+            # Deliberately BEFORE the materialization: this reads only the
+            # checkpoint's config.json (a few KB), so a contradicting pair is
+            # refused without first downloading the weights it names — and
+            # refused SYNCHRONOUSLY, as a 400, with no job record left behind.
+            # lerobot sizes the policy from the DATASET on this launch path and
+            # loads the weights non-strictly, so a checkpoint whose robot or
+            # camera set contradicts the selected dataset would otherwise train
+            # silently wrong (MT44).
+            _check_pretrained_feature_space(
+                config.policy_pretrained_path, config.dataset_repo_id
+            )
+            if target.runner == "local" and needs_local_materialization(
+                config.policy_pretrained_path
+            ):
+                # A step-suffixed hub ref becomes the real directory the local
+                # trainer loads — but off-request, in _materialize_then_start,
+                # which rewrites policy_pretrained_path once the bytes are here.
+                # A cloud run keeps the ref: its container materializes the same
+                # ref pod-side (see the HF Jobs wrapper), because a host path is
+                # meaningless there.
+                deferred_hub_ref = config.policy_pretrained_path
+
+        with self._lock:
+            # Authoritative local-run mutex: re-checked here, under the lock
+            # that also inserts the record, so two concurrent starts can't both
+            # pass. (The pre-flight copy above is only a fail-fast.)
+            self._assert_no_running_local(target)
 
             # Resume: turn the selected source run + step into the config_path
             # lerobot needs. Do this under the lock (source lookup) and before
@@ -1201,6 +2003,46 @@ class JobRegistry:
                     if source is None:
                         raise ValueError(
                             f"Resume source {config.resume_from_job_id!r} not found."
+                        )
+                    # A completed run is not resumable — on ANY runner, and
+                    # regardless of how the request got here (the UI hides the
+                    # button; this catches a direct API call).
+                    #
+                    # Resume restores the optimizer AND the LR schedule's
+                    # position, and a run that reached its target has spent its
+                    # schedule: SmolVLA's preset cosine-decays to a 2.5e-6 floor
+                    # over a fixed 30k-step horizon, so continuing past the
+                    # target trains at floor LR. The loss chart flattens and
+                    # reads as convergence while the run is barely learning —
+                    # the failure is silent, which is why this refuses rather
+                    # than warns. Fine-tune starts a fresh schedule from the
+                    # same weights, which is the intended way to build on a
+                    # completed run.
+                    if source.state == "done":
+                        raise ValueError(
+                            f"Run {source.id!r} already reached its step target, so there is "
+                            "nothing to resume — its learning-rate schedule is finished and a "
+                            "continuation would train at the schedule's floor. Fine-tune from "
+                            "its final checkpoint instead."
+                        )
+                    # A resume continues on the PARENT'S runner, full stop.
+                    # Neither cross direction works today (F7): cloud→local
+                    # points --config_path at a host directory that only ever
+                    # existed inside the pod, so the run dies at startup; and
+                    # local→cloud is worse — the pod has no access to the host
+                    # checkpoint, so it silently restarts from step 0 while the
+                    # record calls itself a resume. The form pins the Compute
+                    # control on a resume; this is the defense-in-depth half,
+                    # for a direct API call that flips it anyway.
+                    #
+                    # Only local/hf_cloud parents reach here: an imported record
+                    # is created with state="done", so the refusal above already
+                    # took it (imported models are fine-tune sources, never
+                    # resume sources).
+                    if source.runner != target.runner:
+                        raise ValueError(
+                            "Cross-runner resume isn't supported yet — this run continues on "
+                            f"{_RUNNER_LABELS.get(source.runner, source.runner)}. (F7)"
                         )
                     if source.runner == "hf_cloud":
                         # An HF Job is immutable once ended: resuming a cloud run
@@ -1221,8 +2063,8 @@ class JobRegistry:
                 elif not config.config_path:
                     raise ValueError(
                         "Resume is on but no source checkpoint was selected. Use "
-                        '"Continue" on a completed local run rather than toggling '
-                        "resume manually."
+                        '"Continue" on a local run that stopped short of its step '
+                        "target rather than toggling resume manually."
                     )
 
             job_id = self._unique_job_id(config.policy_type, config.dataset_repo_id)
@@ -1242,6 +2084,10 @@ class JobRegistry:
                 started_at=time.time(),
                 runner=target.runner,
                 hf_flavor=target.flavor,
+                # Built AFTER the resume block above, which is what resolves a
+                # "latest checkpoint" request into a concrete step — see
+                # _initial_metrics / _resume_start_step.
+                metrics=_initial_metrics(config),
             )
 
             job_dir.mkdir(parents=True, exist_ok=True)
@@ -1249,35 +2095,177 @@ class JobRegistry:
             self._persist(record, force=True)
 
             log_path = _job_log_path(self._output_root, job_id)
-            if target.runner == "local":
-                runner = LocalJobRunner(record.metrics, log_file_path=log_path)
-            else:
-                runner = HfCloudJobRunner(record.metrics, log_path, target.flavor)
 
-            try:
-                runner.start(job_id, config, lerobot_output_dir)
-            except Exception as exc:
-                logger.exception("Failed to start runner for job %s", job_id)
-                record.state = "failed"
-                record.ended_at = time.time()
-                record.error_message = f"Failed to start runner: {exc}"
+            if deferred_hub_ref is not None:
+                # The base checkpoint still has to be downloaded (GBs, minutes).
+                # Hand the caller its job id NOW — the record exists, is
+                # "running", and has a log file — and do the download in a
+                # thread, which then starts the real trainer. The monitor opens
+                # immediately and tails the download instead of the request
+                # hanging with nothing on screen.
+                #
+                # No new JobState for this window: the job is "running" from the
+                # user's point of view (they asked for a run and one is being
+                # got ready), and a fourth state would ripple through the
+                # watchdog's finalisation, the library chips and isJobActive.
+                # What stands in for the missing process is PreparingJobRunner —
+                # registered here, under the same lock as the record, so /logs
+                # and Stop find a runner from the first request onwards.
+                prep = PreparingJobRunner(log_file_path=log_path)
+                self._runners[job_id] = prep
+                prep.emit(
+                    f"Preparing fine-tune: downloading base checkpoint "
+                    f"{hub_ref_step_label(deferred_hub_ref)} from "
+                    f"{hub_ref_repo_id(deferred_hub_ref)}…"
+                )
+                thread = threading.Thread(
+                    target=self._materialize_then_start,
+                    args=(job_id, deferred_hub_ref, lerobot_output_dir, prep),
+                    name=f"job-{job_id}-prepare",
+                    daemon=True,
+                )
+                # Kept (not popped on completion) so a caller — today only the
+                # tests — can join the thread instead of polling for its effect.
+                self._prepare_threads[job_id] = thread
+                thread.start()
+            else:
+                if target.runner == "local":
+                    runner = LocalJobRunner(record.metrics, log_file_path=log_path)
+                else:
+                    runner = HfCloudJobRunner(record.metrics, log_path, target.flavor)
+
+                try:
+                    runner.start(job_id, config, lerobot_output_dir)
+                except Exception as exc:
+                    logger.exception("Failed to start runner for job %s", job_id)
+                    record.state = "failed"
+                    record.ended_at = time.time()
+                    record.error_message = f"Failed to start runner: {exc}"
+                    self._persist(record, force=True)
+                    raise
+
+                # Capture runner-specific identifiers.
+                if target.runner == "local":
+                    record.process_pid = runner.pid()
+                else:
+                    record.hf_job_id = runner.hf_job_id()
+                    record.hf_job_url = runner.hf_job_url()
+                    # config was mutated by HfCloudJobRunner.start to set
+                    # policy_repo_id; mirror it onto the record for the UI.
+                    record.hf_repo_id = config.policy_repo_id
+
                 self._persist(record, force=True)
-                raise
-
-            # Capture runner-specific identifiers.
-            if target.runner == "local":
-                record.process_pid = runner.pid()
-            else:
-                record.hf_job_id = runner.hf_job_id()
-                record.hf_job_url = runner.hf_job_url()
-                # config was mutated by HfCloudJobRunner.start to set
-                # policy_repo_id; mirror it onto the record for the UI.
-                record.hf_repo_id = config.policy_repo_id
-
-            self._persist(record, force=True)
-            self._runners[job_id] = runner
+                self._runners[job_id] = runner
         self._notify_change()
         return record
+
+    def _materialize_then_start(
+        self,
+        job_id: str,
+        ref: str,
+        output_dir: str,
+        prep: PreparingJobRunner,
+    ) -> None:
+        """Download a local fine-tune's base checkpoint, then start its trainer.
+
+        Runs in its own thread so POST /jobs/training can return the job id
+        immediately (see JobRegistry.start). Everything that can refuse the
+        request cheaply already ran, synchronously, before the record existed;
+        what is left here can only fail for reasons that belong ON the record:
+
+          * download failed  → `failed`, carrying localize_pretrained_path's own
+            "Could not download the base checkpoint …" wording, which used to
+            reach the user as an HTTP 400.
+          * user pressed Stop → `interrupted`, with a message saying so, exactly
+            like stopping a live trainer would.
+          * trainer failed to spawn → `failed`, same wording as the synchronous
+            path's "Failed to start runner: …".
+
+        No synthetic exit code is invented for any of them: there was no
+        process, so `exit_code` stays None.
+
+        On the cancel check: a huggingface_hub download cannot be interrupted
+        mid-flight, so a Stop pressed while bytes are moving takes effect HERE —
+        after the download returns and before the trainer is spawned. The bytes
+        are already on disk (and cached for the next attempt); what the user
+        gets is a run that never starts training, which is what they asked for.
+        The spawn + runner handoff happen inside the registry lock, so a stop can
+        neither be missed (spawning a trainer nobody will signal) nor land on a
+        runner that has already been replaced.
+        """
+        reporter = _DownloadProgressLogger(prep.emit, hub_ref_step_label(ref))
+        try:
+            local_path = localize_pretrained_path(
+                ref, tqdm_class=make_snapshot_progress_tqdm(reporter)
+            )
+        except Exception as exc:
+            logger.exception("Base-checkpoint download failed for job %s", job_id)
+            message = str(exc)
+            prep.emit(message)
+            self._finalize_prepare(job_id, "failed", message)
+            return
+
+        notify = False
+        try:
+            with self._lock:
+                if prep.cancelled():
+                    prep.emit("Stopped before the trainer started.")
+                    self._finalize_prepare_locked(
+                        job_id, "interrupted", _PREPARE_STOPPED_MESSAGE
+                    )
+                    notify = True
+                    return
+                record = self._records.get(job_id)
+                if record is None or record.state != "running":
+                    # Deleted, or finalised by someone else, while the bytes
+                    # moved. Nothing to start, nothing to report.
+                    self._runners.pop(job_id, None)
+                    return
+                prep.emit("Base checkpoint ready — starting the trainer.")
+                record.config.policy_pretrained_path = local_path
+                runner = LocalJobRunner(
+                    record.metrics,
+                    log_file_path=_job_log_path(self._output_root, job_id),
+                )
+                try:
+                    runner.start(job_id, record.config, output_dir)
+                except Exception as exc:
+                    logger.exception("Failed to start runner for job %s", job_id)
+                    self._finalize_prepare_locked(
+                        job_id, "failed", f"Failed to start runner: {exc}"
+                    )
+                    notify = True
+                    return
+                record.process_pid = runner.pid()
+                self._runners[job_id] = runner
+                self._persist(record, force=True)
+                notify = True
+        finally:
+            if notify:
+                self._notify_change()
+
+    def _finalize_prepare(self, job_id: str, state: JobState, error_message: str) -> None:
+        """Lock-taking wrapper around _finalize_prepare_locked."""
+        with self._lock:
+            self._finalize_prepare_locked(job_id, state, error_message)
+        self._notify_change()
+
+    def _finalize_prepare_locked(self, job_id: str, state: JobState, error_message: str) -> None:
+        """Finalise a job that never reached its trainer. Caller holds _lock.
+
+        The watchdog's finalisation minus the exit code: it only ever sees jobs
+        with a runner that HAD a process, and this one never did. Removing the
+        PreparingJobRunner from `_runners` here is what ends its role — until
+        then it answers is_running() True precisely so the watchdog leaves this
+        window alone."""
+        record = self._records.get(job_id)
+        if record is None or record.state != "running":
+            return
+        record.state = state
+        record.ended_at = time.time()
+        record.error_message = error_message
+        self._runners.pop(job_id, None)
+        self._persist(record, force=True)
 
     def _unique_job_id(self, policy_type: str, dataset_repo_id: str) -> str:
         """_generate_job_id with a collision guard. The generated id embeds a
@@ -1419,6 +2407,15 @@ class JobRegistry:
         return record
 
     def stop(self, job_id: str) -> JobRecord:
+        """Ask a running job to stop, and wait briefly for the new state.
+
+        Works during a local fine-tune's base-checkpoint download too: that
+        window has a PreparingJobRunner registered in place of the trainer, so
+        the cancel is recorded on it as usual and the materialize thread
+        finalises the run as `interrupted` when the download returns (it can't
+        be aborted mid-flight — see _materialize_then_start). The 2s wait below
+        will usually time out on that path, so the caller sees `running` and
+        learns the outcome from the next poll."""
         with self._lock:
             record = self._records.get(job_id)
             if record is None:
@@ -1594,6 +2591,7 @@ class JobRegistry:
             self._records.pop(job_id, None)
             self._runners.pop(job_id, None)
             self._last_persist_at.pop(job_id, None)
+            self._prepare_threads.pop(job_id, None)
         with contextlib.suppress(FileNotFoundError):
             shutil.rmtree(_job_dir(self._output_root, job_id))
         self._notify_change()
@@ -1893,7 +2891,9 @@ __all__ = [
     "MetricsHistoryPoint",
     "JobRunner",
     "LocalJobRunner",
+    "PreparingJobRunner",
     "JobRegistry",
+    "make_snapshot_progress_tqdm",
     "JobAlreadyRunningError",
     "JobNotFoundError",
     "JobNotRunningError",

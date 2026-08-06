@@ -218,6 +218,36 @@ export function jobDisplayName(job: JobRecord): string {
   return job.display_name?.trim() || job.name;
 }
 
+/**
+ * What each job state is CALLED in the UI.
+ *
+ * The wire values are the backend's and never change — `interrupted` is what
+ * lands in job.json and what /jobs returns — so this maps them to the words a
+ * person reads. Three are the state name capitalised; the fourth is the reason
+ * this map exists. A run in `interrupted` is one the user pressed **Stop** on,
+ * so it reads "Stopped": the plainer word, and the same one as the button that
+ * produced the state. "Interrupted" suggests something happened TO the run.
+ *
+ * Lives here, beside JobState and jobDisplayName, rather than in whichever
+ * component renders a badge. The badges keep their own colour and icon —
+ * those legitimately differ — but the WORDS have to agree, and they did not:
+ * the card said "Interrupted" while the monitor dialog showed the raw wire
+ * string for the same run.
+ */
+export const JOB_STATE_LABELS: Record<JobState, string> = {
+  running: "Running",
+  done: "Done",
+  failed: "Failed",
+  interrupted: "Stopped",
+};
+
+/** `JOB_STATE_LABELS` for a state that may not be one — a state added by a
+ * newer backend than this bundle falls back to the raw wire word rather than
+ * rendering blank. */
+export function jobStateLabel(state: JobState): string {
+  return JOB_STATE_LABELS[state] ?? state;
+}
+
 /** Set a job's display alias. Metadata-only — the job id, output dir, and
  * hub repo id are immutable identity and never change on rename. */
 export async function renameJob(

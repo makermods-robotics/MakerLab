@@ -980,6 +980,43 @@ def get_hub_dataset_info(repo_id: str) -> dict[str, Any] | None:
     return row
 
 
+def read_dataset_features(repo_id: str) -> dict[str, Any] | None:
+    """The RAW ``features`` map from a dataset's ``meta/info.json``.
+
+    The other readers above summarise info.json for a UI card (camera names,
+    episode counts); this one hands back the feature specs untouched —
+    ``dtype``/``shape``/``names`` per key — because the fine-tune preflight in
+    jobs.py compares them dimension-for-dimension against a checkpoint's own
+    ``input_features``/``output_features``. Local first (a plain file read, no
+    network), falling back to fetching just ``meta/info.json`` from the Hub for
+    a dataset with no local copy — the same tiny file get_hub_dataset_info
+    uses.
+
+    Returns None when it can't be read — not local, offline, absent/private
+    repo, malformed JSON, or no ``features`` map. None means "not established",
+    never "fine": a caller must treat it as a reason to stay silent rather than
+    as a clean bill of health.
+    """
+    path = _resolve_local_dataset_path(repo_id)
+    if path is not None:
+        try:
+            info = json.loads((path / "meta" / "info.json").read_text())
+        except (OSError, ValueError):
+            return None
+    elif hf_hub_offline():
+        return None
+    else:
+        try:
+            local = hf_hub_download(repo_id, filename="meta/info.json", repo_type="dataset")
+            info = json.loads(Path(local).read_text())
+        except Exception as exc:
+            logger.info("dataset features fetch for %s failed: %s", repo_id, exc)
+            return None
+
+    features = info.get("features") if isinstance(info, dict) else None
+    return features if isinstance(features, dict) else None
+
+
 class DatasetRenameError(Exception):
     """Raised by rename_local_dataset when the rename can't proceed. `status`
     is the HTTP status the route should return (400 invalid, 404 not found,

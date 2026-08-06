@@ -8,13 +8,16 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
-import { ConfigComponentProps } from "../types";
+import { ConfigComponentProps, RESUME_INHERITED_SHORT } from "../types";
 import { RunnerFlavor } from "@/lib/jobsApi";
 
 interface TargetCardProps extends ConfigComponentProps {
   authenticated: boolean;
   flavors: RunnerFlavor[];
   loading: boolean;
+  /** True on a resume: the runner toggle is pinned to the parent run's runner
+   * and disabled (F7). The hardware flavor below it stays live. */
+  runnerLocked?: boolean;
 }
 
 const formatHourly = (unitCostUsd: number, unitLabel: string): string => {
@@ -30,17 +33,27 @@ const formatFlavorLine = (f: RunnerFlavor): string => {
 /** Where the run executes — the runner toggle plus whichever hardware control
  * that runner needs. Flat: the controls carry their own <Label>s and there is
  * no "Compute target" eyebrow above them, which used to restate the "Run
- * training on" label directly beneath it. */
+ * training on" label directly beneath it.
+ *
+ * Which HARDWARE a run rents is genuinely chosen per launch, so the cloud
+ * flavor stays live on a resume. WHICH RUNNER does not: a resume can only
+ * continue on the parent's runner (`runnerLocked`, F7), so the toggle is pinned
+ * and disabled there. `policy_device` is locked too, for a different reason:
+ * the resume branch emits no --policy.device, so lerobot uses whatever the
+ * checkpoint's train_config.json recorded. */
 const TargetCard: React.FC<TargetCardProps> = ({
   config,
   updateConfig,
   authenticated,
   flavors,
   loading,
+  resumeLocked,
+  runnerLocked,
 }) => {
   const target = config.target;
 
   const setRunner = (runner: "local" | "hf_cloud") => {
+    if (runnerLocked) return;
     if (runner === target.runner) return;
     if (runner === "local") {
       updateConfig("target", { runner: "local" });
@@ -60,17 +73,30 @@ const TargetCard: React.FC<TargetCardProps> = ({
               key={r}
               type="button"
               onClick={() => setRunner(r)}
+              disabled={runnerLocked}
+              // When pinned, the picked half keeps its fill — the inherited
+              // runner should read as the answer, not as disabled chrome —
+              // while the unpicked half dims and stops inviting a click it
+              // would refuse.
               className={cn(
                 "px-3 py-1.5 transition-colors",
                 target.runner === r
                   ? "bg-primary text-primary-foreground"
-                  : "bg-background text-muted-foreground hover:text-foreground",
+                  : runnerLocked
+                    ? "bg-background text-muted-foreground opacity-50 cursor-not-allowed"
+                    : "bg-background text-muted-foreground hover:text-foreground",
               )}
             >
               {r === "local" ? "Local — your machine" : "Hugging Face Cloud"}
             </button>
           ))}
         </div>
+        {runnerLocked ? (
+          <p className="text-xs text-muted-foreground">
+            Continues on the parent's runner — cross-runner resume isn't
+            supported yet.
+          </p>
+        ) : null}
       </div>
 
       {target.runner === "local" ? (
@@ -79,6 +105,7 @@ const TargetCard: React.FC<TargetCardProps> = ({
           <Select
             value={config.policy_device === "cpu" ? "cpu" : "auto"}
             onValueChange={(value) => updateConfig("policy_device", value)}
+            disabled={resumeLocked}
           >
             <SelectTrigger id="policy_device">
               <SelectValue />
@@ -91,7 +118,9 @@ const TargetCard: React.FC<TargetCardProps> = ({
             </SelectContent>
           </Select>
           <p className="text-xs text-muted-foreground">
-            lerobot auto-detects your GPU (CUDA/MPS); only CPU is forced.
+            {resumeLocked
+              ? RESUME_INHERITED_SHORT
+              : "lerobot auto-detects your GPU (CUDA/MPS); only CPU is forced."}
           </p>
         </div>
       ) : (
