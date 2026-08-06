@@ -57,16 +57,19 @@ RETURN_CEILING_S = 10.0
 RETURN_ARRIVE_TOLERANCE = 20
 
 
-def capture_rest_pose(bus) -> dict[str, int]:
-    """Raw Present_Position (ticks) of every motor on one bus, or {} on failure.
+def capture_rest_pose(bus, normalize: bool = False) -> dict[str, int | float]:
+    """Present_Position of every motor on one bus, or {} on failure.
 
-    Call at session start, before any motion. Raw ticks are directly
-    replayable as Goal_Position later because nothing in a teleop/record
-    session rewrites Homing_Offset (see module docstring). Never raises —
-    a session must not fail to start over an optional nicety.
+    Call at session start, before any motion. Raw ticks (normalize=False,
+    the default) are directly replayable as Goal_Position later because
+    nothing in a teleop/record session rewrites Homing_Offset (see module
+    docstring). normalize=True instead captures the same normalized units
+    robot.send_action() uses — for a caller (replay's ease-in) whose target
+    is itself an action dict, not a raw-ticks pose. Never raises — a session
+    must not fail to start over an optional nicety.
     """
     try:
-        return {m: int(v) for m, v in bus.sync_read("Present_Position", normalize=False).items()}
+        return dict(bus.sync_read("Present_Position", normalize=normalize))
     except Exception as e:
         port = getattr(bus, "port", None) or "unknown port"
         logger.warning(f"Could not capture the rest pose on {port}: {e}")
@@ -75,9 +78,11 @@ def capture_rest_pose(bus) -> dict[str, int]:
 
 def return_to_rest_pose(
     bus,
-    rest_pose: dict[str, int],
+    rest_pose: dict[str, int | float],
     abort_event: threading.Event | None = None,
     label: str = "arm",
+    normalize: bool = False,
+    tolerance: float | None = None,
 ) -> tuple[bool, str]:
     """Drive one bus's motors back to ``rest_pose``, then report how it went.
 
@@ -86,15 +91,22 @@ def return_to_rest_pose(
     motor stopped — Moving == 0 — but short of target: a latched or weak
     motor, reported with its deltas), ``stalled``, ``ceiling``, ``cut-short``
     (abort_event set — a second stop or a new session start), ``no-pose``, or
-    ``comm-error: ...``. Success requires every motor within
-    RETURN_ARRIVE_TOLERANCE ticks of its target — Moving == 0 alone is NOT
-    success, precisely because a weak motor can sit motionless far from its
-    target and that must not be reported as "returned".
+    ``comm-error: ...``. Success requires every motor within ``tolerance``
+    (default RETURN_ARRIVE_TOLERANCE) of its target — Moving == 0 alone is
+    NOT success, precisely because a weak motor can sit motionless far from
+    its target and that must not be reported as "returned".
 
-    Torque must still be enabled (call BEFORE force_disable_torque). Targets
-    are written as-is: they were captured from this same session's calibration,
-    so they are inherently within the arm's limits — no re-expression or
-    clamping needed (unlike the auto-calibration twin). Never raises.
+    Torque must still be enabled (call BEFORE force_disable_torque).
+
+    ``normalize`` selects the unit space for both the Goal_Position write and
+    the Present_Position polling comparison — False (default, raw ticks) for
+    a pose captured by capture_rest_pose(bus) (unchanged behavior for every
+    existing caller); True for a target already expressed in
+    robot.send_action()'s normalized units (e.g. a dataset's recorded
+    `action` frame), where the bus's own calibration-aware
+    normalize/unnormalize handles any needed conversion and clamps
+    out-of-range values rather than raising — no manual tick conversion
+    needed. Never raises.
 
     On EVERY exit path the gentle RETURN_POS_SPEED profile cap written into the
     motors' RAM Goal_Velocity is reset to 0 (uncapped) before returning, so it
@@ -110,7 +122,7 @@ def return_to_rest_pose(
     try:
         for motor in targets:
             bus.write("Goal_Velocity", motor, RETURN_POS_SPEED, normalize=False)
-        bus.sync_write("Goal_Position", targets, normalize=False)
+        bus.sync_write("Goal_Position", targets, normalize=normalize)
     except Exception as e:
         logger.warning(f"Rest-pose return failed to start for the {label}: {e}")
         # The gentle RETURN_POS_SPEED cap may already be stamped on some motors;
@@ -119,7 +131,13 @@ def return_to_rest_pose(
         return False, f"comm-error: {e}"
 
     try:
-        return _run_return_loop(bus, targets, abort_event)
+        return _run_return_loop(
+            bus,
+            targets,
+            abort_event,
+            normalize=normalize,
+            tolerance=RETURN_ARRIVE_TOLERANCE if tolerance is None else tolerance,
+        )
     finally:
         # Belt and braces: whatever the outcome (returned / settled / stalled /
         # ceiling / cut-short), we wrote the gentle RETURN_POS_SPEED cap into the
@@ -129,7 +147,7 @@ def return_to_rest_pose(
         _restore_goal_velocity(bus, targets, label)
 
 
-def _restore_goal_velocity(bus, targets: dict[str, int], label: str = "arm") -> None:
+def _restore_goal_velocity(bus, targets: dict[str, int | float], label: str = "arm") -> None:
     """Reset Goal_Velocity to 0 (uncapped) on the motors the return just drove.
 
     The return writes a gentle RETURN_POS_SPEED profile cap into each motor's
@@ -148,8 +166,10 @@ def _restore_goal_velocity(bus, targets: dict[str, int], label: str = "arm") -> 
 
 def _run_return_loop(
     bus,
-    targets: dict[str, int],
+    targets: dict[str, int | float],
     abort_event: threading.Event | None,
+    normalize: bool = False,
+    tolerance: float = RETURN_ARRIVE_TOLERANCE,
 ) -> tuple[bool, str]:
     """The poll-until-arrived loop of return_to_rest_pose (see its docstring).
 
@@ -158,28 +178,32 @@ def _run_return_loop(
     """
     time.sleep(RETURN_SETTLE_S)
     t0 = time.monotonic()
-    best_dist: int | None = None
+    best_dist: float | None = None
     last_progress_t = t0
-    remaining = -1
-    distances: dict[str, int] = {}
+    remaining = -1.0
+    distances: dict[str, float] = {}
+    unit = "units" if normalize else "ticks"
     while time.monotonic() - t0 < RETURN_CEILING_S:
         if abort_event is not None and abort_event.is_set():
             return False, "cut-short"
         try:
-            positions = bus.sync_read("Present_Position", normalize=False)
+            positions = bus.sync_read("Present_Position", normalize=normalize)
         except Exception:
             positions = {}
         now = time.monotonic()
         if positions:
-            distances = {m: abs(int(positions[m]) - t) for m, t in targets.items() if m in positions}
+            if normalize:
+                distances = {m: abs(float(positions[m]) - float(t)) for m, t in targets.items() if m in positions}
+            else:
+                distances = {m: abs(int(positions[m]) - int(t)) for m, t in targets.items() if m in positions}
             remaining = sum(distances.values())
-            if distances and all(d <= RETURN_ARRIVE_TOLERANCE for d in distances.values()):
-                return True, f"returned: max delta {max(distances.values())} ticks ({_deltas(distances)})"
+            if distances and all(d <= tolerance for d in distances.values()):
+                return True, f"returned: max delta {max(distances.values())} {unit} ({_deltas(distances)})"
             if best_dist is None or remaining < best_dist - RETURN_STALL_MIN_PROGRESS:
                 best_dist = remaining
                 last_progress_t = now
         if now - last_progress_t > RETURN_STALL_WINDOW_S:
-            detail = f"remaining {remaining} ticks ({_deltas(distances)})"
+            detail = f"remaining {remaining} {unit} ({_deltas(distances)})"
             # Distinguish a motor still fighting (stalled) from one that gave
             # up and sits motionless short of target (settled: a latched or
             # weak motor) — a one-shot Moving read, only on this exit path.
@@ -189,7 +213,7 @@ def _run_return_loop(
                     return False, f"settled short of target after {now - t0:.1f}s, {detail}"
             return False, f"stalled after {now - t0:.1f}s, {detail}"
         time.sleep(RETURN_POLL_S)
-    return False, f"ceiling ({RETURN_CEILING_S:.0f}s), remaining {remaining} ticks"
+    return False, f"ceiling ({RETURN_CEILING_S:.0f}s), remaining {remaining} {unit}"
 
 
 def _deltas(distances: dict[str, int]) -> str:

@@ -892,6 +892,16 @@ def test_capture_rest_pose_reads_raw_ticks() -> None:
     assert capture_rest_pose(bus) == {}  # never raises — the session must still start
 
 
+def test_capture_rest_pose_normalized_reads_floats() -> None:
+    """normalize=True reads the same normalized units robot.send_action()
+    uses, for a caller (replay's ease-in) whose target is an action dict
+    rather than raw ticks."""
+    from makermodslab.rest_pose import capture_rest_pose
+
+    bus = _RestBus(positions={"shoulder_pan": 12.5, "gripper": 90.0})
+    assert capture_rest_pose(bus, normalize=True) == {"shoulder_pan": 12.5, "gripper": 90.0}
+
+
 def test_return_to_rest_pose_arrives_and_writes_gentle_goals(rest_clock: _RestClock) -> None:
     """The return writes a gentle profile speed then the captured goals, and
     reports 'returned' once every motor is within tolerance."""
@@ -917,6 +927,39 @@ def test_return_to_rest_pose_arrives_and_writes_gentle_goals(rest_clock: _RestCl
     speed_writes = [w for w in bus.writes if w[0] == "Goal_Velocity"]
     assert {w[2] for w in speed_writes} == {rest_pose.RETURN_POS_SPEED}
     assert {w[1] for w in speed_writes} == set(targets)
+
+
+def test_return_to_rest_pose_arrives_with_normalized_targets(rest_clock: _RestClock) -> None:
+    """normalize=True writes/reads/compares in the same normalized units as
+    robot.send_action() — no raw-tick conversion needed for a target that's
+    already an action dict — and a caller-supplied tolerance is honored
+    instead of the raw-ticks default."""
+    import makermodslab.rest_pose as rest_pose
+
+    targets = {"shoulder_pan": 10.0, "gripper": 50.0}
+    bus = _RestBus(positions={"shoulder_pan": 10.5, "gripper": 49.0})
+
+    arrived, reason = rest_pose.return_to_rest_pose(
+        bus, targets, label="follower arm", normalize=True, tolerance=2.0
+    )
+
+    assert arrived is True
+    assert reason.startswith("returned: max delta 1.0")
+    # Written via the SAME sync_write call shape, only normalize flips.
+    assert bus.sync_writes[0] == ("Goal_Position", targets)
+
+
+def test_return_to_rest_pose_normalized_default_tolerance_is_raw_ticks_constant(
+    rest_clock: _RestClock,
+) -> None:
+    """Omitting `tolerance` with normalize=True still falls back to
+    RETURN_ARRIVE_TOLERANCE (20) — documented so a caller isn't surprised by
+    an inherited raw-ticks-sized tolerance in normalized-unit space."""
+    import makermodslab.rest_pose as rest_pose
+
+    bus = _RestBus(positions={"shoulder_pan": 10.0})
+    arrived, _ = rest_pose.return_to_rest_pose(bus, {"shoulder_pan": 10.0}, normalize=True)
+    assert arrived is True
 
 
 def test_return_to_rest_pose_stalls_without_progress(rest_clock: _RestClock) -> None:
