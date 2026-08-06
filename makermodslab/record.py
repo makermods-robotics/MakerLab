@@ -82,6 +82,10 @@ _DEFAULT_FOURCC = "MJPG"
 _BUS_SYNC_READ_RETRIES = 2
 _original_sync_read = MotorsBus.sync_read
 
+# Robot-connect attempts before giving up on transient camera turbulence (see
+# the retry loop below and connect_retry_attempt above).
+_CONNECT_ATTEMPTS = 3
+
 
 def _sync_read_with_default_retries(
     self, data_name, motors=None, *, normalize=True, num_retry=_BUS_SYNC_READ_RETRIES
@@ -100,11 +104,14 @@ if MotorsBus.sync_read.__name__ != "_sync_read_with_default_retries":  # idempot
 # polled GET endpoint. The deque is capacity-capped (maxlen) so memory can never
 # grow unbounded no matter how chatty or long a session is.
 _RECORD_LOG_MAX_LINES = 500
-# Loggers whose records describe a recording session: this module's logger and
+# Loggers whose records describe a recording session: this module's logger,
 # lerobot's own record/control loggers (the "Recording episode N", save/reset
-# lines come from there). Attaching to the shared "lerobot" ancestor captures
-# any lerobot child logger via propagation.
-_RECORD_LOG_LOGGER_NAMES = (__name__, "lerobot")
+# lines come from there; attaching to the shared "lerobot" ancestor captures
+# any lerobot child logger via propagation), and teleoperate's connect/
+# teardown logger — force_disconnect_partial's warnings and torque-disable
+# errors otherwise only ever reach the server console, invisible to an
+# operator watching the Record page during a failed/retried connect.
+_RECORD_LOG_LOGGER_NAMES = (__name__, "lerobot", "makermodslab.teleoperate")
 
 
 class _RingBufferLogHandler(logging.Handler):
@@ -198,6 +205,12 @@ current_episode = 1  # Track current episode number
 saved_episodes = 0  # Track how many episodes have been saved
 current_phase = "preparing"  # Track current phase: "preparing", "recording", "resetting", "completed"
 phase_start_time = None  # Track when current phase started
+# Set only while current_phase == "reconnecting_robot" (the backoff sleep
+# between connect retries below); 0 otherwise. Lets the frontend show which
+# retry attempt is in flight ("Camera hiccup, retrying (2/3)…") instead of
+# one static "Connecting arm & cameras…" label for a window that can now run
+# past ten seconds across multiple component-wise teardowns and retries.
+connect_retry_attempt = 0
 # Total time spent paused during the CURRENT reset phase, credited on resume
 # (see handle_resume_recording). Reset to 0.0 at the start of every new reset
 # phase (both reset-phase call sites in record_with_web_events) AND at the
@@ -545,7 +558,8 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
         last_session_outcome, \
         last_session_error, \
         identity_warnings, \
-        discard_requested
+        discard_requested, \
+        connect_retry_attempt
 
     from . import (
         auto_calibrate as _auto_calibrate,
@@ -649,6 +663,7 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
         saved_episodes = 0
         current_phase = "preparing"
         phase_start_time = None
+        connect_retry_attempt = 0
         last_session_discarded_empty = False
         last_session_outcome = None
         last_session_error = None
@@ -1032,6 +1047,10 @@ def handle_recording_status() -> dict[str, Any]:
     status = {
         "recording_active": recording_active,
         "current_phase": current_phase,  # "preparing", "recording", "resetting", "completed"
+        # Only meaningful while current_phase == "reconnecting_robot": which
+        # connect attempt is about to be retried, out of _CONNECT_ATTEMPTS.
+        "connect_retry_attempt": connect_retry_attempt,
+        "connect_retry_max": _CONNECT_ATTEMPTS,
         "session_ended": session_ended,  # New field to indicate session completion
         # True during the post-session rest-pose return: the recording loop is
         # over but the arm is still energized and driving back to its
@@ -1544,7 +1563,7 @@ def record_with_web_events(
     from lerobot.utils.utils import log_say
 
     global current_phase, phase_start_time, current_episode, saved_episodes, releasing
-    global identity_warnings
+    global identity_warnings, connect_retry_attempt
     global paused_accum_seconds, pause_started_at
 
     robot = make_robot_from_config(cfg.robot)
@@ -1620,13 +1639,12 @@ def record_with_web_events(
     # handler already returns; no new plumbing.)
     current_phase = "connecting_robot"
     phase_start_time = time.time()
-    connect_attempts = 3
-    for attempt in range(1, connect_attempts + 1):
+    for attempt in range(1, _CONNECT_ATTEMPTS + 1):
         try:
             logger.info(
                 "🔧 ROBOT CONNECTION: Attempting to connect robot (attempt %d/%d)...",
                 attempt,
-                connect_attempts,
+                _CONNECT_ATTEMPTS,
             )
             # Calibration is already on disk (loaded via the configs above), so never
             # let connect() drop into interactive recalibration — that would hang the
@@ -1676,10 +1694,25 @@ def record_with_web_events(
             # disconnect() a no-op raise in exactly that state (see
             # force_disconnect_partial).
             force_disconnect_partial(robot, "robot")
-            if attempt < connect_attempts and transient_camera:
+            if attempt < _CONNECT_ATTEMPTS and transient_camera:
+                # Distinguish the backoff substep from the connect substep so
+                # the UI can show "Camera hiccup, retrying (2/3)…" instead of
+                # one static "Connecting arm & cameras…" label for a window
+                # that (with the teardown above) can now run well past ten
+                # seconds. Logged at INFO through this module's own logger
+                # (already in _RECORD_LOG_LOGGER_NAMES) so it reaches the
+                # visible Record-page log panel, not just the server console.
+                current_phase = "reconnecting_robot"
+                connect_retry_attempt = attempt
+                logger.info(
+                    "🔁 ROBOT CONNECTION: Camera hiccup, retrying (%d/%d) after OS release settles...",
+                    attempt + 1,
+                    _CONNECT_ATTEMPTS,
+                )
                 # Let the OS release settle past the turbulence window before
                 # re-rolling the connect.
                 time.sleep(2.0)
+                current_phase = "connecting_robot"
                 continue
             raise
 

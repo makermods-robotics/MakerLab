@@ -42,21 +42,64 @@ def test_recording_status_handler_exposes_state_fields() -> None:
     assert "available_controls" in result
 
 
+def test_record_log_captures_teleoperate_teardown_warnings() -> None:
+    """force_disconnect_partial's teardown warnings (a leaked bus, a stuck
+    camera) are logged through makermodslab.teleoperate's logger, not this
+    module's — without it in _RECORD_LOG_LOGGER_NAMES they never reach the
+    Record page's log panel, only the server console.
+    """
+    import logging
+
+    from makermodslab.record import (
+        _attach_record_log_handler,
+        _detach_record_log_handler_locked,
+        handle_recording_log,
+    )
+
+    teleop_logger = logging.getLogger("makermodslab.teleoperate")
+    _attach_record_log_handler()
+    try:
+        teleop_logger.warning("Could not release robot bus on COM_FOLLOWER: wedged")
+    finally:
+        import makermodslab.record as record_module
+
+        with record_module._record_log_lock:
+            _detach_record_log_handler_locked()
+
+    assert "Could not release robot bus on COM_FOLLOWER" in handle_recording_log()["logs"]
+
+
 def test_recording_status_surfaces_preparing_substeps(monkeypatch) -> None:
     """record_with_web_events refines the coarse "preparing" window into named
-    substeps ("connecting_robot", "connecting_teleop") by writing current_phase.
-    The status handler must pass those through verbatim so the UI can name the
-    substep — verified here without touching hardware by driving the module
-    global the worker sets."""
+    substeps ("connecting_robot", "connecting_teleop", "reconnecting_robot")
+    by writing current_phase. The status handler must pass those through
+    verbatim so the UI can name the substep — verified here without touching
+    hardware by driving the module global the worker sets."""
     from makermodslab import record
 
-    for substep in ("connecting_robot", "connecting_teleop"):
+    for substep in ("connecting_robot", "connecting_teleop", "reconnecting_robot"):
         monkeypatch.setattr(record, "current_phase", substep)
         # An active session with no config still surfaces current_phase.
         result = record.handle_recording_status()
         assert result["current_phase"] == substep
         # A preparing substep is not a completed/errored session.
         assert result["session_ended"] is False
+
+
+def test_recording_status_surfaces_connect_retry_attempt(monkeypatch) -> None:
+    """During the "reconnecting_robot" backoff substep, the UI needs which
+    attempt is in flight (and the ceiling) to show "retrying (2/3)…" instead
+    of a static label for the whole multi-attempt window.
+    """
+    from makermodslab import record
+
+    monkeypatch.setattr(record, "current_phase", "reconnecting_robot")
+    monkeypatch.setattr(record, "connect_retry_attempt", 2)
+
+    result = record.handle_recording_status()
+
+    assert result["connect_retry_attempt"] == 2
+    assert result["connect_retry_max"] == record._CONNECT_ATTEMPTS
 
 
 class _FakeWorker:
