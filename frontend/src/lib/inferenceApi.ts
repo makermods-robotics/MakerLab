@@ -188,9 +188,22 @@ export async function getInferenceStatus(
   });
 }
 
+// Which run the returned log belongs to. The backend only ever serves a log it
+// opened itself, so this is never a guess:
+//   "active"   — the currently running session's own log
+//   "last_run" — the most recent FINISHED run of this server process
+//   null       — there is no log to show
+// A live session reporting anything other than "active" simply has not produced
+// output yet (it is still downloading/preflighting, or it failed before the
+// rollout process started). Rendering `logs` in that case is how a previous
+// run's output gets presented as the current run's — the defect this field
+// exists to prevent.
+export type InferenceLogOwner = "active" | "last_run" | null;
+
 export interface InferenceLog {
   logs: string;
   log_path: string | null;
+  belongs_to: InferenceLogOwner;
 }
 
 // Tail of the active/most-recent rollout's log file. Read-only + bounded on the

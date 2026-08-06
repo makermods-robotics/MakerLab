@@ -590,8 +590,12 @@ def inference_status():
 def inference_log():
     """Tail of the active/most-recent rollout's log file (read-only, bounded).
 
-    Returns {logs, log_path}; empty logs (not an error) when no run has produced
-    output yet, so the frontend can poll unconditionally."""
+    Returns {logs, log_path, belongs_to}; empty logs (not an error) when no run
+    has produced output yet, so the frontend can poll unconditionally.
+
+    `belongs_to` is "active" (the running session's own log), "last_run" (the
+    most recent finished run of this server process) or null (nothing to show) —
+    the caller must not present a "last_run" log as the live session's output."""
     return handle_inference_log()
 
 

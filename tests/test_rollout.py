@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import io
 import threading
+from pathlib import Path
 
 import pytest
 
@@ -2412,3 +2413,171 @@ def test_runner_death_before_the_first_episode_fails_the_session(monkeypatch) ->
     assert rollout._eval_session is None
     # Idempotent, like every other terminal payload.
     assert rollout.handle_inference_status()["phase"] == rollout.PHASE_ERROR
+
+
+# ---------------------------------------------------------------------------
+# /inference-log identity: the endpoint may only ever serve a log this PROCESS
+# opened, and must say whose it is.
+#
+# The old resolver fell back to "newest *.log in inference_logs" whenever the
+# active meta had no path — true during a new session's pre-spawn phases, and
+# after a run that failed before spawning. Both windows served an earlier run's
+# log unlabelled. Live incident: a run that failed in _prepare_robot on a
+# calibration error produced no log at all, and the user was shown a three-day-old
+# RTC run's output, concluding their sync run was executing RTC code.
+# ---------------------------------------------------------------------------
+
+
+def _seed_log_dir(monkeypatch, tmp_path, *, stale_text: str = "STALE RTC RUN") -> Path:
+    """An inference_logs dir holding an old log from some previous run."""
+    log_dir = tmp_path / "inference_logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    stale = log_dir / "1000.log"
+    stale.write_text(stale_text + "\n")
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+    return stale
+
+
+def test_inference_log_ignores_stale_files_during_startup(monkeypatch, tmp_path) -> None:
+    """THE INCIDENT: a session in its pre-spawn phases has no log of its own.
+
+    `log_path` is only committed once the subprocess is launched, so during the
+    download/preflight window the endpoint must report nothing rather than the
+    newest file on disk.
+    """
+    from makermodslab import rollout
+
+    stale = _seed_log_dir(monkeypatch, tmp_path)
+    monkeypatch.setattr(rollout, "inference_active", True)
+    monkeypatch.setattr(rollout, "_inference_meta", {"phase": rollout.PHASE_DOWNLOADING_MODEL})
+    monkeypatch.setattr(rollout, "_last_log_path", None)
+
+    result = rollout.handle_inference_log()
+
+    assert result["belongs_to"] is None
+    assert result["logs"] == "" and result["log_path"] is None
+    assert stale.is_file(), "the stale file is still there — it is simply not ours to show"
+
+
+def test_inference_log_after_a_startup_failure_is_empty(monkeypatch, tmp_path) -> None:
+    """A run that failed BEFORE spawning never opened a log.
+
+    `_fail_startup` wipes the meta, so nothing points anywhere — and the previous
+    run's file must not fill the gap. This is the shape of the live incident: the
+    user's calibration error produced no log, and they were shown someone else's.
+    """
+    from makermodslab import rollout
+
+    _seed_log_dir(monkeypatch, tmp_path)
+    monkeypatch.setattr(rollout, "inference_active", False)
+    monkeypatch.setattr(rollout, "_inference_meta", {})
+    monkeypatch.setattr(rollout, "_last_log_path", None)
+
+    result = rollout.handle_inference_log()
+
+    assert result == {"logs": "", "log_path": None, "belongs_to": None}
+
+
+def test_inference_log_serves_the_active_sessions_own_log(monkeypatch, tmp_path) -> None:
+    from makermodslab import rollout
+
+    _seed_log_dir(monkeypatch, tmp_path)
+    mine = tmp_path / "inference_logs" / "2000.log"
+    mine.write_text("MY RUN\n")
+    monkeypatch.setattr(rollout, "inference_active", True)
+    monkeypatch.setattr(rollout, "_inference_meta", {"log_path": str(mine)})
+    monkeypatch.setattr(rollout, "_last_log_path", str(mine))
+
+    result = rollout.handle_inference_log()
+
+    assert result["belongs_to"] == "active"
+    assert "MY RUN" in result["logs"]
+
+
+def test_inference_log_serves_a_finished_run_as_last_run(monkeypatch, tmp_path) -> None:
+    """The legitimate case the glob fallback existed for, now explicit.
+
+    A finished run's log stays readable — `_go_idle_locked` clears the meta but
+    not `_last_log_path` — and is labelled so the UI can say it is not live.
+    """
+    from makermodslab import rollout
+
+    _seed_log_dir(monkeypatch, tmp_path)
+    mine = tmp_path / "inference_logs" / "2000.log"
+    mine.write_text("MY FINISHED RUN\n")
+    monkeypatch.setattr(rollout, "inference_active", False)
+    monkeypatch.setattr(rollout, "_inference_meta", {})
+    monkeypatch.setattr(rollout, "_last_log_path", str(mine))
+
+    result = rollout.handle_inference_log()
+
+    assert result["belongs_to"] == "last_run"
+    assert "MY FINISHED RUN" in result["logs"]
+    assert result["log_path"] == str(mine)
+
+
+def test_inference_log_never_globs_the_directory(monkeypatch, tmp_path) -> None:
+    """The fallback is gone, not merely deprioritised.
+
+    Pinned directly: with a populated log dir and no session state at all, the
+    answer is None. If someone reintroduces a "be helpful, show the newest file"
+    shortcut, this fails.
+    """
+    from makermodslab import rollout
+
+    log_dir = tmp_path / "inference_logs"
+    log_dir.mkdir(parents=True)
+    for name in ("1000.log", "2000.log", "3000.log"):
+        (log_dir / name).write_text(f"run {name}\n")
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+    monkeypatch.setattr(rollout, "inference_active", False)
+    monkeypatch.setattr(rollout, "_inference_meta", {})
+    monkeypatch.setattr(rollout, "_last_log_path", None)
+
+    assert rollout._resolve_inference_log_path() == (None, None)
+
+
+def test_inference_log_does_not_serve_a_previous_runs_log_to_a_new_session(monkeypatch, tmp_path) -> None:
+    """A new claim clears the pointer, so run N+1 cannot inherit run N's log."""
+    from makermodslab import rollout
+
+    previous = tmp_path / "inference_logs" / "2000.log"
+    previous.parent.mkdir(parents=True)
+    previous.write_text("PREVIOUS RUN\n")
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+    monkeypatch.setattr(rollout, "_last_log_path", str(previous))
+
+    # What handle_start_inference does when it claims the slot.
+    monkeypatch.setattr(rollout, "inference_active", True)
+    monkeypatch.setattr(rollout, "_inference_meta", {"phase": rollout.PHASE_STARTING})
+    monkeypatch.setattr(rollout, "_last_log_path", None)
+
+    result = rollout.handle_inference_log()
+    assert result["belongs_to"] is None and result["logs"] == ""
+
+
+def test_start_inference_clears_the_previous_runs_log_pointer(monkeypatch, tmp_path) -> None:
+    """The clear happens in the real claim path, not just in test setup.
+
+    Driven through `handle_start_inference` so the lifecycle wiring itself is
+    covered; the start is failed immediately after the claim (arm-count mismatch)
+    so nothing spawns.
+    """
+    from makermodslab import rollout
+    from makermodslab.rollout import InferenceRequest
+
+    monkeypatch.setattr(rollout, "_last_log_path", "/tmp/some-previous-run.log")
+    monkeypatch.setattr(rollout, "_arm_count_mismatch", lambda mode, dim: "nope")
+
+    # Built inline rather than via a shared helper so this case stays
+    # self-contained on this branch.
+    request = InferenceRequest(
+        follower_port="/dev/ttyUSB0",
+        follower_config="robot_a",
+        policy_ref="user/repo@checkpoints/000050",
+        checkpoint_state_dim=12,
+    )
+    result = rollout.handle_start_inference(request)
+
+    assert result["success"] is False
+    assert rollout._last_log_path is None, "a new claim must not inherit the previous run's log"

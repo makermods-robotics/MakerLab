@@ -7,6 +7,7 @@ import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import {
   EpisodeResult,
   InferenceStatus,
+  InferenceLogOwner,
   InferencePhase,
   getInferenceStatus,
   getInferenceLog,
@@ -105,6 +106,10 @@ const InferenceSessionDialog: React.FC<{
   const { toast } = useToast();
   const [status, setStatus] = useState<InferenceStatus | null>(null);
   const [logs, setLogs] = useState("");
+  // Which run the fetched log belongs to. Never inferred from the text: the
+  // backend says so explicitly, because a log file on disk carries no evidence
+  // of which run wrote it.
+  const [logOwner, setLogOwner] = useState<InferenceLogOwner>(null);
   const [stopping, setStopping] = useState(false);
   // Eval mode only: in-flight guards for the two per-episode controls, so a
   // double-click can't fire "succeeded" or "next episode" twice.
@@ -171,7 +176,10 @@ const InferenceSessionDialog: React.FC<{
         // Best-effort: a log fetch failure must not disturb status handling.
         try {
           const log = await getInferenceLog(baseUrl, fetchWithHeaders);
-          if (!cancelled) setLogs(log.logs);
+          if (!cancelled) {
+            setLogs(log.logs);
+            setLogOwner(log.belongs_to);
+          }
         } catch {
           // Ignore; the next tick retries.
         }
@@ -375,6 +383,18 @@ const InferenceSessionDialog: React.FC<{
   const finishedWarn = isFinished && outcome === "ran_with_warning";
   const finishedFailed = isFinished && outcome === "failed";
   const showOutcome = finishedWarn || finishedFailed;
+  // What to put in the log panel. `logs` is only THIS run's output when the
+  // backend says the log belongs to the active session; a finished run's own log
+  // is equally fine to show once the session has ended. Anything else means this
+  // run has produced no output, and printing the text anyway is how a previous
+  // run's log gets read as the current one — a live incident, where a failed run
+  // showed a three-day-old run's output and the user concluded the wrong policy
+  // had executed.
+  const logIsThisRun =
+    logOwner === "active" || (logOwner === "last_run" && !status?.inference_active);
+  const logPlaceholder = finishedFailed
+    ? "This run failed before the rollout process started, so it produced no log — see the error above."
+    : "No log yet for this run — it hasn't started producing output.";
   // The live timer/progress block is replaced by the reset screen between
   // episodes and by the summary once an evaluation ends.
   const showTimer = !isFinished && !isResetting;
@@ -791,7 +811,7 @@ const InferenceSessionDialog: React.FC<{
 
             <div className="mt-4">
               <LogPanel
-                logs={logs}
+                logs={logIsThisRun ? logs : logPlaceholder}
                 title="Inference log"
                 defaultCollapsed
                 wrap={false}

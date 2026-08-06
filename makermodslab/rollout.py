@@ -147,6 +147,24 @@ _inference_meta: dict[str, Any] = {}
 # dies swallows the outcome/error/hint — the dialog then sees a bare idle
 # status and misreports a crash as a clean finish.
 _last_result: dict[str, Any] | None = None
+# Log file of the most recent run that actually SPAWNED a subprocess, kept until
+# the next start claims the slot. Same lifecycle as `_last_result` above and for
+# the same reason: a finished run's log must stay readable while the dialog is
+# still showing its terminal state.
+#
+# It exists because the log used to be found by globbing the newest `*.log` out
+# of the inference_logs dir whenever the active meta had no path — which is true
+# in two ordinary windows: during a new session's pre-spawn phases (download /
+# preflight), and after a run that FAILED before spawning (the startup error
+# wipes the meta, so no path is ever committed). In both, the glob served a
+# previous run's log as though it were this one, unlabelled. Observed live: a run
+# that failed in `_prepare_robot` on a calibration error produced no log at all,
+# and the user was shown a three-day-old RTC run's output — they reasonably
+# concluded their sync run was executing RTC code.
+#
+# Binding log identity to the session lifecycle instead means the endpoint can
+# only ever return THIS process's own runs, and can say which.
+_last_log_path: str | None = None
 # Set for the CURRENT session at claim time; the background startup worker
 # captures its own reference and stop() sets it. It's the only way to abandon a
 # start that's still in its pre-subprocess window (Hub download / arm preflight),
@@ -1319,7 +1337,7 @@ def _run_inference_startup(request: InferenceRequest, cancel_event: threading.Ev
     next cancel check without preflighting or spawning. Terminal download/
     preflight failures flow through _fail_startup into the shared outcome/error/
     hint status machinery."""
-    global _inference_proc, _inference_rollout_started_at, _inference_meta
+    global _inference_proc, _inference_rollout_started_at, _inference_meta, _last_log_path
 
     # 1. Resolve/download the policy. A Hub ref streams byte progress into the
     #    meta; a local dir returns instantly (no downloading_model phase, no
@@ -1403,6 +1421,10 @@ def _run_inference_startup(request: InferenceRequest, cancel_event: threading.Ev
             if identity_warnings:
                 meta["warning"] = " ".join(identity_warnings)
             _inference_meta = meta
+            # This run now owns a log file. Recorded outside the meta too, so it
+            # survives the meta being cleared at session end and the endpoint can
+            # still serve THIS run's log (labelled last_run) afterwards.
+            _last_log_path = str(log_path)
 
     if abandoned:
         # Stopped during/just after the spawn — kill the subprocess we just
@@ -1448,7 +1470,7 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
     launch modal; the multi-minute Hub download moves off the request thread so
     the UI lands on the inference page and shows download progress there."""
     global inference_active, _inference_started_at, _inference_meta, _inference_cancel
-    global _last_result, _inference_startup_thread, _eval_session
+    global _last_result, _last_log_path, _inference_startup_thread, _eval_session
 
     # Mutex with every other feature that drives the same serial bus (see
     # CLAUDE.md's "State model & mutual exclusion").
@@ -1522,6 +1544,11 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
         # A new run supersedes the previous run's terminal payload — status
         # polls must reflect THIS session from the first tick.
         _last_result = None
+        # ...and its log. Until THIS session opens its own log file, there is no
+        # log to show: the pre-spawn phases (download / preflight) produce no
+        # subprocess output, and inheriting the previous run's path here is
+        # exactly how a stale log used to be presented as the current one.
+        _last_log_path = None
         # Eval mode is decided once, here, and clamped: episodes > 1 seeds the
         # session bookkeeping so the very first status poll already reports
         # "episode 1 / N". A count of 1 leaves `_eval_session` None, which is
@@ -1797,6 +1824,7 @@ def handle_next_episode() -> dict[str, Any]:
     ONE reload; even then the model isn't re-downloaded and the arm isn't
     re-preflighted, because both results are cached on the session."""
     global _inference_proc, _inference_started_at, _inference_rollout_started_at, _inference_meta
+    global _last_log_path
 
     with _state_lock:
         ev = _eval_session
@@ -1881,6 +1909,10 @@ def handle_next_episode() -> dict[str, Any]:
             return {"success": False, "status_code": 409, "message": "No evaluation is active"}
         _inference_proc = proc
         _inference_meta["log_path"] = str(log_path)
+        # A respawn opens a FRESH log (see _open_log_and_spawn), so this is not a
+        # set-once-per-session value: keep the two in step here as well as at the
+        # session's first launch.
+        _last_log_path = str(log_path)
 
     threading.Thread(
         target=_pump_runner_stdout,
@@ -1897,43 +1929,66 @@ def handle_next_episode() -> dict[str, Any]:
 _INFERENCE_LOG_MAX_LINES = 500
 
 
-def _resolve_inference_log_path() -> Path | None:
-    """Path of the current (or most-recent) run's inference log, or None.
+def _resolve_inference_log_path() -> tuple[Path | None, str | None]:
+    """The log to show and WHOSE it is: (path, "active" | "last_run" | None).
 
-    Prefers the active session's `_inference_meta["log_path"]`; when no session
-    is active (or its meta lacks a path), falls back to the newest `*.log` under
-    the inference_logs dir so a just-finished run's log is still viewable."""
+    Two sources, in order, and nothing else:
+      * the ACTIVE session's `_inference_meta["log_path"]` — this run's own log;
+      * `_last_log_path` — the most recent run of THIS server process to have
+        spawned a subprocess, so a finished run's log stays readable while the
+        dialog shows its terminal state.
+
+    There is deliberately NO directory fallback. Globbing the newest `*.log` out
+    of inference_logs looks like a harmless convenience, but a log file on disk
+    carries no evidence of which run produced it: during a new session's pre-spawn
+    phases, and after a run that failed before spawning, the newest file belongs
+    to some EARLIER run and was served as if it were the current one (see
+    `_last_log_path`). Returning None is the honest answer.
+
+    The cost is that after a server restart the endpoint reports no log even
+    though files exist on disk. That is accepted: those files belong to runs this
+    process never saw, and mislabelling them is worse than not showing them. The
+    path is still printed in the status payload for anyone who wants to open it.
+    """
     with _state_lock:
         meta_path = _inference_meta.get("log_path")
-    if meta_path:
+        active = inference_active
+        last_path = _last_log_path
+    if meta_path and active:
         p = Path(meta_path)
         if p.is_file():
-            return p
-    log_dir = Path.home() / ".cache" / "huggingface" / "lerobot" / "inference_logs"
-    try:
-        logs = sorted(log_dir.glob("*.log"), key=lambda p: p.stat().st_mtime)
-    except OSError:
-        return None
-    return logs[-1] if logs else None
+            return p, "active"
+    if last_path:
+        p = Path(last_path)
+        if p.is_file():
+            return p, "last_run"
+    return None, None
 
 
 def handle_inference_log(max_lines: int = _INFERENCE_LOG_MAX_LINES) -> dict[str, Any]:
-    """Return the tail of the active/most-recent inference log.
+    """Return the tail of this session's (or the last run's) inference log.
 
     Read-only and bounded: at most `max_lines` trailing lines. Never raises —
     a missing/unreadable log yields empty text, so the route stays 200 even
-    before a run has produced any output."""
-    path = _resolve_inference_log_path()
+    before a run has produced any output.
+
+    `belongs_to` tells the caller what it is looking at, so the UI never has to
+    guess: "active" is the running session's own log, "last_run" the most recent
+    finished run of this process, and None means there is no log to show. A live
+    session that reports anything other than "active" has not produced output
+    yet — rendering `logs` in that case is how a stale run's output ends up
+    labelled as the current one."""
+    path, belongs_to = _resolve_inference_log_path()
     if path is None:
-        return {"logs": "", "log_path": None}
+        return {"logs": "", "log_path": None, "belongs_to": None}
     # Bounded read: only the last ~64 KB is decoded (shared with the error-mining
     # path), which holds every line a rollout log this size produces. A
     # missing/unreadable file yields None -> empty text, keeping the route 200.
     lines = _read_log_tail_lines(str(path))
     if lines is None:
-        return {"logs": "", "log_path": str(path)}
+        return {"logs": "", "log_path": str(path), "belongs_to": belongs_to}
     tail = lines[-max_lines:] if max_lines > 0 else lines
-    return {"logs": "\n".join(tail), "log_path": str(path)}
+    return {"logs": "\n".join(tail), "log_path": str(path), "belongs_to": belongs_to}
 
 
 def _finalise_eval_episode_locked(
