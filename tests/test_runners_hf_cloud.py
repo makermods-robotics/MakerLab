@@ -314,6 +314,73 @@ def test_install_plan_reports_no_installer() -> None:
     assert _install_plan("spec", "/py", None, False, False) == (None, [])
 
 
+# -- checkpoint-completeness check (partial-upload race fix) --
+
+
+def test_checkpoint_step_ready_false_when_step_dir_empty(tmp_path: Path) -> None:
+    from makerlab.runners.hf_cloud import _checkpoint_step_ready
+
+    step_dir = tmp_path / "005000"
+    step_dir.mkdir()
+    assert _checkpoint_step_ready(step_dir) is False
+
+
+def test_checkpoint_step_ready_false_when_only_config_json_exists(tmp_path: Path) -> None:
+    """The exact race this fixes: lerobot's save_checkpoint writes
+    pretrained_model/config.json before model.safetensors, and only creates
+    training_state/ after all of pretrained_model/ is written. A poll that
+    lands in this window must not consider the step ready."""
+    from makerlab.runners.hf_cloud import _checkpoint_step_ready
+
+    step_dir = tmp_path / "005000"
+    pretrained_dir = step_dir / "pretrained_model"
+    pretrained_dir.mkdir(parents=True)
+    (pretrained_dir / "config.json").write_text("{}")
+    assert _checkpoint_step_ready(step_dir) is False
+
+
+def test_checkpoint_step_ready_false_when_only_training_state_exists(tmp_path: Path) -> None:
+    """Belt-and-suspenders: training_state/ alone (no pretrained_model/config.json,
+    e.g. a directory mid-construction from something other than save_checkpoint)
+    is not enough either."""
+    from makerlab.runners.hf_cloud import _checkpoint_step_ready
+
+    step_dir = tmp_path / "005000"
+    (step_dir / "training_state").mkdir(parents=True)
+    assert _checkpoint_step_ready(step_dir) is False
+
+
+def test_checkpoint_step_ready_true_once_training_state_exists(tmp_path: Path) -> None:
+    """Once training_state/ exists, save_checkpoint has already finished
+    writing pretrained_model/ (training_state is created strictly after), so
+    the step is safe to upload."""
+    from makerlab.runners.hf_cloud import _checkpoint_step_ready
+
+    step_dir = tmp_path / "005000"
+    pretrained_dir = step_dir / "pretrained_model"
+    pretrained_dir.mkdir(parents=True)
+    (pretrained_dir / "config.json").write_text("{}")
+    (pretrained_dir / "model.safetensors").write_bytes(b"fake-weights")
+    (step_dir / "training_state").mkdir()
+    assert _checkpoint_step_ready(step_dir) is True
+
+
+def test_wrapper_source_inlines_the_tested_checkpoint_ready_check() -> None:
+    """The wrapper's checkpoint-completeness check is _checkpoint_step_ready's
+    source inlined verbatim, so the in-container upload gate is exactly the
+    function the tests above exercise — and _scan_and_upload must call it
+    instead of checking config.json directly (that was the bug: uploading and
+    marking a step `seen` the moment config.json appeared, even though
+    model.safetensors and training_state/ might not exist yet)."""
+    import inspect
+
+    from makerlab.runners.hf_cloud import WRAPPER_SOURCE, _checkpoint_step_ready
+
+    assert inspect.getsource(_checkpoint_step_ready) in WRAPPER_SOURCE
+    assert "__CHECKPOINT_READY_SOURCE__" not in WRAPPER_SOURCE  # placeholder replaced
+    assert "_checkpoint_step_ready(entry)" in WRAPPER_SOURCE
+
+
 # -- wrapper sanity --
 
 

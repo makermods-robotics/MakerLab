@@ -153,6 +153,33 @@ def _install_plan(spec, python, uv_path, has_pip, has_ensurepip):
     return None, []
 
 
+def _checkpoint_step_ready(step_dir):
+    """Whether `step_dir` (a lerobot checkpoints/<step>/ directory) has been
+    fully written and is safe to upload.
+
+    lerobot's save_checkpoint (lerobot/common/train_utils.py) writes
+    pretrained_model/ first via policy.save_pretrained — which itself writes
+    config.json *before* the much larger model.safetensors (see
+    PreTrainedPolicy._save_pretrained in lerobot/policies/pretrained.py) — and
+    only calls save_training_state, which creates training_state/, once every
+    pretrained_model/ file is already on disk. So pretrained_model/config.json
+    existing is NOT sufficient evidence the step is complete: it can be
+    observed while model.safetensors is still being written, or before it
+    exists at all. training_state/ existing is a reliable "the whole step
+    finished" signal, since save_checkpoint only creates it after
+    pretrained_model/ is done.
+
+    Pure and self-contained (stdlib pathlib only) so its source can be
+    inlined verbatim into WRAPPER_SOURCE the same way _install_plan is,
+    keeping the in-container check and the unit-tested implementation
+    identical.
+    """
+    pretrained_dir = step_dir / "pretrained_model"
+    if not (pretrained_dir / "config.json").is_file():
+        return False
+    return (step_dir / "training_state").is_dir()
+
+
 def _cloud_device(flavor: str) -> str:
     """HF Jobs flavors are NVIDIA GPU boxes except the cpu-* tiers."""
     return "cpu" if flavor.startswith("cpu") else "cuda"
@@ -216,9 +243,11 @@ _CONTAINER_TRAIN_CONFIG_NAME = "train_config.json"
 #
 # Sent verbatim as the value of `python -c '...'`. Wrapper-side arguments
 # (the pinned lerobot spec) come before `--`; anything after `--` is
-# forwarded to the trainer. The __INSTALL_PLAN_SOURCE__ placeholder is
-# replaced with _install_plan's own source below, so the wrapper's installer
-# choice is the exact function the unit tests exercise.
+# forwarded to the trainer. The __INSTALL_PLAN_SOURCE__ and
+# __CHECKPOINT_READY_SOURCE__ placeholders are replaced with _install_plan's
+# and _checkpoint_step_ready's own source below, so the wrapper's installer
+# choice and checkpoint-completeness check are the exact functions the unit
+# tests exercise.
 _WRAPPER_TEMPLATE = r'''
 import importlib.util
 import os, re, shlex, shutil, sys, threading, subprocess
@@ -226,6 +255,8 @@ from pathlib import Path
 from huggingface_hub import HfApi
 
 __INSTALL_PLAN_SOURCE__
+
+__CHECKPOINT_READY_SOURCE__
 
 argv = sys.argv[1:]
 if "--" not in argv:
@@ -397,10 +428,12 @@ def _scan_and_upload():
     for entry in entries:
         if not re.fullmatch(r"\d+", entry.name):
             continue
-        config_json = entry / "pretrained_model" / "config.json"
-        if not config_json.is_file():
-            continue
         if entry.name in seen:
+            continue
+        # config.json can exist while model.safetensors is still being
+        # written (or absent) — training_state/ only appears once the whole
+        # step is on disk. See _checkpoint_step_ready.
+        if not _checkpoint_step_ready(entry):
             continue
         try:
             api.upload_folder(
@@ -449,7 +482,9 @@ print(f"[wrapper] trainer exited with rc={rc}", flush=True)
 sys.exit(rc)
 '''
 
-WRAPPER_SOURCE = _WRAPPER_TEMPLATE.replace("__INSTALL_PLAN_SOURCE__", inspect.getsource(_install_plan))
+WRAPPER_SOURCE = _WRAPPER_TEMPLATE.replace(
+    "__INSTALL_PLAN_SOURCE__", inspect.getsource(_install_plan)
+).replace("__CHECKPOINT_READY_SOURCE__", inspect.getsource(_checkpoint_step_ready))
 
 # HF Jobs' platform default timeout has killed legitimate runs that pushed
 # the model successfully but were still uploading auxiliary files. 2h covers
