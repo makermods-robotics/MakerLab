@@ -1787,17 +1787,22 @@ def test_delete_refusal_wording_is_action_neutral(tmp_lerobot_home, monkeypatch:
     assert result["message"].endswith("Stop it first.")
 
 
-def _stub_recording_request():
+def _stub_recording_request(**overrides):
+    """Minimal RecordingRequest for exercising handle_start_recording's
+    precondition checks — none of these reach real hardware. Pass keyword
+    overrides to vary a single field (e.g. an invalid dataset_repo_id)."""
     import makermodslab.record as record
 
-    return record.RecordingRequest(
-        leader_port="/dev/leader",
-        follower_port="/dev/follower",
-        leader_config="leader",
-        follower_config="follower",
-        dataset_repo_id="tester/ds",
-        single_task="pick",
-    )
+    fields = {
+        "leader_port": "/dev/leader",
+        "follower_port": "/dev/follower",
+        "leader_config": "leader",
+        "follower_config": "follower",
+        "dataset_repo_id": "tester/ds",
+        "single_task": "pick",
+    }
+    fields.update(overrides)
+    return record.RecordingRequest(**fields)
 
 
 def test_start_recording_blocked_when_calibration_active(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1886,23 +1891,6 @@ def test_start_recording_resume_skips_timestamp_stamp(monkeypatch: pytest.Monkey
     assert _start(resume=True) == "tester/existing_ds"
     monkeypatch.setattr(record, "recording_active", False)  # release the claim
     assert re.fullmatch(r"tester/existing_ds_\d{8}_\d{6}", _start(resume=False))
-
-
-def _stub_recording_request(**overrides):
-    """Minimal RecordingRequest for exercising handle_start_recording's
-    precondition checks — none of these reach real hardware."""
-    import makermodslab.record as record
-
-    fields = {
-        "leader_port": "COM_LEADER",
-        "follower_port": "COM_FOLLOWER",
-        "leader_config": "leader",
-        "follower_config": "follower",
-        "dataset_repo_id": "tester/some_dataset",
-        "single_task": "pick",
-    }
-    fields.update(overrides)
-    return record.RecordingRequest(**fields)
 
 
 # ---------------------------------------------------------------------------
