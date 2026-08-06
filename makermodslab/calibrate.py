@@ -170,6 +170,14 @@ class CalibrationManager:
         # reached a real commit (on-disk file written) that supersedes them.
         self._original_homing_offsets: dict[str, int] = {}
         self._calibration_committed = False
+        # Guards _cleanup_device's body. stop_calibration_process forces a
+        # cleanup call from the request-handling thread once its join()
+        # times out, without knowing whether the worker thread has since
+        # reached its own _cleanup_and_finish — without this lock the two
+        # could race and both run the homing-offset restore loop against the
+        # live bus concurrently. Whichever thread arrives second finds
+        # self.device already None and no-ops.
+        self._cleanup_lock = threading.Lock()
 
         # Initialize logging
         init_logging()
@@ -430,14 +438,17 @@ class CalibrationManager:
             # run is cancelled or errors before _complete_calibration commits a
             # new value to disk, _cleanup_device restores this baseline so the
             # servo never diverges from the last-saved calibration file.
-            try:
-                self._original_homing_offsets = {
-                    motor: self.device.bus.read("Homing_Offset", motor, normalize=False)
-                    for motor in self.device.bus.motors
-                }
-            except Exception as e:
-                logger.warning(f"Could not read baseline homing offsets before calibration: {e}")
-                self._original_homing_offsets = {}
+            #
+            # A failed read here isn't caught locally: the device is freshly
+            # connected and nothing has been written yet, so there's nothing
+            # cheaper to retry into. Letting it propagate to this method's own
+            # except Exception below aborts the run with a clear error instead
+            # of silently proceeding with no rollback safety net for the one
+            # run that most needs it.
+            self._original_homing_offsets = {
+                motor: self.device.bus.read("Homing_Offset", motor, normalize=False)
+                for motor in self.device.bus.motors
+            }
 
             # Start Step 1: Homing
             self._step_homing()
@@ -734,35 +745,40 @@ class CalibrationManager:
 
     def _cleanup_device(self):
         """Clean up device connection"""
-        try:
-            if self.device:
-                # A run that never committed (cancelled, or errored before
-                # _complete_calibration saved) may have already pushed new
-                # Homing_Offset values to the servo in _step_homing. Left as-is,
-                # the servo would permanently diverge from the last-saved
-                # calibration file — the next session's arm-identity check
-                # would then either hard-refuse to start or, worse, silently
-                # decode positions against a stale offset. Restore the
-                # pre-calibration baseline so a cancelled run leaves the
-                # physical arm exactly as it found it.
-                if not self._calibration_committed and self._original_homing_offsets:
-                    try:
-                        logger.info(
-                            "Calibration did not complete — restoring pre-calibration "
-                            f"homing offsets: {self._original_homing_offsets}"
-                        )
-                        for motor, offset in self._original_homing_offsets.items():
-                            self.device.bus.write("Homing_Offset", motor, offset)
-                    except Exception as e:
-                        logger.error(
-                            f"Failed to restore original homing offsets after cancelled calibration: {e}"
-                        )
+        # Serializes against a concurrent forced cleanup from
+        # stop_calibration_process (see its comment, and _cleanup_lock's
+        # docstring in __init__): only the first caller does real work, a
+        # second concurrent call finds self.device already None below.
+        with self._cleanup_lock:
+            try:
+                if self.device:
+                    # A run that never committed (cancelled, or errored before
+                    # _complete_calibration saved) may have already pushed new
+                    # Homing_Offset values to the servo in _step_homing. Left as-is,
+                    # the servo would permanently diverge from the last-saved
+                    # calibration file — the next session's arm-identity check
+                    # would then either hard-refuse to start or, worse, silently
+                    # decode positions against a stale offset. Restore the
+                    # pre-calibration baseline so a cancelled run leaves the
+                    # physical arm exactly as it found it.
+                    if not self._calibration_committed and self._original_homing_offsets:
+                        try:
+                            logger.info(
+                                "Calibration did not complete — restoring pre-calibration "
+                                f"homing offsets: {self._original_homing_offsets}"
+                            )
+                            for motor, offset in self._original_homing_offsets.items():
+                                self.device.bus.write("Homing_Offset", motor, offset)
+                        except Exception as e:
+                            logger.error(
+                                f"Failed to restore original homing offsets after cancelled calibration: {e}"
+                            )
 
-                logger.info("Disconnecting device...")
-                self.device.disconnect()
-                self.device = None
-        except Exception as e:
-            logger.error(f"Error disconnecting device: {e}")
+                    logger.info("Disconnecting device...")
+                    self.device.disconnect()
+                    self.device = None
+            except Exception as e:
+                logger.error(f"Error disconnecting device: {e}")
 
 
 # Global calibration manager instance

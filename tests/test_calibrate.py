@@ -291,10 +291,10 @@ def test_cleanup_device_restores_homing_offsets_when_not_committed() -> None:
     ever saves the on-disk calibration file (step 3). A calibration cancelled
     or errored in between used to leave the servo permanently diverged from
     the last-saved file — the next session's arm-identity fingerprint check
-    (see makerlab/arm_identity.py) would then either hard-refuse to start or
+    (see makermodslab/arm_identity.py) would then either hard-refuse to start or
     silently decode positions against a stale offset. _cleanup_device must
     restore the pre-calibration baseline whenever the run never committed."""
-    from makerlab.calibrate import CalibrationManager
+    from makermodslab.calibrate import CalibrationManager
 
     mgr = CalibrationManager()
     bus = _FakeBus()
@@ -315,7 +315,7 @@ def test_cleanup_device_does_not_restore_once_calibration_committed() -> None:
     """A calibration that reached _complete_calibration (file saved to disk)
     must not have its final homing offsets touched during cleanup — EEPROM
     and the file already agree at that point."""
-    from makerlab.calibrate import CalibrationManager
+    from makermodslab.calibrate import CalibrationManager
 
     mgr = CalibrationManager()
     bus = _FakeBus()
@@ -332,7 +332,7 @@ def test_cleanup_device_skips_restore_when_no_baseline_was_captured() -> None:
     """If the baseline read itself failed (device unreachable at connect
     time), there's nothing to roll back to — cleanup must not crash or invent
     a value."""
-    from makerlab.calibrate import CalibrationManager
+    from makermodslab.calibrate import CalibrationManager
 
     mgr = CalibrationManager()
     bus = _FakeBus()
@@ -348,7 +348,7 @@ def test_cleanup_device_skips_restore_when_no_baseline_was_captured() -> None:
 def test_cleanup_device_still_disconnects_if_restore_write_fails() -> None:
     """A failed rollback write (e.g. the bus just dropped) must be logged, not
     swallowed silently and not allowed to block the device disconnect."""
-    from makerlab.calibrate import CalibrationManager
+    from makermodslab.calibrate import CalibrationManager
 
     mgr = CalibrationManager()
     bus = _BrokenBus()
