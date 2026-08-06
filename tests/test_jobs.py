@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json as _json
 import os
+import threading
 from pathlib import Path
 
 import pytest
@@ -1198,6 +1199,17 @@ def _resumable_source(tmp_path, state: str, *, job_id: str = "src", steps: int =
     return reg
 
 
+def _assert_nothing_was_created(reg) -> None:
+    """A synchronous refusal must leave NO trace on disk either.
+
+    Cheap guards stayed in front of the record when the base-checkpoint download
+    moved behind it (see the deferred-materialization section), and a job
+    directory or a log file appearing here would be the first sign that one of
+    them slipped past. `_resumable_source` keeps its source run outside the
+    registry root, so the root is empty until a record is created."""
+    assert list(reg._output_root.iterdir()) == []
+
+
 def _resume_request(job_id: str = "src"):
     from makermodslab.train import TrainingRequest
 
@@ -1224,6 +1236,7 @@ def test_start_refuses_to_resume_a_completed_run(tmp_path) -> None:
         reg.start(_resume_request(), JobTarget(runner="local"))
 
     assert [r.id for r in reg.list(limit=10)] == ["src"]
+    _assert_nothing_was_created(reg)
 
 
 def test_start_refuses_to_resume_a_completed_cloud_run(tmp_path) -> None:
@@ -1298,6 +1311,7 @@ def test_start_refuses_a_local_parent_resumed_on_the_cloud(tmp_path, monkeypatch
 
     assert "Local" in str(excinfo.value)
     assert [r.id for r in reg.list(limit=10)] == ["src"]
+    _assert_nothing_was_created(reg)
 
 
 def test_start_refuses_a_cloud_parent_resumed_locally(tmp_path, monkeypatch) -> None:
@@ -1323,6 +1337,7 @@ def test_start_refuses_a_cloud_parent_resumed_locally(tmp_path, monkeypatch) -> 
     # Read the registry directly: `list` counts a cloud record's checkpoints,
     # which would itself call the stand-in above.
     assert list(reg._records) == ["src"]
+    _assert_nothing_was_created(reg)
 
 
 def test_start_still_resumes_a_cloud_run_on_the_cloud(tmp_path, monkeypatch) -> None:
@@ -1496,9 +1511,23 @@ def _cloud_finetune_source(reg, repo_id: str = "user/act_ds_2026"):
     return record
 
 
+def _join_prepare(reg, job_id: str, timeout: float = 10.0) -> None:
+    """Wait for the thread that materializes a fine-tune's base checkpoint.
+
+    Joining the thread — rather than polling for its effect — is what keeps
+    these tests off sleeps and out of the flaky column."""
+    thread = reg._prepare_threads[job_id]
+    thread.join(timeout)
+    assert not thread.is_alive(), "the preparing thread never finished"
+
+
 def test_finetune_start_local_materializes_the_selected_step(monkeypatch, tmp_path) -> None:
     """LOCAL target: the ref becomes a real directory on this machine before the
-    trainer starts, and that directory is the SELECTED step."""
+    trainer starts, and that directory is the SELECTED step.
+
+    The download now happens off-request (see the deferred-materialization
+    section below), so join the preparing thread before asserting on its
+    effect."""
     from unittest.mock import MagicMock
 
     from makermodslab.jobs import JobRegistry, JobTarget
@@ -1525,11 +1554,14 @@ def test_finetune_start_local_materializes_the_selected_step(monkeypatch, tmp_pa
         ),
         JobTarget(runner="local"),
     )
+    _join_prepare(reg, record.id)
 
     resolved = record.config.policy_pretrained_path
     assert "@" not in resolved  # materialized, not a ref
     assert resolved.endswith("/checkpoints/003000/pretrained_model")
     assert seen["allow_patterns"] == ["checkpoints/003000/pretrained_model/*"]
+    # The trainer really was handed the materialized directory, not the ref.
+    assert fake_runner.start.call_args.args[1].policy_pretrained_path == resolved
 
 
 def test_finetune_start_cloud_keeps_the_step_ref(monkeypatch, tmp_path) -> None:
@@ -1565,3 +1597,246 @@ def test_finetune_start_cloud_keeps_the_step_ref(monkeypatch, tmp_path) -> None:
     )
 
     assert record.config.policy_pretrained_path == "user/act_ds_2026@checkpoints/003000"
+
+
+# ---------------------------------------------------------------------------
+# The base-checkpoint download happens AFTER the record exists.
+#
+# Materializing a Hub checkpoint for a local fine-tune is minutes and gigabytes.
+# Doing it inside POST /jobs/training meant the request hung with nothing on
+# screen and no job to look at. The record + log file are now created first and
+# the download runs in a background thread, so the monitor opens immediately and
+# tails the progress lines. Everything that can refuse the request cheaply still
+# refuses it synchronously, before any record exists.
+# ---------------------------------------------------------------------------
+
+
+def _patch_hub_for_finetune(monkeypatch, tmp_path):
+    """Stand-in for the CHEAP Hub read a fine-tune start makes synchronously:
+    the source run's checkpoint listing."""
+    monkeypatch.setattr(
+        "makermodslab.jobs.shared_hf_api", lambda: _FakeHubApi(_hub_checkpoint_files("003000"))
+    )
+
+
+def _hub_finetune_request(source_id: str, policy_type: str = "act"):
+    from makermodslab.train import TrainingRequest
+
+    return TrainingRequest(
+        dataset_repo_id="user/ds",
+        policy_type=policy_type,
+        finetune_from_job_id=source_id,
+        finetune_from_step=3000,
+    )
+
+
+def _gated_snapshot(tmp_path, *, started: threading.Event, release: threading.Event):
+    """_fake_snapshot, but it parks in the middle so a test can observe the
+    world WHILE the download is in flight."""
+    seen: dict = {}
+    inner = _fake_snapshot(tmp_path, seen)
+
+    def _download(**kwargs):
+        started.set()
+        assert release.wait(timeout=10), "the gated download was never released"
+        return inner(**kwargs)
+
+    return _download
+
+
+def _fake_local_runner(monkeypatch):
+    from unittest.mock import MagicMock
+
+    runner = MagicMock()
+    runner.pid.return_value = 4242
+    monkeypatch.setattr("makermodslab.jobs.LocalJobRunner", lambda *a, **k: runner)
+    return runner
+
+
+def test_local_finetune_start_returns_before_the_download_finishes(monkeypatch, tmp_path) -> None:
+    """The whole point: the caller gets a job id (and a log file with something
+    in it) while the gigabytes are still moving."""
+    from makermodslab.jobs import JobRegistry, JobTarget
+
+    started, release = threading.Event(), threading.Event()
+    _patch_hub_for_finetune(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "huggingface_hub.snapshot_download",
+        _gated_snapshot(tmp_path, started=started, release=release),
+    )
+
+    reg = JobRegistry(tmp_path / "root")
+    source = _cloud_finetune_source(reg)
+    fake_runner = _fake_local_runner(monkeypatch)
+
+    record = reg.start(_hub_finetune_request(source.id), JobTarget(runner="local"))
+    assert started.wait(timeout=10), "the download never started"
+
+    # Mid-download: the record is real, visible, and running — and no trainer
+    # has been spawned yet.
+    assert record.state == "running"
+    assert reg.get(record.id).state == "running"
+    assert fake_runner.start.call_count == 0
+
+    # The monitor's two log sources both have the opening line: the file it
+    # seeds from on mount, and the live drain it polls every second.
+    log_path = reg._output_root / record.id / "log.jsonl"
+    assert log_path.exists()
+    assert "Preparing fine-tune" in log_path.read_text()
+    assert any("Preparing fine-tune" in line.message for line in reg.drain_logs(record.id))
+    assert "003000" in reg.read_persisted_logs(record.id)[0].message
+
+    release.set()
+    _join_prepare(reg, record.id)
+
+    final = reg.get(record.id)
+    assert final.state == "running"
+    assert final.process_pid == 4242
+    assert fake_runner.start.call_count == 1
+    assert "@" not in final.config.policy_pretrained_path
+
+
+def test_local_finetune_download_failure_fails_the_record(monkeypatch, tmp_path) -> None:
+    """The failure that used to be an HTTP 400 now lands ON the record, with the
+    same wording — no orphan record, no job stuck at 'running'."""
+    from makermodslab.jobs import JobRegistry, JobTarget
+
+    def _boom(**kwargs):
+        raise RuntimeError("hub down")
+
+    _patch_hub_for_finetune(monkeypatch, tmp_path)
+    monkeypatch.setattr("huggingface_hub.snapshot_download", _boom)
+
+    reg = JobRegistry(tmp_path / "root")
+    source = _cloud_finetune_source(reg)
+    fake_runner = _fake_local_runner(monkeypatch)
+
+    record = reg.start(_hub_finetune_request(source.id), JobTarget(runner="local"))
+    _join_prepare(reg, record.id)
+
+    final = reg.get(record.id)
+    assert final.state == "failed"
+    assert "Could not download the base checkpoint" in final.error_message
+    assert "hub down" in final.error_message
+    # No process ever existed, so no synthetic exit code is invented for one.
+    assert final.exit_code is None
+    assert final.ended_at is not None
+    assert fake_runner.start.call_count == 0
+    # The stand-in runner is gone, so the watchdog has nothing left to finalise.
+    assert record.id not in reg._runners
+    # Persisted, not just fixed in memory.
+    meta = _json.loads((reg._output_root / record.id / "job.json").read_text())
+    assert meta["state"] == "failed"
+
+
+def test_stop_during_the_download_is_interrupted(monkeypatch, tmp_path) -> None:
+    """Stop must work while the base checkpoint is downloading. huggingface_hub
+    can't be aborted mid-flight, so the cancel takes effect when the download
+    returns — before the trainer is spawned — and reads as a deliberate stop."""
+    from makermodslab.jobs import _PREPARE_STOPPED_MESSAGE, JobRegistry, JobTarget
+
+    started, release = threading.Event(), threading.Event()
+    _patch_hub_for_finetune(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "huggingface_hub.snapshot_download",
+        _gated_snapshot(tmp_path, started=started, release=release),
+    )
+
+    reg = JobRegistry(tmp_path / "root")
+    source = _cloud_finetune_source(reg)
+    fake_runner = _fake_local_runner(monkeypatch)
+
+    record = reg.start(_hub_finetune_request(source.id), JobTarget(runner="local"))
+    assert started.wait(timeout=10), "the download never started"
+
+    # Stop lands while the bytes are still moving; the record can only settle
+    # once the download returns, so this call reports the job as still running.
+    assert reg.stop(record.id).state == "running"
+    release.set()
+    _join_prepare(reg, record.id)
+
+    final = reg.get(record.id)
+    assert final.state == "interrupted"
+    assert final.error_message == _PREPARE_STOPPED_MESSAGE
+    assert "exited with code" not in (final.error_message or "")
+    assert final.exit_code is None
+    # The stop is honoured by NOT starting the trainer we were about to start.
+    assert fake_runner.start.call_count == 0
+    assert record.id not in reg._runners
+
+
+def test_a_download_bound_job_refuses_a_second_local_run(monkeypatch, tmp_path) -> None:
+    """The local mutex covers the download window too — the machine is spoken
+    for from the moment the record exists, not from the trainer's first step."""
+    from makermodslab.jobs import JobAlreadyRunningError, JobRegistry, JobTarget
+    from makermodslab.train import TrainingRequest
+
+    started, release = threading.Event(), threading.Event()
+    _patch_hub_for_finetune(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "huggingface_hub.snapshot_download",
+        _gated_snapshot(tmp_path, started=started, release=release),
+    )
+
+    reg = JobRegistry(tmp_path / "root")
+    source = _cloud_finetune_source(reg)
+    _fake_local_runner(monkeypatch)
+
+    record = reg.start(_hub_finetune_request(source.id), JobTarget(runner="local"))
+    assert started.wait(timeout=10), "the download never started"
+
+    with pytest.raises(JobAlreadyRunningError):
+        reg.start(
+            TrainingRequest(dataset_repo_id="user/ds", policy_type="act"),
+            JobTarget(runner="local"),
+        )
+
+    release.set()
+    _join_prepare(reg, record.id)
+
+
+def test_download_progress_logs_are_readable_not_per_chunk() -> None:
+    """The progress hook has to be worth reading: snapshot_download calls back
+    per CHUNK, and one log line per chunk would bury the run's own output. Drive
+    the tqdm class the way huggingface_hub does — one shared bytes bar plus a
+    file-count bar — and check the cadence and the wording."""
+    from makermodslab.jobs import _DownloadProgressLogger, make_snapshot_progress_tqdm
+
+    lines: list[str] = []
+    tqdm_class = make_snapshot_progress_tqdm(_DownloadProgressLogger(lines.append, "012000"))
+    bytes_bar = tqdm_class(unit="B", unit_scale=True, total=0)
+    file_bar = tqdm_class(total=4)  # not the bytes bar; must contribute nothing
+
+    bytes_bar.total = 1_288_490_188  # ~1.2 GB, discovered as metadata arrives
+    bytes_bar.refresh()
+    for _ in range(200):  # ~0.5% per chunk
+        bytes_bar.update(6_442_450)
+    file_bar.update(1)
+
+    # ~5% apart, so a 1.2 GB download is tens of lines, not thousands.
+    assert 10 <= len(lines) <= 40
+    assert lines[1] == "Downloading base checkpoint 012000 — 6% (74 MB / 1.2 GB)"
+    assert "1.2 GB / 1.2 GB" in lines[-1]
+
+
+def test_an_unknown_finetune_source_still_refuses_before_any_record(monkeypatch, tmp_path) -> None:
+    """The cheap guards did NOT move behind the record. A request that can be
+    refused without touching the Hub still fails fast, with no record, no job
+    directory, and no download."""
+    from makermodslab.jobs import JobRegistry, JobTarget
+
+    def _no_downloads(**kwargs):
+        raise AssertionError("a refused request must not download anything")
+
+    _patch_hub_for_finetune(monkeypatch, tmp_path)
+    monkeypatch.setattr("huggingface_hub.snapshot_download", _no_downloads)
+
+    reg = JobRegistry(tmp_path / "root")
+    _fake_local_runner(monkeypatch)
+
+    with pytest.raises(ValueError, match="not found"):
+        reg.start(_hub_finetune_request("no-such-run"), JobTarget(runner="local"))
+
+    assert list(reg._records) == []
+    assert list(reg._output_root.iterdir()) == []
+    assert reg._prepare_threads == {}

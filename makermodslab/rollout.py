@@ -37,13 +37,12 @@ from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel
-from tqdm.auto import tqdm as _base_tqdm
 
 from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
 
 from .arm_identity import ArmIdentityError, ArmSlot, verify_devices
 from .camera_preview import camera_preview_manager
-from .jobs import download_hub_checkpoint_ref
+from .jobs import download_hub_checkpoint_ref, make_snapshot_progress_tqdm
 from .motor_power import clear_goal_velocity, reset_torque_limit
 from .record import _DEFAULT_FOURCC
 from .utils.config import (
@@ -241,60 +240,6 @@ def _detect_device() -> str:
     except Exception:
         pass
     return "cpu"
-
-
-def make_snapshot_progress_tqdm(
-    report: Callable[[int, int | None], None],
-) -> type[_base_tqdm]:
-    """A ``tqdm_class`` for ``snapshot_download`` that reports byte progress.
-
-    Mirrored (name + shape kept identical) from
-    ``datasets.make_snapshot_progress_tqdm`` on the sibling
-    ``claude/download-progress`` branch so the eventual landing of that branch
-    can dedup to a single shared helper. Verified against the pinned
-    huggingface_hub 1.21.0 contract: ``snapshot_download(tqdm_class=cls)``
-    instantiates ``cls`` twice — a file-count bar and ONE shared bytes bar
-    (``unit="B"``). Both the plain-HTTP and xet download paths funnel their chunk
-    updates into that shared bar: as each file's metadata arrives its size is
-    added by mutating ``bar.total`` in place followed by ``bar.refresh()``, and
-    downloaded chunks arrive as ``bar.update(n)``. So the recorder keys off
-    ``unit == "B"``, hooks ``update`` for bytes done, and hooks ``refresh`` as
-    the signal that the (growing) total changed. The total keeps growing while
-    file metadata is discovered, so percent can legitimately drop — honest, since
-    the real total isn't known upfront.
-
-    Subclasses the vanilla tqdm on purpose: huggingface_hub hands non-hf
-    subclasses full responsibility (no ``disable``/``name`` injection, no
-    HF_HUB_DISABLE_PROGRESS_BARS gating), so reporting can't be silently turned
-    off by env/log-level. The bar itself is force-disabled — nothing is drawn to
-    the server's stderr — which also means tqdm's own ``n`` never advances; bytes
-    are accumulated in ``_bytes_done`` instead. ``total`` IS still set and mutable
-    on a disabled tqdm, which is all ``refresh`` needs to read."""
-
-    class _ProgressTqdm(_base_tqdm):
-        def __init__(self, *args: Any, **kwargs: Any) -> None:
-            self._is_bytes_bar = kwargs.get("unit") == "B"
-            self._bytes_done = int(kwargs.get("initial") or 0)
-            kwargs["disable"] = True
-            super().__init__(*args, **kwargs)
-
-        def _report(self) -> None:
-            total = getattr(self, "total", None)
-            report(self._bytes_done, int(total) if total else None)
-
-        def update(self, n: float | None = 1) -> bool | None:
-            if self._is_bytes_bar:
-                if n:
-                    self._bytes_done += int(n)
-                self._report()
-            return super().update(n)
-
-        def refresh(self, *args: Any, **kwargs: Any) -> bool | None:
-            if self._is_bytes_bar:
-                self._report()
-            return super().refresh(*args, **kwargs)
-
-    return _ProgressTqdm
 
 
 def _report_download_progress(bytes_done: int, bytes_total: int | None) -> None:

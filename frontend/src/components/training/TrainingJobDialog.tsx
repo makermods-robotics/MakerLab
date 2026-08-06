@@ -234,6 +234,16 @@ const TrainingJobDialog: React.FC<{
 
   const isRunning = job?.state === "running";
 
+  // Before the trainer's first metric tick the stats panel can only say
+  // "Training starting…" — which is wrong (and worryingly quiet) for the
+  // minutes a local fine-tune spends downloading its base checkpoint. The
+  // backend writes that progress into the job's log, so surface the newest line
+  // as a status strip until real steps arrive; it then gets out of the way.
+  const preStepStatus =
+    isRunning && job.metrics.current_step === 0
+      ? (logs[logs.length - 1]?.message ?? null)
+      : null;
+
   const backButton = (
     <Button
       variant="ghost"
@@ -342,6 +352,13 @@ const TrainingJobDialog: React.FC<{
                 </Button>
               )}
             </div>
+
+            {preStepStatus ? (
+              <div className="flex items-center gap-2 rounded-md border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+                <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" />
+                <span className="truncate">{preStepStatus}</span>
+              </div>
+            ) : null}
 
             <MonitoringStats
               jobId={jobId}

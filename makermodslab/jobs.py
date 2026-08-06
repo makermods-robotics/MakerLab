@@ -37,6 +37,7 @@ from queue import Empty, Queue
 from typing import Any, Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel
+from tqdm.auto import tqdm as _base_tqdm
 
 from .train import TrainingRequest
 from .utils.config import is_valid_robot_name
@@ -545,6 +546,93 @@ class TailingJobRunner:
             logger.exception("Tailing loop error: %s", exc)
 
 
+class PreparingJobRunner:
+    """Stand-in runner for a local job whose base checkpoint is still downloading.
+
+    A local fine-tune from a Hub checkpoint has to materialize multi-GB weights
+    before the trainer can start. That used to happen inside POST /jobs/training,
+    which blocked the request for minutes with nothing on screen. The record is
+    now created first (state "running") and the download runs in a background
+    thread; this object stands in for the real LocalJobRunner meanwhile, so the
+    registry's existing seams keep working with no special cases:
+
+      * `stream_log_lines` feeds the monitor's 1Hz /jobs/{id}/logs poll — that
+        is how download progress reaches the screen. `emit` is the writing end:
+        it appends to the SAME log.jsonl the trainer will append to next, so
+        the download is part of the run's log rather than a separate channel.
+      * `stop` records the user's cancel, which the materialize thread reads
+        between the download and the spawn (see
+        JobRegistry._materialize_then_start).
+      * `is_running` is deliberately always True. The registry ends this
+        runner's role by REPLACING it in `_runners` (handoff) or removing it
+        (finalisation), both under the registry lock. Answering False would let
+        a watchdog tick that raced the handoff finalise the job as failed while
+        the trainer it had just spawned kept running.
+
+    Not a real process: `returncode` is always None, and `start` is never called
+    (the registry constructs this runner directly).
+    """
+
+    def __init__(self, log_file_path: Path | None = None) -> None:
+        self._log_file_path = log_file_path
+        self._log_queue: Queue[LogLine] = Queue()
+        self._cancelled = threading.Event()
+
+    def emit(self, message: str) -> None:
+        """Append one line to the job's log, for the file and the live poll.
+
+        Opens and closes the file per line on purpose: this runs at most every
+        few seconds, and holding no handle keeps the file free for
+        LocalJobRunner to open in append mode at handoff."""
+        line = LogLine(timestamp=time.time(), message=message)
+        if self._log_file_path is not None:
+            try:
+                self._log_file_path.parent.mkdir(parents=True, exist_ok=True)
+                with self._log_file_path.open("a") as f:
+                    f.write(line.model_dump_json() + "\n")
+            except Exception as exc:  # pragma: no cover — best-effort persist
+                logger.exception("Error writing to log file: %s", exc)
+        # Same cap as LocalJobRunner: never grow unbounded if nobody polls.
+        if self._log_queue.qsize() >= 1000:
+            with contextlib.suppress(Empty):
+                self._log_queue.get_nowait()
+        self._log_queue.put(line)
+
+    def cancelled(self) -> bool:
+        return self._cancelled.is_set()
+
+    # -- JobRunner protocol --
+
+    def start(self, job_id: str, config: TrainingRequest, output_dir: str) -> None:
+        raise RuntimeError("PreparingJobRunner stands in for a runner; it starts nothing")
+
+    def stop(self) -> None:
+        # A huggingface_hub download can't be interrupted mid-flight, so this
+        # only records the intent; the materialize thread acts on it when the
+        # download returns.
+        self._cancelled.set()
+
+    def is_running(self) -> bool:
+        return True
+
+    def returncode(self) -> int | None:
+        return None
+
+    def stream_log_lines(self) -> list[LogLine]:
+        out: list[LogLine] = []
+        try:
+            while True:
+                out.append(self._log_queue.get_nowait())
+        except Empty:
+            pass
+        return out
+
+    def wandb_run_url(self) -> str | None:
+        # No trainer has run yet, so there is no run URL to capture. Present
+        # only because the watchdog asks every runner for one.
+        return None
+
+
 _PERSIST_THROTTLE_SECONDS = 1.0
 
 
@@ -829,6 +917,140 @@ _HUB_ROOT_REF_RE = re.compile(r"^(?P<repo>[^@]+)@root$")
 _HUB_CKPT_SUBDIR = "pretrained_model"
 
 
+def make_snapshot_progress_tqdm(
+    report: Callable[[int, int | None], None],
+) -> type[_base_tqdm]:
+    """A ``tqdm_class`` for ``snapshot_download`` that reports byte progress.
+
+    Lives here, next to ``download_hub_checkpoint_ref``, because both consumers
+    of a Hub download need it: the inference page's progress bar (rollout.py,
+    which imports it from this module) and the local fine-tune's
+    base-checkpoint download (JobRegistry._materialize_then_start). Verified
+    against the pinned huggingface_hub 1.21.0 contract:
+    ``snapshot_download(tqdm_class=cls)`` instantiates ``cls`` twice — a
+    file-count bar and ONE shared bytes bar (``unit="B"``). Both the plain-HTTP
+    and xet download paths funnel their chunk updates into that shared bar: as
+    each file's metadata arrives its size is added by mutating ``bar.total`` in
+    place followed by ``bar.refresh()``, and downloaded chunks arrive as
+    ``bar.update(n)``. So the recorder keys off ``unit == "B"``, hooks
+    ``update`` for bytes done, and hooks ``refresh`` as the signal that the
+    (growing) total changed. The total keeps growing while file metadata is
+    discovered, so percent can legitimately drop — honest, since the real total
+    isn't known upfront.
+
+    `report` is called from huggingface_hub's download worker threads, so an
+    implementation that touches shared state must do its own locking.
+
+    Subclasses the vanilla tqdm on purpose: huggingface_hub hands non-hf
+    subclasses full responsibility (no ``disable``/``name`` injection, no
+    HF_HUB_DISABLE_PROGRESS_BARS gating), so reporting can't be silently turned
+    off by env/log-level. The bar itself is force-disabled — nothing is drawn to
+    the server's stderr — which also means tqdm's own ``n`` never advances; bytes
+    are accumulated in ``_bytes_done`` instead. ``total`` IS still set and mutable
+    on a disabled tqdm, which is all ``refresh`` needs to read."""
+
+    class _ProgressTqdm(_base_tqdm):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            self._is_bytes_bar = kwargs.get("unit") == "B"
+            self._bytes_done = int(kwargs.get("initial") or 0)
+            kwargs["disable"] = True
+            super().__init__(*args, **kwargs)
+
+        def _report(self) -> None:
+            total = getattr(self, "total", None)
+            report(self._bytes_done, int(total) if total else None)
+
+        def update(self, n: float | None = 1) -> bool | None:
+            if self._is_bytes_bar:
+                if n:
+                    self._bytes_done += int(n)
+                self._report()
+            return super().update(n)
+
+        def refresh(self, *args: Any, **kwargs: Any) -> bool | None:
+            if self._is_bytes_bar:
+                self._report()
+            return super().refresh(*args, **kwargs)
+
+    return _ProgressTqdm
+
+
+def _format_bytes(n: int) -> str:
+    """Human byte size for a log line: 540 MB, 1.2 GB."""
+    if n >= 1024**3:
+        return f"{n / 1024**3:.1f} GB"
+    if n >= 1024**2:
+        return f"{n / 1024**2:.0f} MB"
+    if n >= 1024:
+        return f"{n / 1024:.0f} KB"
+    return f"{n} B"
+
+
+# Written to `error_message` when a fine-tune is stopped during its
+# base-checkpoint download — before any trainer existed, so there is no exit
+# code and no crash to report, and leaving the field None would show the user
+# nothing at all where the card says why the run ended.
+_PREPARE_STOPPED_MESSAGE = "Stopped at your request, before training started."
+
+
+# How far apart two download-progress log lines have to be to be worth writing.
+# Either condition is enough. snapshot_download calls back per CHUNK (thousands
+# of times for a multi-GB checkpoint) and every line is a JSON write plus a row
+# in the monitor's log panel, so an unthrottled hook would drown the log the
+# progress is meant to make readable.
+_DOWNLOAD_LOG_PERCENT_STEP = 5.0
+_DOWNLOAD_LOG_INTERVAL_SECONDS = 5.0
+
+
+class _DownloadProgressLogger:
+    """Turn snapshot_download's byte callbacks into occasional job-log lines.
+
+    Shaped for `make_snapshot_progress_tqdm`'s `report` contract, which fires
+    from several download worker threads at once — hence the lock, which also
+    keeps the emitted lines in ascending order.
+
+    A total of None (huggingface_hub is still discovering file sizes) is
+    reported as bytes-so-far rather than a fake percentage; the total also
+    grows as metadata arrives, so the percentage can legitimately go down."""
+
+    def __init__(self, emit: Callable[[str], None], label: str) -> None:
+        self._emit = emit
+        self._label = label
+        self._lock = threading.Lock()
+        self._last_at = 0.0
+        self._last_percent: float | None = None
+        self._last_bytes = 0
+
+    def __call__(self, bytes_done: int, bytes_total: int | None) -> None:
+        with self._lock:
+            if bytes_done <= self._last_bytes:
+                # A refresh with no new bytes (the total changed, or a bar was
+                # rebuilt). Nothing to say.
+                return
+            now = time.monotonic()
+            percent = (bytes_done / bytes_total * 100) if bytes_total else None
+            due = (now - self._last_at) >= _DOWNLOAD_LOG_INTERVAL_SECONDS
+            if percent is not None:
+                due = (
+                    due
+                    or self._last_percent is None
+                    or (percent - self._last_percent) >= _DOWNLOAD_LOG_PERCENT_STEP
+                )
+            if not due:
+                return
+            self._last_at = now
+            self._last_percent = percent
+            self._last_bytes = bytes_done
+            if percent is None:
+                message = f"Downloading base checkpoint {self._label} — {_format_bytes(bytes_done)} so far"
+            else:
+                message = (
+                    f"Downloading base checkpoint {self._label} — {percent:.0f}% "
+                    f"({_format_bytes(bytes_done)} / {_format_bytes(bytes_total or 0)})"
+                )
+            self._emit(message)
+
+
 def download_hub_checkpoint_ref(ref: str, *, tqdm_class=None) -> str:
     """Download the model a hub checkpoint ref names; return its local dir.
 
@@ -883,7 +1105,30 @@ def download_hub_checkpoint_ref(ref: str, *, tqdm_class=None) -> str:
     raise ValueError(f"Unrecognised policy ref: {ref!r}")
 
 
-def localize_pretrained_path(pretrained_path: str) -> str:
+def needs_local_materialization(pretrained_path: str) -> bool:
+    """Would `localize_pretrained_path` have to DOWNLOAD this value?
+
+    The cheap predicate twin of that function's early return, so the start path
+    can decide — without touching the network — whether a job needs the
+    background materialization step (see JobRegistry.start). Keep the two in
+    step: anything this answers False for must pass straight through there."""
+    return bool(_HUB_CKPT_REF_RE.match(pretrained_path))
+
+
+def hub_ref_step_label(ref: str) -> str:
+    """The step directory a hub ref names ('012000'), for log lines. Falls back
+    to the whole ref when it isn't step-suffixed."""
+    m = _HUB_CKPT_REF_RE.match(ref)
+    return m.group("step_dir") if m else ref
+
+
+def hub_ref_repo_id(ref: str) -> str:
+    """The repo half of a hub ref, for log lines. The whole ref if unparseable."""
+    m = _HUB_CKPT_REF_RE.match(ref) or _HUB_ROOT_REF_RE.match(ref)
+    return m.group("repo") if m else ref
+
+
+def localize_pretrained_path(pretrained_path: str, *, tqdm_class=None) -> str:
     """Make a ``--policy.pretrained_path`` value loadable by a LOCAL trainer.
 
     A step-suffixed hub ref is materialized here, on this machine, into the real
@@ -896,13 +1141,17 @@ def localize_pretrained_path(pretrained_path: str) -> str:
     materializes the same ref pod-side and rewrites the argv), because a host
     path means nothing on the pod. One rule, two execution sites.
 
-    A failed download becomes a ValueError (→ HTTP 400) naming the checkpoint,
-    like every other user-facing refusal on the start path — the alternative is
-    a raw Hub exception surfacing as a 500 with nothing actionable in it."""
-    if not _HUB_CKPT_REF_RE.match(pretrained_path):
+    A failed download becomes a ValueError naming the checkpoint, rather than a
+    raw Hub exception with nothing actionable in it. On the local start path the
+    download no longer runs inside the request (see JobRegistry.start), so that
+    message is now written onto the job record's `error_message` instead of
+    becoming an HTTP 400 — same words, later delivery.
+
+    `tqdm_class` is forwarded to the download for byte-progress reporting."""
+    if not needs_local_materialization(pretrained_path):
         return pretrained_path
     try:
-        return download_hub_checkpoint_ref(pretrained_path)
+        return download_hub_checkpoint_ref(pretrained_path, tqdm_class=tqdm_class)
     except Exception as exc:
         raise ValueError(
             f"Could not download the base checkpoint {pretrained_path!r} to fine-tune from: {exc}"
@@ -1097,6 +1346,12 @@ class JobRegistry:
         self._records: dict[str, JobRecord] = {}
         self._runners: dict[str, JobRunner] = {}
         self._last_persist_at: dict[str, float] = {}
+
+        # job_id -> the thread materializing that job's base checkpoint before
+        # its trainer can start (see _materialize_then_start). Entries are left
+        # behind once the thread finishes — a finished Thread object is inert
+        # and joinable, and dropping it would race a caller that wants to join.
+        self._prepare_threads: dict[str, threading.Thread] = {}
 
         self._stop_watchdog = threading.Event()
         self._watchdog_thread: threading.Thread | None = None
@@ -1293,13 +1548,18 @@ class JobRegistry:
         # ------------------------------------------------------------------
         # Pretrained-path resolution runs OUTSIDE the registry lock.
         #
-        # It reads the Hub (the source's checkpoint listing) and, for a local
-        # run, DOWNLOADS the base checkpoint — minutes and gigabytes.
+        # It reads the Hub (the source's checkpoint listing) — seconds at worst.
         # self._lock is taken by list / get / stop / delete, so holding it
         # across that would freeze the whole job interface (the MT23 coupling).
-        # Nothing is registered yet either way, so a bad selection still fails
-        # with no orphaned record; the registry lookup it needs takes the lock
-        # briefly on its own.
+        # Nothing is registered yet, so a bad selection still fails with no
+        # orphaned record; the registry lookup it needs takes the lock briefly
+        # on its own.
+        #
+        # What does NOT happen here any more is the multi-GB DOWNLOAD a local
+        # fine-tune needs. Every cheap refusal above and below stays synchronous
+        # (a bad request must still fail fast with a clear 400), but the
+        # materialization itself is deferred to a background thread that starts
+        # after the record exists — see the `deferred_hub_ref` branch below.
         # ------------------------------------------------------------------
         if config.finetune_from_job_id:
             # Fine-tune: turn the selected source run + step into the
@@ -1315,14 +1575,20 @@ class JobRegistry:
                 source, config.finetune_from_step
             )
 
-        if config.policy_pretrained_path and not config.resume and target.runner == "local":
+        deferred_hub_ref: str | None = None
+        if (
+            config.policy_pretrained_path
+            and not config.resume
+            and target.runner == "local"
+            and needs_local_materialization(config.policy_pretrained_path)
+        ):
             # A step-suffixed hub ref becomes the real directory the local
-            # trainer loads. A cloud run keeps the ref: its container
-            # materializes the same ref pod-side (see the HF Jobs wrapper),
-            # because a host path is meaningless there.
-            config.policy_pretrained_path = localize_pretrained_path(
-                config.policy_pretrained_path
-            )
+            # trainer loads — but off-request, in _materialize_then_start,
+            # which rewrites policy_pretrained_path once the bytes are here.
+            # A cloud run keeps the ref: its container materializes the same
+            # ref pod-side (see the HF Jobs wrapper), because a host path is
+            # meaningless there.
+            deferred_hub_ref = config.policy_pretrained_path
 
         with self._lock:
             # Authoritative local-run mutex: re-checked here, under the lock
@@ -1428,35 +1694,177 @@ class JobRegistry:
             self._persist(record, force=True)
 
             log_path = _job_log_path(self._output_root, job_id)
-            if target.runner == "local":
-                runner = LocalJobRunner(record.metrics, log_file_path=log_path)
-            else:
-                runner = HfCloudJobRunner(record.metrics, log_path, target.flavor)
 
-            try:
-                runner.start(job_id, config, lerobot_output_dir)
-            except Exception as exc:
-                logger.exception("Failed to start runner for job %s", job_id)
-                record.state = "failed"
-                record.ended_at = time.time()
-                record.error_message = f"Failed to start runner: {exc}"
+            if deferred_hub_ref is not None:
+                # The base checkpoint still has to be downloaded (GBs, minutes).
+                # Hand the caller its job id NOW — the record exists, is
+                # "running", and has a log file — and do the download in a
+                # thread, which then starts the real trainer. The monitor opens
+                # immediately and tails the download instead of the request
+                # hanging with nothing on screen.
+                #
+                # No new JobState for this window: the job is "running" from the
+                # user's point of view (they asked for a run and one is being
+                # got ready), and a fourth state would ripple through the
+                # watchdog's finalisation, the library chips and isJobActive.
+                # What stands in for the missing process is PreparingJobRunner —
+                # registered here, under the same lock as the record, so /logs
+                # and Stop find a runner from the first request onwards.
+                prep = PreparingJobRunner(log_file_path=log_path)
+                self._runners[job_id] = prep
+                prep.emit(
+                    f"Preparing fine-tune: downloading base checkpoint "
+                    f"{hub_ref_step_label(deferred_hub_ref)} from "
+                    f"{hub_ref_repo_id(deferred_hub_ref)}…"
+                )
+                thread = threading.Thread(
+                    target=self._materialize_then_start,
+                    args=(job_id, deferred_hub_ref, lerobot_output_dir, prep),
+                    name=f"job-{job_id}-prepare",
+                    daemon=True,
+                )
+                # Kept (not popped on completion) so a caller — today only the
+                # tests — can join the thread instead of polling for its effect.
+                self._prepare_threads[job_id] = thread
+                thread.start()
+            else:
+                if target.runner == "local":
+                    runner = LocalJobRunner(record.metrics, log_file_path=log_path)
+                else:
+                    runner = HfCloudJobRunner(record.metrics, log_path, target.flavor)
+
+                try:
+                    runner.start(job_id, config, lerobot_output_dir)
+                except Exception as exc:
+                    logger.exception("Failed to start runner for job %s", job_id)
+                    record.state = "failed"
+                    record.ended_at = time.time()
+                    record.error_message = f"Failed to start runner: {exc}"
+                    self._persist(record, force=True)
+                    raise
+
+                # Capture runner-specific identifiers.
+                if target.runner == "local":
+                    record.process_pid = runner.pid()
+                else:
+                    record.hf_job_id = runner.hf_job_id()
+                    record.hf_job_url = runner.hf_job_url()
+                    # config was mutated by HfCloudJobRunner.start to set
+                    # policy_repo_id; mirror it onto the record for the UI.
+                    record.hf_repo_id = config.policy_repo_id
+
                 self._persist(record, force=True)
-                raise
-
-            # Capture runner-specific identifiers.
-            if target.runner == "local":
-                record.process_pid = runner.pid()
-            else:
-                record.hf_job_id = runner.hf_job_id()
-                record.hf_job_url = runner.hf_job_url()
-                # config was mutated by HfCloudJobRunner.start to set
-                # policy_repo_id; mirror it onto the record for the UI.
-                record.hf_repo_id = config.policy_repo_id
-
-            self._persist(record, force=True)
-            self._runners[job_id] = runner
+                self._runners[job_id] = runner
         self._notify_change()
         return record
+
+    def _materialize_then_start(
+        self,
+        job_id: str,
+        ref: str,
+        output_dir: str,
+        prep: PreparingJobRunner,
+    ) -> None:
+        """Download a local fine-tune's base checkpoint, then start its trainer.
+
+        Runs in its own thread so POST /jobs/training can return the job id
+        immediately (see JobRegistry.start). Everything that can refuse the
+        request cheaply already ran, synchronously, before the record existed;
+        what is left here can only fail for reasons that belong ON the record:
+
+          * download failed  → `failed`, carrying localize_pretrained_path's own
+            "Could not download the base checkpoint …" wording, which used to
+            reach the user as an HTTP 400.
+          * user pressed Stop → `interrupted`, with a message saying so, exactly
+            like stopping a live trainer would.
+          * trainer failed to spawn → `failed`, same wording as the synchronous
+            path's "Failed to start runner: …".
+
+        No synthetic exit code is invented for any of them: there was no
+        process, so `exit_code` stays None.
+
+        On the cancel check: a huggingface_hub download cannot be interrupted
+        mid-flight, so a Stop pressed while bytes are moving takes effect HERE —
+        after the download returns and before the trainer is spawned. The bytes
+        are already on disk (and cached for the next attempt); what the user
+        gets is a run that never starts training, which is what they asked for.
+        The spawn + runner handoff happen inside the registry lock, so a stop can
+        neither be missed (spawning a trainer nobody will signal) nor land on a
+        runner that has already been replaced.
+        """
+        reporter = _DownloadProgressLogger(prep.emit, hub_ref_step_label(ref))
+        try:
+            local_path = localize_pretrained_path(
+                ref, tqdm_class=make_snapshot_progress_tqdm(reporter)
+            )
+        except Exception as exc:
+            logger.exception("Base-checkpoint download failed for job %s", job_id)
+            message = str(exc)
+            prep.emit(message)
+            self._finalize_prepare(job_id, "failed", message)
+            return
+
+        notify = False
+        try:
+            with self._lock:
+                if prep.cancelled():
+                    prep.emit("Stopped before the trainer started.")
+                    self._finalize_prepare_locked(
+                        job_id, "interrupted", _PREPARE_STOPPED_MESSAGE
+                    )
+                    notify = True
+                    return
+                record = self._records.get(job_id)
+                if record is None or record.state != "running":
+                    # Deleted, or finalised by someone else, while the bytes
+                    # moved. Nothing to start, nothing to report.
+                    self._runners.pop(job_id, None)
+                    return
+                prep.emit("Base checkpoint ready — starting the trainer.")
+                record.config.policy_pretrained_path = local_path
+                runner = LocalJobRunner(
+                    record.metrics,
+                    log_file_path=_job_log_path(self._output_root, job_id),
+                )
+                try:
+                    runner.start(job_id, record.config, output_dir)
+                except Exception as exc:
+                    logger.exception("Failed to start runner for job %s", job_id)
+                    self._finalize_prepare_locked(
+                        job_id, "failed", f"Failed to start runner: {exc}"
+                    )
+                    notify = True
+                    return
+                record.process_pid = runner.pid()
+                self._runners[job_id] = runner
+                self._persist(record, force=True)
+                notify = True
+        finally:
+            if notify:
+                self._notify_change()
+
+    def _finalize_prepare(self, job_id: str, state: JobState, error_message: str) -> None:
+        """Lock-taking wrapper around _finalize_prepare_locked."""
+        with self._lock:
+            self._finalize_prepare_locked(job_id, state, error_message)
+        self._notify_change()
+
+    def _finalize_prepare_locked(self, job_id: str, state: JobState, error_message: str) -> None:
+        """Finalise a job that never reached its trainer. Caller holds _lock.
+
+        The watchdog's finalisation minus the exit code: it only ever sees jobs
+        with a runner that HAD a process, and this one never did. Removing the
+        PreparingJobRunner from `_runners` here is what ends its role — until
+        then it answers is_running() True precisely so the watchdog leaves this
+        window alone."""
+        record = self._records.get(job_id)
+        if record is None or record.state != "running":
+            return
+        record.state = state
+        record.ended_at = time.time()
+        record.error_message = error_message
+        self._runners.pop(job_id, None)
+        self._persist(record, force=True)
 
     def _unique_job_id(self, policy_type: str, dataset_repo_id: str) -> str:
         """_generate_job_id with a collision guard. The generated id embeds a
@@ -1598,6 +2006,15 @@ class JobRegistry:
         return record
 
     def stop(self, job_id: str) -> JobRecord:
+        """Ask a running job to stop, and wait briefly for the new state.
+
+        Works during a local fine-tune's base-checkpoint download too: that
+        window has a PreparingJobRunner registered in place of the trainer, so
+        the cancel is recorded on it as usual and the materialize thread
+        finalises the run as `interrupted` when the download returns (it can't
+        be aborted mid-flight — see _materialize_then_start). The 2s wait below
+        will usually time out on that path, so the caller sees `running` and
+        learns the outcome from the next poll."""
         with self._lock:
             record = self._records.get(job_id)
             if record is None:
@@ -1773,6 +2190,7 @@ class JobRegistry:
             self._records.pop(job_id, None)
             self._runners.pop(job_id, None)
             self._last_persist_at.pop(job_id, None)
+            self._prepare_threads.pop(job_id, None)
         with contextlib.suppress(FileNotFoundError):
             shutil.rmtree(_job_dir(self._output_root, job_id))
         self._notify_change()
@@ -2072,7 +2490,9 @@ __all__ = [
     "MetricsHistoryPoint",
     "JobRunner",
     "LocalJobRunner",
+    "PreparingJobRunner",
     "JobRegistry",
+    "make_snapshot_progress_tqdm",
     "JobAlreadyRunningError",
     "JobNotFoundError",
     "JobNotRunningError",
