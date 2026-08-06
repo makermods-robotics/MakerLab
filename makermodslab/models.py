@@ -230,20 +230,23 @@ def list_local_models() -> list[dict[str, Any]]:
     """Every local training run that produced a usable final checkpoint.
 
     Reads the job registry (never mutates it). A run qualifies iff it is a
-    `local` runner that isn't still running AND has at least one valid
-    on-disk checkpoint — checkpoint presence, not the terminal state, is what
-    makes a model usable. A "done" run with no checkpoint (crashed before its
-    first save) is skipped; an "interrupted" run (e.g. its exit couldn't be
-    confirmed after a server restart) whose checkpoint is on disk still counts
-    — the terminal state is only a claim about how we found out, not about
-    whether the weights exist. Each row carries the policy type, base dataset
+    `local` runner in state "done" or "interrupted" AND has at least one
+    valid on-disk checkpoint. A "done" run with no checkpoint (crashed before
+    its first save) is skipped. An "interrupted" run (e.g. its exit couldn't
+    be confirmed after a server restart) whose checkpoint is on disk still
+    counts — that state is only a claim about how we found out, not about
+    whether the weights exist. A "failed" run is excluded even with a
+    checkpoint present: unlike "interrupted", its exit code is a confirmed
+    non-zero result, so listing it next to real models — indistinguishable,
+    selectable for inference or a Hub push — would misrepresent a known
+    failure as a usable one. Each row carries the policy type, base dataset
     repo_id, step count, and the local checkpoint path, read from the final
     checkpoint's train_config.json.
 
     Newest first (by the run's end/start time)."""
     out: list[dict[str, Any]] = []
     for record in job_registry.list(limit=_LOCAL_MODEL_SCAN_LIMIT):
-        if record.runner != "local" or record.state == "running":
+        if record.runner != "local" or record.state not in ("done", "interrupted"):
             continue
         pretrained_dir = _final_checkpoint_dir(record)
         if pretrained_dir is None:
@@ -257,16 +260,17 @@ def list_local_models() -> list[dict[str, Any]]:
 def _find_local_record(model_id: str) -> JobRecord | None:
     """The usable local-run registry record for `model_id`, or None.
 
-    None when the id is unknown, isn't a local run, is still running, or left
-    no checkpoint — the same qualification `list_local_models` applies, so
-    callers (info / upload / delete) agree on what a "local model" is."""
+    None when the id is unknown, isn't a local run, isn't "done" or
+    "interrupted", or left no checkpoint — the same qualification
+    `list_local_models` applies, so callers (info / upload / delete) agree on
+    what a "local model" is."""
     from .jobs import JobNotFoundError
 
     try:
         record = job_registry.get(model_id)
     except JobNotFoundError:
         return None
-    if record.runner != "local" or record.state == "running":
+    if record.runner != "local" or record.state not in ("done", "interrupted"):
         return None
     if _final_checkpoint_dir(record) is None:
         return None

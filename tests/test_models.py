@@ -155,21 +155,31 @@ def test_list_local_models_reads_train_config_over_record(registry) -> None:
     assert m["dataset"] == "cfg/other"
 
 
-def test_list_local_models_skips_running_but_keeps_checkpointed_failed_or_interrupted(registry) -> None:
-    """A run only counts as usable once it's stopped changing (not "running")
-    and has a real checkpoint on disk — the terminal state itself no longer
-    gates it (MT10). A "failed" or "interrupted" run that still saved a valid
-    final checkpoint (e.g. an unconfirmed exit after a server restart) must
-    stay visible rather than vanish from the library."""
+def test_list_local_models_skips_running_but_keeps_checkpointed_interrupted(registry) -> None:
+    """A run counts as usable once it's "done" or "interrupted" (not
+    "running") and has a real checkpoint on disk (MT10). An "interrupted" run
+    that still saved a valid final checkpoint (e.g. an unconfirmed exit after
+    a server restart) must stay visible rather than vanish from the library."""
     from makermodslab.models import list_local_models
 
     _seed_run(registry, "done_run", state="done")
     _seed_run(registry, "running_run", state="running")
-    _seed_run(registry, "failed_run", state="failed")
     _seed_run(registry, "interrupted_run", state="interrupted")
 
     ids = {m["id"] for m in list_local_models()}
-    assert ids == {"done_run", "failed_run", "interrupted_run"}
+    assert ids == {"done_run", "interrupted_run"}
+
+
+def test_list_local_models_skips_failed_run_even_with_checkpoint(registry) -> None:
+    """A "failed" run's exit code is a confirmed non-zero result, unlike
+    "interrupted"'s unconfirmed one — so it must not appear in the library
+    looking like a usable model, even if an earlier checkpoint saved before
+    the crash (e.g. an OOM mid-training, or a manual stop that finalizes as
+    "failed")."""
+    from makermodslab.models import list_local_models
+
+    _seed_run(registry, "failed_run", state="failed")
+    assert list_local_models() == []
 
 
 def test_list_local_models_skips_checkpointless_run(registry) -> None:
