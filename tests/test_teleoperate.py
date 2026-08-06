@@ -618,7 +618,7 @@ def test_force_disconnect_partial_releases_bus_when_a_later_camera_never_opened(
     raise in that state, leaking the bus (next attempt: "FeetechMotorsBus is
     already connected") and the opened camera's read thread.
     """
-    from makerlab.teleoperate import force_disconnect_partial
+    from makermodslab.teleoperate import force_disconnect_partial
 
     bus = _FakeConnectableBus(port="COM_FOLLOWER")
     front = _FakeCamera("front", connected=True)
@@ -641,7 +641,7 @@ def test_lerobot_disconnect_cannot_release_a_partially_connected_robot() -> None
     """
     from lerobot.utils.decorators import check_if_not_connected
     from lerobot.utils.errors import DeviceNotConnectedError
-    from makerlab.teleoperate import force_disconnect_partial
+    from makermodslab.teleoperate import force_disconnect_partial
 
     class _LeRobotShapedRobot:
         def __init__(self) -> None:
@@ -676,7 +676,7 @@ def test_lerobot_disconnect_cannot_release_a_partially_connected_robot() -> None
 
 def test_force_disconnect_partial_releases_bus_despite_a_wedged_camera() -> None:
     """A camera that fails to release must not strand the serial port."""
-    from makerlab.teleoperate import force_disconnect_partial
+    from makermodslab.teleoperate import force_disconnect_partial
 
     bus = _FakeConnectableBus(port="COM_FOLLOWER")
     wedged = _FakeCamera("front", connected=True, failing=True)
@@ -701,7 +701,7 @@ def test_force_disconnect_partial_disables_remaining_motors_despite_one_failing(
     handles the same "torque may already be enabled after an incomplete
     connect" situation and needs the same protection.
     """
-    from makerlab.teleoperate import force_disconnect_partial
+    from makermodslab.teleoperate import force_disconnect_partial
 
     bus = _FakeConnectableBus(port="COM_FOLLOWER")
     bus.failing = {"elbow_flex"}
@@ -715,8 +715,91 @@ def test_force_disconnect_partial_disables_remaining_motors_despite_one_failing(
     assert bus.is_connected is False
 
 
+def test_force_disconnect_partial_does_not_alarm_on_a_bus_that_never_opened() -> None:
+    """Bug: the torque-disable pass ran unconditionally, even when connect()
+    failed on the bus itself (the ordinary "wrong port" / "arm unplugged"
+    case) and nothing was ever energized. That wrote to a closed port for
+    every motor, and force_disable_torque's failures then printed the single
+    most alarming string the system can emit — "TORQUE MAY STILL BE ENABLED
+    ... unplug its power to release it" — for an arm that was never
+    connected, on what will be the most common failure path by far.
+    """
+    from makermodslab.teleoperate import force_disconnect_partial
+
+    bus = _FakeConnectableBus(port="COM_FOLLOWER", connected=False)
+    robot = _FakePartialRobot(bus, {})
+
+    problems = force_disconnect_partial(robot, "robot")
+
+    assert bus.disabled == []  # no motor writes against an unopened port
+    assert bus.disconnect_calls == 0
+    assert problems == []
+
+
+class _FakeFailingPortHandler(_FakePortHandler):
+    def __init__(self, fail_close: bool = False) -> None:
+        super().__init__()
+        self.fail_close = fail_close
+        self.close_calls = 0
+
+    def closePort(self) -> None:  # noqa: N802 — camelCase mimics the real Feetech SDK method this fakes
+        self.close_calls += 1
+        if self.fail_close:
+            raise RuntimeError("port already gone")
+
+
+class _FakeUnreleasableBus(_FakeConnectableBus):
+    """Bus whose disconnect() always raises, to exercise the force-close fallback."""
+
+    def disconnect(self, disable_torque: bool = True) -> None:
+        self.disconnect_calls += 1
+        raise RuntimeError("bus wedged")
+
+
+def test_force_disconnect_partial_force_closes_port_when_disconnect_raises() -> None:
+    """If bus.disconnect() itself fails, the port handle must still be forced
+    closed — same last-resort fallback utils/devices.py's
+    _force_close_device_resources uses elsewhere — instead of leaking the COM
+    handle for the rest of the process.
+    """
+    from makermodslab.teleoperate import force_disconnect_partial
+
+    bus = _FakeUnreleasableBus(port="COM_FOLLOWER")
+    port_handler = _FakeFailingPortHandler()
+    bus.port_handler = port_handler  # type: ignore[attr-defined]
+    robot = _FakePartialRobot(bus, {})
+
+    problems = force_disconnect_partial(robot, "robot")
+
+    # force_disable_torque's own pre-write port clear runs first (the bus is
+    # connected, so it isn't skipped); the fallback below clears again before
+    # force-closing — both are defensive and idempotent, so >=1 is the
+    # contract, not an exact count.
+    assert port_handler.clear_calls >= 1
+    assert port_handler.is_using is False
+    assert port_handler.close_calls == 1
+    assert any("COM_FOLLOWER" in p for p in problems)
+
+
+def test_force_disconnect_partial_returns_problems_instead_of_none() -> None:
+    """Sibling _cleanup_after_setup_failure returns joined problem text so
+    callers can surface teardown failures to the operator; force_disconnect_partial
+    silently returned None despite discarding force_disable_torque's problems.
+    """
+    from makermodslab.teleoperate import force_disconnect_partial
+
+    bus = _FakeConnectableBus(port="COM_FOLLOWER")
+    bus.failing = {"elbow_flex"}
+    robot = _FakePartialRobot(bus, {})
+
+    problems = force_disconnect_partial(robot, "robot")
+
+    assert isinstance(problems, list)
+    assert any("TORQUE MAY STILL BE ENABLED" in p and "elbow_flex" in p for p in problems)
+
+
 def test_force_disconnect_partial_is_idempotent_and_handles_bimanual_and_none() -> None:
-    from makerlab.teleoperate import force_disconnect_partial
+    from makermodslab.teleoperate import force_disconnect_partial
 
     # Already fully disconnected: no raise, no bus disconnect call.
     bus = _FakeConnectableBus(connected=False)

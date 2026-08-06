@@ -455,6 +455,14 @@ def force_disable_torque(device, label: str = "device") -> list[str]:
     """
     problems: list[str] = []
     for bus in _device_buses(device):
+        # A bus that never opened (connect() failed before reaching it, or
+        # died on an earlier bus/camera) has nothing to disable — writing to
+        # a closed port here just produces a false "TORQUE MAY STILL BE
+        # ENABLED" alarm on what is often the most common failure path (wrong
+        # port, arm unplugged). Test doubles that don't model connection
+        # state default to True so existing torque-only tests are unaffected.
+        if not getattr(bus, "is_connected", True):
+            continue
         # The Dynamixel SDK port handler can be left flagged "in use" after a
         # failed read/write in the control loop. LeRobot's normal
         # bus.disconnect() clears this before disabling torque; mirror that here
@@ -531,7 +539,7 @@ def _cleanup_after_setup_failure(
     return " ".join(problems) if problems else None
 
 
-def force_disconnect_partial(device, label: str = "device") -> None:
+def force_disconnect_partial(device, label: str = "device") -> list[str]:
     """Release a device that may be only *partially* connected.
 
     ``device.disconnect()`` is unusable after a failed ``connect()``. lerobot
@@ -561,11 +569,17 @@ def force_disconnect_partial(device, label: str = "device") -> None:
     independently first so a bad motor can't strand its bus-mates rigid; the
     disconnect() call after it is then belt-and-braces, same ordering as
     _cleanup_after_setup_failure uses for the same "torque may already be
-    enabled after an incomplete setup" situation.
+    enabled after an incomplete setup" situation. force_disable_torque skips
+    any bus that never opened, so this is safe to call unconditionally.
+
+    Returns the joined list of problem descriptions (same shape as
+    _cleanup_after_setup_failure), empty when teardown was clean, so callers
+    can surface a partial teardown instead of silently discarding it.
     """
+    problems: list[str] = []
     if device is None:
-        return
-    force_disable_torque(device, label)
+        return problems
+    problems += force_disable_torque(device, label)
     # Cameras next: they're the usual point of failure, and their read threads
     # are what keep the device busy for the next attempt. ``.cameras`` covers
     # both sides on a bimanual BiSO device (it merges the sub-arms' dicts).
@@ -575,14 +589,37 @@ def force_disconnect_partial(device, label: str = "device") -> None:
         except DeviceNotConnectedError:
             pass  # never opened (or already released) — nothing to do
         except Exception as e:
-            logger.warning(f"Could not release {label} camera {name}: {e}")
+            message = f"Could not release {label} camera {name}: {e}"
+            logger.warning(message)
+            problems.append(message)
     for bus in _device_buses(device):
         try:
             if bus.is_connected:
                 bus.disconnect()
         except Exception as e:
             port = getattr(bus, "port", None) or "unknown port"
-            logger.warning(f"Could not release {label} bus on {port}: {e}")
+            message = f"Could not release {label} bus on {port}: {e}"
+            logger.warning(message)
+            problems.append(message)
+            # Last resort (same fallback utils/devices.py's
+            # _force_close_device_resources uses): force the port handle
+            # closed so a failed disconnect can't leave it open until process
+            # exit. Scoped per-bus (not delegated to that device-level
+            # helper) so bimanual sub-arm buses each get their own fallback.
+            port_handler = getattr(bus, "port_handler", None)
+            if port_handler is not None:
+                with contextlib.suppress(Exception):
+                    port_handler.clearPort()
+                with contextlib.suppress(Exception):
+                    port_handler.is_using = False
+                try:
+                    port_handler.closePort()
+                    logger.info(f"Force-closed {label} bus port on {port} after disconnect failure")
+                except Exception as close_exc:
+                    close_message = f"Failed to force-close {label} bus port on {port}: {close_exc}"
+                    logger.warning(close_message)
+                    problems.append(close_message)
+    return problems
 
 
 def _connect_bimanual(request: TeleoperateRequest):
