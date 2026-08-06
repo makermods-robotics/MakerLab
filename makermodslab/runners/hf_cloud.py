@@ -171,21 +171,41 @@ def _checkpoint_step_ready(step_dir):
     training_step.json, then rng_state.safetensors, then (only if an
     optimizer was passed — always true for lerobot's own training loop,
     lerobot/scripts/lerobot_train.py, which never calls save_checkpoint with
-    optimizer=None) optimizer_state.safetensors, then — only if the policy's
-    config has a scheduler (get_scheduler_preset(); e.g. diffusion, pi0,
-    pi0_fast, pi05, smolvla, vqbet — but NOT act, tdmpc, gaussian_actor) —
+    optimizer=None) the optimizer state, then — only if the policy's config
+    has a scheduler (get_scheduler_preset(); e.g. diffusion, pi0, pi0_fast,
+    pi05, smolvla, vqbet — but NOT act, tdmpc, gaussian_actor) —
     scheduler_state.json. So training_state/ merely *existing* is not
     reliable either: it can be observed the instant after mkdir, before any
-    of its files are written. Checking for training_step.json and
-    optimizer_state.safetensors alone would still miss an in-flight
-    scheduler_state.json write for the many policies that do have a
-    scheduler, so whether a scheduler file is required is read off
-    pretrained_model/train_config.json's "scheduler" key instead of a
-    hardcoded policy list — that file is written by cfg.save_pretrained,
-    which save_checkpoint always calls (and returns from) strictly before
-    save_training_state starts, so by the time training_step.json exists
-    (checked above) train_config.json is guaranteed complete; reading it
-    here carries no extra race.
+    of its files are written. Checking for training_step.json and the
+    optimizer state alone would still miss an in-flight scheduler_state.json
+    write for the many policies that do have a scheduler, so whether a
+    scheduler file is required is read off pretrained_model/train_config.json's
+    "scheduler" key instead of a hardcoded policy list — that file is written
+    by cfg.save_pretrained, which save_checkpoint always calls (and returns
+    from) strictly before save_training_state starts, so by the time
+    training_step.json exists (checked above) train_config.json is guaranteed
+    complete; reading it here carries no extra race.
+
+    The optimizer state's own on-disk shape is not fixed either:
+    save_optimizer_state (lerobot/optim/optimizers.py) writes a flat
+    training_state/optimizer_state.safetensors only for a single Optimizer.
+    A policy whose get_optimizer_preset() is a MultiAdamConfig — currently
+    only gaussian_actor, whose SAC-style actor/critic/temperature groups
+    build a dict[str, Optimizer] — takes the dict branch instead: one
+    training_state/<group name>/optimizer_state.safetensors per group,
+    mkdir'd then written the same non-atomic way as the flat case, and never
+    a flat file at all. Which shape to expect is read off train_config.json's
+    "optimizer.type" (draccus's ChoiceRegistry discriminator: "multi_adam"
+    for the dict case). The exact set of group names isn't reliable from
+    train_config.json's "optimizer_groups" — gaussian_actor configures three
+    (actor/critic/temperature) but get_optim_params() only ever builds
+    "actor" — so instead every group subdirectory that has *actually*
+    appeared under training_state/ is required to be complete. This leaves a
+    residual, deliberately-accepted race symmetric with the ones already
+    described above: a poll could land after one group's subdirectory
+    appears but before a second group's mkdir, and see the step as ready one
+    poll early. No shipped multi-optimizer policy has more than one group in
+    practice, so this is theoretical today.
 
     Pure and self-contained (stdlib only: pathlib + json) so its source can
     be inlined verbatim into WRAPPER_SOURCE the same way _install_plan is,
@@ -202,16 +222,27 @@ def _checkpoint_step_ready(step_dir):
         return False
     if not (training_state_dir / "rng_state.safetensors").is_file():
         return False
-    if not (training_state_dir / "optimizer_state.safetensors").is_file():
-        return False
+
     try:
         train_config = json.loads((pretrained_dir / "train_config.json").read_text())
-        needs_scheduler = train_config.get("scheduler") is not None
     except (OSError, ValueError):
         # train_config.json is part of pretrained_model/ and is guaranteed
         # present by this point (checked above via config.json); if it can't
-        # be read/parsed, fail closed and require the scheduler file too.
-        needs_scheduler = True
+        # be read/parsed, fail closed: assume a single optimizer (the flat
+        # check below) and require the scheduler file too.
+        train_config = None
+
+    optimizer_cfg = train_config.get("optimizer") if train_config is not None else None
+    if isinstance(optimizer_cfg, dict) and optimizer_cfg.get("type") == "multi_adam":
+        group_dirs = [p for p in training_state_dir.iterdir() if p.is_dir()]
+        if not group_dirs:
+            return False
+        if any(not (group_dir / "optimizer_state.safetensors").is_file() for group_dir in group_dirs):
+            return False
+    elif not (training_state_dir / "optimizer_state.safetensors").is_file():
+        return False
+
+    needs_scheduler = train_config is None or train_config.get("scheduler") is not None
     return not needs_scheduler or (training_state_dir / "scheduler_state.json").is_file()
 
 

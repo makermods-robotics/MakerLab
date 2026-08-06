@@ -351,16 +351,21 @@ def test_checkpoint_step_ready_false_when_only_training_state_exists(tmp_path: P
     assert _checkpoint_step_ready(step_dir) is False
 
 
-def _write_pretrained(step_dir: Path, scheduler: dict | None = None) -> Path:
+def _write_pretrained(step_dir: Path, scheduler: dict | None = None, optimizer_type: str = "adam") -> Path:
     """Populate a fully-written pretrained_model/ for `step_dir` (config.json,
     model.safetensors, train_config.json with the given `scheduler` value —
     None mirrors a policy with no scheduler preset, e.g. act; a dict mirrors
-    one that has one, e.g. diffusion/pi0/smolvla/vqbet)."""
+    one that has one, e.g. diffusion/pi0/smolvla/vqbet — and `optimizer_type`,
+    draccus's ChoiceRegistry discriminator for the optimizer config: "adam"/
+    "adamw"/etc. for a single-optimizer policy, "multi_adam" for one built from
+    lerobot's MultiAdamConfig, e.g. gaussian_actor)."""
     pretrained_dir = step_dir / "pretrained_model"
     pretrained_dir.mkdir(parents=True)
     (pretrained_dir / "config.json").write_text("{}")
     (pretrained_dir / "model.safetensors").write_bytes(b"fake-weights")
-    (pretrained_dir / "train_config.json").write_text(json.dumps({"scheduler": scheduler}))
+    (pretrained_dir / "train_config.json").write_text(
+        json.dumps({"scheduler": scheduler, "optimizer": {"type": optimizer_type}})
+    )
     return pretrained_dir
 
 
@@ -443,6 +448,107 @@ def test_checkpoint_step_ready_true_for_scheduler_policy_once_complete(tmp_path:
     (training_state_dir / "optimizer_state.safetensors").write_bytes(b"fake-optim")
     (training_state_dir / "scheduler_state.json").write_text("{}")
     assert _checkpoint_step_ready(step_dir) is True
+
+
+def test_checkpoint_step_ready_false_for_multi_optimizer_policy_before_any_group_dir(
+    tmp_path: Path,
+) -> None:
+    """gaussian_actor's MultiAdamConfig preset means lerobot's save_optimizer_state
+    takes the dict branch: it writes one training_state/<name>/optimizer_state.safetensors
+    per named optimizer group, never a flat training_state/optimizer_state.safetensors.
+    Before any group subdirectory has appeared, the step is not ready."""
+    from makerlab.runners.hf_cloud import _checkpoint_step_ready
+
+    step_dir = tmp_path / "005000"
+    _write_pretrained(step_dir, optimizer_type="multi_adam")
+    training_state_dir = step_dir / "training_state"
+    training_state_dir.mkdir()
+    (training_state_dir / "training_step.json").write_text("{}")
+    (training_state_dir / "rng_state.safetensors").write_bytes(b"fake-rng")
+    assert _checkpoint_step_ready(step_dir) is False
+
+
+def test_checkpoint_step_ready_false_for_multi_optimizer_policy_with_incomplete_group(
+    tmp_path: Path,
+) -> None:
+    """save_optimizer_state's dict branch does `optimizer_dir.mkdir()` for a group
+    before writing that group's optimizer_state.safetensors into it — the same
+    mkdir-then-write race the single-optimizer checks above already guard against,
+    reopened here for the per-group subdirectory."""
+    from makerlab.runners.hf_cloud import _checkpoint_step_ready
+
+    step_dir = tmp_path / "005000"
+    _write_pretrained(step_dir, optimizer_type="multi_adam")
+    training_state_dir = step_dir / "training_state"
+    training_state_dir.mkdir()
+    (training_state_dir / "training_step.json").write_text("{}")
+    (training_state_dir / "rng_state.safetensors").write_bytes(b"fake-rng")
+    (training_state_dir / "actor").mkdir()  # freshly created, empty
+    assert _checkpoint_step_ready(step_dir) is False
+
+
+def test_checkpoint_step_ready_false_for_multi_optimizer_policy_with_one_of_two_groups_done(
+    tmp_path: Path,
+) -> None:
+    """Two optimizer groups (e.g. actor + critic) are being saved; only one has
+    finished writing. The step must not be considered ready until every group
+    subdirectory that has appeared is itself complete."""
+    from makerlab.runners.hf_cloud import _checkpoint_step_ready
+
+    step_dir = tmp_path / "005000"
+    _write_pretrained(step_dir, optimizer_type="multi_adam")
+    training_state_dir = step_dir / "training_state"
+    training_state_dir.mkdir()
+    (training_state_dir / "training_step.json").write_text("{}")
+    (training_state_dir / "rng_state.safetensors").write_bytes(b"fake-rng")
+    actor_dir = training_state_dir / "actor"
+    actor_dir.mkdir()
+    (actor_dir / "optimizer_state.safetensors").write_bytes(b"fake-optim")
+    (training_state_dir / "critic").mkdir()  # freshly created, empty
+    assert _checkpoint_step_ready(step_dir) is False
+
+
+def test_checkpoint_step_ready_true_for_multi_optimizer_policy_once_group_complete(
+    tmp_path: Path,
+) -> None:
+    """The regression this fixes: a flat training_state/optimizer_state.safetensors
+    check (the pre-fix behaviour) never exists for a MultiAdamConfig policy like
+    gaussian_actor, so the step would never be considered ready. Once its (only)
+    optimizer group has finished writing, the step is ready even though no flat
+    optimizer_state.safetensors file exists directly under training_state/."""
+    from makerlab.runners.hf_cloud import _checkpoint_step_ready
+
+    step_dir = tmp_path / "005000"
+    _write_pretrained(step_dir, optimizer_type="multi_adam")
+    training_state_dir = step_dir / "training_state"
+    training_state_dir.mkdir()
+    (training_state_dir / "training_step.json").write_text("{}")
+    (training_state_dir / "rng_state.safetensors").write_bytes(b"fake-rng")
+    actor_dir = training_state_dir / "actor"
+    actor_dir.mkdir()
+    (actor_dir / "optimizer_state.safetensors").write_bytes(b"fake-optim")
+    assert not (training_state_dir / "optimizer_state.safetensors").exists()
+    assert _checkpoint_step_ready(step_dir) is True
+
+
+def test_checkpoint_step_ready_false_for_multi_optimizer_policy_missing_scheduler_state(
+    tmp_path: Path,
+) -> None:
+    """The scheduler check applies independently of single- vs multi-optimizer:
+    a multi_adam policy whose train_config.json also declares a scheduler still
+    needs scheduler_state.json before the step is ready."""
+    from makerlab.runners.hf_cloud import _checkpoint_step_ready
+
+    step_dir = tmp_path / "005000"
+    _write_pretrained(step_dir, scheduler={"type": "cosine_decay_with_warmup"}, optimizer_type="multi_adam")
+    training_state_dir = step_dir / "training_state"
+    training_state_dir.mkdir()
+    (training_state_dir / "training_step.json").write_text("{}")
+    (training_state_dir / "rng_state.safetensors").write_bytes(b"fake-rng")
+    actor_dir = training_state_dir / "actor"
+    actor_dir.mkdir()
+    (actor_dir / "optimizer_state.safetensors").write_bytes(b"fake-optim")
+    assert _checkpoint_step_ready(step_dir) is False
 
 
 def test_checkpoint_step_ready_fails_closed_when_train_config_unreadable(tmp_path: Path) -> None:
