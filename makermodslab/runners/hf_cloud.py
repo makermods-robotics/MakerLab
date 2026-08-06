@@ -157,93 +157,28 @@ def _checkpoint_step_ready(step_dir):
     """Whether `step_dir` (a lerobot checkpoints/<step>/ directory) has been
     fully written and is safe to upload.
 
-    lerobot's save_checkpoint (lerobot/common/train_utils.py) writes
-    pretrained_model/ first via policy.save_pretrained — which itself writes
-    config.json *before* the much larger model.safetensors (see
-    PreTrainedPolicy._save_pretrained in lerobot/policies/pretrained.py) — and
-    only calls save_training_state once every pretrained_model/ file is
-    already on disk. So pretrained_model/config.json existing is NOT
-    sufficient evidence the step is complete: it can be observed while
-    model.safetensors is still being written, or before it exists at all.
+    Reads lerobot's own completion signal instead of reconstructing its
+    internal write order. `checkpoints/last` is a relative symlink that
+    lerobot_train.py points at a step directory via update_last_checkpoint()
+    (lerobot/common/train_utils.py) strictly *after* save_checkpoint() has
+    returned for that step — so the link having advanced to (or past) this
+    step number is proof every file under step_dir is already on disk. The
+    `<=` (not `==`) covers two checkpoints completing inside one poll window.
+    See test_lerobot_last_checkpoint_symlink_matches_our_readiness_check for
+    the upstream contract this assumes.
 
-    save_training_state (lerobot/common/train_utils.py) is itself
-    non-atomic: it does `training_state/.mkdir(...)` *first*, then writes
-    training_step.json, then rng_state.safetensors, then (only if an
-    optimizer was passed — always true for lerobot's own training loop,
-    lerobot/scripts/lerobot_train.py, which never calls save_checkpoint with
-    optimizer=None) the optimizer state, then — only if the policy's config
-    has a scheduler (get_scheduler_preset(); e.g. diffusion, pi0, pi0_fast,
-    pi05, smolvla, vqbet — but NOT act, tdmpc, gaussian_actor) —
-    scheduler_state.json. So training_state/ merely *existing* is not
-    reliable either: it can be observed the instant after mkdir, before any
-    of its files are written. Checking for training_step.json and the
-    optimizer state alone would still miss an in-flight scheduler_state.json
-    write for the many policies that do have a scheduler, so whether a
-    scheduler file is required is read off pretrained_model/train_config.json's
-    "scheduler" key instead of a hardcoded policy list — that file is written
-    by cfg.save_pretrained, which save_checkpoint always calls (and returns
-    from) strictly before save_training_state starts, so by the time
-    training_step.json exists (checked above) train_config.json is guaranteed
-    complete; reading it here carries no extra race.
-
-    The optimizer state's own on-disk shape is not fixed either:
-    save_optimizer_state (lerobot/optim/optimizers.py) writes a flat
-    training_state/optimizer_state.safetensors only for a single Optimizer.
-    A policy whose get_optimizer_preset() is a MultiAdamConfig — currently
-    only gaussian_actor, whose SAC-style actor/critic/temperature groups
-    build a dict[str, Optimizer] — takes the dict branch instead: one
-    training_state/<group name>/optimizer_state.safetensors per group,
-    mkdir'd then written the same non-atomic way as the flat case, and never
-    a flat file at all. Which shape to expect is read off train_config.json's
-    "optimizer.type" (draccus's ChoiceRegistry discriminator: "multi_adam"
-    for the dict case). The exact set of group names isn't reliable from
-    train_config.json's "optimizer_groups" — gaussian_actor configures three
-    (actor/critic/temperature) but get_optim_params() only ever builds
-    "actor" — so instead every group subdirectory that has *actually*
-    appeared under training_state/ is required to be complete. This leaves a
-    residual, deliberately-accepted race symmetric with the ones already
-    described above: a poll could land after one group's subdirectory
-    appears but before a second group's mkdir, and see the step as ready one
-    poll early. No shipped multi-optimizer policy has more than one group in
-    practice, so this is theoretical today.
-
-    Pure and self-contained (stdlib only: pathlib + json) so its source can
-    be inlined verbatim into WRAPPER_SOURCE the same way _install_plan is,
-    keeping the in-container check and the unit-tested implementation
-    identical.
+    Pure and self-contained (stdlib only) so its source can be inlined
+    verbatim into WRAPPER_SOURCE the same way _install_plan is, keeping the
+    in-container check and the unit-tested implementation identical.
     """
-    import json
-
-    pretrained_dir = step_dir / "pretrained_model"
-    if not (pretrained_dir / "config.json").is_file():
-        return False
-    training_state_dir = step_dir / "training_state"
-    if not (training_state_dir / "training_step.json").is_file():
-        return False
-    if not (training_state_dir / "rng_state.safetensors").is_file():
-        return False
+    import os
 
     try:
-        train_config = json.loads((pretrained_dir / "train_config.json").read_text())
-    except (OSError, ValueError):
-        # train_config.json is part of pretrained_model/ and is guaranteed
-        # present by this point (checked above via config.json); if it can't
-        # be read/parsed, fail closed: assume a single optimizer (the flat
-        # check below) and require the scheduler file too.
-        train_config = None
-
-    optimizer_cfg = train_config.get("optimizer") if train_config is not None else None
-    if isinstance(optimizer_cfg, dict) and optimizer_cfg.get("type") == "multi_adam":
-        group_dirs = [p for p in training_state_dir.iterdir() if p.is_dir()]
-        if not group_dirs:
-            return False
-        if any(not (group_dir / "optimizer_state.safetensors").is_file() for group_dir in group_dirs):
-            return False
-    elif not (training_state_dir / "optimizer_state.safetensors").is_file():
+        target = os.readlink(step_dir.parent / "last")
+    except OSError:
         return False
-
-    needs_scheduler = train_config is None or train_config.get("scheduler") is not None
-    return not needs_scheduler or (training_state_dir / "scheduler_state.json").is_file()
+    target = os.path.basename(target.rstrip("/"))
+    return target.isdigit() and step_dir.name.isdigit() and int(step_dir.name) <= int(target)
 
 
 def _cloud_device(flavor: str) -> str:
@@ -408,6 +343,10 @@ except Exception as exc:
     print(f"[wrapper] create_repo failed: {exc}", flush=True)
 
 seen = set()
+# Per-step count of consecutive not-ready polls, so a stalled gate (or a
+# genuinely slow write) surfaces in the log instead of looking identical to
+# "no checkpoint yet" for the whole run.
+waits = {}
 
 # Resume: download the parent checkpoint tree (pretrained_model/ +
 # training_state/) into <output_dir>/checkpoints/<step_dir>/ so lerobot's own
@@ -435,8 +374,23 @@ if resume_from:
         # copytree from the snapshot cache (symlinked files) into a real tree the
         # trainer can read/rewrite; resolve symlinks so lerobot sees plain files.
         shutil.copytree(src, dest, symlinks=False)
-        if not (dest / "training_state").is_dir():
-            print("[wrapper] resume checkpoint has no training_state/; cannot resume", flush=True)
+        # A bare training_state/ is_dir() check would pass a checkpoint that
+        # was itself partially uploaded before this fix existed (the exact
+        # bug this watcher fixes). There is no checkpoints/last symlink to
+        # check here — it lives beside the run's local output dir and is
+        # never pushed to the Hub — so check the files a resume actually
+        # needs directly instead.
+        has_weights = any((dest / "pretrained_model").glob("*.safetensors"))
+        has_training_state = (
+            (dest / "training_state" / "training_step.json").is_file()
+            and (dest / "training_state" / "rng_state.safetensors").is_file()
+        )
+        if not (has_weights and has_training_state):
+            print(
+                f"[wrapper] resume checkpoint at {dest} is incomplete "
+                f"(weights: {has_weights}, training_state: {has_training_state}); cannot resume",
+                flush=True,
+            )
             sys.exit(1)
         seen.add(step_dir)
         print(f"[wrapper] resume checkpoint ready at {dest}", flush=True)
@@ -496,10 +450,20 @@ def _scan_and_upload():
             continue
         if entry.name in seen:
             continue
-        # config.json can exist while model.safetensors is still being
-        # written (or absent) — training_state/ only appears once the whole
-        # step is on disk. See _checkpoint_step_ready.
+        # config.json can exist while the rest of the step is still being
+        # written. See _checkpoint_step_ready.
         if not _checkpoint_step_ready(entry):
+            waits[entry.name] = waits.get(entry.name, 0) + 1
+            if waits[entry.name] in (1, 20, 80):  # ~15s, ~5min, ~20min at the 15s poll interval
+                try:
+                    last_target = os.readlink(root / "last")
+                except OSError:
+                    last_target = None
+                print(
+                    f"[wrapper] checkpoint {entry.name} not complete yet "
+                    f"(poll {waits[entry.name]}); checkpoints/last -> {last_target}",
+                    flush=True,
+                )
             continue
         try:
             api.upload_folder(
@@ -509,6 +473,7 @@ def _scan_and_upload():
                 commit_message=f"checkpoint {entry.name}",
             )
             seen.add(entry.name)
+            waits.pop(entry.name, None)
             print(f"[wrapper] uploaded checkpoint {entry.name}", flush=True)
         except Exception as exc:
             print(f"[wrapper] upload failed for {entry.name}: {exc}", flush=True)
@@ -574,6 +539,7 @@ def resolve_job_timeout(config: TrainingRequest) -> int | str:
     if config.hf_job_timeout:
         return parse_hf_duration(config.hf_job_timeout)
     return HF_JOB_TIMEOUT
+
 
 # Cadence at which the status poller hits inspect_job. inspect_job is the
 # authoritative source for job liveness; the log stream is best-effort and
