@@ -73,6 +73,18 @@ EASE_ARRIVE_TOLERANCE = 2.0
 # defaults (RETURN_STALL_MIN_PROGRESS=10 is half of RETURN_ARRIVE_TOLERANCE=20).
 EASE_STALL_MIN_PROGRESS = 1.0
 
+# How far behind real time a frame may be before it is dropped rather than
+# fired late. Below this, ordinary jitter is absorbed by the pacing wait; above
+# it the frame is stale and sending it would only stream an out-of-date setpoint
+# at uncapped speed. ~1.5 frames at the 30fps these datasets record at.
+_MAX_FRAME_LAG_S = 0.05
+
+# Retries for the idempotent write_calibration + configure pair at connect, to
+# absorb a dropped serial packet (see _connect_follower). Deliberately small: a
+# genuinely dead bus should still fail fast rather than stall the caller.
+_CONNECT_ATTEMPTS = 3
+_CONNECT_RETRY_DELAY_S = 0.25
+
 # Bound on how long stop_and_wait() waits for the worker to actually finish
 # releasing the arm before forcing an immediate release — mirrors
 # teleoperate.py's _STOP_AND_WAIT_TIMEOUT_S shape (RETURN_CEILING_S is
@@ -203,6 +215,26 @@ def handle_start_replay(request: ReplayRequest, websocket_manager=None) -> dict[
                 "message": "This dataset's joints don't match the connected robot.",
             }
 
+        # The check above compares against robot.action_features, which is
+        # `<motor>.pos`-suffixed — it therefore cannot catch a target that
+        # re-keys onto zero bus motors. Verify the ease-in target the worker
+        # will actually build covers every motor, so a naming mismatch fails
+        # here with a clear message instead of surfacing as a bare "no-pose"
+        # from the worker after the arm has already been energized.
+        if action_series["values"]:
+            frame0 = dict(zip(action_series["action_names"], action_series["values"][0], strict=True))
+            missing = set(robot.bus.motors) - set(_bus_keyed(frame0, robot.bus))
+            if missing:
+                _cleanup_after_setup_failure(robot, None, "follower arm", "leader arm")
+                return {
+                    "success": False,
+                    "status_code": 400,
+                    "message": (
+                        "This dataset's joint names don't map onto the connected robot's motors "
+                        f"({', '.join(sorted(missing))})."
+                    ),
+                }
+
         replay_active = True
         _replay_started_at = time.time()
         _replay_meta = {
@@ -246,11 +278,83 @@ def _connect_follower(request: ReplayRequest) -> tuple[SO101Follower, list[str]]
 
     identity_warnings = verify_devices(((robot, "follower"),), skip=request.skip_identity_check)
 
-    robot.bus.write_calibration(robot.calibration)
-    robot.configure()
+    # A dropped serial packet during configure() ("Failed to write 'Lock' ...
+    # no status packet") turned roughly one start in twenty into a hard 500,
+    # on a bus that was otherwise healthy — lerobot's configure_motors() retries
+    # only once internally. Both steps are idempotent register writes, so retry
+    # the pair rather than surfacing a transient glitch as a failed start.
+    for attempt in range(_CONNECT_ATTEMPTS):
+        try:
+            robot.bus.write_calibration(robot.calibration)
+            robot.configure()
+            break
+        except Exception as e:
+            if attempt == _CONNECT_ATTEMPTS - 1:
+                raise RuntimeError(
+                    f"The follower arm on {request.follower_port} stopped responding while being "
+                    f"configured ({e}). Check the power and the daisy-chain cabling, then try again."
+                ) from e
+            logger.warning(
+                "Follower configure failed (%s); retrying (%d/%d)", e, attempt + 2, _CONNECT_ATTEMPTS
+            )
+            time.sleep(_CONNECT_RETRY_DELAY_S)
+
     identity_warnings += reset_torque_limit(robot, "follower arm")
     identity_warnings += clear_goal_velocity(robot, "follower arm")
     return robot, identity_warnings
+
+
+def _bus_keyed(action: dict[str, float], bus) -> dict[str, float]:
+    """Re-key an action dict onto the plain motor names the bus uses.
+
+    A dataset's `action` feature names carry lerobot's robot-level `<motor>.pos`
+    suffix (SO101Follower._motors_ft), but `bus.motors` — and therefore
+    rest_pose's target filtering — is keyed by bare motor name. Passing an
+    unconverted action dict straight to return_to_rest_pose matches zero motors
+    and yields "no-pose" without ever writing a Goal_Position. This mirrors what
+    robot.send_action() already does internally at the same robot→bus boundary
+    (`key.removesuffix(".pos")`); the bare-name fallback keeps a dataset that
+    recorded unsuffixed names working too.
+    """
+    keyed: dict[str, float] = {}
+    for motor in bus.motors:
+        for key in (f"{motor}.pos", motor):
+            if key in action:
+                keyed[motor] = action[key]
+                break
+    return keyed
+
+
+def _ensure_uncapped(robot: SO101Follower, label: str) -> None:
+    """Clear the RAM Goal_Velocity profile cap and verify it actually took.
+
+    clear_goal_velocity (like rest_pose's own restore) is deliberately
+    best-effort so a failed write can't abort a session — but for playback a
+    silently-surviving cap is not a degraded nicety, it throttles every move of
+    the whole episode. Read back and retry once, and say so loudly if a cap
+    survives, rather than replaying at a fraction of the recorded speed with no
+    indication why.
+    """
+    clear_goal_velocity(robot, label)
+    try:
+        caps = robot.bus.sync_read("Goal_Velocity", normalize=False)
+    except Exception as e:
+        logger.warning(f"Could not verify the speed cap was cleared for the {label}: {e}")
+        return
+    stuck = {m: v for m, v in caps.items() if v}
+    if not stuck:
+        return
+    logger.warning(f"Speed cap survived on the {label} ({stuck}) — retrying before playback")
+    clear_goal_velocity(robot, label)
+    try:
+        still = {m: v for m, v in robot.bus.sync_read("Goal_Velocity", normalize=False).items() if v}
+        if still:
+            logger.error(
+                f"The {label} is still speed-capped ({still}); this replay will run slower than "
+                "recorded. A power cycle clears the register if the write keeps failing."
+            )
+    except Exception:
+        pass
 
 
 def _replay_worker(robot: SO101Follower, action_series: dict[str, Any], websocket_manager) -> None:
@@ -276,7 +380,7 @@ def _replay_worker(robot: SO101Follower, action_series: dict[str, Any], websocke
             frame0 = dict(zip(action_names, frames[0], strict=True))
             arrived, reason = return_to_rest_pose(
                 robot.bus,
-                frame0,
+                _bus_keyed(frame0, robot.bus),
                 abort_event=stop_event,
                 label="follower arm",
                 normalize=True,
@@ -300,14 +404,36 @@ def _replay_worker(robot: SO101Follower, action_series: dict[str, Any], websocke
             if reason == "cut-short" or _stop_check():
                 return
 
+            # The ease-in stamps RETURN_POS_SPEED into every motor's RAM
+            # Goal_Velocity and clears it again in its own finally — but that
+            # restore is best-effort, so a single dropped serial write leaves a
+            # 400 profile cap throttling the ENTIRE playback (slow but
+            # accurate-looking, with nothing in the UI to say why). Re-clear and
+            # verify here so playback can never inherit the ease-in's cap.
+            _ensure_uncapped(robot, "follower arm")
+
             with _state_lock:
                 _replay_meta["phase"] = "playing"
 
             t0 = time.monotonic()
-            for ts, values in zip(timestamps, frames, strict=True):
+            skipped = 0
+            last_i = len(timestamps) - 1
+            for i, (ts, values) in enumerate(zip(timestamps, frames, strict=True)):
                 if _stop_check():
                     break
                 target_t = t0 + ts
+                now = time.monotonic()
+                # Falling behind (a slow bus read, a GC pause, a serial retry)
+                # used to make every overdue frame fire back-to-back with no
+                # wait, streaming far-apart setpoints at uncapped speed — the
+                # arm lurches through them instead of following the recorded
+                # path. Drop stale frames instead: the arm is then always
+                # driven to the setpoint that matches wall-clock time. The
+                # final frame is never dropped, so the episode still ends on
+                # its recorded pose.
+                if now > target_t + _MAX_FRAME_LAG_S and i != last_i:
+                    skipped += 1
+                    continue
                 while True:
                     now = time.monotonic()
                     if now >= target_t or _stop_check():
@@ -331,6 +457,27 @@ def _replay_worker(robot: SO101Follower, action_series: dict[str, Any], websocke
                     except Exception as e:
                         logger.warning(f"Could not broadcast replay joint feedback: {e}")
 
+            played = time.monotonic() - t0
+            if skipped:
+                logger.warning(
+                    "Replay dropped %d/%d frames to stay in real time (played %.2fs vs %.2fs recorded) "
+                    "— the control loop could not keep up",
+                    skipped,
+                    len(timestamps),
+                    played,
+                    timestamps[-1],
+                )
+            else:
+                logger.info(
+                    "Replay played %d frames in %.2fs (recorded %.2fs)",
+                    len(timestamps),
+                    played,
+                    timestamps[-1],
+                )
+            with _state_lock:
+                _replay_meta["frames_dropped"] = skipped
+                _replay_meta["played_s"] = played
+
         with _state_lock:
             _replay_meta["phase"] = "stopping"
         return_to_rest_pose(robot.bus, start_pose, label="follower arm")
@@ -353,7 +500,12 @@ def _replay_worker(robot: SO101Follower, action_series: dict[str, Any], websocke
 
 def handle_replay_status() -> dict[str, Any]:
     with _state_lock:
-        elapsed_s = time.time() - _replay_started_at if _replay_started_at else 0.0
+        # Freeze once the session ends: computing this unconditionally made a
+        # finished run keep ticking upward, so a dead session read as live.
+        if not replay_active:
+            elapsed_s = _replay_meta.get("played_s") or 0.0
+        else:
+            elapsed_s = time.time() - _replay_started_at if _replay_started_at else 0.0
         return {
             "replay_active": replay_active,
             "phase": _replay_meta.get("phase", "idle"),
@@ -362,6 +514,11 @@ def handle_replay_status() -> dict[str, Any]:
             "duration_s": _replay_meta.get("duration_s"),
             "error": _replay_meta.get("error"),
             "hint": _replay_meta.get("hint"),
+            # Fidelity of the run just played: a nonzero drop count or a
+            # played_s well past duration_s means the arm did NOT follow the
+            # recorded motion, which otherwise looks identical to success.
+            "frames_dropped": _replay_meta.get("frames_dropped"),
+            "played_s": _replay_meta.get("played_s"),
         }
 
 
