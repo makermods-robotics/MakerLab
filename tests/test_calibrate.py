@@ -221,6 +221,28 @@ def test_start_calibration_check_and_claim_is_atomic(
     )
 
 
+def test_start_calibration_resets_calibration_committed(monkeypatch, tmp_lerobot_home) -> None:
+    """The manager is a long-lived singleton reused across sessions, so a
+    stale True left over from a prior successful run must not survive into a
+    new one — otherwise _cleanup_device would treat this run's own cancelled
+    attempt as already committed and skip the homing-offset/position-limit
+    rollback entirely."""
+    from makermodslab.calibrate import CalibrationManager, CalibrationRequest
+
+    mgr = CalibrationManager()
+    # Avoid spawning the real hardware-touching worker; only the
+    # check-and-claim / reset path is under test here.
+    monkeypatch.setattr(mgr, "_calibration_worker", lambda request: None)
+    mgr._calibration_committed = True  # leftover from a prior successful run
+
+    result = mgr.start_calibration(
+        CalibrationRequest(device_type="teleop", port="/dev/null", config_file="x")
+    )
+
+    assert result["success"] is True
+    assert mgr._calibration_committed is False
+
+
 def test_find_off_center_joints_passes_centered_ranges() -> None:
     """Ranges whose midpoints sit on the raw-tick center (2047) all pass."""
     ranges = {
@@ -260,7 +282,7 @@ def test_find_off_center_joints_tolerance_boundary() -> None:
 
 
 class _FakeBus:
-    """Records Homing_Offset writes; enough surface for _cleanup_device."""
+    """Records register writes; enough surface for _cleanup_device."""
 
     def __init__(self) -> None:
         self.writes: list[tuple[str, str, int]] = []
@@ -274,6 +296,19 @@ class _BrokenBus(_FakeBus):
 
     def write(self, register: str, motor: str, value: int) -> None:
         raise RuntimeError("bus unreachable")
+
+
+class _PartiallyBrokenBus(_FakeBus):
+    """Only the named motor's writes fail; every other motor succeeds."""
+
+    def __init__(self, failing_motor: str) -> None:
+        super().__init__()
+        self._failing_motor = failing_motor
+
+    def write(self, register: str, motor: str, value: int) -> None:
+        if motor == self._failing_motor:
+            raise RuntimeError(f"bus rejected write for {motor}")
+        super().write(register, motor, value)
 
 
 class _FakeDevice:
@@ -307,6 +342,59 @@ def test_cleanup_device_restores_homing_offsets_when_not_committed() -> None:
 
     assert ("Homing_Offset", "shoulder_pan", 15) in bus.writes
     assert ("Homing_Offset", "wrist_roll", -42) in bus.writes
+    assert device.disconnected is True
+    assert mgr.device is None
+
+
+def test_cleanup_device_restores_position_limits_when_not_committed() -> None:
+    """Regression: reset_calibration() (called by _step_homing) doesn't just
+    zero Homing_Offset — it also zeroes Min_Position_Limit and maxes out
+    Max_Position_Limit for every motor on the bus. A cancelled run must roll
+    those back too, or the next session's arm-identity check still sees a
+    servo diverged from the saved calibration file, just via a different
+    pair of registers."""
+    from makermodslab.calibrate import CalibrationManager
+
+    mgr = CalibrationManager()
+    bus = _FakeBus()
+    device = _FakeDevice(bus)
+    mgr.device = device
+    mgr._original_homing_offsets = {"shoulder_pan": 15}
+    mgr._original_min_position_limits = {"shoulder_pan": 120}
+    mgr._original_max_position_limits = {"shoulder_pan": 3980}
+    mgr._calibration_committed = False
+
+    mgr._cleanup_device()
+
+    assert ("Min_Position_Limit", "shoulder_pan", 120) in bus.writes
+    assert ("Max_Position_Limit", "shoulder_pan", 3980) in bus.writes
+    assert device.disconnected is True
+
+
+def test_cleanup_device_restores_remaining_motors_after_one_write_fails() -> None:
+    """One motor's restore write failing must not abort the writes still
+    queued for the remaining motors — the old single try/except around the
+    whole loop meant one bad write left every motor after it in iteration
+    order still diverged: a partially-rolled-back arm, which is worse than a
+    fully-diverged one because it's much harder to notice and diagnose."""
+    from makermodslab.calibrate import CalibrationManager
+
+    mgr = CalibrationManager()
+    bus = _PartiallyBrokenBus(failing_motor="elbow_flex")
+    device = _FakeDevice(bus)
+    mgr.device = device
+    mgr._original_homing_offsets = {
+        "shoulder_pan": 15,
+        "elbow_flex": 7,
+        "wrist_roll": -42,
+    }
+    mgr._calibration_committed = False
+
+    mgr._cleanup_device()  # must not raise despite elbow_flex's write failing
+
+    assert ("Homing_Offset", "shoulder_pan", 15) in bus.writes
+    assert ("Homing_Offset", "wrist_roll", -42) in bus.writes
+    assert not any(write[1] == "elbow_flex" for write in bus.writes)
     assert device.disconnected is True
     assert mgr.device is None
 
