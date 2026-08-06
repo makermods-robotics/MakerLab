@@ -1319,16 +1319,34 @@ class UploadManager:
     def _worker(self, request: UploadRequest) -> None:
         from lerobot.datasets import LeRobotDataset
 
+        from .utils.hf_auth import cached_whoami
+
         repo_id = request.dataset_repo_id
         try:
             logger.info(f"Loading dataset {repo_id} for upload")
             dataset = LeRobotDataset(repo_id)
             logger.info(f"Dataset loaded with {dataset.num_episodes} episodes")
 
+            # A locally-recorded dataset's directory (and thus repo_id) is
+            # bare, with no "namespace/" prefix. push_to_hub()'s create_repo()
+            # call silently resolves a bare repo_id to the caller's own
+            # namespace and creates the repo there, but the upload_folder()
+            # (and card-push/tag) calls right after it reuse the same bare
+            # repo_id literally and 404 against it instead of the resolved
+            # one — leaving an empty repo behind. Qualify it up front so every
+            # call inside push_to_hub targets the same repo.
+            hub_repo_id = repo_id
+            if "/" not in hub_repo_id:
+                who = cached_whoami()
+                if who is None:
+                    raise RuntimeError("Not authenticated with the Hugging Face Hub")
+                hub_repo_id = f"{who['name']}/{hub_repo_id}"
+                dataset.repo_id = hub_repo_id
+
             tags = with_makermodslab_tag(request.tags)
             logger.info(f"Uploading to HuggingFace Hub with tags: {tags}, private: {request.private}")
             dataset.push_to_hub(tags=tags, private=request.private)
-            logger.info(f"Dataset {repo_id} uploaded successfully to HuggingFace Hub")
+            logger.info(f"Dataset {hub_repo_id} uploaded successfully to HuggingFace Hub")
 
             # The dataset now exists on the Hub; drop any cached "local_only"
             # answer so the info card's next hub-status check flips to "On Hub",
@@ -1341,8 +1359,8 @@ class UploadManager:
 
             with self._lock:
                 self.state = "done"
-                self.message = f"Dataset {repo_id} uploaded successfully to the Hugging Face Hub"
-                self.dataset_url = f"https://huggingface.co/datasets/{repo_id}"
+                self.message = f"Dataset {hub_repo_id} uploaded successfully to the Hugging Face Hub"
+                self.dataset_url = f"https://huggingface.co/datasets/{hub_repo_id}"
                 self.docs_url = None
         except Exception as e:
             logger.error(f"Error uploading dataset {repo_id}: {e}")
