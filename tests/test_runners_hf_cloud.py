@@ -19,6 +19,7 @@ integration tests."""
 
 from __future__ import annotations
 
+import json
 import netrc
 import re
 import tomllib
@@ -350,10 +351,104 @@ def test_checkpoint_step_ready_false_when_only_training_state_exists(tmp_path: P
     assert _checkpoint_step_ready(step_dir) is False
 
 
-def test_checkpoint_step_ready_true_once_training_state_exists(tmp_path: Path) -> None:
-    """Once training_state/ exists, save_checkpoint has already finished
-    writing pretrained_model/ (training_state is created strictly after), so
-    the step is safe to upload."""
+def _write_pretrained(step_dir: Path, scheduler: dict | None = None) -> Path:
+    """Populate a fully-written pretrained_model/ for `step_dir` (config.json,
+    model.safetensors, train_config.json with the given `scheduler` value —
+    None mirrors a policy with no scheduler preset, e.g. act; a dict mirrors
+    one that has one, e.g. diffusion/pi0/smolvla/vqbet)."""
+    pretrained_dir = step_dir / "pretrained_model"
+    pretrained_dir.mkdir(parents=True)
+    (pretrained_dir / "config.json").write_text("{}")
+    (pretrained_dir / "model.safetensors").write_bytes(b"fake-weights")
+    (pretrained_dir / "train_config.json").write_text(json.dumps({"scheduler": scheduler}))
+    return pretrained_dir
+
+
+def test_checkpoint_step_ready_false_when_training_state_freshly_created(tmp_path: Path) -> None:
+    """The race the original fix left open: lerobot's save_training_state does
+    `training_state/.mkdir(...)` *before* writing any of training_step.json /
+    rng_state.safetensors / optimizer_state.safetensors / scheduler_state.json.
+    A poll landing right after the mkdir (and before any of those files exist)
+    must not consider the step ready, even though pretrained_model/ is fully
+    written and training_state/ already exists as a directory."""
+    from makerlab.runners.hf_cloud import _checkpoint_step_ready
+
+    step_dir = tmp_path / "005000"
+    _write_pretrained(step_dir)
+    (step_dir / "training_state").mkdir()  # freshly created, empty
+    assert _checkpoint_step_ready(step_dir) is False
+
+
+def test_checkpoint_step_ready_false_when_training_state_missing_optimizer(tmp_path: Path) -> None:
+    """Same race, later in the window: training_step.json and rng_state.safetensors
+    have landed but optimizer_state.safetensors (always written — lerobot's own
+    training loop never calls save_checkpoint with optimizer=None) has not."""
+    from makerlab.runners.hf_cloud import _checkpoint_step_ready
+
+    step_dir = tmp_path / "005000"
+    _write_pretrained(step_dir)
+    training_state_dir = step_dir / "training_state"
+    training_state_dir.mkdir()
+    (training_state_dir / "training_step.json").write_text("{}")
+    (training_state_dir / "rng_state.safetensors").write_bytes(b"fake-rng")
+    assert _checkpoint_step_ready(step_dir) is False
+
+
+def test_checkpoint_step_ready_true_for_no_scheduler_policy(tmp_path: Path) -> None:
+    """A policy with no scheduler preset (train_config.json's "scheduler" is
+    null, e.g. act) is ready once training_step.json, rng_state.safetensors,
+    and optimizer_state.safetensors exist — save_training_state never writes
+    scheduler_state.json for these, so requiring it would leave the step
+    permanently un-uploadable."""
+    from makerlab.runners.hf_cloud import _checkpoint_step_ready
+
+    step_dir = tmp_path / "005000"
+    _write_pretrained(step_dir, scheduler=None)
+    training_state_dir = step_dir / "training_state"
+    training_state_dir.mkdir()
+    (training_state_dir / "training_step.json").write_text("{}")
+    (training_state_dir / "rng_state.safetensors").write_bytes(b"fake-rng")
+    (training_state_dir / "optimizer_state.safetensors").write_bytes(b"fake-optim")
+    assert _checkpoint_step_ready(step_dir) is True
+
+
+def test_checkpoint_step_ready_false_for_scheduler_policy_missing_scheduler_state(
+    tmp_path: Path,
+) -> None:
+    """A policy that does have a scheduler preset (e.g. diffusion/pi0/smolvla/
+    vqbet) is NOT ready until scheduler_state.json lands too, even though
+    optimizer_state.safetensors already exists — the narrower race the
+    original fix's is_dir() check would have missed entirely."""
+    from makerlab.runners.hf_cloud import _checkpoint_step_ready
+
+    step_dir = tmp_path / "005000"
+    _write_pretrained(step_dir, scheduler={"type": "cosine_decay_with_warmup"})
+    training_state_dir = step_dir / "training_state"
+    training_state_dir.mkdir()
+    (training_state_dir / "training_step.json").write_text("{}")
+    (training_state_dir / "rng_state.safetensors").write_bytes(b"fake-rng")
+    (training_state_dir / "optimizer_state.safetensors").write_bytes(b"fake-optim")
+    assert _checkpoint_step_ready(step_dir) is False
+
+
+def test_checkpoint_step_ready_true_for_scheduler_policy_once_complete(tmp_path: Path) -> None:
+    from makerlab.runners.hf_cloud import _checkpoint_step_ready
+
+    step_dir = tmp_path / "005000"
+    _write_pretrained(step_dir, scheduler={"type": "cosine_decay_with_warmup"})
+    training_state_dir = step_dir / "training_state"
+    training_state_dir.mkdir()
+    (training_state_dir / "training_step.json").write_text("{}")
+    (training_state_dir / "rng_state.safetensors").write_bytes(b"fake-rng")
+    (training_state_dir / "optimizer_state.safetensors").write_bytes(b"fake-optim")
+    (training_state_dir / "scheduler_state.json").write_text("{}")
+    assert _checkpoint_step_ready(step_dir) is True
+
+
+def test_checkpoint_step_ready_fails_closed_when_train_config_unreadable(tmp_path: Path) -> None:
+    """If train_config.json is missing or unparsable, don't guess: require
+    scheduler_state.json too (fail closed) rather than risk uploading a step
+    whose training_state/ is still incomplete for a scheduler-having policy."""
     from makerlab.runners.hf_cloud import _checkpoint_step_ready
 
     step_dir = tmp_path / "005000"
@@ -361,8 +456,13 @@ def test_checkpoint_step_ready_true_once_training_state_exists(tmp_path: Path) -
     pretrained_dir.mkdir(parents=True)
     (pretrained_dir / "config.json").write_text("{}")
     (pretrained_dir / "model.safetensors").write_bytes(b"fake-weights")
-    (step_dir / "training_state").mkdir()
-    assert _checkpoint_step_ready(step_dir) is True
+    # no train_config.json written at all
+    training_state_dir = step_dir / "training_state"
+    training_state_dir.mkdir()
+    (training_state_dir / "training_step.json").write_text("{}")
+    (training_state_dir / "rng_state.safetensors").write_bytes(b"fake-rng")
+    (training_state_dir / "optimizer_state.safetensors").write_bytes(b"fake-optim")
+    assert _checkpoint_step_ready(step_dir) is False
 
 
 def test_wrapper_source_inlines_the_tested_checkpoint_ready_check() -> None:

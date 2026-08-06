@@ -161,23 +161,58 @@ def _checkpoint_step_ready(step_dir):
     pretrained_model/ first via policy.save_pretrained — which itself writes
     config.json *before* the much larger model.safetensors (see
     PreTrainedPolicy._save_pretrained in lerobot/policies/pretrained.py) — and
-    only calls save_training_state, which creates training_state/, once every
-    pretrained_model/ file is already on disk. So pretrained_model/config.json
-    existing is NOT sufficient evidence the step is complete: it can be
-    observed while model.safetensors is still being written, or before it
-    exists at all. training_state/ existing is a reliable "the whole step
-    finished" signal, since save_checkpoint only creates it after
-    pretrained_model/ is done.
+    only calls save_training_state once every pretrained_model/ file is
+    already on disk. So pretrained_model/config.json existing is NOT
+    sufficient evidence the step is complete: it can be observed while
+    model.safetensors is still being written, or before it exists at all.
 
-    Pure and self-contained (stdlib pathlib only) so its source can be
-    inlined verbatim into WRAPPER_SOURCE the same way _install_plan is,
+    save_training_state (lerobot/common/train_utils.py) is itself
+    non-atomic: it does `training_state/.mkdir(...)` *first*, then writes
+    training_step.json, then rng_state.safetensors, then (only if an
+    optimizer was passed — always true for lerobot's own training loop,
+    lerobot/scripts/lerobot_train.py, which never calls save_checkpoint with
+    optimizer=None) optimizer_state.safetensors, then — only if the policy's
+    config has a scheduler (get_scheduler_preset(); e.g. diffusion, pi0,
+    pi0_fast, pi05, smolvla, vqbet — but NOT act, tdmpc, gaussian_actor) —
+    scheduler_state.json. So training_state/ merely *existing* is not
+    reliable either: it can be observed the instant after mkdir, before any
+    of its files are written. Checking for training_step.json and
+    optimizer_state.safetensors alone would still miss an in-flight
+    scheduler_state.json write for the many policies that do have a
+    scheduler, so whether a scheduler file is required is read off
+    pretrained_model/train_config.json's "scheduler" key instead of a
+    hardcoded policy list — that file is written by cfg.save_pretrained,
+    which save_checkpoint always calls (and returns from) strictly before
+    save_training_state starts, so by the time training_step.json exists
+    (checked above) train_config.json is guaranteed complete; reading it
+    here carries no extra race.
+
+    Pure and self-contained (stdlib only: pathlib + json) so its source can
+    be inlined verbatim into WRAPPER_SOURCE the same way _install_plan is,
     keeping the in-container check and the unit-tested implementation
     identical.
     """
+    import json
+
     pretrained_dir = step_dir / "pretrained_model"
     if not (pretrained_dir / "config.json").is_file():
         return False
-    return (step_dir / "training_state").is_dir()
+    training_state_dir = step_dir / "training_state"
+    if not (training_state_dir / "training_step.json").is_file():
+        return False
+    if not (training_state_dir / "rng_state.safetensors").is_file():
+        return False
+    if not (training_state_dir / "optimizer_state.safetensors").is_file():
+        return False
+    try:
+        train_config = json.loads((pretrained_dir / "train_config.json").read_text())
+        needs_scheduler = train_config.get("scheduler") is not None
+    except (OSError, ValueError):
+        # train_config.json is part of pretrained_model/ and is guaranteed
+        # present by this point (checked above via config.json); if it can't
+        # be read/parsed, fail closed and require the scheduler file too.
+        needs_scheduler = True
+    return not needs_scheduler or (training_state_dir / "scheduler_state.json").is_file()
 
 
 def _cloud_device(flavor: str) -> str:
