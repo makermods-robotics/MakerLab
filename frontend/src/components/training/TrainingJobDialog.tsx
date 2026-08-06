@@ -272,8 +272,15 @@ const TrainingJobDialog: React.FC<{
           </span>
         ),
       });
-      const next = await getJob(baseUrl, fetchWithHeaders, job.id);
-      setJob(next);
+      try {
+        const next = await getJob(baseUrl, fetchWithHeaders, job.id);
+        setJob(next);
+      } catch {
+        // The upload itself already succeeded and the user already has
+        // their success toast + link — a refetch blip here shouldn't look
+        // like a failed upload. The row may linger until the next poll
+        // tick or a manual reopen picks up the real (now-uploaded) state.
+      }
     } catch (e) {
       toast({
         title: "Upload failed",
