@@ -155,23 +155,30 @@ def test_list_local_models_reads_train_config_over_record(registry) -> None:
     assert m["dataset"] == "cfg/other"
 
 
-def test_list_local_models_skips_running_and_failed(registry) -> None:
+def test_list_local_models_skips_running_but_keeps_checkpointed_failed_or_interrupted(registry) -> None:
+    """A run only counts as usable once it's stopped changing (not "running")
+    and has a real checkpoint on disk — the terminal state itself no longer
+    gates it (MT10). A "failed" or "interrupted" run that still saved a valid
+    final checkpoint (e.g. an unconfirmed exit after a server restart) must
+    stay visible rather than vanish from the library."""
     from makermodslab.models import list_local_models
 
     _seed_run(registry, "done_run", state="done")
     _seed_run(registry, "running_run", state="running")
     _seed_run(registry, "failed_run", state="failed")
+    _seed_run(registry, "interrupted_run", state="interrupted")
 
     ids = {m["id"] for m in list_local_models()}
-    assert ids == {"done_run"}
+    assert ids == {"done_run", "failed_run", "interrupted_run"}
 
 
 def test_list_local_models_skips_checkpointless_run(registry) -> None:
-    """A completed run that died before its first save has no checkpoint and is
-    hidden (nothing to browse / serve)."""
+    """A run that died before its first save has no checkpoint and is hidden
+    (nothing to browse / serve) regardless of its terminal state."""
     from makermodslab.models import list_local_models
 
-    _seed_run(registry, "no_ckpt", state="done", with_checkpoint=False)
+    _seed_run(registry, "no_ckpt_done", state="done", with_checkpoint=False)
+    _seed_run(registry, "no_ckpt_interrupted", state="interrupted", with_checkpoint=False)
     assert list_local_models() == []
 
 

@@ -460,32 +460,29 @@ def test_pid_alive_returns_false_for_unlikely_pid() -> None:
 
 
 def _write_log_lines(path: Path, messages: list[str]) -> None:
-    from makerlab.jobs import LogLine
+    from makermodslab.jobs import LogLine
 
     lines = (LogLine(timestamp=float(i), message=m).model_dump_json() + "\n" for i, m in enumerate(messages))
     path.write_text("".join(lines))
 
 
-def test_tailing_runner_returncode_confirms_done_after_training_end_marker(tmp_path) -> None:
-    """MT10 regression: a reattached job (TailingJobRunner) whose tailed log
-    shows lerobot's own "End of training" line before the pid disappears has
-    genuine positive evidence of completion. returncode() must report 0 so
-    the watchdog still finalises it as 'done' — the case must not regress
-    while we fix the false-positive below."""
-    from makerlab.jobs import TailingJobRunner, TrainingMetrics
+def test_tailing_runner_returncode_confirms_done_when_exit_status_zero(tmp_path) -> None:
+    """MT10: a reattached job (TailingJobRunner) whose pid has disappeared is
+    only confirmed 'done' when the wrapper LocalJobRunner.start() launched
+    actually wrote a real exit status of 0 to disk — the trainer's own log
+    output is not usable evidence, because after a server restart nothing
+    appends to that log ever again (see LocalJobRunner._pump_stdout, which is
+    the log's only writer and lives in the process that just died)."""
+    from makermodslab.jobs import TailingJobRunner, TrainingMetrics
 
     log_path = tmp_path / "log.jsonl"
-    _write_log_lines(
-        log_path,
-        [
-            "Training:  99%|##########| 999/1000 [01:00<00:01,  1.0step/s]",
-            "End of training",
-        ],
-    )
+    _write_log_lines(log_path, ["Training:  99%|##########| 999/1000 [01:00<00:01,  1.0step/s]"])
+    status_path = tmp_path / "exit_status"
+    status_path.write_text("0")
 
     # A pid guaranteed not to exist (see test_pid_alive_returns_false_for_unlikely_pid)
     # stands in for "the process is gone by the time we look."
-    runner = TailingJobRunner(TrainingMetrics(), log_path, pid=999999999)
+    runner = TailingJobRunner(TrainingMetrics(), log_path, pid=999999999, status_path=status_path)
     runner.start_tailing()
     runner._tail_thread.join(timeout=5)
     assert not runner._tail_thread.is_alive()
@@ -493,30 +490,80 @@ def test_tailing_runner_returncode_confirms_done_after_training_end_marker(tmp_p
     assert runner.returncode() == 0
 
 
-def test_tailing_runner_returncode_unconfirmed_when_pid_gone_without_marker(tmp_path) -> None:
-    """MT10: a reattached job whose pid disappears WITHOUT the log ever
-    showing "End of training" (e.g. the trainer crashed after reattach) must
-    NOT be reported as returncode 0 — TailingJobRunner has no way to reap the
-    real exit code, and no positive evidence of completion either. Before the
-    fix this unconditionally returned 0 once the pid vanished, so a crash
-    got silently recorded as a successful run. returncode() must now report
-    None (JobRegistry._tick() reads that as "unconfirmed" and marks the
-    record 'interrupted' rather than 'done')."""
-    from makerlab.jobs import TailingJobRunner, TrainingMetrics
+def test_tailing_runner_returncode_reports_real_nonzero_exit(tmp_path) -> None:
+    """A trainer that crashed after reattach records its own real exit code
+    via the wrapper — returncode() must surface that code (not clamp it to
+    None or 0) so JobRegistry._tick() can finalise 'failed' with a real
+    exit_code, same as it would for a LocalJobRunner that never detached."""
+    from makermodslab.jobs import TailingJobRunner, TrainingMetrics
 
     log_path = tmp_path / "log.jsonl"
-    _write_log_lines(
-        log_path,
-        [
-            "Training:  42%|####      | 420/1000 [00:30<00:41, 14.0step/s]",
-            "INFO step: 420 smpl: 3K ep: 5 epch: 1.00 loss: 0.512 grdn: 1.2 lr: 1.0e-04",
-        ],
-    )
+    _write_log_lines(log_path, ["Training:  42%|####      | 420/1000 [00:30<00:41, 14.0step/s]"])
+    status_path = tmp_path / "exit_status"
+    status_path.write_text("1")
 
-    runner = TailingJobRunner(TrainingMetrics(), log_path, pid=999999999)
+    runner = TailingJobRunner(TrainingMetrics(), log_path, pid=999999999, status_path=status_path)
     runner.start_tailing()
     runner._tail_thread.join(timeout=5)
     assert not runner._tail_thread.is_alive()
+
+    assert runner.returncode() == 1
+
+
+def test_tailing_runner_returncode_unconfirmed_when_status_file_absent(tmp_path) -> None:
+    """MT10 regression: this is the actual shape of a reattached job whose
+    trainer keeps running (or crashes) for the rest of its life after a
+    server restart — log.jsonl is frozen (nothing appends to it once the
+    owning process is gone) and no exit_status file has been written yet.
+    Before the fix, returncode() unconditionally returned 0 once the pid
+    vanished, silently recording a crash as a successful run. It must now
+    report None so JobRegistry._tick() marks the record 'interrupted' rather
+    than asserting a 'done' or 'failed' it can't back up."""
+    from makermodslab.jobs import TailingJobRunner, TrainingMetrics
+
+    log_path = tmp_path / "log.jsonl"
+    _write_log_lines(log_path, ["Training:  42%|####      | 420/1000 [00:30<00:41, 14.0step/s]"])
+    status_path = tmp_path / "exit_status"  # never written
+
+    runner = TailingJobRunner(TrainingMetrics(), log_path, pid=999999999, status_path=status_path)
+    runner.start_tailing()
+    runner._tail_thread.join(timeout=5)
+    assert not runner._tail_thread.is_alive()
+
+    assert runner.returncode() is None
+
+
+def test_tailing_runner_returncode_unconfirmed_when_status_file_malformed(tmp_path) -> None:
+    """A status file that isn't a clean integer (e.g. a torn read caught
+    mid-write, though start()'s tmp+rename should prevent that in practice)
+    must degrade to 'unconfirmed', not raise or silently pick a wrong code."""
+    from makermodslab.jobs import TailingJobRunner, TrainingMetrics
+
+    log_path = tmp_path / "log.jsonl"
+    _write_log_lines(log_path, ["Training:  42%|####      | 420/1000 [00:30<00:41, 14.0step/s]"])
+    status_path = tmp_path / "exit_status"
+    status_path.write_text("not-a-number")
+
+    runner = TailingJobRunner(TrainingMetrics(), log_path, pid=999999999, status_path=status_path)
+    runner.start_tailing()
+    runner._tail_thread.join(timeout=5)
+    assert not runner._tail_thread.is_alive()
+
+    assert runner.returncode() is None
+
+
+def test_tailing_runner_returncode_unconfirmed_while_pid_alive(tmp_path) -> None:
+    """Even with a written exit_status on disk (e.g. left over from state we
+    shouldn't trust yet), a live pid always means 'still running' — returncode()
+    must not report a stale status file's contents while the process itself
+    is confirmed alive."""
+    from makermodslab.jobs import TailingJobRunner, TrainingMetrics
+
+    log_path = tmp_path / "log.jsonl"
+    status_path = tmp_path / "exit_status"
+    status_path.write_text("0")
+
+    runner = TailingJobRunner(TrainingMetrics(), log_path, pid=os.getpid(), status_path=status_path)
 
     assert runner.returncode() is None
 
@@ -558,12 +605,15 @@ def _inject_running_job(reg, tmp_path: Path, rc: int | None):
 def test_tick_marks_interrupted_when_runner_cannot_confirm_exit(tmp_path) -> None:
     """MT10: JobRegistry._tick() must not treat "runner says not running,
     returncode() is None" as a failure (or a success) — that combination
-    means the runner has no evidence either way (TailingJobRunner's new
-    signal for "pid died on our watch, no completion marker seen"). It
-    should finalise as 'interrupted', the same honest state already used
-    when a reattach finds an already-dead pid at boot, with no exit_code and
-    no error_message — not 'done', and not 'failed' either."""
-    from makerlab.jobs import JobRegistry
+    means the runner has no evidence either way (TailingJobRunner's signal
+    for "pid died on our watch, no exit_status file written"). It should
+    finalise as 'interrupted', the same honest state already used when a
+    reattach finds an already-dead pid at boot, with no exit_code but an
+    explanatory error_message — not 'done', and not 'failed' either. The
+    message matters because 'interrupted' no longer implies the run actually
+    failed; a real checkpoint may still be sitting on disk (see
+    models.list_local_models, which no longer deletes it from the library)."""
+    from makermodslab.jobs import JobRegistry
 
     reg = JobRegistry(tmp_path / "root")
     record = _inject_running_job(reg, tmp_path, rc=None)
@@ -573,7 +623,7 @@ def test_tick_marks_interrupted_when_runner_cannot_confirm_exit(tmp_path) -> Non
     finalized = reg._records[record.id]
     assert finalized.state == "interrupted"
     assert finalized.exit_code is None
-    assert finalized.error_message is None
+    assert finalized.error_message is not None
 
 
 def test_tick_marks_done_when_runner_confirms_zero_exit(tmp_path) -> None:
@@ -581,7 +631,7 @@ def test_tick_marks_done_when_runner_confirms_zero_exit(tmp_path) -> None:
     when a runner confirms rc == 0 (LocalJobRunner completing normally, or
     TailingJobRunner after observing "End of training"), the watchdog still
     finalises promptly as 'done'."""
-    from makerlab.jobs import JobRegistry
+    from makermodslab.jobs import JobRegistry
 
     reg = JobRegistry(tmp_path / "root")
     record = _inject_running_job(reg, tmp_path, rc=0)

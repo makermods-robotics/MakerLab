@@ -227,19 +227,23 @@ def _epoch_iso(ts: float | None) -> str | None:
 
 
 def list_local_models() -> list[dict[str, Any]]:
-    """Every COMPLETED local training run that produced a final checkpoint.
+    """Every local training run that produced a usable final checkpoint.
 
     Reads the job registry (never mutates it). A run qualifies iff it is a
-    `local` runner in state "done" AND has at least one valid on-disk checkpoint
-    — running / failed / interrupted runs and checkpoint-less runs are skipped
-    (a failed run may have died before its first save). Each row carries the
-    policy type, base dataset repo_id, step count, and the local checkpoint path,
-    read from the final checkpoint's train_config.json.
+    `local` runner that isn't still running AND has at least one valid
+    on-disk checkpoint — checkpoint presence, not the terminal state, is what
+    makes a model usable. A "done" run with no checkpoint (crashed before its
+    first save) is skipped; an "interrupted" run (e.g. its exit couldn't be
+    confirmed after a server restart) whose checkpoint is on disk still counts
+    — the terminal state is only a claim about how we found out, not about
+    whether the weights exist. Each row carries the policy type, base dataset
+    repo_id, step count, and the local checkpoint path, read from the final
+    checkpoint's train_config.json.
 
     Newest first (by the run's end/start time)."""
     out: list[dict[str, Any]] = []
     for record in job_registry.list(limit=_LOCAL_MODEL_SCAN_LIMIT):
-        if record.runner != "local" or record.state != "done":
+        if record.runner != "local" or record.state == "running":
             continue
         pretrained_dir = _final_checkpoint_dir(record)
         if pretrained_dir is None:
@@ -251,18 +255,18 @@ def list_local_models() -> list[dict[str, Any]]:
 
 
 def _find_local_record(model_id: str) -> JobRecord | None:
-    """The completed local-run registry record for `model_id`, or None.
+    """The usable local-run registry record for `model_id`, or None.
 
-    None when the id is unknown, isn't a local run, isn't done, or left no
-    checkpoint — the same qualification `list_local_models` applies, so callers
-    (info / upload / delete) agree on what a "local model" is."""
+    None when the id is unknown, isn't a local run, is still running, or left
+    no checkpoint — the same qualification `list_local_models` applies, so
+    callers (info / upload / delete) agree on what a "local model" is."""
     from .jobs import JobNotFoundError
 
     try:
         record = job_registry.get(model_id)
     except JobNotFoundError:
         return None
-    if record.runner != "local" or record.state != "done":
+    if record.runner != "local" or record.state == "running":
         return None
     if _final_checkpoint_dir(record) is None:
         return None
