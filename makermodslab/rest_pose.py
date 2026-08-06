@@ -38,7 +38,34 @@ import logging
 import threading
 import time
 
+from lerobot.motors import MotorNormMode
+
 logger = logging.getLogger(__name__)
+
+# Bounds lerobot's own bus.sync_write/sync_read clamp normalized values into
+# (motors_bus.py's _unnormalize/_normalize) — DEGREES mode is left out on
+# purpose, since lerobot doesn't clamp that one either.
+_NORMALIZED_BOUNDS: dict[MotorNormMode, tuple[float, float]] = {
+    MotorNormMode.RANGE_M100_100: (-100.0, 100.0),
+    MotorNormMode.RANGE_0_100: (0.0, 100.0),
+}
+
+
+def _clamp_to_representable_range(motors: dict, targets: dict[str, int | float]) -> dict[str, int | float]:
+    """Clamp each normalized target into the range the bus can actually
+    write/read back (see _NORMALIZED_BOUNDS). A dataset-recorded action can
+    fall outside a motor's calibrated range; lerobot clamps it on both the
+    write and read path, so comparing against the unclamped value would
+    compare against a position the bus can never report — the arrival check
+    would never pass no matter how close the arm gets."""
+    clamped = dict(targets)
+    for motor, value in targets.items():
+        bounds = _NORMALIZED_BOUNDS.get(getattr(motors.get(motor), "norm_mode", None))
+        if bounds is not None:
+            lo, hi = bounds
+            clamped[motor] = min(hi, max(lo, float(value)))
+    return clamped
+
 
 # Gentle return speed (ticks/s-ish register units; teleop snaps run at full).
 RETURN_POS_SPEED = 400
@@ -83,6 +110,7 @@ def return_to_rest_pose(
     label: str = "arm",
     normalize: bool = False,
     tolerance: float | None = None,
+    stall_min_progress: float | None = None,
 ) -> tuple[bool, str]:
     """Drive one bus's motors back to ``rest_pose``, then report how it went.
 
@@ -106,7 +134,20 @@ def return_to_rest_pose(
     `action` frame), where the bus's own calibration-aware
     normalize/unnormalize handles any needed conversion and clamps
     out-of-range values rather than raising — no manual tick conversion
-    needed. Never raises.
+    needed. A target outside the bus's representable range (e.g. a recorded
+    action beyond a motor's calibrated span) is itself clamped before both
+    the write and the arrival comparison, so a saturated joint is compared
+    against the value the bus will actually report back, not the unreachable
+    original. Never raises.
+
+    ``stall_min_progress`` (default RETURN_STALL_MIN_PROGRESS, raw ticks) is
+    the aggregate distance-to-target the return must close within
+    RETURN_STALL_WINDOW_S to avoid being reported as stalled — like
+    ``tolerance``, it does NOT auto-scale with ``normalize``: the raw-ticks
+    constant is ~15x too strict a bar in normalized-unit space (10 ticks of
+    required progress vs. 10 normalized units, a much larger physical
+    distance), so a normalized caller should pass its own value sized for its
+    unit space rather than inherit the raw-ticks default.
 
     On EVERY exit path the gentle RETURN_POS_SPEED profile cap written into the
     motors' RAM Goal_Velocity is reset to 0 (uncapped) before returning, so it
@@ -119,6 +160,11 @@ def return_to_rest_pose(
     if not targets:
         logger.info(f"Rest-pose return skipped for the {label}: no captured pose")
         return False, "no-pose"
+    if normalize:
+        # Clamp before both the write and the arrival comparison, so the
+        # comparison is against what the bus will actually report back for a
+        # saturated joint (see _clamp_to_representable_range).
+        targets = _clamp_to_representable_range(motors, targets)
     try:
         for motor in targets:
             bus.write("Goal_Velocity", motor, RETURN_POS_SPEED, normalize=False)
@@ -137,6 +183,9 @@ def return_to_rest_pose(
             abort_event,
             normalize=normalize,
             tolerance=RETURN_ARRIVE_TOLERANCE if tolerance is None else tolerance,
+            stall_min_progress=RETURN_STALL_MIN_PROGRESS
+            if stall_min_progress is None
+            else stall_min_progress,
         )
     finally:
         # Belt and braces: whatever the outcome (returned / settled / stalled /
@@ -170,6 +219,7 @@ def _run_return_loop(
     abort_event: threading.Event | None,
     normalize: bool = False,
     tolerance: float = RETURN_ARRIVE_TOLERANCE,
+    stall_min_progress: float = RETURN_STALL_MIN_PROGRESS,
 ) -> tuple[bool, str]:
     """The poll-until-arrived loop of return_to_rest_pose (see its docstring).
 
@@ -201,7 +251,7 @@ def _run_return_loop(
             remaining = sum(distances.values())
             if distances and all(d <= tolerance for d in distances.values()):
                 return True, f"returned: max delta {max(distances.values())} {unit} ({_deltas(distances)})"
-            if best_dist is None or remaining < best_dist - RETURN_STALL_MIN_PROGRESS:
+            if best_dist is None or remaining < best_dist - stall_min_progress:
                 best_dist = remaining
                 last_progress_t = now
         if now - last_progress_t > RETURN_STALL_WINDOW_S:

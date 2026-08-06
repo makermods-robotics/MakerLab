@@ -54,14 +54,24 @@ logger = logging.getLogger(__name__)
 _SINGLE_ARM_MODE = "single"
 
 # Ease-in tolerance, in the SAME normalized units as robot.send_action() (not
-# raw ticks — see rest_pose.py's normalize=True path). Deliberately smaller
-# than RETURN_ARRIVE_TOLERANCE's raw-ticks value since it's compared in a
-# different unit space; validate on real hardware before trusting this
-# default (see the plan's manual hardware verification step) — arm joints
-# and the gripper share this one tolerance despite having different
-# normalized ranges (~-100..100 vs 0..100 by default), same simplification
-# RETURN_ARRIVE_TOLERANCE already makes across differently-geared joints.
+# raw ticks — see rest_pose.py's normalize=True path). Numerically smaller
+# than RETURN_ARRIVE_TOLERANCE's raw-ticks value (2.0 vs 20), but NOT looser
+# in real terms: normalized units are coarser than ticks (roughly 11-19
+# ticks per unit on this arm), so 2.0 units is actually ~23-39 ticks —
+# looser than RETURN_ARRIVE_TOLERANCE, not tighter. Validate on real
+# hardware before trusting this default (see the plan's manual hardware
+# verification step) — arm joints and the gripper share this one tolerance
+# despite having different normalized ranges (~-100..100 vs 0..100 by
+# default), same simplification RETURN_ARRIVE_TOLERANCE already makes across
+# differently-geared joints.
 EASE_ARRIVE_TOLERANCE = 2.0
+
+# Stall-progress threshold for the ease-in, in the same normalized units as
+# EASE_ARRIVE_TOLERANCE — rest_pose.RETURN_STALL_MIN_PROGRESS is in raw
+# ticks and would be ~15x too strict a bar here (see return_to_rest_pose's
+# docstring). Keeps the same 0.5x-of-arrival-tolerance ratio as the raw-ticks
+# defaults (RETURN_STALL_MIN_PROGRESS=10 is half of RETURN_ARRIVE_TOLERANCE=20).
+EASE_STALL_MIN_PROGRESS = 1.0
 
 # Bound on how long stop_and_wait() waits for the worker to actually finish
 # releasing the arm before forcing an immediate release — mirrors
@@ -271,13 +281,19 @@ def _replay_worker(robot: SO101Follower, action_series: dict[str, Any], websocke
                 label="follower arm",
                 normalize=True,
                 tolerance=EASE_ARRIVE_TOLERANCE,
+                stall_min_progress=EASE_STALL_MIN_PROGRESS,
             )
             if not arrived and reason != "cut-short":
                 with _state_lock:
                     _replay_meta["phase"] = "error"
                     _replay_meta["error"] = f"Could not reach the episode's starting position ({reason})"
+                    # Surface the actual per-motor reason (return_to_rest_pose
+                    # already names the joint and its delta) instead of a
+                    # generic guess — the frontend shows hint in preference to
+                    # error, so a static "may be posed too far" message was
+                    # hiding the real diagnosis from the user.
                     _replay_meta["hint"] = (
-                        "The arm may be posed too far from this episode's start. "
+                        f"The arm didn't settle at this episode's starting position ({reason}). "
                         "Try again, or reposition it closer first."
                     )
                 return
