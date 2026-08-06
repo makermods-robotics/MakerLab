@@ -51,6 +51,17 @@ import type { DatasetItem } from "@/lib/replayApi";
  * Every recording session creates a NEW dataset — recording on top of an
  * existing one was removed; merging datasets covers growing one.
  */
+
+// Releasing a browser getUserMedia stream (releaseStreamsRef.current(), just
+// below) only guarantees the *browser* has dropped it — the OS-level camera
+// release it triggers is asynchronous, the same class of turbulence the
+// backend already documents and works around with its own 2s settle sleep
+// after a failed connect (makerlab/record.py, "let the OS release settle
+// past the turbulence window before re-rolling the connect"). Wait that same
+// 2s here, before /start-recording asks cv2 to grab the device, so a cold
+// backend connect attempt isn't racing the browser's own teardown.
+const CAMERA_RELEASE_SETTLE_MS = 2000;
+
 const CollectPanel: React.FC = () => {
   const { auth } = useHfAuth();
   const { selectedRecord } = useRobots();
@@ -198,7 +209,7 @@ const CollectPanel: React.FC = () => {
         description: `Releasing ${cameras.length} camera stream(s) for recording...`,
       });
       releaseStreamsRef.current();
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      await new Promise((resolve) => setTimeout(resolve, CAMERA_RELEASE_SETTLE_MS));
       toast({
         title: "Camera resources ready",
         description:
