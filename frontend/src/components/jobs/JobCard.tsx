@@ -1,5 +1,4 @@
 import React, { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -41,6 +40,7 @@ import { useApi } from "@/contexts/ApiContext";
 import { useStudio } from "@/contexts/StudioContext";
 import { useToast } from "@/hooks/use-toast";
 import { JobCheckpoint, listJobCheckpoints } from "@/lib/checkpointsApi";
+import { buildResumeSeed } from "./resumeSeed";
 import CheckpointDropdown from "@/components/jobs/CheckpointDropdown";
 import PolicyExtraDialog from "@/components/training/PolicyExtraDialog";
 
@@ -98,7 +98,6 @@ const JobCard: React.FC<Props> = ({
   onRenamed,
   ancestors = [],
 }) => {
-  const navigate = useNavigate();
   const { baseUrl, fetchWithHeaders } = useApi();
   const { toast } = useToast();
   const { openStudio, openJobMonitor } = useStudio();
@@ -362,39 +361,40 @@ const JobCard: React.FC<Props> = ({
     selectedStep != null &&
     endedBeforeTarget;
 
+  // No dialog and no route jump: continuing opens the Train panel's
+  // "Start a new training" form in resume mode, seeded from this run and the
+  // dropdown's checkpoint — the same in-place flow Fine-tune already uses,
+  // rather than navigating away to /training and losing the studio.
+  //
   // The configurator PREFILLS from this seed, then renders read-only the
   // settings lerobot rebuilds from the checkpoint anyway (batch size, seed,
   // device, optimizer, AMP). Steps, the log/save cadence, the worker count,
   // the cloud flavor and the timeout stay editable — those a continuation can
-  // really change.
-  const goToResume = (runner: "local" | "hf_cloud") => {
+  // really change, and so is the runner it continues ON (F7's cross-runner
+  // resume).
+  //
+  // The payload itself comes from the ONE shared builder (buildResumeSeed), so
+  // this and the library's row-level quick-resume can no longer drift. The
+  // parent's runner is derived there from the job rather than passed in: local
+  // Continue is gated on canContinue and cloud Resume on canResumeCloud, both
+  // of which already require selectedJob.runner to match, so a caller-supplied
+  // runner could only ever disagree by mistake. Where the continuation RUNS is
+  // then the form's choice, not this call site's.
+  const goToResume = () => {
     if (selectedStep == null) return;
-    navigate("/training", {
-      state: {
-        resume: {
-          jobId: selectedJob.id,
-          step: selectedStep,
-          name: jobDisplayName(selectedJob),
-          datasetRepoId: selectedJob.config.dataset_repo_id,
-          policyType: selectedJob.config.policy_type,
-          sourceSteps: selectedJob.config.steps,
-          logFreq: selectedJob.config.log_freq,
-          saveFreq: selectedJob.config.save_freq,
-          runner,
-          flavor: runner === "hf_cloud" ? (selectedJob.hf_flavor ?? undefined) : undefined,
-        },
-      },
+    openStudio("train", {
+      train: { resume: buildResumeSeed(selectedJob, selectedStep) },
     });
   };
 
   const handleContinue = (e: React.MouseEvent) => {
     e.stopPropagation();
-    goToResume("local");
+    goToResume();
   };
 
   const handleResumeCloud = (e: React.MouseEvent) => {
     e.stopPropagation();
-    goToResume("hf_cloud");
+    goToResume();
   };
 
   // Fine-tune: start a FRESH run whose weights are initialized from this
