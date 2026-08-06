@@ -176,6 +176,13 @@ _TQDM_RE = re.compile(r"Training:\s*\d+%[^|]*\|[^|]*\|\s*(\d+)/(\d+)\s*\[(?:[\d:
 # when it boots. We capture the first URL of that shape we see.
 _WANDB_URL_RE = re.compile(r"https://wandb\.ai/[^\s/]+/[^\s/]+/runs/[A-Za-z0-9]+")
 
+# lerobot's training entrypoint logs this exact line once its step loop
+# finishes, before any optional push-to-hub (see lerobot's
+# scripts/lerobot_train.py: `logging.info("End of training")`). It's the only
+# positive signal TailingJobRunner has that a reattached job actually
+# completed rather than merely disappearing — see its returncode().
+_TRAINING_END_MARKER = "End of training"
+
 
 def extract_wandb_run_url(line: str) -> str | None:
     match = _WANDB_URL_RE.search(line)
@@ -528,6 +535,10 @@ class TailingJobRunner:
         # on metrics, then tail from the current EOF.
         self._tail_offset = 0
         self._wandb_run_url: str | None = None
+        # Set from _tail_loop once the tailed log shows _TRAINING_END_MARKER.
+        # The only positive evidence returncode() has that the trainer really
+        # finished, since we can't waitpid() a process from another session.
+        self._training_completed = False
 
     def start(self, job_id: str, config: TrainingRequest, output_dir: str) -> None:
         # Required by JobRunner Protocol but irrelevant here; the subprocess
@@ -552,12 +563,16 @@ class TailingJobRunner:
 
     def returncode(self) -> int | None:
         # We can't reap a process from another session, so we don't know the
-        # actual exit code. Return 0 once the pid is gone — the watchdog
-        # finalises as "done" rather than "failed", which is the better
-        # default for a detached training that completed normally.
+        # actual exit code. Once the pid is gone, only claim success (0) if
+        # the tailed log actually showed the trainer's own "End of training"
+        # marker — i.e. we watched it finish, not just disappear. Otherwise
+        # return None: JobRegistry._tick() reads that (once is_running() is
+        # already False) as "no confirmation either way" and finalises the
+        # record as 'interrupted' rather than asserting a "done" or "failed"
+        # we can't back up.
         if _pid_alive(self._pid):
             return None
-        return 0
+        return 0 if self._training_completed else None
 
     def stream_log_lines(self) -> list[LogLine]:
         out: list[LogLine] = []
@@ -605,6 +620,8 @@ class TailingJobRunner:
                             url = extract_wandb_run_url(log_line.message)
                             if url is not None:
                                 self._wandb_run_url = url
+                        if not self._training_completed and _TRAINING_END_MARKER in log_line.message:
+                            self._training_completed = True
                         if self._log_queue.qsize() >= 1000:
                             with contextlib.suppress(Empty):
                                 self._log_queue.get_nowait()
@@ -3259,10 +3276,20 @@ class JobRegistry:
             with self._lock:
                 if record.wandb_run_url is None:
                     record.wandb_run_url = runner.wandb_run_url()
-                record.state = "done" if rc == 0 else "failed"
+                if rc is None:
+                    # is_running() already said the process is gone, but the
+                    # runner has no evidence of how it ended (e.g. a
+                    # reattached local job — TailingJobRunner — whose pid
+                    # disappeared without its log showing a real completion).
+                    # Don't assert a "done" or "failed" we can't back up;
+                    # reuse the same honest 'interrupted' state a dead pid at
+                    # boot already gets.
+                    record.state = "interrupted"
+                else:
+                    record.state = "done" if rc == 0 else "failed"
                 record.ended_at = time.time()
                 record.exit_code = rc
-                if rc != 0 and record.error_message is None:
+                if rc is not None and rc != 0 and record.error_message is None:
                     # Prefer a runner-supplied reason (e.g. HF Jobs'
                     # 'Job timeout') over the synthetic exit-code message.
                     reason = None
