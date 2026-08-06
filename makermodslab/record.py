@@ -746,8 +746,11 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                 recording_active = False
                 recording_start_time = None
                 phase_start_time = None
-                current_episode = 1
-                saved_episodes = 0
+                # current_episode/saved_episodes are deliberately left as-is:
+                # handle_recording_status reports saved_episodes in the terminal
+                # (session_ended) status, and the next session already resets both
+                # under the lock in handle_start_recording. Zeroing them here would
+                # erase the count before any poll can read it.
                 logger.info("Recording session ended")
 
         recording_thread = threading.Thread(target=recording_worker, name="recording-worker", daemon=True)
@@ -1027,6 +1030,10 @@ def handle_recording_status() -> dict[str, Any]:
         status["outcome"] = last_session_outcome
         status["error"] = last_session_error
         status["hint"] = friendly_hint(last_session_error)
+        # The frontend's exit handoff reads this to show/pass along how many
+        # episodes actually got saved — it must survive past recording_active
+        # flipping False, not just live-poll while recording is in progress.
+        status["saved_episodes"] = saved_episodes
 
     # Warn-but-allow arm-identity findings (the guard runs in the worker, after
     # the start response) — the frontend shows these as a non-blocking toast.

@@ -1013,6 +1013,11 @@ def test_worker_quit_discards_fresh_dataset_with_saved_episodes(
         assert status["session_ended"] is True
         assert status["discarded_empty"] is True
         assert not (tmp_lerobot_home / status["dataset_repo_id"]).exists()
+        # saved_episodes still reports what was recorded before the quit, even
+        # though the dataset directory itself was deleted — the two are
+        # independent facts (discarded_empty is what tells the frontend nothing
+        # was kept on disk).
+        assert status["saved_episodes"] == 2
     finally:
         record.discard_requested = False  # don't leak the armed flag into later tests
 
@@ -2059,6 +2064,12 @@ def test_worker_reports_ok_outcome_on_clean_end(monkeypatch: pytest.MonkeyPatch,
     assert status["outcome"] == "ok"
     assert status["error"] is None
     assert status["hint"] is None
+    # Regression (R5): the worker's finally block used to zero saved_episodes
+    # the instant it flipped recording_active False, and handle_recording_status
+    # only ever echoed saved_episodes while recording_active was True — so the
+    # terminal status silently reported nothing saved even though 2 episodes
+    # were recorded.
+    assert status["saved_episodes"] == 2
 
 
 # ---------------------------------------------------------------------------
@@ -2188,3 +2199,21 @@ def test_stop_and_wait_lets_an_already_in_progress_release_finish_gracefully(
     assert finished_gracefully.is_set(), "an already-in-progress graceful return was aborted early"
     assert not forced.is_set(), "stop_and_wait force-released a session already mid graceful return"
     worker.join(timeout=2.0)
+
+
+def test_recording_status_reports_saved_episodes_at_session_end(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The terminal status must keep reporting saved_episodes once the session
+    has ended — the frontend's exit handoff (RecordingSessionDialog) reads this
+    field to tell the user, and the upload flow, how many episodes exist."""
+    import makermodslab.record as record
+
+    monkeypatch.setattr(record, "recording_active", False)
+    monkeypatch.setattr(record, "current_phase", "completed")
+    monkeypatch.setattr(record, "saved_episodes", 5)
+
+    status = record.handle_recording_status()
+
+    assert status["session_ended"] is True
+    assert status["saved_episodes"] == 5
