@@ -1811,6 +1811,7 @@ def test_start_recording_blocked_when_calibration_active(monkeypatch: pytest.Mon
     result = record.handle_start_recording(_stub_recording_request())
     assert result == {
         "success": False,
+        "status_code": 409,
         "message": "Calibration is currently active. Stop it first.",
     }
 
@@ -1824,6 +1825,7 @@ def test_start_recording_blocked_when_auto_calibration_active(monkeypatch: pytes
     result = record.handle_start_recording(_stub_recording_request())
     assert result == {
         "success": False,
+        "status_code": 409,
         "message": "Auto-calibration is currently active. Stop it first.",
     }
 
@@ -1837,6 +1839,7 @@ def test_start_recording_blocked_when_wiggle_active(monkeypatch: pytest.MonkeyPa
     result = record.handle_start_recording(_stub_recording_request())
     assert result == {
         "success": False,
+        "status_code": 409,
         "message": "A gripper wiggle is currently in progress. Wait for it to finish.",
     }
 
@@ -1888,7 +1891,7 @@ def test_start_recording_resume_skips_timestamp_stamp(monkeypatch: pytest.Monkey
 def _stub_recording_request(**overrides):
     """Minimal RecordingRequest for exercising handle_start_recording's
     precondition checks — none of these reach real hardware."""
-    import makerlab.record as record
+    import makermodslab.record as record
 
     fields = {
         "leader_port": "COM_LEADER",
@@ -1914,9 +1917,9 @@ def _stub_recording_request(**overrides):
 def test_start_recording_rejects_with_409_when_recording_already_active(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import makerlab.record as record
-    import makerlab.rollout as rollout
-    import makerlab.teleoperate as teleop
+    import makermodslab.record as record
+    import makermodslab.rollout as rollout
+    import makermodslab.teleoperate as teleop
 
     monkeypatch.setattr(record, "recording_active", True)
     monkeypatch.setattr(record, "releasing", False)
@@ -1935,9 +1938,9 @@ def test_start_recording_rejects_with_409_while_previous_session_releases(
 ) -> None:
     """The "releasing" variant of the recording_active conflict is still a 409
     (a client should retry shortly), not a 400."""
-    import makerlab.record as record
-    import makerlab.rollout as rollout
-    import makerlab.teleoperate as teleop
+    import makermodslab.record as record
+    import makermodslab.rollout as rollout
+    import makermodslab.teleoperate as teleop
 
     monkeypatch.setattr(record, "recording_active", True)
     monkeypatch.setattr(record, "releasing", True)
@@ -1954,9 +1957,9 @@ def test_start_recording_rejects_with_409_while_previous_session_releases(
 def test_start_recording_rejects_with_409_when_teleoperation_active(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import makerlab.record as record
-    import makerlab.rollout as rollout
-    import makerlab.teleoperate as teleop
+    import makermodslab.record as record
+    import makermodslab.rollout as rollout
+    import makermodslab.teleoperate as teleop
 
     monkeypatch.setattr(record, "recording_active", False)
     monkeypatch.setattr(teleop, "teleoperation_active", True)
@@ -1972,9 +1975,9 @@ def test_start_recording_rejects_with_409_when_teleoperation_active(
 def test_start_recording_rejects_with_409_when_inference_active(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import makerlab.record as record
-    import makerlab.rollout as rollout
-    import makerlab.teleoperate as teleop
+    import makermodslab.record as record
+    import makermodslab.rollout as rollout
+    import makermodslab.teleoperate as teleop
 
     monkeypatch.setattr(record, "recording_active", False)
     monkeypatch.setattr(teleop, "teleoperation_active", False)
@@ -1990,9 +1993,9 @@ def test_start_recording_rejects_with_409_when_inference_active(
 def test_start_recording_rejects_with_400_for_invalid_dataset_name(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import makerlab.record as record
-    import makerlab.rollout as rollout
-    import makerlab.teleoperate as teleop
+    import makermodslab.record as record
+    import makermodslab.rollout as rollout
+    import makermodslab.teleoperate as teleop
 
     monkeypatch.setattr(record, "recording_active", False)
     monkeypatch.setattr(teleop, "teleoperation_active", False)
