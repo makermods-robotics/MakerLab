@@ -153,6 +153,34 @@ def _install_plan(spec, python, uv_path, has_pip, has_ensurepip):
     return None, []
 
 
+def _checkpoint_step_ready(step_dir):
+    """Whether `step_dir` (a lerobot checkpoints/<step>/ directory) has been
+    fully written and is safe to upload.
+
+    Reads lerobot's own completion signal instead of reconstructing its
+    internal write order. `checkpoints/last` is a relative symlink that
+    lerobot_train.py points at a step directory via update_last_checkpoint()
+    (lerobot/common/train_utils.py) strictly *after* save_checkpoint() has
+    returned for that step — so the link having advanced to (or past) this
+    step number is proof every file under step_dir is already on disk. The
+    `<=` (not `==`) covers two checkpoints completing inside one poll window.
+    See test_lerobot_last_checkpoint_symlink_matches_our_readiness_check for
+    the upstream contract this assumes.
+
+    Pure and self-contained (stdlib only) so its source can be inlined
+    verbatim into WRAPPER_SOURCE the same way _install_plan is, keeping the
+    in-container check and the unit-tested implementation identical.
+    """
+    import os
+
+    try:
+        target = os.readlink(step_dir.parent / "last")
+    except OSError:
+        return False
+    target = os.path.basename(target.rstrip("/"))
+    return target.isdigit() and step_dir.name.isdigit() and int(step_dir.name) <= int(target)
+
+
 def _cloud_device(flavor: str) -> str:
     """HF Jobs flavors are NVIDIA GPU boxes except the cpu-* tiers."""
     return "cpu" if flavor.startswith("cpu") else "cuda"
@@ -216,9 +244,11 @@ _CONTAINER_TRAIN_CONFIG_NAME = "train_config.json"
 #
 # Sent verbatim as the value of `python -c '...'`. Wrapper-side arguments
 # (the pinned lerobot spec) come before `--`; anything after `--` is
-# forwarded to the trainer. The __INSTALL_PLAN_SOURCE__ placeholder is
-# replaced with _install_plan's own source below, so the wrapper's installer
-# choice is the exact function the unit tests exercise.
+# forwarded to the trainer. The __INSTALL_PLAN_SOURCE__ and
+# __CHECKPOINT_READY_SOURCE__ placeholders are replaced with _install_plan's
+# and _checkpoint_step_ready's own source below, so the wrapper's installer
+# choice and checkpoint-completeness check are the exact functions the unit
+# tests exercise.
 _WRAPPER_TEMPLATE = r'''
 import importlib.util
 import os, re, shlex, shutil, sys, threading, subprocess
@@ -226,6 +256,8 @@ from pathlib import Path
 from huggingface_hub import HfApi
 
 __INSTALL_PLAN_SOURCE__
+
+__CHECKPOINT_READY_SOURCE__
 
 argv = sys.argv[1:]
 if "--" not in argv:
@@ -311,6 +343,10 @@ except Exception as exc:
     print(f"[wrapper] create_repo failed: {exc}", flush=True)
 
 seen = set()
+# Per-step count of consecutive not-ready polls, so a stalled gate (or a
+# genuinely slow write) surfaces in the log instead of looking identical to
+# "no checkpoint yet" for the whole run.
+waits = {}
 
 # Resume: download the parent checkpoint tree (pretrained_model/ +
 # training_state/) into <output_dir>/checkpoints/<step_dir>/ so lerobot's own
@@ -338,8 +374,23 @@ if resume_from:
         # copytree from the snapshot cache (symlinked files) into a real tree the
         # trainer can read/rewrite; resolve symlinks so lerobot sees plain files.
         shutil.copytree(src, dest, symlinks=False)
-        if not (dest / "training_state").is_dir():
-            print("[wrapper] resume checkpoint has no training_state/; cannot resume", flush=True)
+        # A bare training_state/ is_dir() check would pass a checkpoint that
+        # was itself partially uploaded before this fix existed (the exact
+        # bug this watcher fixes). There is no checkpoints/last symlink to
+        # check here — it lives beside the run's local output dir and is
+        # never pushed to the Hub — so check the files a resume actually
+        # needs directly instead.
+        has_weights = any((dest / "pretrained_model").glob("*.safetensors"))
+        has_training_state = (
+            (dest / "training_state" / "training_step.json").is_file()
+            and (dest / "training_state" / "rng_state.safetensors").is_file()
+        )
+        if not (has_weights and has_training_state):
+            print(
+                f"[wrapper] resume checkpoint at {dest} is incomplete "
+                f"(weights: {has_weights}, training_state: {has_training_state}); cannot resume",
+                flush=True,
+            )
             sys.exit(1)
         seen.add(step_dir)
         print(f"[wrapper] resume checkpoint ready at {dest}", flush=True)
@@ -397,10 +448,22 @@ def _scan_and_upload():
     for entry in entries:
         if not re.fullmatch(r"\d+", entry.name):
             continue
-        config_json = entry / "pretrained_model" / "config.json"
-        if not config_json.is_file():
-            continue
         if entry.name in seen:
+            continue
+        # config.json can exist while the rest of the step is still being
+        # written. See _checkpoint_step_ready.
+        if not _checkpoint_step_ready(entry):
+            waits[entry.name] = waits.get(entry.name, 0) + 1
+            if waits[entry.name] in (1, 20, 80):  # ~15s, ~5min, ~20min at the 15s poll interval
+                try:
+                    last_target = os.readlink(root / "last")
+                except OSError:
+                    last_target = None
+                print(
+                    f"[wrapper] checkpoint {entry.name} not complete yet "
+                    f"(poll {waits[entry.name]}); checkpoints/last -> {last_target}",
+                    flush=True,
+                )
             continue
         try:
             api.upload_folder(
@@ -410,6 +473,7 @@ def _scan_and_upload():
                 commit_message=f"checkpoint {entry.name}",
             )
             seen.add(entry.name)
+            waits.pop(entry.name, None)
             print(f"[wrapper] uploaded checkpoint {entry.name}", flush=True)
         except Exception as exc:
             print(f"[wrapper] upload failed for {entry.name}: {exc}", flush=True)
@@ -449,7 +513,9 @@ print(f"[wrapper] trainer exited with rc={rc}", flush=True)
 sys.exit(rc)
 '''
 
-WRAPPER_SOURCE = _WRAPPER_TEMPLATE.replace("__INSTALL_PLAN_SOURCE__", inspect.getsource(_install_plan))
+WRAPPER_SOURCE = _WRAPPER_TEMPLATE.replace(
+    "__INSTALL_PLAN_SOURCE__", inspect.getsource(_install_plan)
+).replace("__CHECKPOINT_READY_SOURCE__", inspect.getsource(_checkpoint_step_ready))
 
 # HF Jobs' platform default timeout has killed legitimate runs that pushed
 # the model successfully but were still uploading auxiliary files. 2h covers
@@ -473,6 +539,7 @@ def resolve_job_timeout(config: TrainingRequest) -> int | str:
     if config.hf_job_timeout:
         return parse_hf_duration(config.hf_job_timeout)
     return HF_JOB_TIMEOUT
+
 
 # Cadence at which the status poller hits inspect_job. inspect_job is the
 # authoritative source for job liveness; the log stream is best-effort and

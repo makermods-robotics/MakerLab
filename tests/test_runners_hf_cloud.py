@@ -314,6 +314,97 @@ def test_install_plan_reports_no_installer() -> None:
     assert _install_plan("spec", "/py", None, False, False) == (None, [])
 
 
+# -- checkpoint-completeness check (partial-upload race fix) --
+
+
+def test_checkpoint_step_ready_false_when_no_last_link_exists(tmp_path: Path) -> None:
+    """No checkpoints/last symlink at all — e.g. before the first checkpoint
+    of a run has completed — must not be mistaken for readiness."""
+    from makermodslab.runners.hf_cloud import _checkpoint_step_ready
+
+    step_dir = tmp_path / "005000"
+    step_dir.mkdir()
+    assert _checkpoint_step_ready(step_dir) is False
+
+
+def test_checkpoint_step_ready_false_when_last_points_to_an_earlier_step(tmp_path: Path) -> None:
+    """The exact race this fixes: lerobot writes pretrained_model/config.json
+    (and creates training_state/) well before the step is actually complete.
+    Only checkpoints/last advancing to (or past) this step is proof the whole
+    step finished — a step dir existing on its own proves nothing."""
+    from makermodslab.runners.hf_cloud import _checkpoint_step_ready
+
+    step_dir = tmp_path / "010000"
+    step_dir.mkdir()
+    (tmp_path / "005000").mkdir()
+    (tmp_path / "last").symlink_to("005000")
+    assert _checkpoint_step_ready(step_dir) is False
+
+
+def test_checkpoint_step_ready_true_when_last_points_to_this_step(tmp_path: Path) -> None:
+    from makermodslab.runners.hf_cloud import _checkpoint_step_ready
+
+    step_dir = tmp_path / "005000"
+    step_dir.mkdir()
+    (tmp_path / "last").symlink_to("005000")
+    assert _checkpoint_step_ready(step_dir) is True
+
+
+def test_checkpoint_step_ready_true_when_last_has_advanced_past_this_step(tmp_path: Path) -> None:
+    """<=, not ==: two checkpoints can complete inside one 15s poll window, and
+    a step must not go permanently unuploaded just because the poller missed
+    the instant `last` pointed at it exactly."""
+    from makermodslab.runners.hf_cloud import _checkpoint_step_ready
+
+    step_dir = tmp_path / "005000"
+    step_dir.mkdir()
+    (tmp_path / "010000").mkdir()
+    (tmp_path / "last").symlink_to("010000")
+    assert _checkpoint_step_ready(step_dir) is True
+
+
+def test_checkpoint_step_ready_false_when_last_is_not_a_symlink(tmp_path: Path) -> None:
+    """A plain file or directory named `last` (not the symlink lerobot writes)
+    must not be misread as a target step number."""
+    from makermodslab.runners.hf_cloud import _checkpoint_step_ready
+
+    step_dir = tmp_path / "005000"
+    step_dir.mkdir()
+    (tmp_path / "last").mkdir()
+    assert _checkpoint_step_ready(step_dir) is False
+
+
+def test_wrapper_source_inlines_the_tested_checkpoint_ready_check() -> None:
+    """The wrapper's checkpoint-completeness check is _checkpoint_step_ready's
+    source inlined verbatim, so the in-container upload gate is exactly the
+    function the tests above exercise — and _scan_and_upload must call it
+    instead of checking config.json directly."""
+    import inspect
+
+    from makermodslab.runners.hf_cloud import WRAPPER_SOURCE, _checkpoint_step_ready
+
+    assert inspect.getsource(_checkpoint_step_ready) in WRAPPER_SOURCE
+    assert "__CHECKPOINT_READY_SOURCE__" not in WRAPPER_SOURCE  # placeholder replaced
+    assert "_checkpoint_step_ready(entry)" in WRAPPER_SOURCE
+
+
+def test_lerobot_last_checkpoint_symlink_matches_our_readiness_check() -> None:
+    """_checkpoint_step_ready's readiness signal is lerobot's own
+    checkpoints/<LAST_CHECKPOINT_LINK> symlink, which lerobot_train.py points
+    at a step directory via update_last_checkpoint() strictly after
+    save_checkpoint() returns for that step. A lerobot pin bump that renames
+    the link or reorders those two calls should fail here in CI, not ship a
+    gate that silently never passes."""
+    import inspect
+
+    from lerobot.scripts import lerobot_train
+    from lerobot.utils.constants import LAST_CHECKPOINT_LINK
+
+    assert LAST_CHECKPOINT_LINK == "last"
+    src = inspect.getsource(lerobot_train)
+    assert src.index("save_checkpoint(") < src.index("update_last_checkpoint(checkpoint_dir)")
+
+
 # -- wrapper sanity --
 
 
@@ -331,15 +422,28 @@ def test_wrapper_source_compiles_and_launches_an_argv_list() -> None:
 
 def test_wrapper_source_handles_resume_download() -> None:
     """Cloud resume: the wrapper must parse --resume-from, download the parent
-    checkpoint tree, refuse when training_state/ is absent, and pre-seed `seen`
-    so it never re-uploads the checkpoint it just pulled down."""
+    checkpoint tree, refuse when the downloaded step is incomplete, and
+    pre-seed `seen` so it never re-uploads the checkpoint it just pulled
+    down."""
     from makermodslab.runners.hf_cloud import WRAPPER_SOURCE
 
     compile(WRAPPER_SOURCE, "<hf-jobs-wrapper>", "exec")  # still valid with the resume block
     assert "--resume-from=" in WRAPPER_SOURCE
     assert "snapshot_download" in WRAPPER_SOURCE
-    assert "training_state" in WRAPPER_SOURCE
     assert "seen.add(step_dir)" in WRAPPER_SOURCE
+
+
+def test_wrapper_source_resume_checks_weights_and_training_state_not_just_a_bare_dir() -> None:
+    """C4: a plain `training_state/` is_dir() check would pass a checkpoint
+    that was itself only partially uploaded before this fix existed — the
+    checkpoints/last symlink used by the live watcher isn't available here
+    (it's never pushed to the Hub), so the resume path checks the files it
+    actually needs directly instead of trusting the directory's existence."""
+    from makermodslab.runners.hf_cloud import WRAPPER_SOURCE
+
+    assert 'any((dest / "pretrained_model").glob("*.safetensors"))' in WRAPPER_SOURCE
+    assert '(dest / "training_state" / "training_step.json").is_file()' in WRAPPER_SOURCE
+    assert '(dest / "training_state" / "rng_state.safetensors").is_file()' in WRAPPER_SOURCE
 
 
 def test_wrapper_source_materializes_a_step_suffixed_finetune_base() -> None:
