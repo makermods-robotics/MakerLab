@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for makerlab.models — the trained-model browser.
+"""Tests for makermodslab.models — the trained-model browser.
 
 HF and the filesystem are MOCKED throughout: no test hits the real Hub, creates
 or deletes a real repo, or removes a real file outside its tmp dir. Local runs
@@ -19,8 +19,10 @@ are seeded into a temp outputs/train via a fresh JobRegistry."""
 
 from __future__ import annotations
 
+import contextlib
 import json
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -35,7 +37,7 @@ def _reset_model_cache():
     """Clear the module-global /models listing cache before and after each test
     so a cached result from one test never leaks into another (the conftest
     autouse fixture resets the datasets/jobs caches but not this one)."""
-    import makerlab.models as m
+    import makermodslab.models as m
 
     m.invalidate_model_listing_cache()
     yield
@@ -45,13 +47,13 @@ def _reset_model_cache():
 @pytest.fixture
 def registry(tmp_path: Path):
     """A JobRegistry rooted at a temp outputs/train, patched in as the module
-    singleton `makerlab.models.job_registry` reads. Watchdog is stopped so no
+    singleton `makermodslab.models.job_registry` reads. Watchdog is stopped so no
     background thread runs during the test."""
-    from makerlab.jobs import JobRegistry
+    from makermodslab.jobs import JobRegistry
 
     reg = JobRegistry(tmp_path / "outputs" / "train")
     reg.shutdown()  # stop the watchdog thread; we drive state directly
-    with patch("makerlab.models.job_registry", reg), patch("makerlab.jobs.job_registry", reg):
+    with patch("makermodslab.models.job_registry", reg), patch("makermodslab.jobs.job_registry", reg):
         yield reg
 
 
@@ -72,8 +74,8 @@ def _seed_run(
 
     Returns the pretrained_model dir. When with_checkpoint is False, no
     checkpoint is written (simulating a run that died before its first save)."""
-    from makerlab.jobs import JobRecord
-    from makerlab.train import TrainingRequest
+    from makermodslab.jobs import JobRecord
+    from makermodslab.train import TrainingRequest
 
     run_dir = registry._output_root / job_id / "run"
     record = JobRecord(
@@ -112,7 +114,7 @@ def _seed_run(
 
 
 def test_list_local_models_enumerates_completed_run(registry) -> None:
-    from makerlab.models import list_local_models
+    from makermodslab.models import list_local_models
 
     pretrained = _seed_run(registry, "act_pick_2026", policy_type="act", dataset="user/pick", steps=250)
 
@@ -129,7 +131,7 @@ def test_list_local_models_enumerates_completed_run(registry) -> None:
 
 def test_list_local_models_reads_train_config_over_record(registry) -> None:
     """policy_type / dataset come from train_config.json, not just the record."""
-    from makerlab.models import list_local_models
+    from makermodslab.models import list_local_models
 
     pretrained = _seed_run(registry, "run_a", policy_type="act", dataset="rec/ds", steps=100)
     # Rewrite train_config.json with DIFFERENT values than the record carries.
@@ -149,7 +151,7 @@ def test_list_local_models_reads_train_config_over_record(registry) -> None:
 
 
 def test_list_local_models_skips_running_and_failed(registry) -> None:
-    from makerlab.models import list_local_models
+    from makermodslab.models import list_local_models
 
     _seed_run(registry, "done_run", state="done")
     _seed_run(registry, "running_run", state="running")
@@ -162,14 +164,14 @@ def test_list_local_models_skips_running_and_failed(registry) -> None:
 def test_list_local_models_skips_checkpointless_run(registry) -> None:
     """A completed run that died before its first save has no checkpoint and is
     hidden (nothing to browse / serve)."""
-    from makerlab.models import list_local_models
+    from makermodslab.models import list_local_models
 
     _seed_run(registry, "no_ckpt", state="done", with_checkpoint=False)
     assert list_local_models() == []
 
 
 def test_list_local_models_skips_non_local_runner(registry) -> None:
-    from makerlab.models import list_local_models
+    from makermodslab.models import list_local_models
 
     _seed_run(registry, "cloud_run", state="done", runner="hf_cloud")
     assert list_local_models() == []
@@ -181,14 +183,14 @@ def test_list_local_models_skips_non_local_runner(registry) -> None:
 
 
 def test_list_all_models_merges_local_and_hub(registry) -> None:
-    from makerlab.models import list_all_models
+    from makermodslab.models import list_all_models
 
     _seed_run(registry, "local_only_run", state="done", dataset="user/pick", ended_at=1000.0)
 
     hub_rows = [
         {"repo_id": "user/hub_model", "last_modified": "2026-02-01T00:00:00+00:00", "private": False},
     ]
-    with patch("makerlab.models.list_hub_models", return_value=hub_rows):
+    with patch("makermodslab.models.list_hub_models", return_value=hub_rows):
         result = list_all_models()
 
     by_key = {m.get("id", m.get("repo_id")): m for m in result}
@@ -198,7 +200,7 @@ def test_list_all_models_merges_local_and_hub(registry) -> None:
 
 def test_list_all_models_collapses_pushed_run_to_both(registry, tmp_lerobot_home) -> None:
     """A local run whose hf_repo_id matches a Hub repo → one 'both' entry."""
-    from makerlab.models import list_all_models
+    from makermodslab.models import list_all_models
 
     _seed_run(
         registry,
@@ -211,7 +213,7 @@ def test_list_all_models_collapses_pushed_run_to_both(registry, tmp_lerobot_home
     hub_rows = [
         {"repo_id": "user/hub_model", "last_modified": "2026-01-01T00:00:00+00:00", "private": False},
     ]
-    with patch("makerlab.models.list_hub_models", return_value=hub_rows):
+    with patch("makermodslab.models.list_hub_models", return_value=hub_rows):
         result = list_all_models()
 
     # Collapsed: exactly one row, keyed on the hub repo id, source "both", and
@@ -227,25 +229,25 @@ def test_list_all_models_collapses_pushed_run_to_both(registry, tmp_lerobot_home
 def test_list_all_models_degrades_to_local_when_hub_empty(registry, tmp_lerobot_home) -> None:
     """The hub half is best-effort; an empty/failed hub listing degrades to
     local-only rather than crashing."""
-    from makerlab.models import list_all_models
+    from makermodslab.models import list_all_models
 
     _seed_run(registry, "local_run", state="done")
-    with patch("makerlab.models.list_hub_models", return_value=[]):
+    with patch("makermodslab.models.list_hub_models", return_value=[]):
         result = list_all_models()
     assert [m["id"] for m in result] == ["local_run"]
 
 
 def test_list_hub_models_empty_when_not_logged_in() -> None:
-    from makerlab.models import list_hub_models
+    from makermodslab.models import list_hub_models
 
-    with patch("makerlab.models.cached_whoami", return_value=None):
+    with patch("makermodslab.models.cached_whoami", return_value=None):
         assert list_hub_models() == []
 
 
 def test_list_hub_models_filters_and_dedupes() -> None:
     """Only repos with the `lerobot` tag or a run-repo timestamp suffix qualify;
     fan-out over authors is deduped by repo_id."""
-    from makerlab.models import list_hub_models
+    from makermodslab.models import list_hub_models
 
     m_tagged = MagicMock()
     m_tagged.id = "user/act_model"
@@ -269,8 +271,8 @@ def test_list_hub_models_filters_and_dedupes() -> None:
     fake_api.list_models.return_value = [m_tagged, m_run, m_other]
 
     with (
-        patch("makerlab.models.cached_whoami", return_value={"name": "user", "orgs": []}),
-        patch("makerlab.models.shared_hf_api", return_value=fake_api),
+        patch("makermodslab.models.cached_whoami", return_value={"name": "user", "orgs": []}),
+        patch("makermodslab.models.shared_hf_api", return_value=fake_api),
     ):
         rows = list_hub_models()
 
@@ -280,15 +282,15 @@ def test_list_hub_models_filters_and_dedupes() -> None:
 
 def test_list_all_models_surfaces_policy_type_from_name_only_tags(registry, tmp_lerobot_home) -> None:
     """BUG 2 regression: a hub repo named ``act_<stuff>`` carrying only the
-    org tags (makermods / MakerLab), with NO ``lerobot``/policy-type tag, must
+    org tags (makermods / MakerModsLab), with NO ``lerobot``/policy-type tag, must
     surface policy_type "act" end-to-end through list_all_models — via the
     name-prefix fallback in _hub_policy_type. This is the exact shape whose
     policy label went missing in the picker."""
-    from makerlab.models import list_all_models
+    from makermodslab.models import list_all_models
 
     m_named = MagicMock()
     m_named.id = "makermods/act_makermods_pick_up_red_cube_10_2026-07-04_17-09-13"
-    m_named.tags = ["makermods", "MakerLab"]  # org tags only — no policy-type tag
+    m_named.tags = ["makermods", "MakerModsLab"]  # org tags only — no policy-type tag
     m_named.last_modified = None
     m_named.private = False
 
@@ -296,8 +298,8 @@ def test_list_all_models_surfaces_policy_type_from_name_only_tags(registry, tmp_
     fake_api.list_models.return_value = [m_named]
 
     with (
-        patch("makerlab.models.cached_whoami", return_value={"name": "makermods", "orgs": []}),
-        patch("makerlab.models.shared_hf_api", return_value=fake_api),
+        patch("makermodslab.models.cached_whoami", return_value={"name": "makermods", "orgs": []}),
+        patch("makermodslab.models.shared_hf_api", return_value=fake_api),
     ):
         result = list_all_models()
 
@@ -310,12 +312,12 @@ def test_list_all_models_infers_pinned_model_policy_type_from_name(registry) -> 
     """A pinned custom model the Hub listing didn't return still gets its policy
     type inferred from the repo name (act_… / smolvla_…) rather than dropping to
     None — so the picker shows the label even for a pin-only row."""
-    from makerlab.models import list_all_models
+    from makermodslab.models import list_all_models
 
     with (
-        patch("makerlab.models.list_hub_models", return_value=[]),
+        patch("makermodslab.models.list_hub_models", return_value=[]),
         patch(
-            "makerlab.models.get_saved_custom_models",
+            "makermodslab.models.get_saved_custom_models",
             return_value=["makermods/smolvla_makermods_sock_2026-07-08_01-47-15"],
         ),
     ):
@@ -329,12 +331,482 @@ def test_list_all_models_infers_pinned_model_policy_type_from_name(registry) -> 
 
 
 # ---------------------------------------------------------------------------
+# list_all_models — naming a repo-keyed row after the run that produced it.
+# ---------------------------------------------------------------------------
+
+
+def _seed_cloud_run(
+    registry,
+    job_id: str,
+    *,
+    repo_id: str,
+    state: str = "done",
+    started_at: float = 1.0,
+    policy_type: str = "smolvla",
+    dataset: str = "makermods/eraser",
+    steps: int = 20000,
+    display_name: str | None = None,
+) -> None:
+    """Register a cloud JobRecord publishing to `repo_id`. No local checkpoint:
+    a cloud run's artifacts live on the Hub, so it never appears in
+    list_local_models — only as the identity behind a Hub-keyed row."""
+    from makermodslab.jobs import JobRecord
+    from makermodslab.train import TrainingRequest
+
+    registry._records[job_id] = JobRecord(
+        id=job_id,
+        name=job_id,
+        display_name=display_name,
+        state=state,
+        config=TrainingRequest(dataset_repo_id=dataset, policy_type=policy_type, steps=steps),
+        output_dir="",
+        started_at=started_at,
+        ended_at=started_at + 1.0,
+        runner="hf_cloud",
+        hf_repo_id=repo_id,
+    )
+
+
+class _NoHubFiles:
+    """HfApi stand-in for the registry's per-record checkpoint count: an empty
+    repo listing, so seeding cloud records costs no network."""
+
+    def list_repo_files(self, repo_id, repo_type):
+        return []
+
+
+def _sandboxed_listing(hub_rows: list[dict[str, Any]]):
+    """The patches every list_all_models test needs to stay off the network and
+    off the developer's real pinned/hidden-model files."""
+    return (
+        patch("makermodslab.models.list_hub_models", return_value=hub_rows),
+        patch("makermodslab.models.get_saved_custom_models", return_value=[]),
+        patch("makermodslab.models.get_hidden_models", return_value=set()),
+        patch("makermodslab.jobs.shared_hf_api", return_value=_NoHubFiles()),
+    )
+
+
+_SHARED_REPO = "makermods/smolvla_eraser_2026-07-31_17-35-54"
+
+
+def test_list_all_models_names_repo_row_after_the_run_that_finished(registry, tmp_lerobot_home) -> None:
+    """MT12's user-facing symptom: a cloud resume reuses its PARENT's output
+    repo, so a resume chain shares one repo named after run #1. /models keys Hub
+    entries by repo_id, so the run that actually finished had no entry under its
+    own name — the only row was the parent's, with null steps/dataset. The row
+    now carries the finishing run's identity while its routing keys (id /
+    repo_id / hf_repo_id) stay the repo id."""
+    from makermodslab.models import list_all_models
+
+    _seed_cloud_run(registry, "run_17-35-54", repo_id=_SHARED_REPO, state="failed", started_at=100.0)
+    _seed_cloud_run(registry, "run_20-31-48", repo_id=_SHARED_REPO, state="failed", started_at=200.0)
+    # The one that reached its 20k target — newer AND done, so it names the repo.
+    _seed_cloud_run(registry, "run_22-40-15", repo_id=_SHARED_REPO, state="done", started_at=300.0)
+
+    hub_rows = [{"repo_id": _SHARED_REPO, "last_modified": None, "private": False}]
+    with contextlib.ExitStack() as stack:
+        for cm in _sandboxed_listing(hub_rows):
+            stack.enter_context(cm)
+        result = list_all_models()
+
+    row = next(r for r in result if r["repo_id"] == _SHARED_REPO)
+    assert row["name"] == "run_22-40-15"
+    # Identity is untouched — every request (info / download / deploy) routes on it.
+    assert row["id"] == _SHARED_REPO
+    assert row["hf_repo_id"] == _SHARED_REPO
+    assert row["source"] == "hub"
+    # Detail the Hub listing had no way to know.
+    assert row["steps"] == 20000
+    assert row["dataset"] == "makermods/eraser"
+    assert row["policy_type"] == "smolvla"
+
+
+def test_list_all_models_repo_row_prefers_done_over_newer_unfinished(registry, tmp_lerobot_home) -> None:
+    """A later resume attempt that failed does not get to name the repo: the run
+    that reached "done" published the policy sitting at the repo root."""
+    from makermodslab.models import list_all_models
+
+    _seed_cloud_run(registry, "finished", repo_id=_SHARED_REPO, state="done", started_at=100.0)
+    _seed_cloud_run(registry, "later_crash", repo_id=_SHARED_REPO, state="failed", started_at=999.0)
+
+    hub_rows = [{"repo_id": _SHARED_REPO, "last_modified": None, "private": False}]
+    with contextlib.ExitStack() as stack:
+        for cm in _sandboxed_listing(hub_rows):
+            stack.enter_context(cm)
+        result = list_all_models()
+
+    assert next(r for r in result if r["repo_id"] == _SHARED_REPO)["name"] == "finished"
+
+
+def test_list_all_models_repo_row_uses_display_name_when_renamed(registry, tmp_lerobot_home) -> None:
+    """A renamed run shows its alias — the same display_name/name precedence the
+    local rows and the job cards use."""
+    from makermodslab.models import list_all_models
+
+    _seed_cloud_run(
+        registry, "raw_run_id", repo_id=_SHARED_REPO, state="done", display_name="Eraser placing v3"
+    )
+    hub_rows = [{"repo_id": _SHARED_REPO, "last_modified": None, "private": False}]
+    with contextlib.ExitStack() as stack:
+        for cm in _sandboxed_listing(hub_rows):
+            stack.enter_context(cm)
+        result = list_all_models()
+
+    assert next(r for r in result if r["repo_id"] == _SHARED_REPO)["name"] == "Eraser placing v3"
+
+
+def test_list_all_models_repo_row_falls_back_to_newest_when_none_done(registry, tmp_lerobot_home) -> None:
+    """No run in the chain finished (all failed/interrupted): the newest one
+    still names the repo — it is the last thing that wrote to it."""
+    from makermodslab.models import list_all_models
+
+    _seed_cloud_run(registry, "older", repo_id=_SHARED_REPO, state="failed", started_at=100.0)
+    _seed_cloud_run(registry, "newest", repo_id=_SHARED_REPO, state="interrupted", started_at=400.0)
+
+    hub_rows = [{"repo_id": _SHARED_REPO, "last_modified": None, "private": False}]
+    with contextlib.ExitStack() as stack:
+        for cm in _sandboxed_listing(hub_rows):
+            stack.enter_context(cm)
+        result = list_all_models()
+
+    row = next(r for r in result if r["repo_id"] == _SHARED_REPO)
+    assert row["name"] == "newest"
+    # Never finished and never reported a step ⇒ no step count invented.
+    assert row["steps"] is None
+
+
+def test_list_all_models_local_checkpoint_detail_wins_over_job_identity(registry, tmp_lerobot_home) -> None:
+    """A local run collapsed into its Hub row already owns the row's name and
+    checkpoint-derived detail; the run-identity pass must not overwrite it."""
+    from makermodslab.models import list_all_models
+
+    _seed_run(
+        registry,
+        "pushed_run",
+        state="done",
+        dataset="user/pick",
+        steps=250,
+        hf_repo_id="user/hub_model",
+    )
+    hub_rows = [{"repo_id": "user/hub_model", "last_modified": None, "private": False}]
+    with contextlib.ExitStack() as stack:
+        for cm in _sandboxed_listing(hub_rows):
+            stack.enter_context(cm)
+        result = list_all_models()
+
+    row = next(r for r in result if r["repo_id"] == "user/hub_model")
+    assert row["source"] == "both"
+    assert row["name"] == "run pushed_run"  # the local row's name, not re-derived
+    assert row["steps"] == 250  # the checkpoint's real step, not the config target
+    assert row["id"] == "pushed_run"
+
+
+def test_list_all_models_repo_row_ignores_imported_records(registry, tmp_lerobot_home) -> None:
+    """Re-importing a repo registers a POINTER to it, whose config is a
+    placeholder (dataset "(imported)", the default 10000 steps) and which is
+    always done + newest. It must not outrank the run that trained the weights,
+    or the row would advertise a step count and dataset nobody trained on."""
+    from makermodslab.jobs import JobRecord
+    from makermodslab.models import list_all_models
+    from makermodslab.train import TrainingRequest
+
+    _seed_cloud_run(registry, "real_run", repo_id=_SHARED_REPO, state="done", started_at=100.0)
+    registry._records["smolvla_imported_x"] = JobRecord(
+        id="smolvla_imported_x",
+        name="smolvla_imported_x",
+        state="done",
+        config=TrainingRequest(dataset_repo_id="(imported)", policy_type="smolvla", steps=10000),
+        output_dir="",
+        started_at=900.0,  # newest, and done — would win without the guard
+        runner="imported",
+        hf_repo_id=_SHARED_REPO,
+    )
+
+    hub_rows = [{"repo_id": _SHARED_REPO, "last_modified": None, "private": False}]
+    with contextlib.ExitStack() as stack:
+        for cm in _sandboxed_listing(hub_rows):
+            stack.enter_context(cm)
+        result = list_all_models()
+
+    row = next(r for r in result if r["repo_id"] == _SHARED_REPO)
+    assert row["name"] == "real_run"
+    assert row["steps"] == 20000
+    assert row["dataset"] == "makermods/eraser"
+
+
+def test_list_all_models_reduces_a_generated_run_name_to_the_task(registry, tmp_lerobot_home) -> None:
+    """An auto-generated run name is "{POLICY} · {dataset}" (jobs.start). Both
+    halves are printed elsewhere on the row — policy_type and dataset each have
+    their own field — so the title line keeps only the task: policy prefix and
+    dataset namespace both peeled."""
+    from makermodslab.models import list_all_models
+
+    _seed_cloud_run(registry, "generated", repo_id=_SHARED_REPO, state="done")
+    registry._records["generated"].name = "SMOLVLA · makermods/eraser_place"
+    hub_rows = [{"repo_id": _SHARED_REPO, "last_modified": None, "private": False}]
+    with contextlib.ExitStack() as stack:
+        for cm in _sandboxed_listing(hub_rows):
+            stack.enter_context(cm)
+        result = list_all_models()
+
+    row = next(r for r in result if r["repo_id"] == _SHARED_REPO)
+    assert row["name"] == "eraser_place"
+    # Neither fact is lost, just moved to where each is rendered once.
+    assert row["policy_type"] == "smolvla"
+    assert row["dataset"] == "makermods/eraser"
+
+
+def test_list_all_models_keeps_a_generated_name_whose_dataset_has_no_namespace(
+    registry, tmp_lerobot_home
+) -> None:
+    """A dataset id with no "/" is already the task — nothing to peel off it."""
+    from makermodslab.models import list_all_models
+
+    _seed_cloud_run(registry, "bare", repo_id=_SHARED_REPO, state="done")
+    registry._records["bare"].name = "ACT · eraser_place"
+    hub_rows = [{"repo_id": _SHARED_REPO, "last_modified": None, "private": False}]
+    with contextlib.ExitStack() as stack:
+        for cm in _sandboxed_listing(hub_rows):
+            stack.enter_context(cm)
+        result = list_all_models()
+
+    assert next(r for r in result if r["repo_id"] == _SHARED_REPO)["name"] == "eraser_place"
+
+
+def test_list_all_models_keeps_a_user_name_that_contains_the_separator(registry, tmp_lerobot_home) -> None:
+    """Only the GENERATED shape is peeled. A job_name the user typed keeps every
+    word, even when it contains " · " — the head isn't a policy type."""
+    from makermodslab.models import list_all_models
+
+    _seed_cloud_run(registry, "typed", repo_id=_SHARED_REPO, state="done")
+    registry._records["typed"].name = "Monday · eraser retrain"
+    hub_rows = [{"repo_id": _SHARED_REPO, "last_modified": None, "private": False}]
+    with contextlib.ExitStack() as stack:
+        for cm in _sandboxed_listing(hub_rows):
+            stack.enter_context(cm)
+        result = list_all_models()
+
+    assert next(r for r in result if r["repo_id"] == _SHARED_REPO)["name"] == ("Monday · eraser retrain")
+
+
+def test_list_all_models_leaves_untracked_repo_row_alone(registry, tmp_lerobot_home) -> None:
+    """A Hub repo no tracked run publishes to keeps the repo id as its name —
+    the enrichment is a fill-in, never a rewrite of unknown rows."""
+    from makermodslab.models import list_all_models
+
+    _seed_cloud_run(registry, "other_run", repo_id="makermods/some_other_repo", state="done")
+    hub_rows = [{"repo_id": "user/untracked", "last_modified": None, "private": False}]
+    with contextlib.ExitStack() as stack:
+        for cm in _sandboxed_listing(hub_rows):
+            stack.enter_context(cm)
+        result = list_all_models()
+
+    row = next(r for r in result if r["repo_id"] == "user/untracked")
+    assert row["name"] == "user/untracked"
+    assert row["steps"] is None
+
+
+def test_list_all_models_separates_two_runs_that_share_a_name(registry, tmp_lerobot_home) -> None:
+    """The reported case: retraining one task publishes a SECOND repo, and both
+    rows take the same auto-generated run name ("SMOLVLA · ns/task", from
+    jobs.start, peeled to "ns/task" by the enrichment) — the picker then showed
+    one label twice with nothing on either row to say which is which. The rows'
+    last-modified dates break the tie; the routing keys stay untouched."""
+    from makermodslab.models import list_all_models
+
+    shared_name = "SMOLVLA · makermods/eraser_place_unblurry_real"
+    # What the enrichment renders: the task alone — policy prefix and dataset
+    # namespace both dropped (each has its own field on the row).
+    shown = "eraser_place_unblurry_real"
+    long_repo = "makermods/smolvla_makermods_eraser_place_unblurry_real_2026-07-31_17-35-54"
+    short_repo = "makermods/smolvla_makermods_eraser_place_unblurry_real_2026-08-02_12-22-54"
+    _seed_cloud_run(registry, "run_long", repo_id=long_repo, state="done", steps=20000)
+    _seed_cloud_run(registry, "run_short", repo_id=short_repo, state="done", steps=5500)
+    registry._records["run_long"].name = shared_name
+    registry._records["run_short"].name = shared_name
+
+    hub_rows = [
+        {"repo_id": long_repo, "last_modified": "2026-07-31T17:35:54Z", "private": False},
+        {"repo_id": short_repo, "last_modified": "2026-08-02T12:22:54Z", "private": False},
+    ]
+    with contextlib.ExitStack() as stack:
+        for cm in _sandboxed_listing(hub_rows):
+            stack.enter_context(cm)
+        result = list_all_models()
+
+    by_repo = {r["repo_id"]: r for r in result}
+    assert by_repo[long_repo]["name"] == f"{shown} (2026-07-31)"
+    assert by_repo[short_repo]["name"] == f"{shown} (2026-08-02)"
+    assert by_repo[long_repo]["hf_repo_id"] == long_repo
+    assert by_repo[short_repo]["hf_repo_id"] == short_repo
+
+
+def test_list_all_models_same_day_collision_escalates_to_the_time(registry, tmp_lerobot_home) -> None:
+    """Two runs of one task on one day: the date alone doesn't separate them, so
+    the next rung of the ladder is used for BOTH rows."""
+    from makermodslab.models import list_all_models
+
+    shared_name = "SMOLVLA · makermods/eraser_place_unblurry_real"
+    shown = "eraser_place_unblurry_real"
+    a_repo = "makermods/smolvla_a_2026-07-31_17-35-54"
+    b_repo = "makermods/smolvla_b_2026-07-31_12-22-54"
+    _seed_cloud_run(registry, "run_a", repo_id=a_repo, state="done")
+    _seed_cloud_run(registry, "run_b", repo_id=b_repo, state="done")
+    registry._records["run_a"].name = shared_name
+    registry._records["run_b"].name = shared_name
+
+    hub_rows = [
+        {"repo_id": a_repo, "last_modified": "2026-07-31T17:35:54Z", "private": False},
+        {"repo_id": b_repo, "last_modified": "2026-07-31T12:22:54Z", "private": False},
+    ]
+    with contextlib.ExitStack() as stack:
+        for cm in _sandboxed_listing(hub_rows):
+            stack.enter_context(cm)
+        result = list_all_models()
+
+    by_repo = {r["repo_id"]: r for r in result}
+    assert by_repo[a_repo]["name"] == f"{shown} (2026-07-31 17:35)"
+    assert by_repo[b_repo]["name"] == f"{shown} (2026-07-31 12:22)"
+
+
+def test_list_all_models_does_not_separate_two_policies_of_one_task(registry, tmp_lerobot_home) -> None:
+    """An ACT and a SmolVLA of one task both enrich to the same title, but the
+    row already carries `policy_type` in its own field — the card's Policy row
+    separates them. Suffixing would spend the title line restating that, and
+    would suggest the pair differs by when it ran rather than by what it is."""
+    from makermodslab.models import list_all_models
+
+    act_repo = "makermods/act_makermods_eraser_place_2026-07-31_17-35-54"
+    smolvla_repo = "makermods/smolvla_makermods_eraser_place_2026-08-02_12-22-54"
+    _seed_cloud_run(registry, "run_act", repo_id=act_repo, state="done", policy_type="act")
+    _seed_cloud_run(registry, "run_smolvla", repo_id=smolvla_repo, state="done", policy_type="smolvla")
+    registry._records["run_act"].name = "ACT · makermods/eraser_place"
+    registry._records["run_smolvla"].name = "SMOLVLA · makermods/eraser_place"
+
+    hub_rows = [
+        {"repo_id": act_repo, "last_modified": "2026-07-31T17:35:54Z", "private": False},
+        {"repo_id": smolvla_repo, "last_modified": "2026-08-02T12:22:54Z", "private": False},
+    ]
+    with contextlib.ExitStack() as stack:
+        for cm in _sandboxed_listing(hub_rows):
+            stack.enter_context(cm)
+        result = list_all_models()
+
+    by_repo = {r["repo_id"]: r for r in result}
+    assert by_repo[act_repo]["name"] == "eraser_place"
+    assert by_repo[smolvla_repo]["name"] == "eraser_place"
+    # The fact that separates them is rendered where it belongs.
+    assert by_repo[act_repo]["policy_type"] == "act"
+    assert by_repo[smolvla_repo]["policy_type"] == "smolvla"
+
+
+def test_list_all_models_still_separates_two_runs_of_one_policy(registry, tmp_lerobot_home) -> None:
+    """The policy key narrows collisions rather than abolishing them: two
+    SmolVLA runs of one task are still two rows nothing else tells apart."""
+    from makermodslab.models import list_all_models
+
+    a_repo = "makermods/smolvla_makermods_eraser_place_2026-07-31_17-35-54"
+    b_repo = "makermods/smolvla_makermods_eraser_place_2026-08-02_12-22-54"
+    _seed_cloud_run(registry, "run_a", repo_id=a_repo, state="done", policy_type="smolvla")
+    _seed_cloud_run(registry, "run_b", repo_id=b_repo, state="done", policy_type="smolvla")
+    registry._records["run_a"].name = "SMOLVLA · makermods/eraser_place"
+    registry._records["run_b"].name = "SMOLVLA · makermods/eraser_place"
+
+    hub_rows = [
+        {"repo_id": a_repo, "last_modified": "2026-07-31T17:35:54Z", "private": False},
+        {"repo_id": b_repo, "last_modified": "2026-08-02T12:22:54Z", "private": False},
+    ]
+    with contextlib.ExitStack() as stack:
+        for cm in _sandboxed_listing(hub_rows):
+            stack.enter_context(cm)
+        result = list_all_models()
+
+    by_repo = {r["repo_id"]: r for r in result}
+    assert by_repo[a_repo]["name"] == "eraser_place (2026-07-31)"
+    assert by_repo[b_repo]["name"] == "eraser_place (2026-08-02)"
+
+
+def test_list_all_models_suffix_prefers_the_name_stamp_over_last_modified(registry, tmp_lerobot_home) -> None:
+    """The disambiguator is WHEN THE RUN RAN, and the repo name carries that
+    verbatim. `last_modified` does not: it moves on any push to the repo — a
+    re-push of the same weights, a README edit, a later checkpoint upload — so
+    two runs weeks apart can both report a date in September and read, next to
+    each other, as simply wrong. The name's stamp never moves."""
+    from makermodslab.models import list_all_models
+
+    july_repo = "makermods/smolvla_makermods_eraser_place_2026-07-31_17-35-54"
+    august_repo = "makermods/smolvla_makermods_eraser_place_2026-08-02_12-22-54"
+    _seed_cloud_run(registry, "run_july", repo_id=july_repo, state="done")
+    _seed_cloud_run(registry, "run_august", repo_id=august_repo, state="done")
+    registry._records["run_july"].name = "SMOLVLA · makermods/eraser_place"
+    registry._records["run_august"].name = "SMOLVLA · makermods/eraser_place"
+
+    # Both repos re-pushed on the same later day: last_modified would date both
+    # rows to September, and the date rung wouldn't even separate them.
+    hub_rows = [
+        {"repo_id": july_repo, "last_modified": "2026-09-20T10:00:00Z", "private": False},
+        {"repo_id": august_repo, "last_modified": "2026-09-20T11:00:00Z", "private": False},
+    ]
+    with contextlib.ExitStack() as stack:
+        for cm in _sandboxed_listing(hub_rows):
+            stack.enter_context(cm)
+        result = list_all_models()
+
+    by_repo = {r["repo_id"]: r for r in result}
+    assert by_repo[july_repo]["name"] == "eraser_place (2026-07-31)"
+    assert by_repo[august_repo]["name"] == "eraser_place (2026-08-02)"
+
+
+def test_list_all_models_suffix_falls_back_to_last_modified_without_a_stamp(
+    registry, tmp_lerobot_home
+) -> None:
+    """A repo whose name carries no run stamp — a hand-named upload, a community
+    repo — has only last_modified to offer, so that is what it uses."""
+    from makermodslab.models import list_all_models
+
+    v1_repo = "makermods/eraser_place_v1"
+    v2_repo = "makermods/eraser_place_v2"
+    _seed_cloud_run(registry, "run_v1", repo_id=v1_repo, state="done")
+    _seed_cloud_run(registry, "run_v2", repo_id=v2_repo, state="done")
+    registry._records["run_v1"].name = "SMOLVLA · makermods/eraser_place"
+    registry._records["run_v2"].name = "SMOLVLA · makermods/eraser_place"
+
+    hub_rows = [
+        {"repo_id": v1_repo, "last_modified": "2026-07-31T17:35:54Z", "private": False},
+        {"repo_id": v2_repo, "last_modified": "2026-08-02T12:22:54Z", "private": False},
+    ]
+    with contextlib.ExitStack() as stack:
+        for cm in _sandboxed_listing(hub_rows):
+            stack.enter_context(cm)
+        result = list_all_models()
+
+    by_repo = {r["repo_id"]: r for r in result}
+    assert by_repo[v1_repo]["name"] == "eraser_place (2026-07-31)"
+    assert by_repo[v2_repo]["name"] == "eraser_place (2026-08-02)"
+
+
+def test_list_all_models_leaves_unique_names_alone(registry, tmp_lerobot_home) -> None:
+    """The collision pass is a no-op on a listing with no duplicates — a row
+    never acquires a date it doesn't need to be distinguishable."""
+    from makermodslab.models import list_all_models
+
+    _seed_cloud_run(registry, "solo_run", repo_id=_SHARED_REPO, state="done")
+    hub_rows = [{"repo_id": _SHARED_REPO, "last_modified": "2026-07-31T17:35:54Z", "private": False}]
+    with contextlib.ExitStack() as stack:
+        for cm in _sandboxed_listing(hub_rows):
+            stack.enter_context(cm)
+        result = list_all_models()
+
+    assert next(r for r in result if r["repo_id"] == _SHARED_REPO)["name"] == "solo_run"
+
+
+# ---------------------------------------------------------------------------
 # get_model_info.
 # ---------------------------------------------------------------------------
 
 
 def test_get_model_info_local(registry) -> None:
-    from makerlab.models import get_model_info
+    from makermodslab.models import get_model_info
 
     pretrained = _seed_run(registry, "info_run", policy_type="act", dataset="user/pick", steps=100)
     (pretrained / "extra.bin").write_bytes(b"x" * 42)
@@ -348,28 +820,28 @@ def test_get_model_info_local(registry) -> None:
 
 
 def test_get_model_info_unknown_returns_none(registry) -> None:
-    from makerlab.models import get_model_info
+    from makermodslab.models import get_model_info
 
-    with patch("makerlab.models.hf_hub_offline", return_value=True):
+    with patch("makermodslab.models.hf_hub_offline", return_value=True):
         assert get_model_info("nope") is None
 
 
 # ---------------------------------------------------------------------------
-# upload_local_model — tags via with_makerlab_tag, create_repo/upload_folder mocked.
+# upload_local_model — tags via with_makermodslab_tag, create_repo/upload_folder mocked.
 # ---------------------------------------------------------------------------
 
 
 def test_upload_local_model_calls_hub_public_and_tagged(registry) -> None:
-    from makerlab.models import upload_local_model
+    from makermodslab.models import upload_local_model
 
     pretrained = _seed_run(registry, "up_run", policy_type="act", dataset="user/pick", steps=100)
 
     fake_api = MagicMock()
     with (
-        patch("makerlab.models.hf_hub_offline", return_value=False),
-        patch("makerlab.models.cached_whoami", return_value={"name": "user", "orgs": []}),
-        patch("makerlab.models.shared_hf_api", return_value=fake_api),
-        patch("makerlab.models.metadata_update") as mock_meta,
+        patch("makermodslab.models.hf_hub_offline", return_value=False),
+        patch("makermodslab.models.cached_whoami", return_value={"name": "user", "orgs": []}),
+        patch("makermodslab.models.shared_hf_api", return_value=fake_api),
+        patch("makermodslab.models.metadata_update") as mock_meta,
     ):
         result = upload_local_model("up_run")
 
@@ -384,43 +856,43 @@ def test_upload_local_model_calls_hub_public_and_tagged(registry) -> None:
     assert ukw["folder_path"] == str(pretrained)
     assert ukw["repo_type"] == "model"
 
-    # tags run through with_makerlab_tag (makermods / openbooth / MakerLab present).
+    # tags run through with_makermodslab_tag (makermods / openbooth / MakerModsLab present).
     _, mkw = mock_meta.call_args
     assert mkw["repo_type"] == "model"
     assert mkw["overwrite"] is True
     tags = mock_meta.call_args.args[1]["tags"]
-    assert {"makermods", "openbooth", "MakerLab"}.issubset(set(tags))
+    assert {"makermods", "openbooth", "MakerModsLab"}.issubset(set(tags))
     assert set(result["tags"]) == set(tags)
 
 
 def test_upload_local_model_rejects_offline(registry) -> None:
-    from makerlab.models import ModelError, upload_local_model
+    from makermodslab.models import ModelError, upload_local_model
 
     _seed_run(registry, "off_run", state="done")
-    with patch("makerlab.models.hf_hub_offline", return_value=True), pytest.raises(ModelError) as ei:
+    with patch("makermodslab.models.hf_hub_offline", return_value=True), pytest.raises(ModelError) as ei:
         upload_local_model("off_run")
     assert ei.value.status == 400
 
 
 def test_upload_local_model_404_when_no_checkpoint(registry) -> None:
-    from makerlab.models import ModelError, upload_local_model
+    from makermodslab.models import ModelError, upload_local_model
 
     _seed_run(registry, "empty_run", state="done", with_checkpoint=False)
-    with patch("makerlab.models.hf_hub_offline", return_value=False), pytest.raises(ModelError) as ei:
+    with patch("makermodslab.models.hf_hub_offline", return_value=False), pytest.raises(ModelError) as ei:
         upload_local_model("empty_run")
     assert ei.value.status == 404
 
 
 def test_upload_local_model_maps_auth_error(registry) -> None:
-    from makerlab.models import ModelError, upload_local_model
+    from makermodslab.models import ModelError, upload_local_model
 
     _seed_run(registry, "auth_run", state="done")
     fake_api = MagicMock()
     fake_api.create_repo.side_effect = Exception("401 Client Error: You must be authenticated")
     with (
-        patch("makerlab.models.hf_hub_offline", return_value=False),
-        patch("makerlab.models.cached_whoami", return_value={"name": "user", "orgs": []}),
-        patch("makerlab.models.shared_hf_api", return_value=fake_api),
+        patch("makermodslab.models.hf_hub_offline", return_value=False),
+        patch("makermodslab.models.cached_whoami", return_value={"name": "user", "orgs": []}),
+        patch("makermodslab.models.shared_hf_api", return_value=fake_api),
         pytest.raises(ModelError) as ei,
     ):
         upload_local_model("auth_run")
@@ -433,7 +905,7 @@ def test_upload_local_model_maps_auth_error(registry) -> None:
 
 
 def test_delete_local_model_removes_run_dir(registry) -> None:
-    from makerlab.models import delete_local_model
+    from makermodslab.models import delete_local_model
 
     _seed_run(registry, "del_run", state="done")
     run_root = registry._output_root / "del_run"
@@ -446,7 +918,7 @@ def test_delete_local_model_removes_run_dir(registry) -> None:
 
 
 def test_delete_local_model_404_unknown(registry) -> None:
-    from makerlab.models import ModelError, delete_local_model
+    from makermodslab.models import ModelError, delete_local_model
 
     with pytest.raises(ModelError) as ei:
         delete_local_model("ghost")
@@ -454,7 +926,7 @@ def test_delete_local_model_404_unknown(registry) -> None:
 
 
 def test_delete_local_model_409_when_running(registry) -> None:
-    from makerlab.models import ModelError, delete_local_model
+    from makermodslab.models import ModelError, delete_local_model
 
     _seed_run(registry, "live_run", state="running")
     with pytest.raises(ModelError) as ei:
@@ -467,9 +939,9 @@ def test_delete_local_model_409_when_running(registry) -> None:
 def test_delete_local_model_refuses_path_outside_output_root(registry) -> None:
     """A record whose id resolves OUTSIDE outputs/train (traversal) is refused;
     no rmtree runs, so nothing outside the sandbox is touched."""
-    from makerlab.jobs import JobRecord
-    from makerlab.models import ModelError, delete_local_model
-    from makerlab.train import TrainingRequest
+    from makermodslab.jobs import JobRecord
+    from makermodslab.models import ModelError, delete_local_model
+    from makermodslab.train import TrainingRequest
 
     # An id containing '..' would resolve <root>/../evil, escaping the root.
     evil_id = "../evil"
@@ -484,14 +956,14 @@ def test_delete_local_model_refuses_path_outside_output_root(registry) -> None:
         runner="local",
     )
 
-    with patch("makerlab.jobs.shutil.rmtree") as mock_rmtree, pytest.raises(ModelError) as ei:
+    with patch("makermodslab.jobs.shutil.rmtree") as mock_rmtree, pytest.raises(ModelError) as ei:
         delete_local_model(evil_id)
     assert ei.value.status == 400
     mock_rmtree.assert_not_called()  # nothing was deleted
 
 
 def test_delete_local_model_400_non_local(registry) -> None:
-    from makerlab.models import ModelError, delete_local_model
+    from makermodslab.models import ModelError, delete_local_model
 
     _seed_run(registry, "cloud_del", state="done", runner="hf_cloud")
     with pytest.raises(ModelError) as ei:
@@ -505,7 +977,7 @@ def test_delete_local_model_400_non_local(registry) -> None:
 
 
 def test_models_endpoint_returns_listing(client, registry) -> None:
-    with patch("makerlab.models.list_hub_models", return_value=[]):
+    with patch("makermodslab.models.list_hub_models", return_value=[]):
         _seed_run(registry, "ep_run", state="done", dataset="user/pick")
         resp = client.get("/models")
     assert resp.status_code == 200
@@ -514,7 +986,7 @@ def test_models_endpoint_returns_listing(client, registry) -> None:
 
 
 def test_models_info_404(client, registry) -> None:
-    with patch("makerlab.models.hf_hub_offline", return_value=True):
+    with patch("makermodslab.models.hf_hub_offline", return_value=True):
         resp = client.get("/models/info", params={"id": "missing"})
     assert resp.status_code == 404
     assert isinstance(resp.json()["detail"], str)
@@ -550,22 +1022,22 @@ def _make_model_checkpoint(
 
 
 def test_local_models_root_migrates_pre_rebrand_cache(tmp_lerobot_home: Path) -> None:
-    from makerlab.models import _local_models_root
+    from makermodslab.models import _local_models_root
 
     legacy_root = tmp_lerobot_home / "lelab_models"
     checkpoint = _make_model_checkpoint(legacy_root, "user/policy")
 
     root = _local_models_root()
 
-    assert root == tmp_lerobot_home / "makerlab_models"
+    assert root == tmp_lerobot_home / "makermodslab_models"
     assert not legacy_root.exists()
     assert (root / checkpoint.relative_to(legacy_root)).is_dir()
 
 
 def test_list_downloaded_models_root_shape(tmp_lerobot_home: Path) -> None:
-    from makerlab.models import list_downloaded_models
+    from makermodslab.models import list_downloaded_models
 
-    _make_model_checkpoint(tmp_lerobot_home / "makerlab_models", "user/policy")
+    _make_model_checkpoint(tmp_lerobot_home / "makermodslab_models", "user/policy")
     rows = list_downloaded_models()
     assert len(rows) == 1
     row = rows[0]
@@ -573,13 +1045,13 @@ def test_list_downloaded_models_root_shape(tmp_lerobot_home: Path) -> None:
     assert row["policy_type"] == "act"
     assert row["source"] == "local"
     # Root shape: the dir itself is the pretrained_model.
-    assert row["path"] == str((tmp_lerobot_home / "makerlab_models" / "user" / "policy").resolve())
+    assert row["path"] == str((tmp_lerobot_home / "makermodslab_models" / "user" / "policy").resolve())
 
 
 def test_list_downloaded_models_tree_shape_reports_final_step(tmp_lerobot_home: Path) -> None:
-    from makerlab.models import list_downloaded_models
+    from makermodslab.models import list_downloaded_models
 
-    _make_model_checkpoint(tmp_lerobot_home / "makerlab_models", "runrepo", shape="tree", step=750)
+    _make_model_checkpoint(tmp_lerobot_home / "makermodslab_models", "runrepo", shape="tree", step=750)
     rows = list_downloaded_models()
     assert len(rows) == 1
     row = rows[0]
@@ -589,16 +1061,16 @@ def test_list_downloaded_models_tree_shape_reports_final_step(tmp_lerobot_home: 
 
 
 def test_list_downloaded_models_skips_non_checkpoint_dirs(tmp_lerobot_home: Path) -> None:
-    from makerlab.models import list_downloaded_models
+    from makermodslab.models import list_downloaded_models
 
-    (tmp_lerobot_home / "makerlab_models" / "junk" / "not_a_model").mkdir(parents=True)
+    (tmp_lerobot_home / "makermodslab_models" / "junk" / "not_a_model").mkdir(parents=True)
     assert list_downloaded_models() == []
 
 
 def test_is_model_available_locally(tmp_lerobot_home: Path) -> None:
-    from makerlab.models import is_model_available_locally
+    from makermodslab.models import is_model_available_locally
 
-    _make_model_checkpoint(tmp_lerobot_home / "makerlab_models", "user/policy")
+    _make_model_checkpoint(tmp_lerobot_home / "makermodslab_models", "user/policy")
     assert is_model_available_locally("user/policy")
     assert not is_model_available_locally("user/other")
 
@@ -606,7 +1078,7 @@ def test_is_model_available_locally(tmp_lerobot_home: Path) -> None:
 def test_is_model_available_locally_rejects_traversal(tmp_lerobot_home: Path) -> None:
     """A repo_id escaping the models root (e.g. a dataset dir one level up) is
     refused even if the target exists."""
-    from makerlab.models import is_model_available_locally
+    from makermodslab.models import is_model_available_locally
 
     outside = tmp_lerobot_home / "outside"
     outside.mkdir()
@@ -618,13 +1090,13 @@ def test_list_all_models_downloaded_flips_hub_to_both(registry, tmp_lerobot_home
     """A hub repo whose checkpoint was downloaded into the local models dir is
     collapsed to one 'both' row carrying the local path — the listing flip that
     makes 'download to local' visible."""
-    from makerlab.models import list_all_models
+    from makermodslab.models import list_all_models
 
-    _make_model_checkpoint(tmp_lerobot_home / "makerlab_models", "user/policy")
+    _make_model_checkpoint(tmp_lerobot_home / "makermodslab_models", "user/policy")
     hub_rows = [
         {"repo_id": "user/policy", "last_modified": "2026-02-01T00:00:00+00:00", "private": False},
     ]
-    with patch("makerlab.models.list_hub_models", return_value=hub_rows):
+    with patch("makermodslab.models.list_hub_models", return_value=hub_rows):
         result = list_all_models()
 
     assert len(result) == 1
@@ -635,10 +1107,10 @@ def test_list_all_models_downloaded_flips_hub_to_both(registry, tmp_lerobot_home
 
 
 def test_list_all_models_downloaded_only_is_local(registry, tmp_lerobot_home: Path) -> None:
-    from makerlab.models import list_all_models
+    from makermodslab.models import list_all_models
 
-    _make_model_checkpoint(tmp_lerobot_home / "makerlab_models", "imported_policy")
-    with patch("makerlab.models.list_hub_models", return_value=[]):
+    _make_model_checkpoint(tmp_lerobot_home / "makermodslab_models", "imported_policy")
+    with patch("makermodslab.models.list_hub_models", return_value=[]):
         result = list_all_models()
     assert [m["id"] for m in result] == ["imported_policy"]
     assert result[0]["source"] == "local"
@@ -647,10 +1119,10 @@ def test_list_all_models_downloaded_only_is_local(registry, tmp_lerobot_home: Pa
 def test_get_model_info_downloaded_checkpoint(registry, tmp_lerobot_home: Path) -> None:
     """A downloaded/imported checkpoint resolves in get_model_info without the
     Hub (works offline) and reports its on-disk size."""
-    from makerlab.models import get_model_info
+    from makermodslab.models import get_model_info
 
-    _make_model_checkpoint(tmp_lerobot_home / "makerlab_models", "user/policy")
-    with patch("makerlab.models.hf_hub_offline", return_value=True):
+    _make_model_checkpoint(tmp_lerobot_home / "makermodslab_models", "user/policy")
+    with patch("makermodslab.models.hf_hub_offline", return_value=True):
         info = get_model_info("user/policy")
     assert info is not None
     assert info["policy_type"] == "act"
@@ -667,7 +1139,7 @@ def test_get_model_info_downloaded_checkpoint(registry, tmp_lerobot_home: Path) 
 def custom_models_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Redirect SAVED_CUSTOM_MODELS_FILE into a tmp file so pin tests never
     touch the developer's real ~/.cache."""
-    from makerlab.utils import config as cfg
+    from makermodslab.utils import config as cfg
 
     path = tmp_path / "saved_custom_models.json"
     monkeypatch.setattr(cfg, "SAVED_CUSTOM_MODELS_FILE", str(path))
@@ -675,7 +1147,7 @@ def custom_models_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def test_saved_custom_models_round_trip(custom_models_file: Path) -> None:
-    from makerlab.utils.config import (
+    from makermodslab.utils.config import (
         add_saved_custom_model,
         get_saved_custom_models,
         remove_saved_custom_model,
@@ -695,11 +1167,11 @@ def test_saved_custom_models_round_trip(custom_models_file: Path) -> None:
 
 
 def test_list_all_models_includes_pinned_custom(registry, tmp_lerobot_home) -> None:
-    from makerlab.models import list_all_models
+    from makermodslab.models import list_all_models
 
     with (
-        patch("makerlab.models.list_hub_models", return_value=[]),
-        patch("makerlab.models.get_saved_custom_models", return_value=["lerobot/smolvla_base"]),
+        patch("makermodslab.models.list_hub_models", return_value=[]),
+        patch("makermodslab.models.get_saved_custom_models", return_value=["lerobot/smolvla_base"]),
     ):
         result = list_all_models()
 
@@ -714,12 +1186,12 @@ def test_list_all_models_includes_pinned_custom(registry, tmp_lerobot_home) -> N
 def test_list_all_models_pinned_and_downloaded_is_both(registry, tmp_lerobot_home: Path) -> None:
     """A pinned foreign repo whose checkpoint was downloaded flips to 'both'
     (Hub + local copy) and keeps saved_custom so unpin stays available."""
-    from makerlab.models import list_all_models
+    from makermodslab.models import list_all_models
 
-    _make_model_checkpoint(tmp_lerobot_home / "makerlab_models", "lerobot/smolvla_base")
+    _make_model_checkpoint(tmp_lerobot_home / "makermodslab_models", "lerobot/smolvla_base")
     with (
-        patch("makerlab.models.list_hub_models", return_value=[]),
-        patch("makerlab.models.get_saved_custom_models", return_value=["lerobot/smolvla_base"]),
+        patch("makermodslab.models.list_hub_models", return_value=[]),
+        patch("makermodslab.models.get_saved_custom_models", return_value=["lerobot/smolvla_base"]),
     ):
         result = list_all_models()
 
@@ -736,7 +1208,7 @@ def test_models_custom_endpoints_round_trip(client, custom_models_file: Path) ->
     assert resp.status_code == 200
     assert resp.json() == {"success": True, "repo_id": "lerobot/smolvla_base"}
 
-    from makerlab.utils.config import get_saved_custom_models
+    from makermodslab.utils.config import get_saved_custom_models
 
     assert get_saved_custom_models() == ["lerobot/smolvla_base"]
 
@@ -760,8 +1232,8 @@ def test_models_custom_endpoint_rejects_bad_repo_id(client, custom_models_file: 
 def _model_download_manager():
     """A fresh DownloadManager wired with the model fetch/cleanup callables —
     same wiring as the module singleton, clean state per test."""
-    import makerlab.models as m
-    from makerlab.datasets import DownloadManager
+    import makermodslab.models as m
+    from makermodslab.datasets import DownloadManager
 
     return DownloadManager(m._fetch_model_snapshot, m._cleanup_partial_model)
 
@@ -775,7 +1247,7 @@ def _join_download(mgr, timeout: float = 5.0) -> None:
 def test_model_download_manager_completes_and_lands_locally(
     tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import makerlab.models as m
+    import makermodslab.models as m
 
     def _fake_snapshot(repo_id, repo_type, local_dir):  # noqa: ARG001
         d = Path(local_dir)
@@ -800,7 +1272,7 @@ def test_model_download_manager_rejects_non_policy_repo(
 ) -> None:
     """A repo that downloads fine but has no config.json / checkpoints tree is
     not a policy — the fetch errors and the partial dir is cleaned up."""
-    import makerlab.models as m
+    import makermodslab.models as m
 
     def _fake_snapshot(repo_id, repo_type, local_dir):  # noqa: ARG001
         Path(local_dir).mkdir(parents=True)
@@ -815,7 +1287,7 @@ def test_model_download_manager_rejects_non_policy_repo(
     status = mgr.get_status()
     assert status["state"] == "error"
     assert "doesn't look like a policy checkpoint" in status["message"]
-    assert not (tmp_lerobot_home / "makerlab_models" / "user" / "notapolicy").exists()
+    assert not (tmp_lerobot_home / "makermodslab_models" / "user" / "notapolicy").exists()
 
 
 def test_models_download_endpoint_rejects_bad_repo_id(client) -> None:
@@ -824,7 +1296,7 @@ def test_models_download_endpoint_rejects_bad_repo_id(client) -> None:
 
 
 def test_models_download_endpoint_409_when_running(client, monkeypatch: pytest.MonkeyPatch) -> None:
-    import makerlab.models as m
+    import makermodslab.models as m
 
     monkeypatch.setattr(m.model_download_manager, "state", "running")
     monkeypatch.setattr(m.model_download_manager, "repo_id", "user/busy")
@@ -845,7 +1317,7 @@ def test_models_download_status_endpoint(client) -> None:
 
 
 def test_import_local_model_copies_root_shape(tmp_lerobot_home: Path, tmp_path: Path) -> None:
-    from makerlab.models import import_local_model, is_model_available_locally
+    from makermodslab.models import import_local_model, is_model_available_locally
 
     src = _make_model_checkpoint(tmp_path / "external", "my_policy")
     result = import_local_model(str(src))
@@ -856,13 +1328,13 @@ def test_import_local_model_copies_root_shape(tmp_lerobot_home: Path, tmp_path: 
 
 
 def test_import_local_model_copies_tree_shape(tmp_lerobot_home: Path, tmp_path: Path) -> None:
-    from makerlab.models import get_model_info, import_local_model
+    from makermodslab.models import get_model_info, import_local_model
 
     src = _make_model_checkpoint(tmp_path / "external", "run_out", shape="tree", step=300)
     result = import_local_model(str(src), name="team/imported")
     assert result == {"repo_id": "team/imported"}
 
-    with patch("makerlab.models.hf_hub_offline", return_value=True):
+    with patch("makermodslab.models.hf_hub_offline", return_value=True):
         info = get_model_info("team/imported")
     assert info is not None
     assert info["steps"] == 300
@@ -870,7 +1342,7 @@ def test_import_local_model_copies_tree_shape(tmp_lerobot_home: Path, tmp_path: 
 
 
 def test_import_local_model_404_missing_folder(tmp_lerobot_home: Path) -> None:
-    from makerlab.models import ModelError, import_local_model
+    from makermodslab.models import ModelError, import_local_model
 
     with pytest.raises(ModelError) as ei:
         import_local_model("/definitely/not/here")
@@ -878,7 +1350,7 @@ def test_import_local_model_404_missing_folder(tmp_lerobot_home: Path) -> None:
 
 
 def test_import_local_model_400_not_a_checkpoint(tmp_lerobot_home: Path, tmp_path: Path) -> None:
-    from makerlab.models import ModelError, import_local_model
+    from makermodslab.models import ModelError, import_local_model
 
     plain = tmp_path / "plain"
     plain.mkdir()
@@ -888,7 +1360,7 @@ def test_import_local_model_400_not_a_checkpoint(tmp_lerobot_home: Path, tmp_pat
 
 
 def test_import_local_model_400_bad_name_reworded(tmp_lerobot_home: Path, tmp_path: Path) -> None:
-    from makerlab.models import ModelError, import_local_model
+    from makermodslab.models import ModelError, import_local_model
 
     src = _make_model_checkpoint(tmp_path / "external", "raw")
     with pytest.raises(ModelError) as ei:
@@ -898,9 +1370,9 @@ def test_import_local_model_400_bad_name_reworded(tmp_lerobot_home: Path, tmp_pa
 
 
 def test_import_local_model_409_target_exists(tmp_lerobot_home: Path, tmp_path: Path) -> None:
-    from makerlab.models import ModelError, import_local_model
+    from makermodslab.models import ModelError, import_local_model
 
-    _make_model_checkpoint(tmp_lerobot_home / "makerlab_models", "taken")
+    _make_model_checkpoint(tmp_lerobot_home / "makermodslab_models", "taken")
     src = _make_model_checkpoint(tmp_path / "external", "src")
     with pytest.raises(ModelError) as ei:
         import_local_model(str(src), name="taken")
@@ -930,7 +1402,7 @@ def test_models_import_endpoint_404_missing(client, tmp_lerobot_home: Path) -> N
 def hidden_models_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Redirect SAVED_HIDDEN_MODELS_FILE into a tmp file so hide tests never
     touch the developer's real ~/.cache."""
-    from makerlab.utils import config as cfg
+    from makermodslab.utils import config as cfg
 
     path = tmp_path / "hidden_models.json"
     monkeypatch.setattr(cfg, "SAVED_HIDDEN_MODELS_FILE", str(path))
@@ -938,7 +1410,7 @@ def hidden_models_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def test_hidden_models_round_trip(hidden_models_file: Path) -> None:
-    from makerlab.utils.config import add_hidden_model, get_hidden_models, remove_hidden_model
+    from makermodslab.utils.config import add_hidden_model, get_hidden_models, remove_hidden_model
 
     assert get_hidden_models() == set()
     assert add_hidden_model("user/policy")
@@ -952,19 +1424,19 @@ def test_hidden_models_round_trip(hidden_models_file: Path) -> None:
 
 
 def test_hidden_models_corrupt_file_degrades_to_empty(hidden_models_file: Path) -> None:
-    from makerlab.utils.config import get_hidden_models
+    from makermodslab.utils.config import get_hidden_models
 
     hidden_models_file.write_text("{not json")
     assert get_hidden_models() == set()
 
 
 def test_models_listing_filters_hidden_hub_row(registry, tmp_lerobot_home) -> None:
-    from makerlab.models import list_all_models
+    from makermodslab.models import list_all_models
 
     hub_rows = [{"repo_id": "user/policy", "last_modified": None, "private": False}]
     with (
-        patch("makerlab.models.list_hub_models", return_value=hub_rows),
-        patch("makerlab.models.get_hidden_models", return_value={"user/policy"}),
+        patch("makermodslab.models.list_hub_models", return_value=hub_rows),
+        patch("makermodslab.models.get_hidden_models", return_value={"user/policy"}),
     ):
         result = list_all_models()
     assert result == []
@@ -972,12 +1444,12 @@ def test_models_listing_filters_hidden_hub_row(registry, tmp_lerobot_home) -> No
 
 def test_models_hidden_filter_runs_after_pin_fold(registry, tmp_lerobot_home) -> None:
     """Hidden+pinned stays hidden — the filter runs AFTER the pin fold."""
-    from makerlab.models import list_all_models
+    from makermodslab.models import list_all_models
 
     with (
-        patch("makerlab.models.list_hub_models", return_value=[]),
-        patch("makerlab.models.get_saved_custom_models", return_value=["user/policy"]),
-        patch("makerlab.models.get_hidden_models", return_value={"user/policy"}),
+        patch("makermodslab.models.list_hub_models", return_value=[]),
+        patch("makermodslab.models.get_saved_custom_models", return_value=["user/policy"]),
+        patch("makermodslab.models.get_hidden_models", return_value={"user/policy"}),
     ):
         result = list_all_models()
     assert result == []
@@ -986,12 +1458,12 @@ def test_models_hidden_filter_runs_after_pin_fold(registry, tmp_lerobot_home) ->
 def test_models_hidden_filter_covers_downloaded_copy(registry, tmp_lerobot_home: Path) -> None:
     """Hidden+downloaded stays hidden — the filter runs after the downloaded
     merge too."""
-    from makerlab.models import list_all_models
+    from makermodslab.models import list_all_models
 
-    _make_model_checkpoint(tmp_lerobot_home / "makerlab_models", "user/policy")
+    _make_model_checkpoint(tmp_lerobot_home / "makermodslab_models", "user/policy")
     with (
-        patch("makerlab.models.list_hub_models", return_value=[]),
-        patch("makerlab.models.get_hidden_models", return_value={"user/policy"}),
+        patch("makermodslab.models.list_hub_models", return_value=[]),
+        patch("makermodslab.models.get_hidden_models", return_value={"user/policy"}),
     ):
         result = list_all_models()
     assert result == []
@@ -1003,7 +1475,7 @@ def test_models_hide_endpoint_rejects_bad_repo_id(client, hidden_models_file: Pa
 
 
 def test_models_hide_unhide_endpoints_round_trip(client, hidden_models_file: Path) -> None:
-    from makerlab.utils.config import get_hidden_models
+    from makermodslab.utils.config import get_hidden_models
 
     resp = client.post("/models/hide", json={"repo_id": "user/policy"})
     assert resp.status_code == 200
@@ -1019,7 +1491,7 @@ def test_models_hide_unhide_endpoints_round_trip(client, hidden_models_file: Pat
 def test_models_pin_route_auto_unhides(client, hidden_models_file: Path, custom_models_file: Path) -> None:
     """Re-adding a hidden model via POST /models/custom removes it from the
     hidden set (mirrors the dataset pin route)."""
-    from makerlab.utils.config import add_hidden_model, get_hidden_models
+    from makermodslab.utils.config import add_hidden_model, get_hidden_models
 
     add_hidden_model("user/policy")
     resp = client.post("/models/custom", json={"repo_id": "user/policy"})
@@ -1035,21 +1507,21 @@ def test_models_pin_route_auto_unhides(client, hidden_models_file: Path, custom_
 def test_delete_local_model_removes_downloaded_checkpoint(registry, tmp_lerobot_home: Path) -> None:
     """A downloaded/imported checkpoint (no registry record) is deleted from
     the local models dir — the 'both' first-press local-copy removal."""
-    from makerlab.models import delete_local_model, is_model_available_locally
+    from makermodslab.models import delete_local_model, is_model_available_locally
 
-    _make_model_checkpoint(tmp_lerobot_home / "makerlab_models", "user/policy")
+    _make_model_checkpoint(tmp_lerobot_home / "makermodslab_models", "user/policy")
     assert is_model_available_locally("user/policy")
 
     result = delete_local_model("user/policy")
     assert result == {"deleted": True, "id": "user/policy"}
     assert not is_model_available_locally("user/policy")
-    assert not (tmp_lerobot_home / "makerlab_models" / "user" / "policy").exists()
+    assert not (tmp_lerobot_home / "makermodslab_models" / "user" / "policy").exists()
 
 
 def test_delete_local_model_unknown_still_404(registry, tmp_lerobot_home: Path) -> None:
     """An id that is neither a registry record nor a downloaded checkpoint
     still 404s (and a traversal id resolves to None, so it 404s too)."""
-    from makerlab.models import ModelError, delete_local_model
+    from makermodslab.models import ModelError, delete_local_model
 
     with pytest.raises(ModelError) as ei:
         delete_local_model("ghost/none")
@@ -1070,27 +1542,27 @@ def test_delete_local_model_unknown_still_404(registry, tmp_lerobot_home: Path) 
 
 
 def test_hub_policy_type_tag_wins() -> None:
-    from makerlab.models import _hub_policy_type
+    from makermodslab.models import _hub_policy_type
 
     assert _hub_policy_type(["robotics", "lerobot", "act"], "whatever_name") == "act"
 
 
 def test_hub_policy_type_longest_prefix_wins() -> None:
     """pi0_fast_... must resolve to pi0_fast, never be shadowed by pi0."""
-    from makerlab.models import _hub_policy_type
+    from makermodslab.models import _hub_policy_type
 
     assert _hub_policy_type([], "pi0_fast_sock_2026-01-01_10-00-00") == "pi0_fast"
     assert _hub_policy_type([], "pi0_sock_2026-01-01_10-00-00") == "pi0"
 
 
-def test_hub_policy_type_makerlab_name_prefix() -> None:
-    from makerlab.models import _hub_policy_type
+def test_hub_policy_type_makermodslab_name_prefix() -> None:
+    from makermodslab.models import _hub_policy_type
 
     assert _hub_policy_type(["lerobot"], "smolvla_makermods_sock_2026-07-01_10-00-00") == "smolvla"
 
 
 def test_hub_policy_type_unknown_returns_none() -> None:
-    from makerlab.models import _hub_policy_type
+    from makermodslab.models import _hub_policy_type
 
     assert _hub_policy_type(["robotics"], "some_random_repo") is None
     assert _hub_policy_type(None, "actual_name") is None  # "actual" != "act_" prefix
@@ -1112,7 +1584,7 @@ def _fake_model_info(*, tags=None, model_name=None, datasets=None, private=False
 
 
 def _clear_model_hub_info_cache() -> None:
-    import makerlab.models as m
+    import makermodslab.models as m
 
     with m._MODEL_HUB_INFO_LOCK:
         m._MODEL_HUB_INFO_CACHE.clear()
@@ -1122,7 +1594,7 @@ def test_hub_model_info_maps_expanded_fields() -> None:
     """ONE model_info call yields policy type (card model_name), dataset (card
     datasets), size (usedStorage), private, and last_modified — no file-tree
     probe when the type is already known."""
-    import makerlab.models as m
+    import makermodslab.models as m
 
     _clear_model_hub_info_cache()
     fake_api = MagicMock()
@@ -1130,8 +1602,8 @@ def test_hub_model_info_maps_expanded_fields() -> None:
         tags=["lerobot"], model_name="act", datasets=["user/pick"], private=True
     )
     with (
-        patch("makerlab.models.shared_hf_api", return_value=fake_api),
-        patch("makerlab.models._hub_model_probe") as probe,
+        patch("makermodslab.models.shared_hf_api", return_value=fake_api),
+        patch("makermodslab.models._hub_model_probe") as probe,
     ):
         row = m._hub_model_info("user/policy")
 
@@ -1147,15 +1619,15 @@ def test_hub_model_info_maps_expanded_fields() -> None:
 
 def test_hub_model_info_falls_back_to_probe_on_error() -> None:
     """model_info raising degrades to the old probe (never propagates)."""
-    import makerlab.models as m
+    import makermodslab.models as m
 
     _clear_model_hub_info_cache()
     fake_api = MagicMock()
     fake_api.model_info.side_effect = RuntimeError("hub down")
     probe_row = {"id": "user/policy", "policy_type": "act", "steps": 500}
     with (
-        patch("makerlab.models.shared_hf_api", return_value=fake_api),
-        patch("makerlab.models._hub_model_probe", return_value=probe_row) as probe,
+        patch("makermodslab.models.shared_hf_api", return_value=fake_api),
+        patch("makermodslab.models._hub_model_probe", return_value=probe_row) as probe,
     ):
         row = m._hub_model_info("user/policy")
     probe.assert_called_once()
@@ -1165,15 +1637,15 @@ def test_hub_model_info_falls_back_to_probe_on_error() -> None:
 def test_hub_model_info_probe_recovers_unknown_type() -> None:
     """When the cheap signals leave the type unknown, the probe supplies the
     type + step from the checkpoint config."""
-    import makerlab.models as m
+    import makermodslab.models as m
 
     _clear_model_hub_info_cache()
     fake_api = MagicMock()
     fake_api.model_info.return_value = _fake_model_info(tags=["robotics"], model_name=None)
     probe_row = {"policy_type": "vqbet", "steps": 700}
     with (
-        patch("makerlab.models.shared_hf_api", return_value=fake_api),
-        patch("makerlab.models._hub_model_probe", return_value=probe_row),
+        patch("makermodslab.models.shared_hf_api", return_value=fake_api),
+        patch("makermodslab.models._hub_model_probe", return_value=probe_row),
     ):
         row = m._hub_model_info("user/mystery_repo")
     assert row["policy_type"] == "vqbet"
@@ -1183,12 +1655,12 @@ def test_hub_model_info_probe_recovers_unknown_type() -> None:
 def test_hub_model_info_caches_success_not_failure() -> None:
     """A successful answer is memoized (one model_info across two calls); a
     failed one is NOT cached, so the next call retries."""
-    import makerlab.models as m
+    import makermodslab.models as m
 
     _clear_model_hub_info_cache()
     fake_api = MagicMock()
     fake_api.model_info.return_value = _fake_model_info(model_name="act")
-    with patch("makerlab.models.shared_hf_api", return_value=fake_api):
+    with patch("makermodslab.models.shared_hf_api", return_value=fake_api):
         m._hub_model_info("user/cached")
         m._hub_model_info("user/cached")
     assert fake_api.model_info.call_count == 1
@@ -1197,8 +1669,8 @@ def test_hub_model_info_caches_success_not_failure() -> None:
     failing_api = MagicMock()
     failing_api.model_info.side_effect = RuntimeError("down")
     with (
-        patch("makerlab.models.shared_hf_api", return_value=failing_api),
-        patch("makerlab.models._hub_model_probe", return_value=None),
+        patch("makermodslab.models.shared_hf_api", return_value=failing_api),
+        patch("makermodslab.models._hub_model_probe", return_value=None),
     ):
         assert m._hub_model_info("user/flaky") is None
         assert m._hub_model_info("user/flaky") is None
@@ -1206,12 +1678,12 @@ def test_hub_model_info_caches_success_not_failure() -> None:
 
 
 def test_invalidate_model_hub_info_forces_refetch() -> None:
-    import makerlab.models as m
+    import makermodslab.models as m
 
     _clear_model_hub_info_cache()
     fake_api = MagicMock()
     fake_api.model_info.return_value = _fake_model_info(model_name="act")
-    with patch("makerlab.models.shared_hf_api", return_value=fake_api):
+    with patch("makermodslab.models.shared_hf_api", return_value=fake_api):
         m._hub_model_info("user/inval")
         m.invalidate_model_hub_info("user/inval")
         m._hub_model_info("user/inval")
@@ -1219,7 +1691,7 @@ def test_invalidate_model_hub_info_forces_refetch() -> None:
 
 
 def test_list_all_models_hub_rows_carry_policy_type(registry) -> None:
-    from makerlab.models import list_all_models
+    from makermodslab.models import list_all_models
 
     hub_rows = [
         {
@@ -1229,7 +1701,7 @@ def test_list_all_models_hub_rows_carry_policy_type(registry) -> None:
             "policy_type": "act",
         },
     ]
-    with patch("makerlab.models.list_hub_models", return_value=hub_rows):
+    with patch("makermodslab.models.list_hub_models", return_value=hub_rows):
         result = list_all_models()
     assert result[0]["policy_type"] == "act"
 
@@ -1237,13 +1709,13 @@ def test_list_all_models_hub_rows_carry_policy_type(registry) -> None:
 def test_list_all_models_local_type_wins_on_both_collapse(registry, tmp_lerobot_home: Path) -> None:
     """The on-disk checkpoint's config.json type overrides the hub row's
     tag/name-derived one when a downloaded copy collapses to 'both'."""
-    from makerlab.models import list_all_models
+    from makermodslab.models import list_all_models
 
-    _make_model_checkpoint(tmp_lerobot_home / "makerlab_models", "user/policy", policy_type="smolvla")
+    _make_model_checkpoint(tmp_lerobot_home / "makermodslab_models", "user/policy", policy_type="smolvla")
     hub_rows = [
         {"repo_id": "user/policy", "last_modified": None, "private": False, "policy_type": "act"},
     ]
-    with patch("makerlab.models.list_hub_models", return_value=hub_rows):
+    with patch("makermodslab.models.list_hub_models", return_value=hub_rows):
         result = list_all_models()
     assert len(result) == 1
     assert result[0]["source"] == "both"
@@ -1252,23 +1724,23 @@ def test_list_all_models_local_type_wins_on_both_collapse(registry, tmp_lerobot_
 
 def test_upload_local_model_stamps_policy_tag(registry) -> None:
     """The uploaded tag set includes the checkpoint's policy type alongside the
-    org tags, so makerlab uploads are self-describing on the Hub."""
-    from makerlab.models import upload_local_model
+    org tags, so MakerMods Lab uploads are self-describing on the Hub."""
+    from makermodslab.models import upload_local_model
 
     _seed_run(registry, "tag_run", policy_type="act", dataset="user/pick", steps=100)
 
     fake_api = MagicMock()
     with (
-        patch("makerlab.models.hf_hub_offline", return_value=False),
-        patch("makerlab.models.cached_whoami", return_value={"name": "user", "orgs": []}),
-        patch("makerlab.models.shared_hf_api", return_value=fake_api),
-        patch("makerlab.models.metadata_update") as mock_meta,
+        patch("makermodslab.models.hf_hub_offline", return_value=False),
+        patch("makermodslab.models.cached_whoami", return_value={"name": "user", "orgs": []}),
+        patch("makermodslab.models.shared_hf_api", return_value=fake_api),
+        patch("makermodslab.models.metadata_update") as mock_meta,
     ):
         result = upload_local_model("tag_run")
 
     tags = mock_meta.call_args.args[1]["tags"]
     assert "act" in tags
-    assert {"makermods", "openbooth", "MakerLab"}.issubset(set(tags))
+    assert {"makermods", "openbooth", "MakerModsLab"}.issubset(set(tags))
     assert "act" in result["tags"]
 
 
@@ -1280,7 +1752,7 @@ def test_upload_local_model_stamps_policy_tag(registry) -> None:
 def _set_running_inference(monkeypatch: pytest.MonkeyPatch, policy_path: str) -> None:
     """Simulate an active inference reading `policy_path` (the resolved local
     checkpoint dir rollout captures at start)."""
-    from makerlab import rollout
+    from makermodslab import rollout
 
     monkeypatch.setattr(rollout, "inference_active", True)
     monkeypatch.setattr(rollout, "_inference_meta", {"policy_path": policy_path})
@@ -1289,7 +1761,7 @@ def _set_running_inference(monkeypatch: pytest.MonkeyPatch, policy_path: str) ->
 def test_model_in_use_containment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Exact-dir match AND parent-of-pretrained_model both count as in use;
     an unrelated sibling does not."""
-    from makerlab.models import _model_in_use
+    from makermodslab.models import _model_in_use
 
     target = tmp_path / "models" / "user" / "policy"
     pretrained = target / "checkpoints" / "500" / "pretrained_model"
@@ -1306,9 +1778,9 @@ def test_model_in_use_containment(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
 def test_delete_downloaded_model_409_when_inference_reads_it(
     registry, tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from makerlab.models import ModelError, delete_local_model
+    from makermodslab.models import ModelError, delete_local_model
 
-    model_dir = _make_model_checkpoint(tmp_lerobot_home / "makerlab_models", "user/live_policy")
+    model_dir = _make_model_checkpoint(tmp_lerobot_home / "makermodslab_models", "user/live_policy")
     _set_running_inference(monkeypatch, str(model_dir))
 
     with pytest.raises(ModelError) as ei:
@@ -1323,7 +1795,7 @@ def test_delete_run_model_409_when_inference_reads_its_checkpoint(
 ) -> None:
     """A COMPLETED run's final checkpoint being an active inference target
     blocks the run-dir delete (the registry's running-guard doesn't cover it)."""
-    from makerlab.models import ModelError, delete_local_model
+    from makermodslab.models import ModelError, delete_local_model
 
     pretrained = _seed_run(registry, "live_run", state="done", steps=100)
     _set_running_inference(monkeypatch, str(pretrained))
@@ -1338,9 +1810,9 @@ def test_delete_run_model_409_when_inference_reads_its_checkpoint(
 def test_delete_succeeds_when_inference_reads_other_path(
     registry, tmp_lerobot_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from makerlab.models import delete_local_model
+    from makermodslab.models import delete_local_model
 
-    _make_model_checkpoint(tmp_lerobot_home / "makerlab_models", "user/idle_policy")
+    _make_model_checkpoint(tmp_lerobot_home / "makermodslab_models", "user/idle_policy")
     elsewhere = tmp_path / "elsewhere" / "pretrained_model"
     elsewhere.mkdir(parents=True)
     _set_running_inference(monkeypatch, str(elsewhere))

@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for makerlab.auto_calibrate — subprocess manager (process mocked)."""
+"""Tests for makermodslab.auto_calibrate — subprocess manager (process mocked)."""
 
 from __future__ import annotations
 
@@ -21,8 +21,8 @@ import threading
 
 import pytest
 
-import makerlab.auto_calibrate as auto_calibrate
-from makerlab.vendor.feetech_autocal import auto_calibrate_script as acs
+import makermodslab.auto_calibrate as auto_calibrate
+from makermodslab.vendor.feetech_autocal import auto_calibrate_script as acs
 
 
 class StoppableFakeProc:
@@ -68,7 +68,7 @@ def _start_with_fake_proc(
     monkeypatch: pytest.MonkeyPatch, proc: StoppableFakeProc, released_ports: list[str]
 ):
     """Start a manager on a fake process, with the fallback release recorded."""
-    import makerlab.auto_calibrate as ac
+    import makermodslab.auto_calibrate as ac
 
     popen_kwargs: dict = {}
 
@@ -95,8 +95,60 @@ def _join_stop(mgr) -> None:
         mgr._thread.join(timeout=5)
 
 
+def test_auto_calibration_blocked_when_teleoperation_active(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Auto-calibration must refuse to start while teleop owns the same
+    serial bus, rather than opening a second connection on a live port."""
+    import makermodslab.auto_calibrate as ac
+
+    monkeypatch.setattr("makermodslab.teleoperate.teleoperation_active", True)
+    mgr = ac.AutoCalibrationManager()
+    result = mgr.start(ac.AutoCalibrationRequest(device_type="robot", port="/dev/arm", config_file="c"))
+    assert result["success"] is False
+    assert "Teleoperation" in result["message"]
+
+
+def test_auto_calibration_blocked_when_recording_active(monkeypatch: pytest.MonkeyPatch) -> None:
+    import makermodslab.auto_calibrate as ac
+
+    monkeypatch.setattr("makermodslab.record.recording_active", True)
+    mgr = ac.AutoCalibrationManager()
+    result = mgr.start(ac.AutoCalibrationRequest(device_type="robot", port="/dev/arm", config_file="c"))
+    assert result["success"] is False
+    assert "Recording" in result["message"]
+
+
+def test_auto_calibration_blocked_when_inference_active(monkeypatch: pytest.MonkeyPatch) -> None:
+    import makermodslab.auto_calibrate as ac
+
+    monkeypatch.setattr("makermodslab.rollout.inference_active", True)
+    mgr = ac.AutoCalibrationManager()
+    result = mgr.start(ac.AutoCalibrationRequest(device_type="robot", port="/dev/arm", config_file="c"))
+    assert result["success"] is False
+    assert "Inference" in result["message"]
+
+
+def test_auto_calibration_blocked_when_calibration_active(monkeypatch: pytest.MonkeyPatch) -> None:
+    import makermodslab.auto_calibrate as ac
+
+    monkeypatch.setattr("makermodslab.calibrate.calibration_manager.status.calibration_active", True)
+    mgr = ac.AutoCalibrationManager()
+    result = mgr.start(ac.AutoCalibrationRequest(device_type="robot", port="/dev/arm", config_file="c"))
+    assert result["success"] is False
+    assert "Calibration" in result["message"]
+
+
+def test_auto_calibration_blocked_when_wiggle_active(monkeypatch: pytest.MonkeyPatch) -> None:
+    import makermodslab.auto_calibrate as ac
+
+    monkeypatch.setattr("makermodslab.wiggle.wiggle_active", True)
+    mgr = ac.AutoCalibrationManager()
+    result = mgr.start(ac.AutoCalibrationRequest(device_type="robot", port="/dev/arm", config_file="c"))
+    assert result["success"] is False
+    assert "wiggle" in result["message"].lower()
+
+
 def test_auto_calibration_rejects_bad_device() -> None:
-    import makerlab.auto_calibrate as ac
+    import makermodslab.auto_calibrate as ac
 
     mgr = ac.AutoCalibrationManager()
     result = mgr.start(ac.AutoCalibrationRequest(device_type="bogus", port="/dev/x", config_file="c"))
@@ -104,7 +156,7 @@ def test_auto_calibration_rejects_bad_device() -> None:
 
 
 def test_auto_calibration_rejects_empty_port() -> None:
-    import makerlab.auto_calibrate as ac
+    import makermodslab.auto_calibrate as ac
 
     mgr = ac.AutoCalibrationManager()
     result = mgr.start(ac.AutoCalibrationRequest(device_type="robot", port="", config_file="c"))
@@ -112,7 +164,7 @@ def test_auto_calibration_rejects_empty_port() -> None:
 
 
 def test_auto_calibration_status_idle() -> None:
-    import makerlab.auto_calibrate as ac
+    import makermodslab.auto_calibrate as ac
 
     status = ac.AutoCalibrationManager().get_status()
     assert status["status"] == "idle"
@@ -124,7 +176,7 @@ def test_auto_calibration_launches_captures_logs_and_completes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A successful subprocess run captures its stdout and ends 'completed'."""
-    import makerlab.auto_calibrate as ac
+    import makermodslab.auto_calibrate as ac
 
     class FakeProc:
         def __init__(self) -> None:
@@ -202,12 +254,40 @@ def test_stop_kills_process_that_ignores_sigterm(
     assert released == ["/dev/arm"]
 
 
+def test_stop_and_wait_blocks_until_torque_released(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """stop_and_wait() must not return until the escalation has actually
+    finished releasing the arm — a caller like server shutdown that's about
+    to exit the process can't rely on the background stop thread to keep
+    running after it's gone, unlike a Stop-button caller."""
+    proc = StoppableFakeProc()
+    released: list[str] = []
+    mgr, _ = _start_with_fake_proc(monkeypatch, proc, released)
+
+    mgr.stop_and_wait(timeout=5)
+
+    status = mgr.get_status()
+    assert status["status"] == "stopped"
+    assert status["active"] is False
+    assert proc.terminated is True
+    assert released == ["/dev/arm"]
+
+
+def test_stop_and_wait_when_idle_is_a_no_op(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Nothing running, nothing to wait for — must return immediately rather
+    than hang, since server shutdown calls this unconditionally."""
+    mgr = auto_calibrate.AutoCalibrationManager()
+    mgr.stop_and_wait(timeout=5)
+    assert mgr.get_status()["active"] is False
+
+
 def test_stop_surfaces_failed_torque_release(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """When the fallback release fails, the status must end terminal (not
     frozen) with an unmistakable torque warning for the UI."""
-    import makerlab.auto_calibrate as ac
+    import makermodslab.auto_calibrate as ac
 
     proc = StoppableFakeProc(ignore_sigterm=True)
     released: list[str] = []
@@ -355,7 +435,7 @@ def test_completed_during_grace_keeps_file(monkeypatch: pytest.MonkeyPatch, tmp_
 
 
 def test_release_arm_torque_disables_all_motors(monkeypatch: pytest.MonkeyPatch) -> None:
-    import makerlab.auto_calibrate as ac
+    import makermodslab.auto_calibrate as ac
 
     class _FakeReleaseBus:
         instances: list[_FakeReleaseBus] = []
@@ -741,7 +821,7 @@ def test_stop_sequence_budget_stays_inside_sigterm_grace() -> None:
 
 
 def test_release_arm_torque_reports_connect_failure(monkeypatch: pytest.MonkeyPatch) -> None:
-    import makerlab.auto_calibrate as ac
+    import makermodslab.auto_calibrate as ac
 
     class _DeadBus:
         def __init__(self, port: str, motors: dict) -> None:
@@ -801,6 +881,36 @@ def _join_batch(mgr) -> None:
             runner._thread.join(timeout=2)
         if runner._stop_thread is not None:
             runner._stop_thread.join(timeout=5)
+
+
+def test_batch_blocked_when_teleoperation_active(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A batch launch must refuse up front (before starting any arm) while
+    teleop owns a serial bus, rather than partially launching some arms."""
+    monkeypatch.setattr("makermodslab.teleoperate.teleoperation_active", True)
+    mgr = auto_calibrate.AutoCalibrationBatchManager()
+    arms = [_arm(port="/dev/a", name="n1")]
+    result = mgr.start(auto_calibrate.AutoCalibrationBatchRequest(arms=arms))
+    assert result["success"] is False
+    assert "Teleoperation" in result["message"]
+    assert mgr._runners == []  # nothing launched
+
+
+def test_batch_blocked_when_calibration_active(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("makermodslab.calibrate.calibration_manager.status.calibration_active", True)
+    mgr = auto_calibrate.AutoCalibrationBatchManager()
+    arms = [_arm(port="/dev/a", name="n1")]
+    result = mgr.start(auto_calibrate.AutoCalibrationBatchRequest(arms=arms))
+    assert result["success"] is False
+    assert "Calibration" in result["message"]
+
+
+def test_batch_blocked_when_wiggle_active(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("makermodslab.wiggle.wiggle_active", True)
+    mgr = auto_calibrate.AutoCalibrationBatchManager()
+    arms = [_arm(port="/dev/a", name="n1")]
+    result = mgr.start(auto_calibrate.AutoCalibrationBatchRequest(arms=arms))
+    assert result["success"] is False
+    assert "wiggle" in result["message"].lower()
 
 
 def test_batch_rejects_empty() -> None:
@@ -1049,6 +1159,106 @@ def test_batch_stop_stops_all_and_releases_each_torque(monkeypatch: pytest.Monke
     assert {a["status"] for a in status["arms"]} == {"stopped"}
     assert sorted(released) == ["/dev/a", "/dev/b"]
     assert procs["/dev/a"].terminated and procs["/dev/b"].terminated
+
+
+def test_batch_stop_and_wait_blocks_until_every_arm_releases_torque(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """stop_and_wait() must not return until every arm's escalation has
+    actually finished, and must signal every arm up front rather than one at
+    a time — otherwise a later arm would keep driving its motors for the
+    length of every earlier arm's whole stop sequence."""
+    released: list[str] = []
+    monkeypatch.setattr(auto_calibrate, "_calibration_name_taken", lambda dt, stem: False)
+    monkeypatch.setattr(
+        auto_calibrate,
+        "_release_arm_torque",
+        lambda port: (released.append(port), [])[1],
+    )
+    monkeypatch.setattr(auto_calibrate, "_STOP_GRACE_S", 0.2)
+    monkeypatch.setattr(auto_calibrate, "_STOP_KILL_WAIT_S", 0.2)
+
+    procs = {"/dev/a": StoppableFakeProc(), "/dev/b": StoppableFakeProc()}
+    monkeypatch.setattr(auto_calibrate.subprocess, "Popen", lambda *a, **k: procs[_port_of(a)])
+
+    mgr = auto_calibrate.AutoCalibrationBatchManager()
+    arms = [_arm(port="/dev/a", name="a"), _arm(port="/dev/b", name="b")]
+    assert mgr.start(auto_calibrate.AutoCalibrationBatchRequest(arms=arms))["success"] is True
+
+    mgr.stop_and_wait(timeout=5)
+
+    status = mgr.get_status()
+    assert status["active"] is False
+    assert {a["status"] for a in status["arms"]} == {"stopped"}
+    assert sorted(released) == ["/dev/a", "/dev/b"]
+    assert procs["/dev/a"].terminated and procs["/dev/b"].terminated
+
+
+def test_batch_stop_and_wait_when_idle_is_a_no_op() -> None:
+    mgr = auto_calibrate.AutoCalibrationBatchManager()
+    mgr.stop_and_wait(timeout=5)
+    assert mgr.get_status()["active"] is False
+
+
+def test_batch_stop_and_wait_races_manual_batch_stop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A manual 'Stop batch' button click and server shutdown's stop_and_wait()
+    can hit the same batch manager at nearly the same instant — the frontend
+    poll loop isn't gated on shutdown. Each arm's own lock must still let only
+    one of the two callers actually start that arm's stop escalation; the
+    loser must not terminate the process a second time or release its torque
+    a second time, and stop_and_wait() must still block until every arm's
+    escalation has genuinely finished, whichever caller started it."""
+    terminate_calls = {"/dev/a": 0, "/dev/b": 0}
+    released: list[str] = []
+
+    class CountingProc(StoppableFakeProc):
+        def __init__(self, port: str) -> None:
+            super().__init__()
+            self._port = port
+
+        def terminate(self) -> None:
+            terminate_calls[self._port] += 1
+            super().terminate()
+
+    monkeypatch.setattr(auto_calibrate, "_calibration_name_taken", lambda dt, stem: False)
+    monkeypatch.setattr(
+        auto_calibrate,
+        "_release_arm_torque",
+        lambda port: (released.append(port), [])[1],
+    )
+    monkeypatch.setattr(auto_calibrate, "_STOP_GRACE_S", 0.2)
+    monkeypatch.setattr(auto_calibrate, "_STOP_KILL_WAIT_S", 0.2)
+
+    procs = {"/dev/a": CountingProc("/dev/a"), "/dev/b": CountingProc("/dev/b")}
+    monkeypatch.setattr(auto_calibrate.subprocess, "Popen", lambda *a, **k: procs[_port_of(a)])
+
+    mgr = auto_calibrate.AutoCalibrationBatchManager()
+    arms = [_arm(port="/dev/a", name="a"), _arm(port="/dev/b", name="b")]
+    assert mgr.start(auto_calibrate.AutoCalibrationBatchRequest(arms=arms))["success"] is True
+
+    start_barrier = threading.Barrier(2)
+
+    def _manual_stop() -> None:
+        start_barrier.wait()
+        mgr.stop()  # the frontend "Stop" button
+
+    def _shutdown_stop() -> None:
+        start_barrier.wait()
+        mgr.stop_and_wait(timeout=5)  # server shutdown_event()
+
+    manual_thread = threading.Thread(target=_manual_stop)
+    shutdown_thread = threading.Thread(target=_shutdown_stop)
+    manual_thread.start()
+    shutdown_thread.start()
+    manual_thread.join(timeout=5)
+    shutdown_thread.join(timeout=5)
+    assert not manual_thread.is_alive() and not shutdown_thread.is_alive()
+
+    status = mgr.get_status()
+    assert status["active"] is False
+    assert {a["status"] for a in status["arms"]} == {"stopped"}
+    assert terminate_calls == {"/dev/a": 1, "/dev/b": 1}
+    assert sorted(released) == ["/dev/a", "/dev/b"]
 
 
 def test_batch_stop_when_idle_is_rejected() -> None:

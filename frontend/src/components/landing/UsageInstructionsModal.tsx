@@ -10,7 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Terminal, ExternalLink, Copy, Check } from "lucide-react";
 
 const ONE_LINER =
-  "uv tool install git+https://github.com/makermods-robotics/MakerLab.git && makerlab";
+  "uv tool install git+https://github.com/makermods-robotics/makermodslab.git && makermodslab";
 const LOCAL_URL = "http://localhost:8000/";
 
 interface UsageInstructionsModalProps {
@@ -55,10 +55,10 @@ const UsageInstructionsModal: React.FC<UsageInstructionsModalProps> = ({
         <DialogHeader className="text-center sm:text-center min-w-0">
           <DialogTitle className="text-foreground flex items-center justify-center gap-2 text-xl">
             <Terminal className="w-6 h-6" />
-            Get Started with MakerLab
+            Get Started with MakerMods Lab
           </DialogTitle>
           <DialogDescription>
-            MakerLab runs on your machine. Click the command to copy it, then paste
+            MakerMods Lab runs on your machine. Click the command to copy it, then paste
             in a terminal:
           </DialogDescription>
         </DialogHeader>
@@ -87,7 +87,7 @@ const UsageInstructionsModal: React.FC<UsageInstructionsModalProps> = ({
             </span>
           </button>
           <p className="text-muted-foreground text-sm text-center">
-            After running, your browser will open the local MakerLab app.
+            After running, your browser will open the local MakerMods Lab app.
           </p>
           <Button
             asChild
@@ -95,7 +95,7 @@ const UsageInstructionsModal: React.FC<UsageInstructionsModalProps> = ({
           >
             <a href={LOCAL_URL} target="_blank" rel="noopener noreferrer">
               <ExternalLink className="w-4 h-4 mr-2" />
-              Open MakerLab
+              Open MakerMods Lab
             </a>
           </Button>
         </div>

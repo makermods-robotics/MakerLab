@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Library } from "lucide-react";
+import { ChevronUp, Library } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import BrandMark from "@/components/BrandMark";
 import Footer from "@/components/Footer";
@@ -13,6 +13,7 @@ import LibrarySheet from "@/components/launchpad/LibrarySheet";
 import RobotCorner from "@/components/launchpad/RobotCorner";
 import CollectHandoff from "@/components/studio/CollectHandoff";
 import StudioOverlay from "@/components/studio/StudioOverlay";
+import { useStudio } from "@/contexts/StudioContext";
 import { isHostedSpace } from "@/lib/isHostedSpace";
 
 const ON_SPACE = isHostedSpace();
@@ -27,6 +28,7 @@ const Launchpad = () => {
   const [showUsageModal, setShowUsageModal] = useState(ON_SPACE);
   const [libraryOpen, setLibraryOpen] = useState(false);
   const [search, setSearch] = useState("");
+  const { openStudio } = useStudio();
 
   return (
     <div className="flex min-h-screen flex-col bg-background text-foreground">
@@ -62,6 +64,22 @@ const Launchpad = () => {
       </main>
 
       <Footer />
+
+      {/* Pull up to open the skill studio — the studio's own header carries
+          the mirrored "pull down" arrow back to here. Pinned to the
+          viewport (not just after Footer in normal flow) so it's reachable
+          without scrolling even when the hero/slider/banner stack above is
+          taller than the screen; centered on the viewport width the same
+          way, independent of anything else on the page. */}
+      <button
+        type="button"
+        onClick={() => openStudio()}
+        aria-label="Open the skill studio"
+        title="Open the skill studio"
+        className="fixed bottom-3 left-1/2 z-30 flex h-9 w-9 -translate-x-1/2 items-center justify-center rounded-full border border-border bg-background/90 text-muted-foreground shadow-1 backdrop-blur-sm transition-colors hover:text-foreground"
+      >
+        <ChevronUp className="h-5 w-5 animate-bounce" />
+      </button>
 
       <UsageInstructionsModal
         open={showUsageModal}

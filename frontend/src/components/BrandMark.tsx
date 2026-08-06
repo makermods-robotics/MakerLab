@@ -3,7 +3,7 @@ import { cn } from "@/lib/utils";
 import logoMark from "@/assets/logo-mark.png";
 
 /**
- * The app's brand block: the MakerMods bracket mark beside the MakerLab
+ * The app's brand block: the MakerMods bracket mark beside the MakerMods Lab
  * wordtext. `sm` fits the Launchpad route header; `md` is the studio overlay
  * header; `lg` is the Launchpad hero treatment.
  */
@@ -32,7 +32,7 @@ const BrandMark: React.FC<{
         size === "sm" ? "text-sm" : size === "md" ? "text-xl" : "text-2xl",
       )}
     >
-      MakerLab
+      MakerMods Lab
     </span>
   </span>
 );

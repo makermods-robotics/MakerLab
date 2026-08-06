@@ -43,14 +43,17 @@ export type ResumeSeed = {
   sourceSteps: number; // the source run's configured total, for a sane prefill
   logFreq?: number; // the source run's log cadence, to preserve on resume
   saveFreq?: number; // the source run's checkpoint cadence, to preserve on resume
-  // Cloud resume: the parent run's runner + flavor. A local Continue omits
-  // these (runner defaults to "local"). When "hf_cloud", the launched run
-  // targets the same flavor and continues into the parent's Hub output repo.
+  // The parent run's runner + flavor. A resume ALWAYS continues on the parent's
+  // runner — the form pins Compute to this value and disables it (see F7) —
+  // so `runner` is the lock's source of truth, not just a cloud convenience.
+  // Omitted ⇒ treated as "local". When "hf_cloud", the launched run targets the
+  // same flavor and continues into the parent's Hub output repo; `flavor` stays
+  // editable, since which GPU the continuation rents is a real per-launch choice.
   runner?: "local" | "hf_cloud";
   flavor?: string;
   // Cloud resume: the parent run's HF Jobs timeout. Omitting it let the form
   // render blank, which `configToRequest` sends as undefined and the runner
-  // resolves to HF_JOB_TIMEOUT ("2h") — silently capping the continuation of a
+  // resolves to HF_JOB_TIMEOUT ("24h") — silently capping the continuation of a
   // run that had already proved it needs a longer budget. See NEW-12.
   hfJobTimeout?: string;
   // The remaining hyperparameters. lerobot rebuilds these from the checkpoint's
@@ -174,9 +177,12 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
   const { openJobMonitor } = useStudio();
 
   const [trainingConfig, setTrainingConfig] = useState<TrainingConfig>({
-    // A cloud resume inherits the parent run's target so the continuation runs
-    // on the same flavor and pushes into the same Hub repo; everything else
-    // defaults to a fresh local run.
+    // A resume inherits the parent run's runner — a cloud one so the
+    // continuation runs on the same flavor and pushes into the same Hub repo, a
+    // local one so it reads the parent's on-disk checkpoint. The Compute
+    // control is then pinned to it (`runnerLocked` below), because neither
+    // cross-runner direction works: see F7. Everything else defaults to a fresh
+    // local run.
     target:
       resumeSeed?.runner === "hf_cloud"
         ? { runner: "hf_cloud", flavor: resumeSeed.flavor }
@@ -237,7 +243,7 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
     // a run that died at config validation. The request field stays.
     use_policy_training_preset: true,
     // Cloud-only. Prefilled from the parent so a Continue keeps its budget
-    // instead of silently falling back to the runner's 2h default; the field
+    // instead of silently falling back to the runner's 24h default; the field
     // stays editable so the user can raise it for a longer tail.
     hf_job_timeout: resumeSeed?.hfJobTimeout,
   });
@@ -477,7 +483,7 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
     if (needsUpload) {
       setUploadError(null);
       setIsStarting(true);
-      const err = await startUpload([], false /* public: MakerLab uploads are public by default */);
+      const err = await startUpload([], false /* public: MakerMods Lab uploads are public by default */);
       if (err) {
         setUploadError(err);
         setIsStarting(false);
@@ -567,7 +573,7 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
               <span className="font-medium">
                 {config.hf_job_timeout?.trim()
                   ? config.hf_job_timeout
-                  : "2h (default)"}
+                  : "24h (default)"}
               </span>{" "}
               — a continuation needs at least as long as the tail it has left.
             </p>
@@ -597,6 +603,21 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
         flavors={flavors}
         hardwareLoading={hardwareLoading}
         policyLocked={finetuneSeed != null || resumeSeed != null}
+        // On a resume, lerobot rebuilds every hyperparameter but the
+        // continuation essentials from the checkpoint's train_config.json, so
+        // those controls render read-only rather than accepting edits the run
+        // will discard. configToRequest still sends the form's values, keeping
+        // the new JobRecord's persisted config truthful about what was asked.
+        resumeLocked={resumeSeed != null}
+        // Compute is pinned to the parent's runner on a resume. Cross-runner
+        // resume isn't implemented (F7) and both directions fail badly —
+        // cloud→local dies at startup on a host path that never existed,
+        // local→cloud silently restarts from step 0 wearing a resume label —
+        // so the control is disabled rather than left to fail late. The
+        // backend refuses a mismatch too (JobRegistry.start). The cloud
+        // flavor and job timeout stay editable: those a continuation can
+        // genuinely change.
+        runnerLocked={resumeSeed != null}
       />
       {needsUpload ? (
         <div className="mt-6">

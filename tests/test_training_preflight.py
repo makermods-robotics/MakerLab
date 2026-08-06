@@ -30,8 +30,8 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-import makerlab.datasets as datasets_mod
-import makerlab.server as server_mod
+import makermodslab.datasets as datasets_mod
+import makermodslab.server as server_mod
 
 DATASET_ID = "alice/hub_only_dataset"
 

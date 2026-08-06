@@ -139,7 +139,7 @@ const TeleoperationPage = () => {
   useEffect(() => {
     const handlePageHide = () => {
       try {
-        sessionStorage.setItem("makerlab:teleop-stopped", "1");
+        sessionStorage.setItem("makermodslab:teleop-stopped", "1");
       } catch {
         /* sessionStorage may be unavailable; the stop below still runs */
       }

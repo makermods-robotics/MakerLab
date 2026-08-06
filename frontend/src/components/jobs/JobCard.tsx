@@ -11,7 +11,12 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { JobRecord, jobDisplayName, renameJob } from "@/lib/jobsApi";
+import {
+  JOB_STATE_LABELS,
+  JobRecord,
+  jobDisplayName,
+  renameJob,
+} from "@/lib/jobsApi";
 import {
   Square,
   Trash2,
@@ -30,6 +35,7 @@ import {
   Upload,
 } from "lucide-react";
 import MetaRows from "@/components/library/MetaRows";
+import DisplayName from "@/components/library/DisplayName";
 import { useApi } from "@/contexts/ApiContext";
 import { useStudio } from "@/contexts/StudioContext";
 import { useToast } from "@/hooks/use-toast";
@@ -69,11 +75,19 @@ const statePresentation: Record<
     Icon: React.ComponentType<{ className?: string }>;
   }
 > = {
-  running: { label: "Running", color: "text-ok", Icon: Loader2 },
-  done: { label: "Done", color: "text-muted-foreground", Icon: CheckCircle2 },
-  failed: { label: "Failed", color: "text-destructive", Icon: XCircle },
+  running: { label: JOB_STATE_LABELS.running, color: "text-ok", Icon: Loader2 },
+  done: {
+    label: JOB_STATE_LABELS.done,
+    color: "text-muted-foreground",
+    Icon: CheckCircle2,
+  },
+  failed: {
+    label: JOB_STATE_LABELS.failed,
+    color: "text-destructive",
+    Icon: XCircle,
+  },
   interrupted: {
-    label: "Interrupted",
+    label: JOB_STATE_LABELS.interrupted,
     color: "text-warn",
     Icon: AlertTriangle,
   },
@@ -319,24 +333,36 @@ const JobCard: React.FC<Props> = ({
     onPlay(selectedJob, selectedStep);
   };
 
-  // Continue (local resume) needs a saved checkpoint with optimizer/step state
-  // on this machine — i.e. a finished local training run.
-  const canContinue =
-    selectedJob.runner === "local" &&
-    !isRunning &&
-    lineageCheckpoints.length > 0 &&
-    selectedStep != null;
-
-  // Resume (cloud): an HF Job is immutable once ended, so this launches a NEW
-  // cloud job that continues from the parent's Hub checkpoint (restoring
-  // optimizer + step, unlike Fine-tune). Offered only on a cloud run that ended
-  // BEFORE its step target — a failed/interrupted/cancelled run with a saved
-  // checkpoint. A `done` run reached its target, so there's nothing to resume.
+  // Resume — local Continue and cloud Resume alike — is for a run that stopped
+  // SHORT of what it was configured to do: failed, interrupted or cancelled,
+  // with a saved checkpoint below the step target.
+  //
+  // A `done` run is deliberately excluded. Resuming restores the optimizer AND
+  // the LR schedule's position, and a completed run's schedule is spent: the
+  // SmolVLA preset cosine-decays to a 2.5e-6 floor over a fixed 30k-step
+  // horizon, so continuing past a reached target trains at floor LR — the loss
+  // curve flattens and reads as convergence while the run is barely learning.
+  // Fine-tuning from the final checkpoint is the intended way to build on a
+  // completed run: it starts a FRESH schedule from those weights. Blanket rule,
+  // no per-policy exceptions.
   const endedBeforeTarget =
     (selectedJob.state === "failed" || selectedJob.state === "interrupted") &&
     (selectedJob.config.steps === 0 ||
       selectedStep == null ||
       selectedStep < selectedJob.config.steps);
+
+  // Continue (local resume) additionally needs the optimizer/step state to be
+  // on THIS machine — i.e. a local run's own checkpoint dir.
+  const canContinue =
+    selectedJob.runner === "local" &&
+    !isRunning &&
+    lineageCheckpoints.length > 0 &&
+    selectedStep != null &&
+    endedBeforeTarget;
+
+  // Resume (cloud): an HF Job is immutable once ended, so this launches a NEW
+  // cloud job that continues from the parent's Hub checkpoint (restoring
+  // optimizer + step, unlike Fine-tune).
   const canResumeCloud =
     selectedJob.runner === "hf_cloud" &&
     !isRunning &&
@@ -344,6 +370,11 @@ const JobCard: React.FC<Props> = ({
     selectedStep != null &&
     endedBeforeTarget;
 
+  // The configurator PREFILLS from this seed, then renders read-only the
+  // settings lerobot rebuilds from the checkpoint anyway (batch size, seed,
+  // device, optimizer, AMP). Steps, the log/save cadence, the worker count,
+  // the cloud flavor and the timeout stay editable — those a continuation can
+  // really change.
   const goToResume = (runner: "local" | "hf_cloud") => {
     if (selectedStep == null) return;
     // Carry the parent run's whole configured shape forward. The registry
@@ -395,15 +426,20 @@ const JobCard: React.FC<Props> = ({
   };
 
   // Fine-tune: start a FRESH run whose weights are initialized from this
-  // (imported) model's checkpoint. Unlike Continue (which needs optimizer/step
-  // state and is local-only), fine-tuning works from weights-only imports —
-  // which is exactly what imported models are. Gate on an imported source with
-  // a selectable checkpoint.
+  // model's checkpoint. Unlike Continue (which needs optimizer/step state and
+  // is local-only), fine-tuning is weights-only, so it works from ANY source
+  // that has a checkpoint — the user's own local and cloud runs included.
+  //
+  // The old gate also required runner === "imported". That was a workaround for
+  // MT2, where a hub step-ref was truncated to the bare repo id and a fine-tune
+  // of a cloud run silently trained from ROOT weights instead of the step the
+  // user picked; excluding cloud runs (and, collaterally, local ones) hid the
+  // bug rather than fixing it. jobs._resolve_finetune_pretrained_path now
+  // branches on all three runners and keeps a step-suffixed hub ref verbatim
+  // for the trainer's host to materialize, so there is nothing left to guard:
+  // gate on state and checkpoints only.
   const canFinetune =
-    selectedJob.runner === "imported" &&
-    !isRunning &&
-    lineageCheckpoints.length > 0 &&
-    selectedStep != null;
+    !isRunning && lineageCheckpoints.length > 0 && selectedStep != null;
 
   // No dialog and no route jump: fine-tuning opens the Train panel's
   // "Start a new training" form with the base skill (and the dropdown's
@@ -579,12 +615,10 @@ const JobCard: React.FC<Props> = ({
           </div>
         </div>
         <div>
-          <div
-            className="text-foreground font-semibold truncate"
-            title={displayName}
-          >
-            {displayName}
-          </div>
+          <DisplayName
+            name={displayName}
+            className="text-foreground font-semibold"
+          />
           {/* When aliased, keep the true identity visible: the run id for
               trainings (imported models already show their repo id / path in
               the subtitle below). */}

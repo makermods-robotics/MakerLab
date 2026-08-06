@@ -70,6 +70,7 @@ import {
 } from "@/components/ui/collapsible";
 import { PanelHeader, SLIDE } from "@/components/studio/panel/primitives";
 import { RobotRecord, robotSetupGap } from "@/hooks/useRobots";
+import { cn } from "@/lib/utils";
 
 const DISCONTINUITY_ERROR_PREFIX = "Motor discontinuity detected";
 
@@ -97,9 +98,10 @@ interface CalibrationRequest {
   arm?: "left" | "right"; // which arm of a bimanual robot ("left" = the single pair)
 }
 
-// One selectable arm slot in the multi-arm auto-calibration picker. `key`
-// uniquely identifies the (device_type, arm) slot; cfgField/portField map it to
-// the robot record's fields so the slot can prefill its name + port.
+// One selectable (device_type, arm) slot — shared by the Device step's card
+// picker and the multi-arm auto-calibration picker. `key` uniquely identifies
+// the slot; cfgField/portField map it to the robot record's fields so the
+// slot can prefill its name + port.
 interface ArmSlot {
   key: string;
   label: string;
@@ -108,6 +110,55 @@ interface ArmSlot {
   cfgField: keyof RobotRecord;
   portField: keyof RobotRecord;
 }
+
+// One card in the Device step's radio-card picker. Selecting a card sets
+// both deviceType and arm together, replacing what used to be two separate
+// dropdown picks. "Ready" (the check mark) mirrors robotSetupGap's
+// definition of a configured arm: a port AND a calibration config assigned.
+const ArmSlotCard = ({
+  slot,
+  selected,
+  port,
+  configured,
+  onSelect,
+}: {
+  slot: ArmSlot;
+  selected: boolean;
+  port: string;
+  configured: boolean;
+  onSelect: () => void;
+}) => {
+  const ready = !!port && configured;
+  return (
+    <button
+      type="button"
+      role="radio"
+      aria-checked={selected}
+      onClick={onSelect}
+      className={cn(
+        "w-full rounded-md border px-3 py-2 text-left transition-colors",
+        selected
+          ? "border-primary bg-accent"
+          : "border-border bg-card hover:bg-accent",
+      )}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-sm font-medium text-foreground">
+          {slot.label}
+        </span>
+        {ready && <CheckCircle className="h-4 w-4 shrink-0 text-ok" />}
+      </div>
+      <p
+        className={cn(
+          "mt-0.5 truncate font-mono text-xs",
+          port ? "text-muted-foreground" : "text-warn/80",
+        )}
+      >
+        {port || "no port assigned"}
+      </p>
+    </button>
+  );
+};
 
 // Per-arm terminal/running state in a concurrent batch (from the backend).
 interface BatchArmStatus {
@@ -602,7 +653,7 @@ const RobotConfigWindow = ({
         (e) => console.error("Failed to stop calibration on leave:", e),
       );
     },
-    beaconFlagKey: "makerlab:calibration-stopped",
+    beaconFlagKey: "makermodslab:calibration-stopped",
   });
 
   const pollStatus = async () => {
@@ -837,6 +888,25 @@ const RobotConfigWindow = ({
 
   // The slots the user ticked, in canonical order, with their inputs.
   const selectedBatchSlots = armSlots.filter((s) => batchSelected[s.key]);
+
+  // Whether ANY slot currently has a detected port — gates the "Calibrate
+  // all" shortcut below (nothing to select otherwise).
+  const anyArmAvailable = armSlots.some((s) => !!slotPort(s));
+
+  // "Calibrate all" shortcut: a more visible duplicate of the multi-arm
+  // auto-calibration entry point (normally tucked behind a calibration-file
+  // row's "+"). Ticks every slot that has a detected port and opens the
+  // batch picker so the user can review the selection before confirming —
+  // it doesn't skip that confirmation, just the manual per-arm ticking.
+  const handleCalibrateAll = () => {
+    const next: Record<string, boolean> = {};
+    for (const slot of armSlots) {
+      if (slotPort(slot)) next[slot.key] = true;
+    }
+    setBatchSelected(next);
+    setBatchAutoCalOpen(true);
+    setNewCalibFor((prev) => prev ?? (armSlots[0]?.cfgField as string) ?? null);
+  };
 
   // Resume the batch panel if a run is in progress (e.g. window reopened).
   useEffect(() => {
@@ -1158,11 +1228,6 @@ const RobotConfigWindow = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isPolling]);
 
-  const handleDeviceTypeChange = (next: string) => {
-    setDeviceType(next);
-    // Port is re-synced from the record by the device/arm effect below.
-  };
-
   // Keep the port field in sync with the selected device_type + arm's saved
   // port whenever either changes (single uses leader/follower; bimanual right
   // uses the right_* fields). Port is a dropdown, so overwriting it is safe.
@@ -1214,21 +1279,21 @@ const RobotConfigWindow = ({
 
   // --- Auto-calibration torque (per-robot, persisted) --------------------
   // The backend stores motor_power as a PERCENT of full torque (10-100; see
-  // makerlab/utils/config.py clamp_motor_power). It is the torque the
+  // makermodslab/utils/config.py clamp_motor_power). It is the torque the
   // AUTO-CALIBRATION subprocess drives the arm at (threaded through as its
-  // --torque-limit = percent × 10; see makerlab/auto_calibrate.py). Regular
+  // --torque-limit = percent × 10; see makermodslab/auto_calibrate.py). Regular
   // sessions (teleop/record/skill runs) run at stock LeRobot torque and
   // ignore this value. The UI below is expressed in RAW Torque_Limit register
   // units (0-1000) — the same scale as the vendored script's
   // DEFAULT_TORQUE_LIMIT = 380 — so operators can reason in one vocabulary.
   // We convert raw<->percent at the edges and persist a percent.
-  const TORQUE_LIMIT_PER_PERCENT = 10; // must match makerlab/motor_power.py
-  const MOTOR_POWER_MIN_PERCENT = 10; // must match makerlab/utils/config.py
-  const MOTOR_POWER_MAX_PERCENT = 100; // must match makerlab/utils/config.py
+  const TORQUE_LIMIT_PER_PERCENT = 10; // must match makermodslab/motor_power.py
+  const MOTOR_POWER_MIN_PERCENT = 10; // must match makermodslab/utils/config.py
+  const MOTOR_POWER_MAX_PERCENT = 100; // must match makermodslab/utils/config.py
   const TORQUE_LIMIT_MIN = MOTOR_POWER_MIN_PERCENT * TORQUE_LIMIT_PER_PERCENT; // 100
   const TORQUE_LIMIT_MAX = MOTOR_POWER_MAX_PERCENT * TORQUE_LIMIT_PER_PERCENT; // 1000
   // The vendored script's own operating torque, shown as a reference marker.
-  const DEFAULT_TORQUE_LIMIT_REF = 380; // makerlab/vendor/.../calibration_defaults.py
+  const DEFAULT_TORQUE_LIMIT_REF = 380; // makermodslab/vendor/.../calibration_defaults.py
 
   // Local slider position (in PERCENT). Held as a draft and committed to the
   // robot record only on Save; an auto-calibration START sends the current
@@ -1901,35 +1966,74 @@ const RobotConfigWindow = ({
           <section className="space-y-4 py-5">
             <PanelHeader step="01" title="Device" />
             <div className="space-y-2">
-              <Label htmlFor="deviceType">Device type</Label>
-              <Select value={deviceType} onValueChange={handleDeviceTypeChange}>
-                <SelectTrigger id="deviceType">
-                  <SelectValue placeholder="Select device type" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="teleop">Teleoperator (Leader)</SelectItem>
-                  <SelectItem value="robot">Robot (Follower)</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-
-            {isBimanual && (
-              <div className="space-y-2">
-                <Label htmlFor="arm">Arm</Label>
-                <Select
-                  value={arm}
-                  onValueChange={(v) => setArm(v as "left" | "right")}
+              <Label>Device</Label>
+              {isBimanual ? (
+                <div
+                  role="radiogroup"
+                  aria-label="Device and arm"
+                  className="grid grid-cols-2 gap-3"
                 >
-                  <SelectTrigger id="arm">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="left">Left arm</SelectItem>
-                    <SelectItem value="right">Right arm</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-            )}
+                  <div className="space-y-2">
+                    {armSlots
+                      .filter((slot) => slot.arm === "left")
+                      .map((slot) => (
+                        <ArmSlotCard
+                          key={slot.key}
+                          slot={slot}
+                          selected={
+                            deviceType === slot.device && arm === slot.arm
+                          }
+                          port={draftPort(slot.portField)}
+                          configured={!!(robot?.[slot.cfgField] as string)}
+                          onSelect={() => {
+                            setDeviceType(slot.device);
+                            setArm(slot.arm);
+                          }}
+                        />
+                      ))}
+                  </div>
+                  <div className="space-y-2">
+                    {armSlots
+                      .filter((slot) => slot.arm === "right")
+                      .map((slot) => (
+                        <ArmSlotCard
+                          key={slot.key}
+                          slot={slot}
+                          selected={
+                            deviceType === slot.device && arm === slot.arm
+                          }
+                          port={draftPort(slot.portField)}
+                          configured={!!(robot?.[slot.cfgField] as string)}
+                          onSelect={() => {
+                            setDeviceType(slot.device);
+                            setArm(slot.arm);
+                          }}
+                        />
+                      ))}
+                  </div>
+                </div>
+              ) : (
+                <div
+                  role="radiogroup"
+                  aria-label="Device"
+                  className="grid grid-cols-2 gap-3"
+                >
+                  {armSlots.map((slot) => (
+                    <ArmSlotCard
+                      key={slot.key}
+                      slot={slot}
+                      selected={deviceType === slot.device}
+                      port={draftPort(slot.portField)}
+                      configured={!!(robot?.[slot.cfgField] as string)}
+                      onSelect={() => {
+                        setDeviceType(slot.device);
+                        setArm(slot.arm);
+                      }}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
 
             <div className="space-y-2">
               <Label htmlFor="port">Port</Label>
@@ -2075,6 +2179,29 @@ const RobotConfigWindow = ({
             <section className="space-y-3 py-5">
               <div className="flex items-center gap-2">
                 <PanelHeader step="02" title="Calibration files" />
+                {/* More visible duplicate of the per-row "Auto-calibrate"
+                    entry point below — same batch flow, pre-selecting every
+                    detected arm instead of requiring per-arm ticking. */}
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="ml-auto h-6 gap-1.5 px-2 text-xs"
+                  onClick={handleCalibrateAll}
+                  disabled={
+                    !robotName ||
+                    !anyArmAvailable ||
+                    calibrationStatus.calibration_active ||
+                    batchAutoCal.active
+                  }
+                  title={
+                    anyArmAvailable
+                      ? "Select every detected arm for auto-calibration"
+                      : "No arms detected — plug in an arm and rescan"
+                  }
+                >
+                  <Wand2 className="h-4 w-4" />
+                  Calibrate all
+                </Button>
                 {/* One folder per device type — both same-side slots share a
                     single directory (so101_leader / so101_follower), so a
                     single leader + follower pair covers single AND bimanual
@@ -2082,7 +2209,7 @@ const RobotConfigWindow = ({
                 <Button
                   size="sm"
                   variant="ghost"
-                  className="ml-auto h-6 gap-1.5 px-2 text-xs text-muted-foreground hover:text-foreground"
+                  className="h-6 gap-1.5 px-2 text-xs text-muted-foreground hover:text-foreground"
                   onClick={() => openCalibrationFolder("teleop")}
                   aria-label="Open leader calibrations folder"
                   title="Open leader calibrations folder"

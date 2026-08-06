@@ -11,12 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for makerlab.runners.hf_cloud — covers the host-side wandb credential
+"""Tests for makermodslab.runners.hf_cloud — covers the host-side wandb credential
 resolution, the pinned-lerobot spec derivation, and the cloud-boundary config
-localization, plus the terminal-stage bookkeeping in HfCloudJobRunner.stop()
-(which decides whether a stopped run reads as `interrupted` or as a failure,
-and needs only a two-method fake). Submission, log tailing and status polling
-talk to HF Jobs and are intentionally left for integration tests."""
+localization. HfCloudJobRunner itself talks to HF Jobs and is not unit-
+testable without a heavy mock of HfApi; we intentionally leave it for
+integration tests."""
 
 from __future__ import annotations
 
@@ -31,7 +30,7 @@ import pytest
 def test_resolve_wandb_api_key_prefers_environment_variable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from makerlab.runners.hf_cloud import resolve_wandb_api_key
+    from makermodslab.runners.hf_cloud import resolve_wandb_api_key
 
     monkeypatch.setenv("WANDB_API_KEY", "env-key-123")
     assert resolve_wandb_api_key() == "env-key-123"
@@ -40,7 +39,7 @@ def test_resolve_wandb_api_key_prefers_environment_variable(
 def test_resolve_wandb_api_key_falls_back_to_netrc(monkeypatch: pytest.MonkeyPatch) -> None:
     """When WANDB_API_KEY is unset, the function must read the same place
     `wandb login` writes — ~/.netrc under machine api.wandb.ai."""
-    from makerlab.runners.hf_cloud import resolve_wandb_api_key
+    from makermodslab.runners.hf_cloud import resolve_wandb_api_key
 
     monkeypatch.delenv("WANDB_API_KEY", raising=False)
 
@@ -56,7 +55,7 @@ def test_resolve_wandb_api_key_falls_back_to_netrc(monkeypatch: pytest.MonkeyPat
 def test_resolve_wandb_api_key_returns_none_when_netrc_has_no_wandb_entry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from makerlab.runners.hf_cloud import resolve_wandb_api_key
+    from makermodslab.runners.hf_cloud import resolve_wandb_api_key
 
     monkeypatch.delenv("WANDB_API_KEY", raising=False)
 
@@ -72,7 +71,7 @@ def test_resolve_wandb_api_key_returns_none_when_netrc_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """No env var, no ~/.netrc — neither source has it, caller decides."""
-    from makerlab.runners.hf_cloud import resolve_wandb_api_key
+    from makermodslab.runners.hf_cloud import resolve_wandb_api_key
 
     monkeypatch.delenv("WANDB_API_KEY", raising=False)
 
@@ -86,7 +85,7 @@ def test_resolve_wandb_api_key_returns_none_when_netrc_missing(
 def test_resolve_wandb_api_key_returns_none_when_netrc_parse_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from makerlab.runners.hf_cloud import resolve_wandb_api_key
+    from makermodslab.runners.hf_cloud import resolve_wandb_api_key
 
     monkeypatch.delenv("WANDB_API_KEY", raising=False)
 
@@ -103,7 +102,7 @@ def test_resolve_wandb_api_key_returns_none_when_password_is_empty(
     """An empty password from netrc is treated as missing — the helper
     contract is 'returns the usable key or None', not 'returns whatever
     netrc happened to have'."""
-    from makerlab.runners.hf_cloud import resolve_wandb_api_key
+    from makermodslab.runners.hf_cloud import resolve_wandb_api_key
 
     monkeypatch.delenv("WANDB_API_KEY", raising=False)
 
@@ -134,7 +133,7 @@ def _spec_extras(spec: str) -> set[str]:
 def test_cloud_lerobot_spec_carries_the_pyproject_pinned_ref() -> None:
     """The container install spec must reference the exact ref pinned in
     pyproject.toml — never a hardcoded second copy, never :latest."""
-    from makerlab.runners.hf_cloud import cloud_lerobot_spec
+    from makermodslab.runners.hf_cloud import cloud_lerobot_spec
 
     pin = _pyproject_lerobot_pin()
     ref = pin.rsplit("@", 1)[1]  # the sha at the end of git+https://…@<sha>
@@ -146,7 +145,7 @@ def test_cloud_lerobot_spec_carries_the_pyproject_pinned_ref() -> None:
 def test_cloud_lerobot_spec_uses_archive_tarball_not_git() -> None:
     """A GitHub git+ pin is rewritten to the source archive tarball so pip in
     the container can install it without a git binary."""
-    from makerlab.runners.hf_cloud import cloud_lerobot_spec
+    from makermodslab.runners.hf_cloud import cloud_lerobot_spec
 
     spec = cloud_lerobot_spec("act")
     assert "git+" not in spec
@@ -156,7 +155,7 @@ def test_cloud_lerobot_spec_uses_archive_tarball_not_git() -> None:
 
 
 def test_cloud_lerobot_spec_drops_host_only_extras_and_adds_policy_extra() -> None:
-    from makerlab.runners.hf_cloud import cloud_lerobot_spec
+    from makermodslab.runners.hf_cloud import cloud_lerobot_spec
 
     act = _spec_extras(cloud_lerobot_spec("act"))
     assert "feetech" not in act  # serial motor bus: host-only
@@ -173,9 +172,9 @@ def test_cloud_lerobot_spec_drops_host_only_extras_and_adds_policy_extra() -> No
 def test_cloud_lerobot_spec_falls_back_to_pyproject_when_metadata_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Running from a source tree without installed MakerLab metadata must still
+    """Running from a source tree without installed MakerMods Lab metadata must still
     derive the pin — from pyproject.toml directly."""
-    from makerlab.runners import hf_cloud
+    from makermodslab.runners import hf_cloud
 
     monkeypatch.setattr(hf_cloud, "requires", lambda name: None)
     pin = _pyproject_lerobot_pin()
@@ -187,7 +186,7 @@ def test_cloud_lerobot_spec_falls_back_to_pyproject_when_metadata_missing(
 
 
 def _request(**overrides):
-    from makerlab.train import TrainingRequest
+    from makermodslab.train import TrainingRequest
 
     return TrainingRequest(dataset_repo_id="user/ds", **overrides)
 
@@ -195,8 +194,8 @@ def _request(**overrides):
 def test_localize_forces_flavor_device_over_host_detection() -> None:
     """The host's auto-detected device (mps on a Mac) must never reach a cloud
     job: GPU flavors force cuda, cpu tiers force cpu."""
-    from makerlab.runners.hf_cloud import localize_config_for_cloud
-    from makerlab.train import build_training_command
+    from makermodslab.runners.hf_cloud import localize_config_for_cloud
+    from makermodslab.train import build_training_command
 
     for host_device in ("auto", "mps", "cpu", None):
         config = _request(policy_device=host_device)
@@ -211,8 +210,8 @@ def test_localize_forces_flavor_device_over_host_detection() -> None:
 
 
 def test_localize_clears_host_local_dataset_root() -> None:
-    from makerlab.runners.hf_cloud import localize_config_for_cloud
-    from makerlab.train import build_training_command
+    from makermodslab.runners.hf_cloud import localize_config_for_cloud
+    from makermodslab.train import build_training_command
 
     config = _request(dataset_root="/Users/someone/.cache/huggingface/lerobot/user/ds")
     localize_config_for_cloud(config, "t4-small")
@@ -221,7 +220,7 @@ def test_localize_clears_host_local_dataset_root() -> None:
 
 
 def test_localize_rejects_resume_from_host_checkpoint() -> None:
-    from makerlab.runners.hf_cloud import localize_config_for_cloud
+    from makermodslab.runners.hf_cloud import localize_config_for_cloud
 
     config = _request(
         resume=True, config_path="/host/run/checkpoints/5000/pretrained_model/train_config.json"
@@ -235,7 +234,7 @@ def test_localize_allows_cloud_resume_from_hub() -> None:
     checkpoint from the Hub), not a host-local config_path — so localization must
     NOT reject it. The host config_path stays unset here; the runner sets the
     container path later."""
-    from makerlab.runners.hf_cloud import localize_config_for_cloud
+    from makermodslab.runners.hf_cloud import localize_config_for_cloud
 
     config = _request(resume=True, resume_from_hub_repo="user/parent-run", resume_from_hub_step="005000")
     localize_config_for_cloud(config, "t4-small")  # no raise
@@ -243,7 +242,7 @@ def test_localize_allows_cloud_resume_from_hub() -> None:
 
 
 def test_localize_rejects_local_pretrained_path_but_allows_hub_id() -> None:
-    from makerlab.runners.hf_cloud import localize_config_for_cloud
+    from makermodslab.runners.hf_cloud import localize_config_for_cloud
 
     local = _request(policy_pretrained_path="/host/checkpoints/000500/pretrained_model")
     with pytest.raises(ValueError, match="[Ff]ine-tun"):
@@ -254,13 +253,26 @@ def test_localize_rejects_local_pretrained_path_but_allows_hub_id() -> None:
     assert hub.policy_pretrained_path == "user/some-model"
 
 
+def test_localize_allows_a_step_suffixed_hub_pretrained_ref() -> None:
+    """MT2, cloud half: fine-tuning from a SPECIFIC Hub step travels as the ref
+    'repo@checkpoints/<step_dir>' — the wrapper materializes it pod-side, the
+    same way cloud resume already downloads its parent checkpoint. It must reach
+    the container verbatim, not be rejected as a host path and not be rewritten
+    here (a host path would be meaningless on the pod)."""
+    from makermodslab.runners.hf_cloud import localize_config_for_cloud
+
+    config = _request(policy_pretrained_path="user/some-model@checkpoints/003000")
+    localize_config_for_cloud(config, "t4-small")  # no raise
+    assert config.policy_pretrained_path == "user/some-model@checkpoints/003000"
+
+
 # -- in-container installer ladder (the image's uv venv ships no pip) --
 
 
 def test_install_plan_prefers_uv() -> None:
     """The lerobot-gpu image's venv is uv-created (no pip module), so uv on
     PATH must win, with --python pinning the install into this interpreter."""
-    from makerlab.runners.hf_cloud import _install_plan
+    from makermodslab.runners.hf_cloud import _install_plan
 
     label, cmds = _install_plan("lerobot @ url", "/venv/bin/python", "/usr/local/bin/uv", True, True)
     assert label == "uv"
@@ -278,7 +290,7 @@ def test_install_plan_prefers_uv() -> None:
 
 
 def test_install_plan_falls_back_to_pip_without_uv() -> None:
-    from makerlab.runners.hf_cloud import _install_plan
+    from makermodslab.runners.hf_cloud import _install_plan
 
     label, cmds = _install_plan("spec", "/py", None, True, True)
     assert label == "pip"
@@ -286,7 +298,7 @@ def test_install_plan_falls_back_to_pip_without_uv() -> None:
 
 
 def test_install_plan_bootstraps_pip_via_ensurepip_as_last_resort() -> None:
-    from makerlab.runners.hf_cloud import _install_plan
+    from makermodslab.runners.hf_cloud import _install_plan
 
     label, cmds = _install_plan("spec", "/py", None, False, True)
     assert label == "ensurepip+pip"
@@ -297,9 +309,100 @@ def test_install_plan_bootstraps_pip_via_ensurepip_as_last_resort() -> None:
 
 
 def test_install_plan_reports_no_installer() -> None:
-    from makerlab.runners.hf_cloud import _install_plan
+    from makermodslab.runners.hf_cloud import _install_plan
 
     assert _install_plan("spec", "/py", None, False, False) == (None, [])
+
+
+# -- checkpoint-completeness check (partial-upload race fix) --
+
+
+def test_checkpoint_step_ready_false_when_no_last_link_exists(tmp_path: Path) -> None:
+    """No checkpoints/last symlink at all — e.g. before the first checkpoint
+    of a run has completed — must not be mistaken for readiness."""
+    from makermodslab.runners.hf_cloud import _checkpoint_step_ready
+
+    step_dir = tmp_path / "005000"
+    step_dir.mkdir()
+    assert _checkpoint_step_ready(step_dir) is False
+
+
+def test_checkpoint_step_ready_false_when_last_points_to_an_earlier_step(tmp_path: Path) -> None:
+    """The exact race this fixes: lerobot writes pretrained_model/config.json
+    (and creates training_state/) well before the step is actually complete.
+    Only checkpoints/last advancing to (or past) this step is proof the whole
+    step finished — a step dir existing on its own proves nothing."""
+    from makermodslab.runners.hf_cloud import _checkpoint_step_ready
+
+    step_dir = tmp_path / "010000"
+    step_dir.mkdir()
+    (tmp_path / "005000").mkdir()
+    (tmp_path / "last").symlink_to("005000")
+    assert _checkpoint_step_ready(step_dir) is False
+
+
+def test_checkpoint_step_ready_true_when_last_points_to_this_step(tmp_path: Path) -> None:
+    from makermodslab.runners.hf_cloud import _checkpoint_step_ready
+
+    step_dir = tmp_path / "005000"
+    step_dir.mkdir()
+    (tmp_path / "last").symlink_to("005000")
+    assert _checkpoint_step_ready(step_dir) is True
+
+
+def test_checkpoint_step_ready_true_when_last_has_advanced_past_this_step(tmp_path: Path) -> None:
+    """<=, not ==: two checkpoints can complete inside one 15s poll window, and
+    a step must not go permanently unuploaded just because the poller missed
+    the instant `last` pointed at it exactly."""
+    from makermodslab.runners.hf_cloud import _checkpoint_step_ready
+
+    step_dir = tmp_path / "005000"
+    step_dir.mkdir()
+    (tmp_path / "010000").mkdir()
+    (tmp_path / "last").symlink_to("010000")
+    assert _checkpoint_step_ready(step_dir) is True
+
+
+def test_checkpoint_step_ready_false_when_last_is_not_a_symlink(tmp_path: Path) -> None:
+    """A plain file or directory named `last` (not the symlink lerobot writes)
+    must not be misread as a target step number."""
+    from makermodslab.runners.hf_cloud import _checkpoint_step_ready
+
+    step_dir = tmp_path / "005000"
+    step_dir.mkdir()
+    (tmp_path / "last").mkdir()
+    assert _checkpoint_step_ready(step_dir) is False
+
+
+def test_wrapper_source_inlines_the_tested_checkpoint_ready_check() -> None:
+    """The wrapper's checkpoint-completeness check is _checkpoint_step_ready's
+    source inlined verbatim, so the in-container upload gate is exactly the
+    function the tests above exercise — and _scan_and_upload must call it
+    instead of checking config.json directly."""
+    import inspect
+
+    from makermodslab.runners.hf_cloud import WRAPPER_SOURCE, _checkpoint_step_ready
+
+    assert inspect.getsource(_checkpoint_step_ready) in WRAPPER_SOURCE
+    assert "__CHECKPOINT_READY_SOURCE__" not in WRAPPER_SOURCE  # placeholder replaced
+    assert "_checkpoint_step_ready(entry)" in WRAPPER_SOURCE
+
+
+def test_lerobot_last_checkpoint_symlink_matches_our_readiness_check() -> None:
+    """_checkpoint_step_ready's readiness signal is lerobot's own
+    checkpoints/<LAST_CHECKPOINT_LINK> symlink, which lerobot_train.py points
+    at a step directory via update_last_checkpoint() strictly after
+    save_checkpoint() returns for that step. A lerobot pin bump that renames
+    the link or reorders those two calls should fail here in CI, not ship a
+    gate that silently never passes."""
+    import inspect
+
+    from lerobot.scripts import lerobot_train
+    from lerobot.utils.constants import LAST_CHECKPOINT_LINK
+
+    assert LAST_CHECKPOINT_LINK == "last"
+    src = inspect.getsource(lerobot_train)
+    assert src.index("save_checkpoint(") < src.index("update_last_checkpoint(checkpoint_dir)")
 
 
 # -- wrapper sanity --
@@ -309,7 +412,7 @@ def test_wrapper_source_compiles_and_launches_an_argv_list() -> None:
     """The wrapper must pass the trainer argv to Popen as a LIST (splitting a
     joined string was the bug-3 hypothesis — it is not the case and must stay
     that way) and quote its log line so spaced values read unambiguously."""
-    from makerlab.runners.hf_cloud import WRAPPER_SOURCE
+    from makermodslab.runners.hf_cloud import WRAPPER_SOURCE
 
     compile(WRAPPER_SOURCE, "<hf-jobs-wrapper>", "exec")  # syntactically valid
     assert "subprocess.Popen(list(trainer_argv)" in WRAPPER_SOURCE
@@ -319,26 +422,142 @@ def test_wrapper_source_compiles_and_launches_an_argv_list() -> None:
 
 def test_wrapper_source_handles_resume_download() -> None:
     """Cloud resume: the wrapper must parse --resume-from, download the parent
-    checkpoint tree, refuse an incomplete one using the same readiness rule the
-    uploader applies, and pre-seed `seen` so it never re-uploads the checkpoint
-    it just pulled down."""
-    from makerlab.runners.hf_cloud import WRAPPER_SOURCE
+    checkpoint tree, refuse when the downloaded step is incomplete, and
+    pre-seed `seen` so it never re-uploads the checkpoint it just pulled
+    down."""
+    from makermodslab.runners.hf_cloud import WRAPPER_SOURCE
 
     compile(WRAPPER_SOURCE, "<hf-jobs-wrapper>", "exec")  # still valid with the resume block
     assert "--resume-from=" in WRAPPER_SOURCE
     assert "snapshot_download" in WRAPPER_SOURCE
-    assert "training_state" in WRAPPER_SOURCE
-    assert "missing_checkpoint_files(scan_checkpoint_dir(dest)[0])" in WRAPPER_SOURCE
     assert "seen.add(step_dir)" in WRAPPER_SOURCE
 
 
+def test_wrapper_source_resume_checks_weights_and_training_state_not_just_a_bare_dir() -> None:
+    """C4: a plain `training_state/` is_dir() check would pass a checkpoint
+    that was itself only partially uploaded before this fix existed — the
+    checkpoints/last symlink used by the live watcher isn't available here
+    (it's never pushed to the Hub), so the resume path checks the files it
+    actually needs directly instead of trusting the directory's existence."""
+    from makermodslab.runners.hf_cloud import WRAPPER_SOURCE
+
+    assert 'any((dest / "pretrained_model").glob("*.safetensors"))' in WRAPPER_SOURCE
+    assert '(dest / "training_state" / "training_step.json").is_file()' in WRAPPER_SOURCE
+    assert '(dest / "training_state" / "rng_state.safetensors").is_file()' in WRAPPER_SOURCE
+
+
+def test_wrapper_source_materializes_a_step_suffixed_finetune_base() -> None:
+    """MT2, container half: a --policy.pretrained_path naming a Hub STEP is
+    downloaded pod-side and rewritten to that local dir before the trainer runs.
+
+    Two properties the block must keep:
+      * it pulls ONLY that step's pretrained_model/ (weights-only — fine-tuning
+        needs no training_state/), and
+      * it uses the snapshot cache rather than <output_dir>/checkpoints/, which
+        the uploader watches — a base checkpoint copied there would be
+        republished as if this run had produced it.
+
+    Source-level assertions: the block is top-level wrapper code (like the
+    resume download it mirrors), so it has no import seam to exec against. The
+    argv rewrite it depends on IS unit-tested below."""
+    from makermodslab.runners.hf_cloud import WRAPPER_SOURCE
+
+    compile(WRAPPER_SOURCE, "<hf-jobs-wrapper>", "exec")
+    assert '_arg("--policy.pretrained_path")' in WRAPPER_SOURCE
+    assert '_set_arg("--policy.pretrained_path", str(base_dir))' in WRAPPER_SOURCE
+    assert 'allow_patterns=[f"checkpoints/{step_dir}/pretrained_model/*"]' in WRAPPER_SOURCE
+    # Never staged under the watched output dir.
+    assert 'base_dir = Path(local_root) / "checkpoints" / step_dir / "pretrained_model"' in WRAPPER_SOURCE
+
+
+def _wrapper_argv_helpers(trainer_argv: list[str]):
+    """Exec the wrapper's own `_arg` / `_set_arg` over `trainer_argv`.
+
+    Sliced out of WRAPPER_SOURCE by name and given the globals the wrapper would
+    have, so a drift between the template and these tests fails loudly instead
+    of silently testing a host-side paraphrase."""
+    from makermodslab.runners.hf_cloud import WRAPPER_SOURCE
+
+    namespace: dict = {"trainer_argv": trainer_argv}
+    for name in ("_arg", "_set_arg"):
+        match = re.search(rf"^def {name}\(.*?(?=^\S)", WRAPPER_SOURCE, re.MULTILINE | re.DOTALL)
+        assert match, f"{name} not found in WRAPPER_SOURCE"
+        exec(compile(match.group(0), "<hf-jobs-wrapper>", "exec"), namespace)  # noqa: S102
+    return namespace["_arg"], namespace["_set_arg"]
+
+
+def test_wrapper_set_arg_rewrites_both_argv_spellings() -> None:
+    """The rewrite must hit whichever form the argv builder used, and touch
+    nothing else — this is what turns a Hub ref only the pod can resolve into a
+    real path for the trainer."""
+    joined = ["--policy.type=act", "--policy.pretrained_path=user/repo@checkpoints/003000", "--steps=10"]
+    arg, set_arg = _wrapper_argv_helpers(joined)
+    assert arg("--policy.pretrained_path") == "user/repo@checkpoints/003000"
+    assert set_arg("--policy.pretrained_path", "/tmp/base") is True
+    assert joined == ["--policy.type=act", "--policy.pretrained_path=/tmp/base", "--steps=10"]
+
+    split = ["--policy.pretrained_path", "user/repo@checkpoints/003000", "--steps", "10"]
+    arg, set_arg = _wrapper_argv_helpers(split)
+    assert arg("--policy.pretrained_path") == "user/repo@checkpoints/003000"
+    assert set_arg("--policy.pretrained_path", "/tmp/base") is True
+    assert split == ["--policy.pretrained_path", "/tmp/base", "--steps", "10"]
+
+
+def test_wrapper_set_arg_reports_a_missing_flag() -> None:
+    """A bare-repo-id fine-tune (or no fine-tune at all) leaves the argv alone;
+    the wrapper treats an unexpected miss as a hard error rather than launching
+    a run that trains from the wrong weights."""
+    argv = ["--policy.type=act"]
+    arg, set_arg = _wrapper_argv_helpers(argv)
+    assert arg("--policy.pretrained_path") is None
+    assert set_arg("--policy.pretrained_path", "/tmp/base") is False
+    assert argv == ["--policy.type=act"]
+
+
+def test_cloud_resume_argv_keeps_lineage_in_parent_repo() -> None:
+    """A cloud-resume config resolves to a --config_path at the container path and
+    pushes into the parent's repo (same lineage), with resume essentials only."""
+    from makermodslab.train import TrainingRequest, build_training_command
+
+    req = TrainingRequest(
+        dataset_repo_id="user/ds",
+        resume=True,
+        steps=20000,
+        policy_push_to_hub=True,
+        policy_repo_id="user/parent-run",
+        config_path="/tmp/makermodslab/train/checkpoints/005000/pretrained_model/train_config.json",
+    )
+    cmd = build_training_command(req, output_dir="/tmp/makermodslab/train")
+    assert (
+        "--config_path=/tmp/makermodslab/train/checkpoints/005000/pretrained_model/train_config.json" in cmd
+    )
+    assert cmd[cmd.index("--policy.push_to_hub") + 1] == "true"
+    assert cmd[cmd.index("--policy.repo_id") + 1] == "user/parent-run"
+    assert cmd[cmd.index("--resume") + 1] == "true"
+    # Inherited from the checkpoint — never re-passed on resume.
+    assert "--dataset.repo_id" not in cmd
+    assert "--policy.type" not in cmd
+
+
+def test_wrapper_source_inlines_the_tested_install_plan() -> None:
+    """The wrapper's installer choice is _install_plan's source inlined
+    verbatim, so the in-container code is exactly what the unit tests above
+    exercised — uv first (shutil.which), pip / ensurepip as fallbacks."""
+    import inspect
+
+    from makermodslab.runners.hf_cloud import WRAPPER_SOURCE, _install_plan
+
+    assert inspect.getsource(_install_plan) in WRAPPER_SOURCE
+    assert "__INSTALL_PLAN_SOURCE__" not in WRAPPER_SOURCE  # placeholder replaced
+    assert 'shutil.which("uv")' in WRAPPER_SOURCE
+    assert "no uv, pip, or ensurepip" in WRAPPER_SOURCE  # clear terminal message
+
+
 # ---------------------------------------------------------------------------
-# Checkpoint uploader (NEW-17). The watcher used to publish a directory the
-# moment pretrained_model/config.json appeared — the FIRST file of a save that
-# takes seconds — and `seen.add` then retired it forever, so the files that
-# finished writing afterwards were never uploaded. The tests below exec the
-# wrapper's own _scan_and_upload against fakes, so they exercise the exact
-# source that runs in the container rather than a host-side paraphrase.
+# Checkpoint uploader hardening. The readiness GATE is covered above (it is
+# _checkpoint_step_ready, exercised directly); what follows covers the two
+# things the upload call itself must get right, by exec'ing the wrapper's own
+# _scan_and_upload against fakes rather than a host-side paraphrase.
 # ---------------------------------------------------------------------------
 
 
@@ -355,10 +574,6 @@ class _FakeUploadApi:
             self._fail_times -= 1
             raise RuntimeError("hub is having a day")
 
-    @property
-    def uploaded_steps(self) -> list[str]:
-        return [c["path_in_repo"].rsplit("/", 1)[-1] for c in self.calls]
-
 
 def _wrapper_scanner(output_dir: Path, api: _FakeUploadApi):
     """Exec the wrapper's own `_scan_and_upload` and return (call, seen).
@@ -367,29 +582,33 @@ def _wrapper_scanner(output_dir: Path, api: _FakeUploadApi):
     the wrapper would have around it, so a drift between the template and this
     test surfaces as a KeyError/NameError rather than passing silently.
     """
-    from makerlab.jobs import missing_checkpoint_files, scan_checkpoint_dir
-    from makerlab.runners.hf_cloud import WRAPPER_SOURCE
+    import os
+
+    from makermodslab.runners.hf_cloud import WRAPPER_SOURCE, _checkpoint_step_ready
 
     match = re.search(r"^def _scan_and_upload\(.*?(?=^\S)", WRAPPER_SOURCE, re.MULTILINE | re.DOTALL)
     assert match, "_scan_and_upload not found in WRAPPER_SOURCE"
     namespace: dict = {
         "Path": Path,
+        "os": os,
         "re": re,
         "api": api,
         "output_dir": str(output_dir),
         "repo_id": "user/run",
         "seen": set(),
-        "pending": {},
-        "scan_checkpoint_dir": scan_checkpoint_dir,
-        "missing_checkpoint_files": missing_checkpoint_files,
+        "waits": {},
+        "_checkpoint_step_ready": _checkpoint_step_ready,
         "print": lambda *a, **k: None,  # keep the wrapper's logging out of pytest
     }
     exec(compile(match.group(0), "<hf-jobs-wrapper>", "exec"), namespace)  # noqa: S102
     return namespace["_scan_and_upload"], namespace["seen"]
 
 
-def _write_checkpoint(output_dir: Path, step_dir: str, *, with_optimizer: bool = True) -> Path:
-    """A lerobot checkpoint tree under <output_dir>/checkpoints/<step_dir>."""
+def _write_checkpoint(output_dir: Path, step_dir: str) -> Path:
+    """A complete lerobot checkpoint tree, with `checkpoints/last` advanced to
+    it — the signal _checkpoint_step_ready reads to call the save finished."""
+    import os
+
     ck = output_dir / "checkpoints" / step_dir
     pm = ck / "pretrained_model"
     pm.mkdir(parents=True, exist_ok=True)
@@ -400,86 +619,22 @@ def _write_checkpoint(output_dir: Path, step_dir: str, *, with_optimizer: bool =
     ts.mkdir(exist_ok=True)
     (ts / "training_step.json").write_text("{}")
     (ts / "rng_state.safetensors").write_bytes(b"rng")
-    if with_optimizer:
-        (ts / "optimizer_state.safetensors").write_bytes(b"optim")
+    (ts / "optimizer_state.safetensors").write_bytes(b"optim")
+    last = output_dir / "checkpoints" / "last"
+    if last.is_symlink() or last.exists():
+        last.unlink()
+    os.symlink(step_dir, last)
     return ck
 
 
-def test_wrapper_does_not_upload_or_seal_a_mid_save_checkpoint(tmp_path: Path) -> None:
-    """The live failure: a poll tick lands inside the save, before the big
-    optimizer file. Nothing may be published, and — the part that made it
-    permanent — the step must NOT enter `seen`, so a later tick re-evaluates."""
-    api = _FakeUploadApi()
-    scan, seen = _wrapper_scanner(tmp_path, api)
-
-    _write_checkpoint(tmp_path, "005000", with_optimizer=False)
-    scan()
-    scan()  # settled, but still incomplete — completeness is not a timing question
-    assert api.calls == []
-    assert seen == set()
-
-    # The save finishes; the next two polls (tree changed, then stable) publish it.
-    training_state = tmp_path / "checkpoints" / "005000" / "training_state"
-    (training_state / "optimizer_state.safetensors").write_bytes(b"optim")
-    scan()
-    assert api.calls == []  # fingerprint moved — defer one tick
-    scan()
-    assert api.uploaded_steps == ["005000"]
-    assert seen == {"005000"}
-
-
-def test_wrapper_defers_a_complete_checkpoint_until_the_tree_stops_changing(
-    tmp_path: Path,
-) -> None:
-    """Two-poll stability: the full file set can be present while the last file
-    is still being written, so one unchanged poll is required before upload."""
-    api = _FakeUploadApi()
-    scan, seen = _wrapper_scanner(tmp_path, api)
-
-    _write_checkpoint(tmp_path, "001000")
-    scan()
-    assert api.calls == []  # first sighting is never enough
-    assert seen == set()
-    scan()
-    assert api.uploaded_steps == ["001000"]
-
-    scan()  # already seen — no duplicate commit
-    assert api.uploaded_steps == ["001000"]
-
-
-def test_wrapper_final_pass_skips_the_settle_wait(tmp_path: Path) -> None:
-    """After the trainer exits there is no next poll, so the final pass must
-    upload a complete checkpoint on first sight or the last one is lost."""
-    api = _FakeUploadApi()
-    scan, seen = _wrapper_scanner(tmp_path, api)
-
-    _write_checkpoint(tmp_path, "015000")
-    scan(final=True)
-    assert api.uploaded_steps == ["015000"]
-    assert seen == {"015000"}
-
-
-def test_wrapper_final_pass_still_refuses_an_incomplete_checkpoint(tmp_path: Path) -> None:
-    """Skipping the settle wait must not become skipping the completeness gate:
-    a save the trainer died inside stays unpublished."""
-    api = _FakeUploadApi()
-    scan, seen = _wrapper_scanner(tmp_path, api)
-
-    _write_checkpoint(tmp_path, "004000", with_optimizer=False)
-    scan(final=True)
-    assert api.calls == []
-    assert seen == set()
-
-
 def test_wrapper_does_not_seal_a_checkpoint_whose_upload_failed(tmp_path: Path) -> None:
-    """`seen.add` used to run inside the try, so a step could be retired on a
-    partial or failed commit. A failure must leave it retryable."""
+    """`seen.add` runs only after upload_folder returns, so a partial or failed
+    commit must leave the step retryable instead of retiring it forever."""
     api = _FakeUploadApi(fail_times=1)
     scan, seen = _wrapper_scanner(tmp_path, api)
 
     _write_checkpoint(tmp_path, "002000")
-    scan()
-    scan()  # settled ⇒ attempts the upload, which raises
+    scan()  # attempts the upload, which raises
     assert len(api.calls) == 1
     assert seen == set()  # not retired
 
@@ -496,58 +651,7 @@ def test_wrapper_upload_excludes_safetensors_temp_files(tmp_path: Path) -> None:
 
     _write_checkpoint(tmp_path, "003000")
     scan()
-    scan()
     assert api.calls[0]["ignore_patterns"] == [".tmp*", "**/.tmp*"]
-
-
-def test_wrapper_source_inlines_the_tested_checkpoint_readiness_helpers() -> None:
-    """The container's readiness rule is jobs.py's source inlined verbatim, the
-    same contract the resume guards apply — one definition, three call sites."""
-    import inspect
-
-    from makerlab.jobs import missing_checkpoint_files, scan_checkpoint_dir
-    from makerlab.runners.hf_cloud import WRAPPER_SOURCE
-
-    assert inspect.getsource(scan_checkpoint_dir) in WRAPPER_SOURCE
-    assert inspect.getsource(missing_checkpoint_files) in WRAPPER_SOURCE
-    assert "__CHECKPOINT_READINESS_SOURCE__" not in WRAPPER_SOURCE  # placeholder replaced
-
-
-def test_cloud_resume_argv_keeps_lineage_in_parent_repo() -> None:
-    """A cloud-resume config resolves to a --config_path at the container path and
-    pushes into the parent's repo (same lineage), with resume essentials only."""
-    from makerlab.train import TrainingRequest, build_training_command
-
-    req = TrainingRequest(
-        dataset_repo_id="user/ds",
-        resume=True,
-        steps=20000,
-        policy_push_to_hub=True,
-        policy_repo_id="user/parent-run",
-        config_path="/tmp/makerlab/train/checkpoints/005000/pretrained_model/train_config.json",
-    )
-    cmd = build_training_command(req, output_dir="/tmp/makerlab/train")
-    assert "--config_path=/tmp/makerlab/train/checkpoints/005000/pretrained_model/train_config.json" in cmd
-    assert cmd[cmd.index("--policy.push_to_hub") + 1] == "true"
-    assert cmd[cmd.index("--policy.repo_id") + 1] == "user/parent-run"
-    assert cmd[cmd.index("--resume") + 1] == "true"
-    # Inherited from the checkpoint — never re-passed on resume.
-    assert "--dataset.repo_id" not in cmd
-    assert "--policy.type" not in cmd
-
-
-def test_wrapper_source_inlines_the_tested_install_plan() -> None:
-    """The wrapper's installer choice is _install_plan's source inlined
-    verbatim, so the in-container code is exactly what the unit tests above
-    exercised — uv first (shutil.which), pip / ensurepip as fallbacks."""
-    import inspect
-
-    from makerlab.runners.hf_cloud import WRAPPER_SOURCE, _install_plan
-
-    assert inspect.getsource(_install_plan) in WRAPPER_SOURCE
-    assert "__INSTALL_PLAN_SOURCE__" not in WRAPPER_SOURCE  # placeholder replaced
-    assert 'shutil.which("uv")' in WRAPPER_SOURCE
-    assert "no uv, pip, or ensurepip" in WRAPPER_SOURCE  # clear terminal message
 
 
 # ---------------------------------------------------------------------------
@@ -557,8 +661,8 @@ def test_wrapper_source_inlines_the_tested_install_plan() -> None:
 
 
 def test_resolve_job_timeout_falls_back_to_constant_when_unset() -> None:
-    from makerlab.runners.hf_cloud import HF_JOB_TIMEOUT, resolve_job_timeout
-    from makerlab.train import TrainingRequest
+    from makermodslab.runners.hf_cloud import HF_JOB_TIMEOUT, resolve_job_timeout
+    from makermodslab.train import TrainingRequest
 
     config = TrainingRequest(dataset_repo_id="x")
     assert config.hf_job_timeout is None
@@ -571,7 +675,7 @@ def test_hf_job_timeout_constant_is_single_unit_and_covers_measured_runs() -> No
     compound "improvement" like "1d12h" would not survive that, so pin the shape
     as well as the budget: it must clear the longest run we have measured
     (SmolVLA 15k steps at 2.24 s/step on a10g-small ≈ 8.8h)."""
-    from makerlab.runners.hf_cloud import HF_JOB_TIMEOUT
+    from makermodslab.runners.hf_cloud import HF_JOB_TIMEOUT
 
     assert isinstance(HF_JOB_TIMEOUT, str)
     factors = {"s": 1, "m": 60, "h": 3600, "d": 3600 * 24}  # run_job's own table
@@ -585,8 +689,8 @@ def test_resolve_job_timeout_uses_request_value_normalised_to_seconds() -> None:
     """An explicit request value wins over the constant and is converted to an
     int of seconds — run_job's own str parser only handles a single unit, so
     compound forms like "3h30m" must be pre-resolved here."""
-    from makerlab.runners.hf_cloud import resolve_job_timeout
-    from makerlab.train import TrainingRequest
+    from makermodslab.runners.hf_cloud import resolve_job_timeout
+    from makermodslab.train import TrainingRequest
 
     assert resolve_job_timeout(TrainingRequest(dataset_repo_id="x", hf_job_timeout="45m")) == 2700
     assert resolve_job_timeout(TrainingRequest(dataset_repo_id="x", hf_job_timeout="3h30m")) == 12600
@@ -636,8 +740,8 @@ class _FakeJobsApi:
 
 
 def _runner_with(api, tmp_path, *, stage=None):
-    from makerlab.jobs import TrainingMetrics
-    from makerlab.runners.hf_cloud import HfCloudJobRunner
+    from makermodslab.jobs import TrainingMetrics
+    from makermodslab.runners.hf_cloud import HfCloudJobRunner
 
     runner = HfCloudJobRunner(TrainingMetrics(), tmp_path / "log.jsonl", "a10g-small")
     runner._api = api
