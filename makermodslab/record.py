@@ -746,10 +746,11 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                 recording_active = False
                 recording_start_time = None
                 phase_start_time = None
-                # current_episode/saved_episodes are deliberately left as-is:
-                # handle_recording_status reports saved_episodes in the terminal
-                # (session_ended) status, and the next session already resets both
-                # under the lock in handle_start_recording. Zeroing them here would
+                current_episode = 1
+                # saved_episodes is deliberately left as-is (not reset here):
+                # handle_recording_status reports it in the terminal
+                # (session_ended) status, and the next session already resets it
+                # under the lock in handle_start_recording. Zeroing it here would
                 # erase the count before any poll can read it.
                 logger.info("Recording session ended")
 

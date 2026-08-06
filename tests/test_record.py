@@ -1015,8 +1015,9 @@ def test_worker_quit_discards_fresh_dataset_with_saved_episodes(
         assert not (tmp_lerobot_home / status["dataset_repo_id"]).exists()
         # saved_episodes still reports what was recorded before the quit, even
         # though the dataset directory itself was deleted — the two are
-        # independent facts (discarded_empty is what tells the frontend nothing
-        # was kept on disk).
+        # independent facts in the status payload. This pins backend behavior
+        # only: the quit/discard exit path doesn't currently pass this count
+        # along to the UI.
         assert status["saved_episodes"] == 2
     finally:
         record.discard_requested = False  # don't leak the armed flag into later tests
