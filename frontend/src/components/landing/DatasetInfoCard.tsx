@@ -601,7 +601,8 @@ const HubSyncRow: React.FC<{ repoId: string }> = ({ repoId }) => {
  * Rename dialog for a local dataset (mirrors JobCard's rename UI). The namespace
  * prefix is fixed — the user edits only the name segment, shown after a static
  * "namespace/" prefix. A dataset's repo id IS its directory path, so this moves
- * the directory; the Hub copy (if any) keeps its old name, called out below.
+ * the directory; if a copy also exists on the Hub, the server renames that too
+ * so the two stay in sync.
  */
 const RenameDatasetDialog: React.FC<{
   open: boolean;
@@ -669,8 +670,8 @@ const RenameDatasetDialog: React.FC<{
         <DialogHeader>
           <DialogTitle>Rename dataset</DialogTitle>
           <DialogDescription className="text-muted-foreground">
-            Renames the local dataset directory. If this dataset has a copy on
-            the Hub, the Hub copy keeps its old name.
+            Renames the local dataset directory. If this dataset also has a
+            copy on the Hub, it's renamed there too.
           </DialogDescription>
         </DialogHeader>
         <div className="flex items-center gap-1">

@@ -1082,18 +1082,28 @@ def _dataset_in_use(repo_id: str) -> str | None:
 
 
 def rename_local_dataset(repo_id: str, new_name: str) -> str:
-    """Rename a locally-cached dataset by moving its directory.
+    """Rename a locally-cached dataset by moving its directory, and its Hub
+    copy (if any) to match.
 
     A dataset's repo id *is* its path under the cache root, so a rename is a
     directory move. `new_name` is the NAME PART ONLY — the namespace prefix is
     fixed, so ``ns/old`` renamed to ``new`` becomes ``ns/new`` and a bare
     ``old`` becomes ``new``. Returns the new repo id.
 
+    If `repo_id` also exists on the Hub, it's moved there FIRST via
+    ``HfApi().move_repo`` — before the local directory is touched — so a Hub
+    failure (offline, no permission, name taken) leaves both copies untouched
+    instead of renaming only the local one and leaving a stale Hub entry under
+    the old name. Skipped entirely when ``HF_HUB_OFFLINE`` is set, same as the
+    rest of the app's Hub mutations degrade when explicitly offline — a purely
+    local (never-uploaded) dataset still renames fine in that case.
+
     Raises DatasetRenameError (with an HTTP status + message) on: a bad
     new_name, a source that isn't a local dataset, a target that already
-    exists, or the dataset being actively used (recording / merge / local
-    training). Invalidates the cached Hub-existence answer for BOTH ids so the
-    info card re-checks after the move.
+    exists (locally or on the Hub), the dataset being actively used
+    (recording / merge / local training), or a Hub rename failure. Invalidates
+    the cached Hub-existence answer for BOTH ids so the info card re-checks
+    after the move.
     """
     ok, reason = validate_dataset_name(new_name)
     if not ok:
@@ -1124,10 +1134,53 @@ def rename_local_dataset(repo_id: str, new_name: str) -> str:
     if in_use is not None:
         raise DatasetRenameError(409, in_use)
 
+    api = shared_hf_api()
+    hub_repo_exists = False
+    if not hf_hub_offline():
+        try:
+            hub_repo_exists = api.repo_exists(repo_id, repo_type="dataset")
+        except Exception as exc:
+            logger.info("rename: repo_exists(%s) failed: %s", repo_id, exc)
+            raise DatasetRenameError(
+                502,
+                "Couldn't confirm whether this dataset also exists on the Hub. "
+                "Check your connection and try again.",
+            ) from exc
+
+    if hub_repo_exists:
+        try:
+            new_taken = api.repo_exists(new_repo_id, repo_type="dataset")
+        except Exception as exc:
+            logger.info("rename: repo_exists(%s) failed: %s", new_repo_id, exc)
+            raise DatasetRenameError(
+                502,
+                "Couldn't confirm whether the new name is free on the Hub. "
+                "Check your connection and try again.",
+            ) from exc
+        if new_taken:
+            raise DatasetRenameError(409, f"A dataset named '{new_repo_id}' already exists on the Hub.")
+
+        try:
+            api.move_repo(repo_id, new_repo_id, repo_type="dataset")
+        except Exception as exc:
+            logger.info("move_repo(%s -> %s) failed: %s", repo_id, new_repo_id, exc)
+            hub_err = _hub_edit_error(exc)
+            raise DatasetRenameError(hub_err.status, hub_err.message) from exc
+        logger.info("Renamed Hub dataset %s -> %s", repo_id, new_repo_id)
+
     try:
         os.rename(src, dst)
     except OSError as exc:
-        logger.error("Failed to rename dataset %s -> %s: %s", repo_id, new_repo_id, exc)
+        if hub_repo_exists:
+            logger.error(
+                "Renamed dataset on the Hub (%s -> %s) but failed to rename the local "
+                "directory: %s. The local and Hub copies are now out of sync.",
+                repo_id,
+                new_repo_id,
+                exc,
+            )
+        else:
+            logger.error("Failed to rename dataset %s -> %s: %s", repo_id, new_repo_id, exc)
         raise DatasetRenameError(500, f"Failed to rename dataset: {exc}") from exc
 
     # The old id no longer exists and the new id now does — drop both cached
