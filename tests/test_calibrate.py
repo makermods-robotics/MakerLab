@@ -257,3 +257,107 @@ def test_find_off_center_joints_tolerance_boundary() -> None:
     assert find_off_center_joints({"elbow_flex": (1447, 3447)}) == []
     # Midpoint 2448 deviates by 401 — just over the line.
     assert find_off_center_joints({"elbow_flex": (1448, 3448)}) == ["elbow_flex"]
+
+
+class _FakeBus:
+    """Records Homing_Offset writes; enough surface for _cleanup_device."""
+
+    def __init__(self) -> None:
+        self.writes: list[tuple[str, str, int]] = []
+
+    def write(self, register: str, motor: str, value: int) -> None:
+        self.writes.append((register, motor, value))
+
+
+class _BrokenBus(_FakeBus):
+    """Every write raises, simulating a bus that's already gone unreachable."""
+
+    def write(self, register: str, motor: str, value: int) -> None:
+        raise RuntimeError("bus unreachable")
+
+
+class _FakeDevice:
+    def __init__(self, bus) -> None:
+        self.bus = bus
+        self.disconnected = False
+
+    def disconnect(self) -> None:
+        self.disconnected = True
+
+
+def test_cleanup_device_restores_homing_offsets_when_not_committed() -> None:
+    """Regression for C2: _step_homing writes new Homing_Offset values to the
+    servo's EEPROM immediately (step 1), well before _complete_calibration
+    ever saves the on-disk calibration file (step 3). A calibration cancelled
+    or errored in between used to leave the servo permanently diverged from
+    the last-saved file — the next session's arm-identity fingerprint check
+    (see makerlab/arm_identity.py) would then either hard-refuse to start or
+    silently decode positions against a stale offset. _cleanup_device must
+    restore the pre-calibration baseline whenever the run never committed."""
+    from makerlab.calibrate import CalibrationManager
+
+    mgr = CalibrationManager()
+    bus = _FakeBus()
+    device = _FakeDevice(bus)
+    mgr.device = device
+    mgr._original_homing_offsets = {"shoulder_pan": 15, "wrist_roll": -42}
+    mgr._calibration_committed = False  # cancelled/errored before saving
+
+    mgr._cleanup_device()
+
+    assert ("Homing_Offset", "shoulder_pan", 15) in bus.writes
+    assert ("Homing_Offset", "wrist_roll", -42) in bus.writes
+    assert device.disconnected is True
+    assert mgr.device is None
+
+
+def test_cleanup_device_does_not_restore_once_calibration_committed() -> None:
+    """A calibration that reached _complete_calibration (file saved to disk)
+    must not have its final homing offsets touched during cleanup — EEPROM
+    and the file already agree at that point."""
+    from makerlab.calibrate import CalibrationManager
+
+    mgr = CalibrationManager()
+    bus = _FakeBus()
+    mgr.device = _FakeDevice(bus)
+    mgr._original_homing_offsets = {"shoulder_pan": 15}
+    mgr._calibration_committed = True
+
+    mgr._cleanup_device()
+
+    assert bus.writes == []
+
+
+def test_cleanup_device_skips_restore_when_no_baseline_was_captured() -> None:
+    """If the baseline read itself failed (device unreachable at connect
+    time), there's nothing to roll back to — cleanup must not crash or invent
+    a value."""
+    from makerlab.calibrate import CalibrationManager
+
+    mgr = CalibrationManager()
+    bus = _FakeBus()
+    mgr.device = _FakeDevice(bus)
+    mgr._original_homing_offsets = {}
+    mgr._calibration_committed = False
+
+    mgr._cleanup_device()  # must not raise
+
+    assert bus.writes == []
+
+
+def test_cleanup_device_still_disconnects_if_restore_write_fails() -> None:
+    """A failed rollback write (e.g. the bus just dropped) must be logged, not
+    swallowed silently and not allowed to block the device disconnect."""
+    from makerlab.calibrate import CalibrationManager
+
+    mgr = CalibrationManager()
+    bus = _BrokenBus()
+    device = _FakeDevice(bus)
+    mgr.device = device
+    mgr._original_homing_offsets = {"shoulder_pan": 15}
+    mgr._calibration_committed = False
+
+    mgr._cleanup_device()  # must not raise despite the write failing
+
+    assert device.disconnected is True
+    assert mgr.device is None

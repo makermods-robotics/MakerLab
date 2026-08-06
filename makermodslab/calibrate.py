@@ -164,6 +164,12 @@ class CalibrationManager:
         self._maxes = {}
         self._homing_offsets = {}
         self._current_request: CalibrationRequest | None = None
+        # Rollback baseline for a cancelled/failed run (see _calibration_worker
+        # and _cleanup_device): the servo's Homing_Offset values as they stood
+        # before this session's _step_homing touched them, and whether the run
+        # reached a real commit (on-disk file written) that supersedes them.
+        self._original_homing_offsets: dict[str, int] = {}
+        self._calibration_committed = False
 
         # Initialize logging
         init_logging()
@@ -300,6 +306,8 @@ class CalibrationManager:
                 self._mins = {}
                 self._maxes = {}
                 self._homing_offsets = {}
+                self._original_homing_offsets = {}
+                self._calibration_committed = False
 
                 self._update_status(
                     calibration_active=True,
@@ -414,6 +422,22 @@ class CalibrationManager:
                 logger.info("Calibration stopped after device connection")
                 self._cleanup_and_finish("Calibration cancelled")
                 return
+
+            # Capture the servo's current Homing_Offset as the rollback baseline
+            # BEFORE _step_homing runs — it calls reset_calibration(), which
+            # zeroes Homing_Offset in EEPROM immediately, so this is the last
+            # point the prior (possibly still-in-use) value is readable. If the
+            # run is cancelled or errors before _complete_calibration commits a
+            # new value to disk, _cleanup_device restores this baseline so the
+            # servo never diverges from the last-saved calibration file.
+            try:
+                self._original_homing_offsets = {
+                    motor: self.device.bus.read("Homing_Offset", motor, normalize=False)
+                    for motor in self.device.bus.motors
+                }
+            except Exception as e:
+                logger.warning(f"Could not read baseline homing offsets before calibration: {e}")
+                self._original_homing_offsets = {}
 
             # Start Step 1: Homing
             self._step_homing()
@@ -673,6 +697,10 @@ class CalibrationManager:
 
         logger.info(f"Calibration saved to {self.device.calibration_fpath}")
 
+        # EEPROM and the on-disk file now agree — nothing left for
+        # _cleanup_device to roll back, regardless of what happens below.
+        self._calibration_committed = True
+
         # Robot-record write-back: if this calibration was launched from a tile,
         # update the robot's port + config field for the side that was just calibrated.
         request = self._current_request
@@ -708,6 +736,28 @@ class CalibrationManager:
         """Clean up device connection"""
         try:
             if self.device:
+                # A run that never committed (cancelled, or errored before
+                # _complete_calibration saved) may have already pushed new
+                # Homing_Offset values to the servo in _step_homing. Left as-is,
+                # the servo would permanently diverge from the last-saved
+                # calibration file — the next session's arm-identity check
+                # would then either hard-refuse to start or, worse, silently
+                # decode positions against a stale offset. Restore the
+                # pre-calibration baseline so a cancelled run leaves the
+                # physical arm exactly as it found it.
+                if not self._calibration_committed and self._original_homing_offsets:
+                    try:
+                        logger.info(
+                            "Calibration did not complete — restoring pre-calibration "
+                            f"homing offsets: {self._original_homing_offsets}"
+                        )
+                        for motor, offset in self._original_homing_offsets.items():
+                            self.device.bus.write("Homing_Offset", motor, offset)
+                    except Exception as e:
+                        logger.error(
+                            f"Failed to restore original homing offsets after cancelled calibration: {e}"
+                        )
+
                 logger.info("Disconnecting device...")
                 self.device.disconnect()
                 self.device = None
