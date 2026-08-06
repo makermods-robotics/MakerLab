@@ -690,6 +690,31 @@ def test_force_disconnect_partial_releases_bus_despite_a_wedged_camera() -> None
     assert bus.is_connected is False
 
 
+def test_force_disconnect_partial_disables_remaining_motors_despite_one_failing() -> None:
+    """force_disconnect_partial must disable torque motor-by-motor, not rely on
+    bus.disconnect()'s own internal torque-disable: lerobot's real disconnect()
+    disables torque motor-by-motor too, but a single motor's failed write
+    aborts that loop and leaves every motor after it energized/rigid — this is
+    exactly why force_disable_torque exists as a standalone belt-and-braces
+    step elsewhere in this module (see its docstring) and why
+    _cleanup_after_setup_failure calls it before disconnecting. This helper
+    handles the same "torque may already be enabled after an incomplete
+    connect" situation and needs the same protection.
+    """
+    from makerlab.teleoperate import force_disconnect_partial
+
+    bus = _FakeConnectableBus(port="COM_FOLLOWER")
+    bus.failing = {"elbow_flex"}
+    robot = _FakePartialRobot(bus, {})
+
+    force_disconnect_partial(robot, "robot")
+
+    # shoulder_pan (before elbow_flex) and gripper (after it) must still get
+    # an explicit disable_torque call despite elbow_flex's failure.
+    assert [motor for motor, _ in bus.disabled] == ["shoulder_pan", "gripper"]
+    assert bus.is_connected is False
+
+
 def test_force_disconnect_partial_is_idempotent_and_handles_bimanual_and_none() -> None:
     from makerlab.teleoperate import force_disconnect_partial
 
