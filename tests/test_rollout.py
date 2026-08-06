@@ -331,6 +331,199 @@ def test_resolve_policy_path_resolves_hub_root_ref(monkeypatch, tmp_path) -> Non
     assert result == str(fake_root)
 
 
+# ---------------------------------------------------------------------------
+# Hub ref → MakerMods Lab's own models store (design-debt F6).
+#
+# The Models page downloads with `local_dir=<makermodslab_models>/<repo_id>`, which
+# huggingface_hub keeps entirely outside the shared hub cache — so a model the
+# user already pulled there used to be downloaded a SECOND time on first
+# inference. _resolve_policy_path now checks the local store first, but ONLY
+# when the hub cache holds nothing for the repo (with a cache entry,
+# snapshot_download is the revision-aware, self-deduping path and must win).
+# No network anywhere: snapshot_download is monkeypatched to explode.
+# ---------------------------------------------------------------------------
+
+_FAKE_POLICY_CONFIG = '{"type": "act"}'
+
+
+def _seed_models_store(monkeypatch, tmp_path, repo_id: str, *, step: str | None = None, flat: bool = False):
+    """Point models._local_models_root at a tmp dir and populate one repo in it.
+
+    `step` writes a `checkpoints/<step>/pretrained_model/config.json` tree (what
+    a training repo download looks like); `flat` writes a root `config.json`
+    (what a `@root` repo looks like). Both may be set, to build the ambiguous
+    tree the `@root` branch deliberately refuses. Returns the repo dir,
+    RESOLVED — _downloaded_model_dir resolves, and tmp_path is behind a symlink
+    on macOS."""
+    import makermodslab.models as m
+
+    store = tmp_path / "makermodslab_models"
+    monkeypatch.setattr(m, "_local_models_root", lambda: store)
+    repo_dir = store / repo_id
+    repo_dir.mkdir(parents=True, exist_ok=True)
+    if step is not None:
+        pretrained = repo_dir / "checkpoints" / step / "pretrained_model"
+        pretrained.mkdir(parents=True)
+        (pretrained / "config.json").write_text(_FAKE_POLICY_CONFIG)
+    if flat:
+        (repo_dir / "config.json").write_text(_FAKE_POLICY_CONFIG)
+    return repo_dir.resolve()
+
+
+def _seed_hub_cache(monkeypatch, tmp_path, *, cached_repo: str | None = None, with_snapshot: bool = True):
+    """Redirect HF_HUB_CACHE at a tmp dir, optionally holding one model repo."""
+    from huggingface_hub import constants as hf_constants
+    from huggingface_hub.file_download import repo_folder_name
+
+    cache = tmp_path / "hub"
+    cache.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(hf_constants, "HF_HUB_CACHE", str(cache))
+    if cached_repo is not None:
+        snapshots = cache / repo_folder_name(repo_id=cached_repo, repo_type="model") / "snapshots"
+        snapshots.mkdir(parents=True)
+        if with_snapshot:
+            (snapshots / "deadbeef").mkdir()
+    return cache
+
+
+def _explode_snapshot_download(monkeypatch) -> None:
+    """Any snapshot_download call in these tests is the bug under test."""
+
+    def _boom(**kwargs):
+        raise AssertionError(f"snapshot_download must not be called: {kwargs}")
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", _boom)
+
+
+def test_resolve_policy_path_uses_local_store_for_checkpoint_ref(monkeypatch, tmp_path) -> None:
+    """A `@checkpoints/<step>` ref whose repo is already in the local models
+    store (and nowhere in the hub cache) resolves with zero network."""
+    from makermodslab import rollout
+
+    repo_dir = _seed_models_store(monkeypatch, tmp_path, "user/repo", step="000050")
+    _seed_hub_cache(monkeypatch, tmp_path)
+    _explode_snapshot_download(monkeypatch)
+
+    result = rollout._resolve_policy_path("user/repo@checkpoints/000050")
+
+    assert result == str(repo_dir / "checkpoints" / "000050" / "pretrained_model")
+
+
+def test_resolve_policy_path_uses_local_store_for_root_ref(monkeypatch, tmp_path) -> None:
+    """Same for a flat `@root` repo — the store's repo dir IS the pretrained
+    dir, so it is returned verbatim."""
+    from makermodslab import rollout
+
+    repo_dir = _seed_models_store(monkeypatch, tmp_path, "user/flat", flat=True)
+    _seed_hub_cache(monkeypatch, tmp_path)
+    _explode_snapshot_download(monkeypatch)
+
+    assert rollout._resolve_policy_path("user/flat@root") == str(repo_dir)
+
+
+def test_resolve_policy_path_local_store_hit_leaves_phase_untouched(monkeypatch, tmp_path) -> None:
+    """Nothing is fetched, so the UI must not be told it is downloading a model
+    — the same contract the plain local-dir branch has."""
+    from makermodslab import rollout
+
+    _seed_models_store(monkeypatch, tmp_path, "user/repo", step="000050")
+    _seed_hub_cache(monkeypatch, tmp_path)
+    _explode_snapshot_download(monkeypatch)
+    monkeypatch.setattr(rollout, "_inference_meta", {"phase": rollout.PHASE_STARTING})
+
+    rollout._resolve_policy_path("user/repo@checkpoints/000050")
+
+    assert rollout._inference_meta["phase"] == rollout.PHASE_STARTING
+
+
+def test_resolve_policy_path_prefers_hub_when_repo_is_cached(monkeypatch, tmp_path) -> None:
+    """With the repo in the hub cache, snapshot_download is the right call even
+    though a local-store copy exists: it is revision-aware and only pulls what
+    changed, so the user stays on `main` instead of being pinned to a possibly
+    stale local copy."""
+    from makermodslab import rollout
+
+    _seed_models_store(monkeypatch, tmp_path, "user/repo", step="000050")
+    _seed_hub_cache(monkeypatch, tmp_path, cached_repo="user/repo")
+    fake_root = tmp_path / "snapshot"
+    fake_root.mkdir()
+    seen: dict = {}
+
+    def fake_snapshot_download(**kwargs):
+        seen.update(kwargs)
+        return str(fake_root)
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", fake_snapshot_download)
+
+    result = rollout._resolve_policy_path("user/repo@checkpoints/000050")
+
+    assert seen["repo_id"] == "user/repo"
+    assert result == str(fake_root / "checkpoints" / "000050" / "pretrained_model")
+
+
+def test_resolve_policy_path_downloads_when_requested_step_is_missing(monkeypatch, tmp_path) -> None:
+    """The local store has the repo but not the step the user picked — that is a
+    miss, not a substitution: fall through to the Hub."""
+    from makermodslab import rollout
+
+    _seed_models_store(monkeypatch, tmp_path, "user/repo", step="000050")
+    _seed_hub_cache(monkeypatch, tmp_path)
+    fake_root = tmp_path / "snapshot"
+    fake_root.mkdir()
+    monkeypatch.setattr("huggingface_hub.snapshot_download", lambda **kw: str(fake_root))
+
+    result = rollout._resolve_policy_path("user/repo@checkpoints/000100")
+
+    assert result == str(fake_root / "checkpoints" / "000100" / "pretrained_model")
+
+
+def test_local_store_root_ref_refuses_a_checkpoints_tree(monkeypatch, tmp_path) -> None:
+    """`@root` means "the repo root IS the pretrained_model". A local copy that
+    resolves to a checkpoints sub-tree is a DIFFERENT tree than the Hub path
+    would return, so the shortcut declines rather than substituting it."""
+    from makermodslab import rollout
+
+    _seed_models_store(monkeypatch, tmp_path, "user/repo", step="000050")
+    _seed_hub_cache(monkeypatch, tmp_path)
+
+    assert rollout._local_store_policy_path("user/repo", None) is None
+
+
+def test_local_store_declines_unknown_repo(monkeypatch, tmp_path) -> None:
+    """Nothing in the store for this repo → no shortcut."""
+    from makermodslab import rollout
+
+    _seed_models_store(monkeypatch, tmp_path, "user/repo", step="000050")
+    _seed_hub_cache(monkeypatch, tmp_path)
+
+    assert rollout._local_store_policy_path("someone/else", "000050") is None
+
+
+def test_local_store_refuses_traversal_repo_id(monkeypatch, tmp_path) -> None:
+    """`policy_ref` is user input and the hub-ref regex accepts any `[^@]+`, so
+    a repo id that escapes the models root must never resolve (the guard comes
+    from models._downloaded_model_dir)."""
+    from makermodslab import rollout
+
+    _seed_models_store(monkeypatch, tmp_path, "user/repo", step="000050")
+    _seed_hub_cache(monkeypatch, tmp_path)
+
+    assert rollout._local_store_policy_path("../../etc", None) is None
+
+
+def test_hub_cache_has_repo_reads_the_on_disk_layout(monkeypatch, tmp_path) -> None:
+    """A repo dir whose snapshots/ is empty (an interrupted or wiped entry) has
+    nothing to dedupe against, so it counts as absent."""
+    from makermodslab import rollout
+
+    _seed_hub_cache(monkeypatch, tmp_path, cached_repo="user/repo")
+    assert rollout._hub_cache_has_repo("user/repo") is True
+    assert rollout._hub_cache_has_repo("user/other") is False
+
+    _seed_hub_cache(monkeypatch, tmp_path / "b", cached_repo="user/repo", with_snapshot=False)
+    assert rollout._hub_cache_has_repo("user/repo") is False
+
+
 def test_format_cameras_arg_empty_yields_empty_braces() -> None:
     from makermodslab.rollout import _format_cameras_arg
 
