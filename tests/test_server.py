@@ -844,6 +844,66 @@ def test_import_model_route_maps_value_error_to_400(client, monkeypatch) -> None
     assert "No usable model" in resp.json()["detail"]
 
 
+_MINIMAL_RECORDING_REQUEST_BODY = {
+    "leader_port": "COM_LEADER",
+    "follower_port": "COM_FOLLOWER",
+    "leader_config": "leader",
+    "follower_config": "follower",
+    "dataset_repo_id": "tester/some_dataset",
+    "single_task": "pick",
+}
+
+
+def test_start_recording_route_returns_409_when_already_active(client, monkeypatch) -> None:
+    """R2 regression: a rejected /start-recording must surface as a real HTTP
+    status (so the frontend's `response.ok` check treats it as a failure),
+    not the HTTP 200 FastAPI would otherwise default every dict return to."""
+    import makerlab.record as record
+    import makerlab.rollout as rollout
+    import makerlab.teleoperate as teleop
+
+    monkeypatch.setattr(record, "recording_active", True)
+    monkeypatch.setattr(record, "releasing", False)
+    monkeypatch.setattr(teleop, "teleoperation_active", False)
+    monkeypatch.setattr(rollout, "inference_active", False)
+
+    resp = client.post("/start-recording", json=_MINIMAL_RECORDING_REQUEST_BODY)
+
+    assert resp.status_code == 409
+    assert "already active" in resp.json()["detail"]
+
+
+def test_start_recording_route_returns_409_when_teleoperation_active(client, monkeypatch) -> None:
+    import makerlab.record as record
+    import makerlab.rollout as rollout
+    import makerlab.teleoperate as teleop
+
+    monkeypatch.setattr(record, "recording_active", False)
+    monkeypatch.setattr(teleop, "teleoperation_active", True)
+    monkeypatch.setattr(rollout, "inference_active", False)
+
+    resp = client.post("/start-recording", json=_MINIMAL_RECORDING_REQUEST_BODY)
+
+    assert resp.status_code == 409
+    assert "Teleoperation is currently active" in resp.json()["detail"]
+
+
+def test_start_recording_route_returns_400_for_invalid_dataset_name(client, monkeypatch) -> None:
+    import makerlab.record as record
+    import makerlab.rollout as rollout
+    import makerlab.teleoperate as teleop
+
+    monkeypatch.setattr(record, "recording_active", False)
+    monkeypatch.setattr(teleop, "teleoperation_active", False)
+    monkeypatch.setattr(rollout, "inference_active", False)
+
+    body = dict(_MINIMAL_RECORDING_REQUEST_BODY, dataset_repo_id="too/many/slashes")
+    resp = client.post("/start-recording", json=body)
+
+    assert resp.status_code == 400
+    assert "'/'" in resp.json()["detail"]
+
+
 def test_rename_job_route_returns_updated_record(client, monkeypatch) -> None:
     from makermodslab import server
     from makermodslab.jobs import JobRecord

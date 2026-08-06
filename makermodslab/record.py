@@ -500,7 +500,11 @@ def create_record_config(request: RecordingRequest) -> RecordConfig:
 
 
 def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
-    """Handle start recording request by using the existing record() function"""
+    """Handle start recording request by using the existing record() function.
+
+    Returns a dict — the route layer turns a rejection into an HTTPException
+    using the "status_code" key when present (409 for an active-session
+    conflict, 400 for a malformed dataset name), defaulting to 500 otherwise."""
     global \
         recording_active, \
         releasing, \
@@ -547,6 +551,7 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
         if recording_active:
             return {
                 "success": False,
+                "status_code": 409,
                 "message": (
                     "The previous session is still releasing the arms. Try again in a few seconds."
                     if releasing
@@ -554,16 +559,33 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                 ),
             }
         if _teleoperate.teleoperation_active:
-            return {"success": False, "message": "Teleoperation is currently active. Stop it first."}
+            return {
+                "success": False,
+                "status_code": 409,
+                "message": "Teleoperation is currently active. Stop it first.",
+            }
         if _rollout.inference_active:
-            return {"success": False, "message": "Inference is currently active. Stop it first."}
+            return {
+                "success": False,
+                "status_code": 409,
+                "message": "Inference is currently active. Stop it first.",
+            }
         if _calibrate.calibration_is_active():
-            return {"success": False, "message": "Calibration is currently active. Stop it first."}
+            return {
+                "success": False,
+                "status_code": 409,
+                "message": "Calibration is currently active. Stop it first.",
+            }
         if _auto_calibrate.auto_calibration_is_active():
-            return {"success": False, "message": "Auto-calibration is currently active. Stop it first."}
+            return {
+                "success": False,
+                "status_code": 409,
+                "message": "Auto-calibration is currently active. Stop it first.",
+            }
         if _wiggle.wiggle_active:
             return {
                 "success": False,
+                "status_code": 409,
                 "message": "A gripper wiggle is currently in progress. Wait for it to finish.",
             }
         # Refuse a malformed dataset name up front (before claiming the flag or
@@ -576,7 +598,7 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                 request.dataset_repo_id,
                 name_reason,
             )
-            return {"success": False, "message": name_reason}
+            return {"success": False, "status_code": 400, "message": name_reason}
         # Per-session state reset, under the same lock that claims the active
         # flag: a stale _release_now from a previous session's double-stop
         # would otherwise cut EVERY later release grace short until the server
