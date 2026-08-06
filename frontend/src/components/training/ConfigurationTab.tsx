@@ -26,6 +26,7 @@ const ConfigurationTab: React.FC<ConfigurationTabProps> = ({
   flavors,
   hardwareLoading,
   policyLocked,
+  resumeLocked,
   runnerLocked,
 }) => {
   return (
@@ -44,10 +45,19 @@ const ConfigurationTab: React.FC<ConfigurationTabProps> = ({
         authenticated={authenticated}
         flavors={flavors}
         loading={hardwareLoading}
+        resumeLocked={resumeLocked}
         runnerLocked={runnerLocked}
       />
-      <EssentialsCard config={config} updateConfig={updateConfig} />
-      <AdvancedCard config={config} updateConfig={updateConfig} />
+      <EssentialsCard
+        config={config}
+        updateConfig={updateConfig}
+        resumeLocked={resumeLocked}
+      />
+      <AdvancedCard
+        config={config}
+        updateConfig={updateConfig}
+        resumeLocked={resumeLocked}
+      />
     </div>
   );
 };

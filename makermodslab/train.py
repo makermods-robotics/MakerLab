@@ -309,7 +309,11 @@ def build_training_command(
     # from config_path, not the CLI. --steps must be raised above the resumed
     # step for the loop to do any work; --output_dir points new checkpoints at
     # this job's own dir so tracking stays consistent (state still loads from
-    # the source checkpoint).
+    # the source checkpoint). --num_workers rides along too: it is a
+    # host-capacity knob, not an experiment property, and a resume can land on a
+    # different flavor than the parent run, so inheriting the checkpoint's
+    # worker count would oversubscribe or starve the new host. (A bare int
+    # decodes fine through the config_path parse path.)
     if request.resume and request.config_path:
         # lerobot pre-parses config_path with its own parser that ONLY accepts
         # the "--config_path=<path>" form (space-separated is silently ignored,
@@ -318,6 +322,7 @@ def build_training_command(
         cmd.extend(["--resume", "true"])
         cmd.extend(["--output_dir", output_dir])
         cmd.extend(["--steps", str(request.steps)])
+        cmd.extend(["--num_workers", str(request.num_workers)])
         cmd.extend(["--log_freq", str(request.log_freq)])
         cmd.extend(["--save_freq", str(request.save_freq)])
         cmd.extend(["--save_checkpoint", "true" if request.save_checkpoint else "false"])

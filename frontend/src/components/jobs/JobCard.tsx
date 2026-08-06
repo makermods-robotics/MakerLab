@@ -341,6 +341,11 @@ const JobCard: React.FC<Props> = ({
     selectedStep != null &&
     endedBeforeTarget;
 
+  // The configurator PREFILLS from this seed, then renders read-only the
+  // settings lerobot rebuilds from the checkpoint anyway (batch size, seed,
+  // device, optimizer, AMP). Steps, the log/save cadence, the worker count,
+  // the cloud flavor and the timeout stay editable — those a continuation can
+  // really change.
   const goToResume = (runner: "local" | "hf_cloud") => {
     if (selectedStep == null) return;
     navigate("/training", {

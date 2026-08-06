@@ -48,6 +48,9 @@ def test_resume_request_emits_minimal_argv() -> None:
         resume=True,
         config_path="/runs/abc/checkpoints/5000/pretrained_model/train_config.json",
         steps=20000,
+        num_workers=12,
+        batch_size=64,
+        seed=7,
     )
     cmd = build_training_command(req, output_dir="/tmp/new")
 
@@ -61,9 +64,19 @@ def test_resume_request_emits_minimal_argv() -> None:
     assert _arg_value(cmd, "--resume") == "true"
     assert _arg_value(cmd, "--output_dir") == "/tmp/new"
     assert _arg_value(cmd, "--steps") == "20000"
+    assert _arg_value(cmd, "--log_freq") == str(req.log_freq)
+    assert _arg_value(cmd, "--save_freq") == str(req.save_freq)
+    # num_workers is a HOST-capacity knob, not an experiment property (the
+    # resumed run's flavor can differ from the parent's), so it stays editable
+    # on a continuation and must actually reach the CLI.
+    assert _arg_value(cmd, "--num_workers") == "12"
     # Inherited from the checkpoint — must not be re-specified on the CLI.
     assert "--dataset.repo_id" not in cmd
     assert "--policy.type" not in cmd
+    assert "--batch_size" not in cmd
+    assert "--seed" not in cmd
+    assert "--policy.device" not in cmd
+    assert "--policy.use_amp" not in cmd
     assert "--optimizer.type" not in cmd
     # Optimizer state comes from the checkpoint on a resume — see
     # test_resume_emits_no_optimizer_flags for the full assertion.

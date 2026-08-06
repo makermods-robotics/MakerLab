@@ -541,6 +541,12 @@ const TrainingConfigurator: React.FC<TrainingConfiguratorProps> = ({
         flavors={flavors}
         hardwareLoading={hardwareLoading}
         policyLocked={finetuneSeed != null || resumeSeed != null}
+        // On a resume, lerobot rebuilds every hyperparameter but the
+        // continuation essentials from the checkpoint's train_config.json, so
+        // those controls render read-only rather than accepting edits the run
+        // will discard. configToRequest still sends the form's values, keeping
+        // the new JobRecord's persisted config truthful about what was asked.
+        resumeLocked={resumeSeed != null}
         // Compute is pinned to the parent's runner on a resume. Cross-runner
         // resume isn't implemented (F7) and both directions fail badly —
         // cloud→local dies at startup on a host path that never existed,

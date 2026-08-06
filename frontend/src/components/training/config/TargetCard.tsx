@@ -8,7 +8,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
-import { ConfigComponentProps } from "../types";
+import { ConfigComponentProps, RESUME_INHERITED_SHORT } from "../types";
 import { RunnerFlavor } from "@/lib/jobsApi";
 
 interface TargetCardProps extends ConfigComponentProps {
@@ -38,13 +38,16 @@ const formatFlavorLine = (f: RunnerFlavor): string => {
  * Which HARDWARE a run rents is genuinely chosen per launch, so the cloud
  * flavor stays live on a resume. WHICH RUNNER does not: a resume can only
  * continue on the parent's runner (`runnerLocked`, F7), so the toggle is pinned
- * and disabled there. */
+ * and disabled there. `policy_device` is locked too, for a different reason:
+ * the resume branch emits no --policy.device, so lerobot uses whatever the
+ * checkpoint's train_config.json recorded. */
 const TargetCard: React.FC<TargetCardProps> = ({
   config,
   updateConfig,
   authenticated,
   flavors,
   loading,
+  resumeLocked,
   runnerLocked,
 }) => {
   const target = config.target;
@@ -102,6 +105,7 @@ const TargetCard: React.FC<TargetCardProps> = ({
           <Select
             value={config.policy_device === "cpu" ? "cpu" : "auto"}
             onValueChange={(value) => updateConfig("policy_device", value)}
+            disabled={resumeLocked}
           >
             <SelectTrigger id="policy_device">
               <SelectValue />
@@ -114,7 +118,9 @@ const TargetCard: React.FC<TargetCardProps> = ({
             </SelectContent>
           </Select>
           <p className="text-xs text-muted-foreground">
-            lerobot auto-detects your GPU (CUDA/MPS); only CPU is forced.
+            {resumeLocked
+              ? RESUME_INHERITED_SHORT
+              : "lerobot auto-detects your GPU (CUDA/MPS); only CPU is forced."}
           </p>
         </div>
       ) : (

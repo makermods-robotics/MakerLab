@@ -5,7 +5,11 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { AdvancedSection } from "@/components/studio/panel/primitives";
 import { cn } from "@/lib/utils";
-import { ConfigComponentProps, POLICY_TYPE_OPTIONS } from "../types";
+import {
+  ConfigComponentProps,
+  POLICY_TYPE_OPTIONS,
+  RESUME_INHERITED_NOTE,
+} from "../types";
 import { useApi } from "@/contexts/ApiContext";
 import { isValidTimeout } from "@/lib/jobTimeout";
 
@@ -79,10 +83,23 @@ const policyShortLabel = (value: string): string =>
 /** Advanced-parameters section of the training form. Uses the shared
  * AdvancedSection, so its trigger is the same eyebrow-level control as the
  * Collect form's "Advanced parameters" instead of a heavier heading that
- * outranked the sections above it. */
+ * outranked the sections above it.
+ *
+ * On a resume the first three sections (policy preset, training, optimizer) are
+ * inherited wholesale from the checkpoint — build_training_command's resume
+ * branch emits none of --policy.use_amp / --seed / --policy.optimizer_* (and
+ * lerobot restores optimizer state from the checkpoint itself) — so they get
+ * ONE section-level read-only treatment rather than a per-field repetition.
+ * "Data loading", "Logging & checkpointing" and the cloud "Job timeout" below
+ * stay live: --num_workers / --log_freq / --save_freq are on the resume argv,
+ * and the timeout is a run_job submission parameter that never reaches lerobot
+ * at all. Worker count sits outside the inherited block on purpose — it is a
+ * host-capacity knob (like the cloud flavor), not part of the experiment, and a
+ * continuation can land on different hardware than the parent run. */
 const AdvancedCard: React.FC<ConfigComponentProps> = ({
   config,
   updateConfig,
+  resumeLocked,
 }) => {
   const [expanded, setExpanded] = useState(false);
   const { baseUrl, fetchWithHeaders } = useApi();
@@ -143,36 +160,138 @@ const AdvancedCard: React.FC<ConfigComponentProps> = ({
       summary="Optimizer, learning rate, log frequency, checkpoints, and more"
     >
       <div className="space-y-6">
-        {/* Policy */}
-        <section className="space-y-3">
-          <SectionHeading>Policy preset</SectionHeading>
-          <div className="flex items-center gap-3">
-            <Switch
-              id="policy_use_amp"
-              checked={config.policy_use_amp}
-              onCheckedChange={(checked) =>
-                updateConfig("policy_use_amp", checked)
-              }
-              className="data-[state=checked]:bg-primary"
-            />
-            <Label htmlFor="policy_use_amp">
-              Use automatic mixed precision
-            </Label>
-          </div>
-        </section>
-
-        {/* Training */}
-        <section className="space-y-3">
-          <SectionHeading>Training</SectionHeading>
-          <div className="grid grid-cols-2 gap-4">
-            <div className="space-y-2">
-              <Label htmlFor="seed">Random seed</Label>
-              <NumberInput
-                id="seed"
-                value={config.seed}
-                onChange={(v) => updateConfig("seed", v)}
+        {/* Policy preset + Training + Optimizer. On a resume these are one
+            inherited block, so the explanation sits once at its head. */}
+        <div
+          className={cn(
+            "space-y-6",
+            resumeLocked && "rounded-md border border-border bg-muted/30 p-4",
+          )}
+        >
+          {resumeLocked && (
+            <p className="text-xs text-muted-foreground">
+              {RESUME_INHERITED_NOTE}
+            </p>
+          )}
+          {/* Policy */}
+          <section className="space-y-3">
+            <SectionHeading>Policy preset</SectionHeading>
+            <div className="flex items-center gap-3">
+              <Switch
+                id="policy_use_amp"
+                checked={config.policy_use_amp}
+                onCheckedChange={(checked) =>
+                  updateConfig("policy_use_amp", checked)
+                }
+                disabled={resumeLocked}
+                className="data-[state=checked]:bg-primary"
               />
+              <Label htmlFor="policy_use_amp">
+                Use automatic mixed precision
+              </Label>
             </div>
+          </section>
+
+          {/* Training */}
+          <section className="space-y-3">
+            <SectionHeading>Training</SectionHeading>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label htmlFor="seed">Random seed</Label>
+                <NumberInput
+                  id="seed"
+                  value={config.seed}
+                  onChange={(v) => updateConfig("seed", v)}
+                  disabled={resumeLocked}
+                />
+              </div>
+            </div>
+          </section>
+
+          {/* Optimizer */}
+          <section className="space-y-3">
+            <SectionHeading>Optimizer</SectionHeading>
+            <div className="space-y-2">
+              <Label>Optimizer</Label>
+              <p className="text-sm">
+                {defaultOptimizerLabel ?? "Set by the policy preset"}
+              </p>
+              <p className="text-xs text-muted-foreground">
+                {defaultOptimizerLabel
+                  ? `Set by the ${policyLabel} policy preset — the optimizer class isn't adjustable.`
+                  : "The policy preset picks the optimizer class; it isn't adjustable."}
+              </p>
+            </div>
+            {knobs.length === 0 ? (
+              <p className="text-xs text-muted-foreground">
+                The {policyLabel} preset builds its optimizer from per-parameter-group
+                settings, so there are no learning-rate or weight-decay knobs to set here.
+              </p>
+            ) : (
+              <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
+                {has("lr") && (
+                  <div className="space-y-2">
+                    <Label htmlFor="optimizer_lr">Learning rate</Label>
+                    <NumberInput
+                      id="optimizer_lr"
+                      integer={false}
+                      step="0.0001"
+                      value={config.optimizer_lr}
+                      onChange={(v) => updateConfig("optimizer_lr", v)}
+                      placeholder={lrPlaceholder}
+                      disabled={resumeLocked}
+                    />
+                  </div>
+                )}
+                {has("weight_decay") && (
+                  <div className="space-y-2">
+                    <Label htmlFor="optimizer_weight_decay">Weight decay</Label>
+                    <NumberInput
+                      id="optimizer_weight_decay"
+                      integer={false}
+                      step="0.0001"
+                      value={config.optimizer_weight_decay}
+                      onChange={(v) => updateConfig("optimizer_weight_decay", v)}
+                      placeholder={wdPlaceholder}
+                      disabled={resumeLocked}
+                    />
+                  </div>
+                )}
+                {has("grad_clip_norm") && (
+                  <div className="space-y-2">
+                    <Label htmlFor="optimizer_grad_clip_norm">
+                      Gradient clipping
+                    </Label>
+                    <NumberInput
+                      id="optimizer_grad_clip_norm"
+                      integer={false}
+                      step="0.0001"
+                      value={config.optimizer_grad_clip_norm}
+                      onChange={(v) =>
+                        updateConfig("optimizer_grad_clip_norm", v)
+                      }
+                      placeholder={gradPlaceholder}
+                      disabled={resumeLocked}
+                    />
+                  </div>
+                )}
+              </div>
+            )}
+            {knobs.length > 0 && !has("grad_clip_norm") && (
+              <p className="text-xs text-muted-foreground">
+                The {policyLabel} policy exposes no gradient-clipping setting
+                {has("weight_decay") ? "" : " or weight decay"}.
+              </p>
+            )}
+          </section>
+        </div>
+
+        {/* Data loading. Outside the inherited block above even on a resume:
+            --num_workers IS on the resume argv, and the host it runs on can
+            differ from the parent run's. */}
+        <section className="space-y-3">
+          <SectionHeading>Data loading</SectionHeading>
+          <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">
               <Label htmlFor="num_workers">Number of workers</Label>
               <NumberInput
@@ -182,82 +301,11 @@ const AdvancedCard: React.FC<ConfigComponentProps> = ({
                   if (v !== undefined) updateConfig("num_workers", v);
                 }}
               />
+              <p className="text-xs text-muted-foreground">
+                DataLoader processes feeding the GPU.
+              </p>
             </div>
           </div>
-        </section>
-
-        {/* Optimizer */}
-        <section className="space-y-3">
-          <SectionHeading>Optimizer</SectionHeading>
-          <div className="space-y-2">
-            <Label>Optimizer</Label>
-            <p className="text-sm">
-              {defaultOptimizerLabel ?? "Set by the policy preset"}
-            </p>
-            <p className="text-xs text-muted-foreground">
-              {defaultOptimizerLabel
-                ? `Set by the ${policyLabel} policy preset — the optimizer class isn't adjustable.`
-                : "The policy preset picks the optimizer class; it isn't adjustable."}
-            </p>
-          </div>
-          {knobs.length === 0 ? (
-            <p className="text-xs text-muted-foreground">
-              The {policyLabel} preset builds its optimizer from per-parameter-group
-              settings, so there are no learning-rate or weight-decay knobs to set here.
-            </p>
-          ) : (
-            <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
-              {has("lr") && (
-                <div className="space-y-2">
-                  <Label htmlFor="optimizer_lr">Learning rate</Label>
-                  <NumberInput
-                    id="optimizer_lr"
-                    integer={false}
-                    step="0.0001"
-                    value={config.optimizer_lr}
-                    onChange={(v) => updateConfig("optimizer_lr", v)}
-                    placeholder={lrPlaceholder}
-                  />
-                </div>
-              )}
-              {has("weight_decay") && (
-                <div className="space-y-2">
-                  <Label htmlFor="optimizer_weight_decay">Weight decay</Label>
-                  <NumberInput
-                    id="optimizer_weight_decay"
-                    integer={false}
-                    step="0.0001"
-                    value={config.optimizer_weight_decay}
-                    onChange={(v) => updateConfig("optimizer_weight_decay", v)}
-                    placeholder={wdPlaceholder}
-                  />
-                </div>
-              )}
-              {has("grad_clip_norm") && (
-                <div className="space-y-2">
-                  <Label htmlFor="optimizer_grad_clip_norm">
-                    Gradient clipping
-                  </Label>
-                  <NumberInput
-                    id="optimizer_grad_clip_norm"
-                    integer={false}
-                    step="0.0001"
-                    value={config.optimizer_grad_clip_norm}
-                    onChange={(v) =>
-                      updateConfig("optimizer_grad_clip_norm", v)
-                    }
-                    placeholder={gradPlaceholder}
-                  />
-                </div>
-              )}
-            </div>
-          )}
-          {knobs.length > 0 && !has("grad_clip_norm") && (
-            <p className="text-xs text-muted-foreground">
-              The {policyLabel} policy exposes no gradient-clipping setting
-              {has("weight_decay") ? "" : " or weight decay"}.
-            </p>
-          )}
         </section>
 
         {/* Logging & Checkpointing */}
