@@ -572,9 +572,12 @@ def force_disconnect_partial(device, label: str = "device") -> list[str]:
     enabled after an incomplete setup" situation. force_disable_torque skips
     any bus that never opened, so this is safe to call unconditionally.
 
-    Returns the joined list of problem descriptions (same shape as
-    _cleanup_after_setup_failure), empty when teardown was clean, so callers
-    can surface a partial teardown instead of silently discarding it.
+    Returns the list of problem descriptions, empty when teardown was clean,
+    so callers can surface a partial teardown instead of silently discarding
+    it. Note this is the raw list, unlike _cleanup_after_setup_failure, which
+    joins its problems into a single ``str | None`` for its one caller —
+    leaving them separate here lets a caller count, filter, or join them as
+    it needs.
     """
     problems: list[str] = []
     if device is None:

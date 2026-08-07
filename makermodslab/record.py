@@ -1703,7 +1703,11 @@ def record_with_web_events(
                 # (already in _RECORD_LOG_LOGGER_NAMES) so it reaches the
                 # visible Record-page log panel, not just the server console.
                 current_phase = "reconnecting_robot"
-                connect_retry_attempt = attempt
+                # The attempt about to run, not the one that just failed —
+                # same convention as the log line below, so the Record page's
+                # dialog and its log panel can't disagree about the number
+                # (they sit one above the other).
+                connect_retry_attempt = attempt + 1
                 logger.info(
                     "🔁 ROBOT CONNECTION: Camera hiccup, retrying (%d/%d) after OS release settles...",
                     attempt + 1,
