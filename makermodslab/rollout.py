@@ -71,6 +71,12 @@ from .eval_protocol import (
     parse_event,
 )
 from .jobs import download_hub_checkpoint_ref, make_snapshot_progress_tqdm
+from .models import (
+    _downloaded_model_dir,
+    _has_loadable_weights,
+    _hub_cache_has_repo,
+    _resolve_pretrained_dir,
+)
 from .motor_power import clear_goal_velocity, reset_torque_limit
 from .record import _DEFAULT_FOURCC
 from .utils.config import (
@@ -687,28 +693,95 @@ def _policy_ref_is_valid(policy_ref: str) -> bool:
     )
 
 
+def _local_store_policy_path(repo_id: str, step_dir: str | None) -> str | None:
+    """A ready-to-run pretrained_model dir for a Hub ref, taken from MakerMods
+    Lab's own models store instead of the Hub — or None to go download.
+
+    The Models page downloads with ``local_dir=<makermodslab_models>/<repo_id>``,
+    and huggingface_hub's local_dir mode neither reads nor populates the shared
+    hub cache. So a model the user already pulled on the Models page was, until
+    this check, downloaded a SECOND time the first time inference ran on it
+    (see design-debt F6). When the hub cache has no entry for the repo there is
+    nothing for snapshot_download to dedupe against, so a usable local copy is
+    strictly better: same bytes, zero network, no downloading_model phase.
+
+    Deliberately does NOT pre-empt a populated hub cache: snapshot_download IS
+    the hub-cache path, it is revision-aware and only fetches changed files, so
+    once the repo is cached letting it run keeps the user on `main` rather than
+    pinning them to a possibly stale local copy.
+
+    `step_dir` is the zero-padded step of a ``@checkpoints/<step>`` ref, or None
+    for a ``@root`` ref. Usability is judged with models.py's own helpers, so
+    the tree that comes back is one the Models page would also call usable:
+    ``_downloaded_model_dir`` for the traversal guard + a first usability probe,
+    then the ref-shape-specific check. For ``@root`` the ROOT itself must be the
+    pretrained dir (what a flat repo resolves to) — a local copy that resolves
+    to a checkpoints sub-tree is not what the Hub path would have returned, so
+    it falls through to the download rather than quietly substituting a
+    different tree."""
+    if _hub_cache_has_repo(repo_id):
+        return None
+    model_dir = _downloaded_model_dir(repo_id)
+    if model_dir is None:
+        return None
+    resolved: Path | None = None
+    if step_dir is not None:
+        candidate = model_dir / "checkpoints" / step_dir / "pretrained_model"
+        # config.json alone is NOT enough: an interrupted local_dir download
+        # leaves the config and the processor safetensors behind but no policy
+        # weights, and serving that turns a silently-partial store entry into a
+        # FileNotFoundError deep inside lerobot. This branch addresses a specific
+        # step directly (it never goes through _resolve_pretrained_dir), so it
+        # has to ask the weights question itself.
+        if (candidate / "config.json").is_file() and _has_loadable_weights(candidate):
+            resolved = candidate
+    elif _resolve_pretrained_dir(model_dir) == model_dir:
+        resolved = model_dir
+    if resolved is None:
+        return None
+    logger.info(
+        "Using the local models store for %s (nothing cached for it in the HF hub cache): %s",
+        repo_id,
+        resolved,
+    )
+    return str(resolved)
+
+
 def _resolve_policy_path(policy_ref: str, report: Callable[[int, int | None], None] | None = None) -> str:
     """Turn a checkpoints API ref into a local path that lerobot accepts.
 
     Local refs are already absolute paths to a pretrained_model dir.
-    Hub refs look like 'user/repo@checkpoints/<step_dir>' where
-    <step_dir> is lerobot's zero-padded directory name (e.g. 000050) — we
-    forward it verbatim into snapshot_download's allow_patterns and the
-    resolved local path.
-    A 'user/repo@root' ref means the whole repo IS the pretrained_model
-    (no checkpoints sub-tree); the full repo is downloaded via
-    snapshot_download and its root is returned directly.
-
-    When ``report`` is given, snapshot_download streams byte progress through it
-    (see make_snapshot_progress_tqdm) so the inference page can show a real
-    download bar. Local refs never download, so they never report and never flip
-    the phase.
+    Hub refs look like 'user/repo@checkpoints/<step_dir>' (where <step_dir> is
+    lerobot's zero-padded directory name, e.g. 000050) and resolve to that
+    step's pretrained_model dir; a 'user/repo@root' ref means the whole repo IS
+    the pretrained_model and resolves to its root.
 
     The download itself (which patterns each ref shape pulls, and what path it
     yields) lives in jobs.download_hub_checkpoint_ref, shared with the fine-tune
     path so a ref resolves to the same weights whoever asks. This wrapper owns
-    only what is inference-specific: the local-dir short-circuit, the
-    downloading_model phase, and the progress hook."""
+    only what is inference-specific: the local-dir short-circuit, the local
+    models-store short-circuit, the downloading_model phase, and the progress
+    hook.
+
+    Before delegating, `_local_store_policy_path` gets a chance to serve the ref
+    out of MakerMods Lab's own models store (what the Models page downloads
+    into) — that store is invisible to the hub cache, so without the check a
+    model already on disk is downloaded a second time (design-debt F6).
+
+    That short-circuit deliberately lives HERE and not inside
+    jobs.download_hub_checkpoint_ref, even though the duplicate-download problem
+    is the same for every caller: the shared helper also feeds fine-tune/resume
+    downloads, and the models store is written by `models._fetch_model_snapshot`,
+    which strips ``training_state/`` (optimizer + scheduler state — dead weight
+    for inference, often the bulk of a checkpoint). Serving the store from the
+    shared helper would therefore hand a *resume* a checkpoint with no optimizer
+    state to resume from. Inference only ever loads the policy weights, so it is
+    the one caller for which the stripped tree is equivalent.
+
+    When ``report`` is given, snapshot_download streams byte progress through it
+    (see make_snapshot_progress_tqdm) so the inference page can show a real
+    download bar. Local refs — on disk or in the models store — never download,
+    so they never report and never flip the phase."""
     if Path(policy_ref).is_dir():
         # A local checkpoint — nothing to fetch, so no downloading_model phase.
         return policy_ref
@@ -721,6 +794,22 @@ def _resolve_policy_path(policy_ref: str, report: Callable[[int, int | None], No
     # the download paths (not the local branch above), and only when a session is
     # live (_set_phase no-ops otherwise), so this helper stays safe to call from
     # the unit tests.
+    # …but first: the ref may already be sitting in our own models store, in
+    # which case there is nothing to announce. Match the ref shape here (rather
+    # than inside the helper) because the two shapes ask a different question of
+    # the store — a specific step's pretrained_model dir, or the repo root.
+    m = _HUB_REF_RE.match(policy_ref)
+    if m:
+        local = _local_store_policy_path(m.group("repo"), m.group("step_dir"))
+    else:
+        m = _HUB_ROOT_REF_RE.match(policy_ref)
+        local = _local_store_policy_path(m.group("repo"), None) if m else None
+    if local is not None:
+        # Already on disk in our own models store and nothing in the hub cache
+        # to dedupe against — no fetch, so (like the local-ref branch above) no
+        # downloading_model phase and no progress reporting.
+        return local
+
     _set_phase(PHASE_DOWNLOADING_MODEL)
     tqdm_class = make_snapshot_progress_tqdm(report) if report is not None else None
     return download_hub_checkpoint_ref(policy_ref, tqdm_class=tqdm_class)

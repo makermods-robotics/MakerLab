@@ -331,6 +331,222 @@ def test_resolve_policy_path_resolves_hub_root_ref(monkeypatch, tmp_path) -> Non
     assert result == str(fake_root)
 
 
+# ---------------------------------------------------------------------------
+# Hub ref → MakerMods Lab's own models store (design-debt F6).
+#
+# The Models page downloads with `local_dir=<makermodslab_models>/<repo_id>`, which
+# huggingface_hub keeps entirely outside the shared hub cache — so a model the
+# user already pulled there used to be downloaded a SECOND time on first
+# inference. _resolve_policy_path now checks the local store first, but ONLY
+# when the hub cache holds nothing for the repo (with a cache entry,
+# snapshot_download is the revision-aware, self-deduping path and must win).
+# No network anywhere: snapshot_download is monkeypatched to explode.
+# ---------------------------------------------------------------------------
+
+_FAKE_POLICY_CONFIG = '{"type": "act"}'
+
+
+def _seed_models_store(
+    monkeypatch,
+    tmp_path,
+    repo_id: str,
+    *,
+    step: str | None = None,
+    flat: bool = False,
+    weights: bool = True,
+):
+    """Point models._local_models_root at a tmp dir and populate one repo in it.
+
+    `step` writes a `checkpoints/<step>/pretrained_model` tree (what a training
+    repo download looks like); `flat` writes a root config (what a `@root` repo
+    looks like). Both may be set, to build the ambiguous tree the `@root` branch
+    deliberately refuses. Returns the repo dir, RESOLVED — _downloaded_model_dir
+    resolves, and tmp_path is behind a symlink on macOS.
+
+    `weights=False` reproduces an INTERRUPTED local_dir download: config plus the
+    pre/post-processor safetensors, but no `model.safetensors`. That is the exact
+    shape that bit the user — note it does contain `.safetensors` files, so any
+    check looking merely for "some safetensors" would still be fooled.
+    """
+    import makermodslab.models as m
+
+    store = tmp_path / "makermodslab_models"
+    monkeypatch.setattr(m, "_local_models_root", lambda: store)
+    repo_dir = store / repo_id
+    repo_dir.mkdir(parents=True, exist_ok=True)
+
+    def _populate(d):
+        (d / "config.json").write_text(_FAKE_POLICY_CONFIG)
+        (d / "train_config.json").write_text(_FAKE_POLICY_CONFIG)
+        # Processor weights land early in a download and are NOT policy weights.
+        (d / "preprocessor.safetensors").write_text("processor")
+        (d / "postprocessor.safetensors").write_text("processor")
+        if weights:
+            (d / "model.safetensors").write_text("weights")
+
+    if step is not None:
+        pretrained = repo_dir / "checkpoints" / step / "pretrained_model"
+        pretrained.mkdir(parents=True)
+        _populate(pretrained)
+    if flat:
+        _populate(repo_dir)
+    return repo_dir.resolve()
+
+
+def _seed_hub_cache(monkeypatch, tmp_path, *, cached_repo: str | None = None, with_snapshot: bool = True):
+    """Redirect HF_HUB_CACHE at a tmp dir, optionally holding one model repo."""
+    from huggingface_hub import constants as hf_constants
+    from huggingface_hub.file_download import repo_folder_name
+
+    cache = tmp_path / "hub"
+    cache.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(hf_constants, "HF_HUB_CACHE", str(cache))
+    if cached_repo is not None:
+        snapshots = cache / repo_folder_name(repo_id=cached_repo, repo_type="model") / "snapshots"
+        snapshots.mkdir(parents=True)
+        if with_snapshot:
+            (snapshots / "deadbeef").mkdir()
+    return cache
+
+
+def _explode_snapshot_download(monkeypatch) -> None:
+    """Any snapshot_download call in these tests is the bug under test."""
+
+    def _boom(**kwargs):
+        raise AssertionError(f"snapshot_download must not be called: {kwargs}")
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", _boom)
+
+
+def test_resolve_policy_path_uses_local_store_for_checkpoint_ref(monkeypatch, tmp_path) -> None:
+    """A `@checkpoints/<step>` ref whose repo is already in the local models
+    store (and nowhere in the hub cache) resolves with zero network."""
+    from makermodslab import rollout
+
+    repo_dir = _seed_models_store(monkeypatch, tmp_path, "user/repo", step="000050")
+    _seed_hub_cache(monkeypatch, tmp_path)
+    _explode_snapshot_download(monkeypatch)
+
+    result = rollout._resolve_policy_path("user/repo@checkpoints/000050")
+
+    assert result == str(repo_dir / "checkpoints" / "000050" / "pretrained_model")
+
+
+def test_resolve_policy_path_uses_local_store_for_root_ref(monkeypatch, tmp_path) -> None:
+    """Same for a flat `@root` repo — the store's repo dir IS the pretrained
+    dir, so it is returned verbatim."""
+    from makermodslab import rollout
+
+    repo_dir = _seed_models_store(monkeypatch, tmp_path, "user/flat", flat=True)
+    _seed_hub_cache(monkeypatch, tmp_path)
+    _explode_snapshot_download(monkeypatch)
+
+    assert rollout._resolve_policy_path("user/flat@root") == str(repo_dir)
+
+
+def test_resolve_policy_path_local_store_hit_leaves_phase_untouched(monkeypatch, tmp_path) -> None:
+    """Nothing is fetched, so the UI must not be told it is downloading a model
+    — the same contract the plain local-dir branch has."""
+    from makermodslab import rollout
+
+    _seed_models_store(monkeypatch, tmp_path, "user/repo", step="000050")
+    _seed_hub_cache(monkeypatch, tmp_path)
+    _explode_snapshot_download(monkeypatch)
+    monkeypatch.setattr(rollout, "_inference_meta", {"phase": rollout.PHASE_STARTING})
+
+    rollout._resolve_policy_path("user/repo@checkpoints/000050")
+
+    assert rollout._inference_meta["phase"] == rollout.PHASE_STARTING
+
+
+def test_resolve_policy_path_prefers_hub_when_repo_is_cached(monkeypatch, tmp_path) -> None:
+    """With the repo in the hub cache, snapshot_download is the right call even
+    though a local-store copy exists: it is revision-aware and only pulls what
+    changed, so the user stays on `main` instead of being pinned to a possibly
+    stale local copy."""
+    from makermodslab import rollout
+
+    _seed_models_store(monkeypatch, tmp_path, "user/repo", step="000050")
+    _seed_hub_cache(monkeypatch, tmp_path, cached_repo="user/repo")
+    fake_root = tmp_path / "snapshot"
+    fake_root.mkdir()
+    seen: dict = {}
+
+    def fake_snapshot_download(**kwargs):
+        seen.update(kwargs)
+        return str(fake_root)
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", fake_snapshot_download)
+
+    result = rollout._resolve_policy_path("user/repo@checkpoints/000050")
+
+    assert seen["repo_id"] == "user/repo"
+    assert result == str(fake_root / "checkpoints" / "000050" / "pretrained_model")
+
+
+def test_resolve_policy_path_downloads_when_requested_step_is_missing(monkeypatch, tmp_path) -> None:
+    """The local store has the repo but not the step the user picked — that is a
+    miss, not a substitution: fall through to the Hub."""
+    from makermodslab import rollout
+
+    _seed_models_store(monkeypatch, tmp_path, "user/repo", step="000050")
+    _seed_hub_cache(monkeypatch, tmp_path)
+    fake_root = tmp_path / "snapshot"
+    fake_root.mkdir()
+    monkeypatch.setattr("huggingface_hub.snapshot_download", lambda **kw: str(fake_root))
+
+    result = rollout._resolve_policy_path("user/repo@checkpoints/000100")
+
+    assert result == str(fake_root / "checkpoints" / "000100" / "pretrained_model")
+
+
+def test_local_store_root_ref_refuses_a_checkpoints_tree(monkeypatch, tmp_path) -> None:
+    """`@root` means "the repo root IS the pretrained_model". A local copy that
+    resolves to a checkpoints sub-tree is a DIFFERENT tree than the Hub path
+    would return, so the shortcut declines rather than substituting it."""
+    from makermodslab import rollout
+
+    _seed_models_store(monkeypatch, tmp_path, "user/repo", step="000050")
+    _seed_hub_cache(monkeypatch, tmp_path)
+
+    assert rollout._local_store_policy_path("user/repo", None) is None
+
+
+def test_local_store_declines_unknown_repo(monkeypatch, tmp_path) -> None:
+    """Nothing in the store for this repo → no shortcut."""
+    from makermodslab import rollout
+
+    _seed_models_store(monkeypatch, tmp_path, "user/repo", step="000050")
+    _seed_hub_cache(monkeypatch, tmp_path)
+
+    assert rollout._local_store_policy_path("someone/else", "000050") is None
+
+
+def test_local_store_refuses_traversal_repo_id(monkeypatch, tmp_path) -> None:
+    """`policy_ref` is user input and the hub-ref regex accepts any `[^@]+`, so
+    a repo id that escapes the models root must never resolve (the guard comes
+    from models._downloaded_model_dir)."""
+    from makermodslab import rollout
+
+    _seed_models_store(monkeypatch, tmp_path, "user/repo", step="000050")
+    _seed_hub_cache(monkeypatch, tmp_path)
+
+    assert rollout._local_store_policy_path("../../etc", None) is None
+
+
+def test_hub_cache_has_repo_reads_the_on_disk_layout(monkeypatch, tmp_path) -> None:
+    """A repo dir whose snapshots/ is empty (an interrupted or wiped entry) has
+    nothing to dedupe against, so it counts as absent."""
+    from makermodslab import rollout
+
+    _seed_hub_cache(monkeypatch, tmp_path, cached_repo="user/repo")
+    assert rollout._hub_cache_has_repo("user/repo") is True
+    assert rollout._hub_cache_has_repo("user/other") is False
+
+    _seed_hub_cache(monkeypatch, tmp_path / "b", cached_repo="user/repo", with_snapshot=False)
+    assert rollout._hub_cache_has_repo("user/repo") is False
+
+
 def test_format_cameras_arg_empty_yields_empty_braces() -> None:
     from makermodslab.rollout import _format_cameras_arg
 
@@ -2581,3 +2797,140 @@ def test_start_inference_clears_the_previous_runs_log_pointer(monkeypatch, tmp_p
 
     assert result["success"] is False
     assert rollout._last_log_path is None, "a new claim must not inherit the previous run's log"
+
+
+# ---------------------------------------------------------------------------
+# F6 store entries must hold LOADABLE WEIGHTS, not just a config.
+#
+# Live incident: the user's sock ACT model had a 68 KB store entry — an
+# interrupted local_dir download with config.json, train_config.json and both
+# processor safetensors, but no model.safetensors. F6's short-circuit served it,
+# and lerobot died with FileNotFoundError on the weights. Pre-F6 the hub path
+# would have downloaded and worked, so the short-circuit converted a silent
+# partial into a hard failure.
+# ---------------------------------------------------------------------------
+
+
+def test_local_store_refuses_a_weightless_checkpoint_ref(monkeypatch, tmp_path) -> None:
+    """The incident, at the `@checkpoints/<step>` branch that hit it."""
+    from makermodslab import rollout
+
+    _seed_models_store(monkeypatch, tmp_path, "user/repo", step="000050", weights=False)
+    _seed_hub_cache(monkeypatch, tmp_path)
+
+    assert rollout._local_store_policy_path("user/repo", "000050") is None, (
+        "a store entry with a config but no model.safetensors must fall through to the "
+        "download instead of being served as a usable checkpoint"
+    )
+
+
+def test_local_store_refuses_a_weightless_root_ref(monkeypatch, tmp_path) -> None:
+    """Same for the flat `@root` shape."""
+    from makermodslab import rollout
+
+    _seed_models_store(monkeypatch, tmp_path, "user/flat", flat=True, weights=False)
+    _seed_hub_cache(monkeypatch, tmp_path)
+
+    assert rollout._local_store_policy_path("user/flat", None) is None
+
+
+def test_weightless_store_entry_falls_through_to_the_hub(monkeypatch, tmp_path) -> None:
+    """End-to-end: the partial entry must not break inference, just be skipped.
+
+    This is the behaviour the incident should have had — resolve via the Hub, as
+    it did before F6 existed.
+    """
+    from makermodslab import rollout
+
+    _seed_models_store(monkeypatch, tmp_path, "user/repo", step="000050", weights=False)
+    _seed_hub_cache(monkeypatch, tmp_path)
+    fake_root = tmp_path / "snapshot"
+    fake_root.mkdir()
+    monkeypatch.setattr("huggingface_hub.snapshot_download", lambda **kw: str(fake_root))
+
+    result = rollout._resolve_policy_path("user/repo@checkpoints/000050")
+
+    assert result == str(fake_root / "checkpoints" / "000050" / "pretrained_model")
+
+
+def test_processor_safetensors_alone_do_not_count_as_weights(monkeypatch, tmp_path) -> None:
+    """The trap, pinned explicitly.
+
+    The broken tree DOES contain .safetensors files (pre/post-processor), so a
+    check for "any safetensors present" would have served it just the same. The
+    requirement is the POLICY weights specifically.
+    """
+    from makermodslab import models
+
+    _seed_models_store(monkeypatch, tmp_path, "user/repo", flat=True, weights=False)
+    repo_dir = tmp_path / "makermodslab_models" / "user" / "repo"
+
+    assert list(repo_dir.glob("*.safetensors")), "fixture precondition: safetensors ARE present"
+    assert models._has_loadable_weights(repo_dir) is False
+    assert models._resolve_pretrained_dir(repo_dir) is None
+
+
+def test_complete_store_entry_is_still_served(monkeypatch, tmp_path) -> None:
+    """Control: the fix must not stop F6 serving a COMPLETE local copy."""
+    from makermodslab import rollout
+
+    repo_dir = _seed_models_store(monkeypatch, tmp_path, "user/repo", step="000050")
+    _seed_hub_cache(monkeypatch, tmp_path)
+    _explode_snapshot_download(monkeypatch)
+
+    assert rollout._local_store_policy_path("user/repo", "000050") == str(
+        repo_dir / "checkpoints" / "000050" / "pretrained_model"
+    )
+
+
+def test_adapter_shaped_checkpoint_counts_as_loadable(tmp_path) -> None:
+    """A PEFT/LoRA adapter dir has no model.safetensors and is still loadable.
+
+    `make_policy`'s use_peft branch reads the adapter config and calls
+    `PeftModel.from_pretrained(policy, dir)`, pulling the BASE weights from the
+    adapter config's `base_model_name_or_path` — so requiring model.safetensors
+    unconditionally would make the user's pi05 LoRA repos vanish.
+    """
+    from makermodslab import models
+
+    d = tmp_path / "adapter"
+    d.mkdir()
+    (d / "config.json").write_text("{}")
+    (d / "adapter_config.json").write_text('{"base_model_name_or_path": "lerobot/pi05"}')
+    (d / "adapter_model.safetensors").write_text("lora")
+
+    assert models._has_loadable_weights(d) is True
+    assert models._resolve_pretrained_dir(d) == d
+
+
+def test_partial_adapter_dir_is_not_loadable(tmp_path) -> None:
+    """Half an adapter is not an adapter: PeftConfig.from_pretrained needs the
+    config, and there is nothing to load without the adapter weights."""
+    from makermodslab import models
+
+    d = tmp_path / "half_adapter"
+    d.mkdir()
+    (d / "config.json").write_text("{}")
+    (d / "adapter_model.safetensors").write_text("lora")  # no adapter_config.json
+
+    assert models._has_loadable_weights(d) is False
+
+
+def test_sharded_weights_are_not_accepted(tmp_path) -> None:
+    """The pinned lerobot cannot load sharded weights from a local dir.
+
+    `from_pretrained` joins SAFETENSORS_SINGLE_FILE and opens it — there is no
+    index-file branch — and the save side pins max_shard_size above the total so
+    output stays one file. Accepting shards would recreate this very bug: a tree
+    we call usable that lerobot then fails to open.
+    """
+    from makermodslab import models
+
+    d = tmp_path / "sharded"
+    d.mkdir()
+    (d / "config.json").write_text("{}")
+    (d / "model-00001-of-00002.safetensors").write_text("shard")
+    (d / "model-00002-of-00002.safetensors").write_text("shard")
+    (d / "model.safetensors.index.json").write_text("{}")
+
+    assert models._has_loadable_weights(d) is False
