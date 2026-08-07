@@ -938,7 +938,10 @@ def handle_pause_recording() -> dict[str, Any]:
     if not recording_active or recording_events is None:
         return {"success": False, "message": "No recording session is active"}
     if current_phase not in ("recording", "resetting"):
-        return {"success": False, "message": "Pause is only available while recording or during the reset gap"}
+        return {
+            "success": False,
+            "message": "Pause is only available while recording or during the reset gap",
+        }
     if recording_events.get("paused", False):
         return {"success": True, "message": "Already paused", "events_state": dict(recording_events)}
 
@@ -961,7 +964,10 @@ def handle_resume_recording() -> dict[str, Any]:
     if not recording_active or recording_events is None:
         return {"success": False, "message": "No recording session is active"}
     if current_phase not in ("recording", "resetting"):
-        return {"success": False, "message": "Resume is only available while recording or during the reset gap"}
+        return {
+            "success": False,
+            "message": "Resume is only available while recording or during the reset gap",
+        }
     if not recording_events.get("paused", False):
         return {"success": True, "message": "Not paused", "events_state": dict(recording_events)}
 
@@ -983,9 +989,7 @@ def _reset_paused() -> bool:
     leak into a later phase's available_controls or status — see the
     loop-exit cleanup in record_with_web_events, which is defense in depth
     on top of this gate, not a substitute for it."""
-    return bool(
-        recording_events and current_phase == "resetting" and recording_events.get("paused", False)
-    )
+    return bool(recording_events and current_phase == "resetting" and recording_events.get("paused", False))
 
 
 def _pause_armed() -> bool:
@@ -1039,7 +1043,8 @@ def handle_recording_status() -> dict[str, Any]:
         "pause_armed": _pause_armed(),
         "available_controls": {
             "stop_recording": recording_active,  # ESC key replacement
-            "exit_early": recording_active and not _reset_paused(),  # Right arrow key replacement; disabled while paused
+            "exit_early": recording_active
+            and not _reset_paused(),  # Right arrow key replacement; disabled while paused
             "rerecord_episode": recording_active
             and current_phase == "recording",  # Only during recording phase
             "pause_recording": recording_active

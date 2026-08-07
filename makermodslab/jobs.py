@@ -195,9 +195,7 @@ def _parse_duration(s: str) -> float | None:
     return None
 
 
-def parse_metrics_into(
-    line: str, metrics: TrainingMetrics, resume_total: int | None = None
-) -> None:
+def parse_metrics_into(line: str, metrics: TrainingMetrics, resume_total: int | None = None) -> None:
     """Update `metrics` in-place from one stdout line.
 
     Two complementary sources:
@@ -314,9 +312,7 @@ def _initial_metrics(config: TrainingRequest) -> TrainingMetrics:
     return TrainingMetrics(current_step=start, total_steps=config.steps)
 
 
-def _read_log_metrics(
-    path: Path, resume_total: int | None
-) -> builtins.list[MetricsHistoryPoint]:
+def _read_log_metrics(path: Path, resume_total: int | None) -> builtins.list[MetricsHistoryPoint]:
     """Parse one job's log.jsonl into (step, loss, lr, grad_norm) points.
 
     Feed every line through ONE accumulator rather than a fresh one per line.
@@ -604,9 +600,7 @@ class TailingJobRunner:
                             log_line = LogLine.model_validate_json(raw.strip())
                         except Exception:
                             continue
-                        parse_metrics_into(
-                            log_line.message, self._metrics, self._resume_total
-                        )
+                        parse_metrics_into(log_line.message, self._metrics, self._resume_total)
                         if self._wandb_run_url is None:
                             url = extract_wandb_run_url(log_line.message)
                             if url is not None:
@@ -877,8 +871,7 @@ def _resolve_resume_config_path(source: JobRecord, step: int | None) -> str:
     training_state = pretrained_dir.parent / "training_state"
     if not train_config.is_file():
         raise ValueError(
-            f"Checkpoint at step {chosen.step} is missing {_TRAIN_CONFIG_NAME}, "
-            "so it can't be resumed."
+            f"Checkpoint at step {chosen.step} is missing {_TRAIN_CONFIG_NAME}, so it can't be resumed."
         )
     if not training_state.is_dir():
         raise ValueError(
@@ -927,9 +920,7 @@ def _resolve_finetune_pretrained_path(source: JobRecord, step: int | None) -> st
         checkpoints = _list_hub_checkpoints(shared_hf_api(), source.hf_repo_id)
 
     if not checkpoints:
-        raise ValueError(
-            f"Source {source.id!r} has no usable checkpoint to fine-tune from."
-        )
+        raise ValueError(f"Source {source.id!r} has no usable checkpoint to fine-tune from.")
     if step is None:
         chosen = checkpoints[-1]  # step-sorted; take the latest
     else:
@@ -1334,7 +1325,7 @@ def hub_ref_step_label(ref: str) -> str:
 
 
 def hub_ref_repo_id(ref: str) -> str:
-    """The repo half of a hub ref, for log lines. The whole ref if unparseable."""
+    """The repo half of a hub ref, for log lines. The whole ref if unparsable."""
     m = _HUB_CKPT_REF_RE.match(ref) or _HUB_ROOT_REF_RE.match(ref)
     return m.group("repo") if m else ref
 
@@ -2104,9 +2095,7 @@ class JobRegistry:
             with self._lock:
                 source = self._records.get(config.finetune_from_job_id)
             if source is None:
-                raise ValueError(
-                    f"Fine-tune source {config.finetune_from_job_id!r} not found."
-                )
+                raise ValueError(f"Fine-tune source {config.finetune_from_job_id!r} not found.")
             config.policy_pretrained_path = _resolve_finetune_pretrained_path(
                 source, config.finetune_from_step
             )
@@ -2131,12 +2120,8 @@ class JobRegistry:
             # loads the weights non-strictly, so a checkpoint whose robot or
             # camera set contradicts the selected dataset would otherwise train
             # silently wrong (MT44).
-            _check_pretrained_feature_space(
-                config.policy_pretrained_path, config.dataset_repo_id
-            )
-            if target.runner == "local" and needs_local_materialization(
-                config.policy_pretrained_path
-            ):
+            _check_pretrained_feature_space(config.policy_pretrained_path, config.dataset_repo_id)
+            if target.runner == "local" and needs_local_materialization(config.policy_pretrained_path):
                 # A step-suffixed hub ref becomes the real directory the local
                 # trainer loads — but off-request, in _materialize_then_start,
                 # which rewrites policy_pretrained_path once the bytes are here.
@@ -2159,9 +2144,7 @@ class JobRegistry:
                 if config.resume_from_job_id:
                     source = self._records.get(config.resume_from_job_id)
                     if source is None:
-                        raise ValueError(
-                            f"Resume source {config.resume_from_job_id!r} not found."
-                        )
+                        raise ValueError(f"Resume source {config.resume_from_job_id!r} not found.")
                     # A completed run is not resumable — on ANY runner, and
                     # regardless of how the request got here (the UI hides the
                     # button; this catches a direct API call).
@@ -2229,9 +2212,7 @@ class JobRegistry:
                             deferred_resume_ref = f"{repo_id}@checkpoints/{step_dir}"
                             config.resume_from_step = int(step_dir)
                     elif target.runner == "local":
-                        config.config_path = _resolve_resume_config_path(
-                            source, config.resume_from_step
-                        )
+                        config.config_path = _resolve_resume_config_path(source, config.resume_from_step)
                     else:
                         # local → Cloud: the parent's checkpoint exists only on
                         # this machine, so it must reach the Hub before the pod
@@ -2406,9 +2387,7 @@ class JobRegistry:
         """
         reporter = _DownloadProgressLogger(prep.emit, hub_ref_step_label(ref))
         try:
-            local_path = localize_pretrained_path(
-                ref, tqdm_class=make_snapshot_progress_tqdm(reporter)
-            )
+            local_path = localize_pretrained_path(ref, tqdm_class=make_snapshot_progress_tqdm(reporter))
         except Exception as exc:
             logger.exception("Base-checkpoint download failed for job %s", job_id)
             self._fail_prepare(job_id, prep, str(exc))
@@ -2587,9 +2566,7 @@ class JobRegistry:
             with self._lock:
                 if prep.cancelled():
                     prep.emit("Stopped before the trainer started.")
-                    self._finalize_prepare_locked(
-                        job_id, "interrupted", _PREPARE_STOPPED_MESSAGE
-                    )
+                    self._finalize_prepare_locked(job_id, "interrupted", _PREPARE_STOPPED_MESSAGE)
                     notify = True
                     return
                 record = self._records.get(job_id)
@@ -2610,9 +2587,7 @@ class JobRegistry:
                     runner.start(job_id, record.config, output_dir)
                 except Exception as exc:
                     logger.exception("Failed to start runner for job %s", job_id)
-                    self._finalize_prepare_locked(
-                        job_id, "failed", f"Failed to start runner: {exc}"
-                    )
+                    self._finalize_prepare_locked(job_id, "failed", f"Failed to start runner: {exc}")
                     notify = True
                     return
                 if target.runner == "local":
@@ -3176,8 +3151,7 @@ class JobRegistry:
                         removed = True
                     else:
                         logger.info(
-                            "Duplicate imported model %s: leaving %s in place "
-                            "(contains more than job.json).",
+                            "Duplicate imported model %s: leaving %s in place (contains more than job.json).",
                             dup.id,
                             dup_dir,
                         )

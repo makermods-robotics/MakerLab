@@ -975,9 +975,7 @@ def _preflight_motor_registers(port: str, follower_id: str) -> list[str]:
     and returns warning messages instead of aborting the start."""
     try:
         with _open_follower(port, follower_id) as robot:
-            return reset_torque_limit(robot, "follower arm") + clear_goal_velocity(
-                robot, "follower arm"
-            )
+            return reset_torque_limit(robot, "follower arm") + clear_goal_velocity(robot, "follower arm")
     except Exception as exc:
         message = (
             f"Could not reset the motor registers on {port}: {exc}. "
