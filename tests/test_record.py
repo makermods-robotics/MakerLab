@@ -1586,7 +1586,7 @@ def test_upload_manager_qualifies_bare_repo_id_with_namespace(monkeypatch: pytes
     monkeypatch.setattr("lerobot.datasets.LeRobotDataset", lambda repo_id: ds)
     monkeypatch.setattr("makermodslab.datasets._dataset_in_use", lambda repo_id: None)
     monkeypatch.setattr(
-        "makermodslab.utils.hf_auth.cached_whoami", lambda: {"name": "makermods", "orgs": []}
+        "makermodslab.record.cached_whoami", lambda: {"name": "makermods", "orgs": []}
     )
 
     mgr = UploadManager()
@@ -1600,6 +1600,37 @@ def test_upload_manager_qualifies_bare_repo_id_with_namespace(monkeypatch: pytes
     # form before push_to_hub() was called on it.
     assert ds.repo_id == "makermods/flat_local_dataset"
     assert status["dataset_url"] == "https://huggingface.co/datasets/makermods/flat_local_dataset"
+
+
+def test_upload_manager_bare_repo_id_unauthenticated_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With no Hub login there is no namespace to qualify a bare repo_id with:
+    cached_whoami() returns None, so the worker raises rather than falling back
+    to pushing the bare id -- pushing it is precisely what strands an empty repo
+    on the Hub. The raise must land on the worker's except path as state "error"
+    with a message naming the cause, not as an unhandled thread exception."""
+    from makermodslab.record import UploadManager, UploadRequest
+
+    ds = _fake_dataset()
+    monkeypatch.setattr("lerobot.datasets.LeRobotDataset", lambda repo_id: ds)
+    monkeypatch.setattr("makermodslab.datasets._dataset_in_use", lambda repo_id: None)
+    monkeypatch.setattr("makermodslab.record.cached_whoami", lambda: None)
+
+    mgr = UploadManager()
+    result = mgr.start(UploadRequest(dataset_repo_id="flat_local_dataset", tags=[], private=False))
+    assert result["started"] is True
+
+    _join_upload(mgr)
+    status = mgr.get_status()
+    assert status["state"] == "error"
+    assert "Not authenticated with the Hugging Face Hub" in status["message"]
+    assert status["dataset_url"] is None
+    # Bailing out before the push is the point: no repo gets created, so there
+    # is no empty-repo litter to clean up before the user retries after login.
+    ds.push_to_hub.assert_not_called()
+    # This message doesn't match _upload_auth_error()'s 401 patterns, so it
+    # takes the generic branch and carries no docs_url -- unlike a 401 raised
+    # from inside push_to_hub(), which does.
+    assert "docs_url" not in status
 
 
 def test_upload_manager_error_maps_auth_friendly(monkeypatch: pytest.MonkeyPatch) -> None:

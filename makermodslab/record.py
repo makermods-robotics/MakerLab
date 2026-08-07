@@ -48,6 +48,7 @@ from .utils.config import (
     with_makermodslab_tag,
 )
 from .utils.errors import classify_outcome, format_exception, friendly_hint
+from .utils.hf_auth import cached_whoami
 from .utils.robot_factory import build_bimanual_configs, build_single_configs
 
 logger = logging.getLogger(__name__)
@@ -1318,8 +1319,6 @@ class UploadManager:
 
     def _worker(self, request: UploadRequest) -> None:
         from lerobot.datasets import LeRobotDataset
-
-        from .utils.hf_auth import cached_whoami
 
         repo_id = request.dataset_repo_id
         try:
