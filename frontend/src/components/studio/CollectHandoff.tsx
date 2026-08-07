@@ -29,9 +29,16 @@ const CollectHandoff: React.FC = () => {
   const location = useLocation();
   const navigate = useNavigate();
   const { setSelectedDataset } = useSelectedDataset();
-  const { openStudio, collectForm } = useStudio();
+  const { openStudio } = useStudio();
 
   const recorded = location.state?.recorded as RecordedInfo | undefined;
+  // Set by CollectPanel's handleFinalize when it just started this repo's
+  // first Hub upload, moments before this navigation landed — see
+  // useDatasetUpload's trustFirstSeed doc comment for why UploadToHubAction
+  // needs to know that.
+  const hubUploadJustStarted = location.state?.hubUploadJustStarted as
+    | string
+    | undefined;
   const [dismissed, setDismissed] = useState(false);
 
   const discardedEmpty = recorded?.discarded_empty ?? false;
@@ -102,11 +109,7 @@ const CollectHandoff: React.FC = () => {
                 {repoId && (
                   <UploadToHubAction
                     repoId={repoId}
-                    // Kick off the Hub push automatically when the Collect
-                    // form's advanced toggle (default on) says so. A repo id
-                    // without a namespace means the user wasn't logged in at
-                    // record time — the push would only 401, so stay manual.
-                    autoStart={collectForm.pushToHub && repoId.includes("/")}
+                    trustFirstSeed={hubUploadJustStarted === repoId}
                   />
                 )}
               </div>
@@ -127,23 +130,26 @@ const CollectHandoff: React.FC = () => {
   );
 };
 
-/** Repo ids already auto-pushed this app session — module-level so a banner
- * remount (e.g. browser-back onto the history entry that carries the
- * `recorded` state) doesn't fire a second, redundant upload. */
-const autoPushed = new Set<string>();
-
 /** "Upload to Hub" affordance — reuses the existing UploadDatasetDialog +
  * useDatasetUpload flow (identical to DatasetInfoCard's HubSyncRow). Rendered
  * only when there's a local dataset to upload, so the hook has a real repoId.
- * With `autoStart`, the upload kicks off on mount (no tags, public — the
- * dialog's own defaults) instead of waiting for a click. */
-const UploadToHubAction: React.FC<{ repoId: string; autoStart?: boolean }> = ({
-  repoId,
-  autoStart = false,
-}) => {
+ * The first upload after a recording session now happens via the Finalize
+ * step in the post-recording dataset viewer (see CollectPanel); this button
+ * is the manual fallback — Push to Hub was off at record time, or the
+ * automatic push from Finalize was refused (see its toast).
+ *
+ * `trustFirstSeed` is true when Finalize just started an upload for this
+ * exact repo moments before this component mounted — it lets the hook report
+ * that upload's outcome (toast) even if it already finished by the time this
+ * mounts, instead of discarding a terminal status as stale history. */
+const UploadToHubAction: React.FC<{
+  repoId: string;
+  trustFirstSeed?: boolean;
+}> = ({ repoId, trustFirstSeed }) => {
   const { toast } = useToast();
   const { uploading, start } = useDatasetUpload({
     repoId,
+    trustFirstSeed,
     onDone: (url) => {
       toast({
         title: "Uploaded to Hub",
@@ -184,22 +190,6 @@ const UploadToHubAction: React.FC<{ repoId: string; autoStart?: boolean }> = ({
       });
     },
   });
-
-  // Auto-push: fire once per repo per app session (the Set guards remounts).
-  // A refused start (another upload running / dataset busy) is surfaced so the
-  // user knows to fall back to the manual button.
-  useEffect(() => {
-    if (!autoStart || autoPushed.has(repoId)) return;
-    autoPushed.add(repoId);
-    start([], false).then((error) => {
-      if (error) {
-        toast({
-          title: "Automatic Hub upload not started",
-          description: error,
-        });
-      }
-    });
-  }, [autoStart, repoId, start, toast]);
 
   if (uploading) {
     return (

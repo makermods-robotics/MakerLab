@@ -4,7 +4,17 @@ import React, {
   useRef,
   useState,
 } from "react";
-import { Boxes, Pause, Play, SkipBack, SkipForward, VideoOff } from "lucide-react";
+import {
+  Boxes,
+  Check,
+  Loader2,
+  Pause,
+  Play,
+  SkipBack,
+  SkipForward,
+  Trash2,
+  VideoOff,
+} from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -12,19 +22,43 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuTrigger,
+} from "@/components/ui/context-menu";
 import { useStudio } from "@/contexts/StudioContext";
 import { useSelectedDataset } from "@/hooks/useSelectedDataset";
 import { useApi } from "@/contexts/ApiContext";
+import { useToast } from "@/hooks/use-toast";
 import DatasetInfoCard from "@/components/landing/DatasetInfoCard";
 import JointPositionChart from "@/components/dialogs/JointPositionChart";
+import DeleteConfirmDialog from "@/components/dialogs/DeleteConfirmDialog";
+import { DeleteResolution } from "@/lib/deleteSemantics";
 import {
+  deleteDataset,
+  deleteEpisode,
   EpisodeJointSeries,
   EpisodeSummary,
   episodeVideoUrl,
+  getDatasetHubStatus,
   getDatasetInfo,
   getEpisodeJoints,
+  HubStatus,
   listEpisodes,
 } from "@/lib/replayApi";
+import { ApiError } from "@/lib/apiClient";
 
 export interface DatasetDetailDialogProps {
   repoId: string | null;
@@ -33,6 +67,26 @@ export interface DatasetDetailDialogProps {
   /** Called when an action navigates to the studio, so a parent surface that
    * would otherwise cover the studio (e.g. the library sheet) can close too. */
   onStudioAction?: () => void;
+  /** Called after the dataset itself (not just an episode) is deleted, so a
+   * parent list (LibrarySheet, CollectPanel) can refresh. Not called for a
+   * "remove local copy" action that keeps the dataset listed as Hub-only. */
+  onDeleted?: () => void;
+  /** Post-recording review mode (set by CollectPanel right after a session
+   * ends). While set: the dialog can't be dismissed by ESC / outside-click /
+   * close button, and its footer shows Finalize instead of Train. onFinalize
+   * fires when the user clicks Finalize. onDiscarded fires (IN ADDITION to
+   * onDeleted, not instead of it) when the whole dataset gets deleted during
+   * review — there's nothing left to finalize. */
+  finalize?: {
+    onFinalize: () => void;
+    onDiscarded: () => void;
+    /** True when clicking Finalize will actually attempt the dataset's first
+     * Hub upload (Push to Hub was on at record time and the repo has a
+     * namespace) — the same gate CollectPanel's handleFinalize itself uses.
+     * Drives the button label / review subtitle so Finalize honestly
+     * discloses that it's about to publish, instead of silently doing so. */
+    willUploadToHub: boolean;
+  };
 }
 
 // Best (cols, tileW, tileH) for `n` tiles inside a box of `boxW` x `boxH`:
@@ -444,16 +498,24 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
   open,
   onOpenChange,
   onStudioAction,
+  onDeleted,
+  finalize,
 }) => {
   const { baseUrl, fetchWithHeaders } = useApi();
   const { openStudio } = useStudio();
   const { setSelectedDataset } = useSelectedDataset();
+  const { toast } = useToast();
 
   const [episodes, setEpisodes] = useState<EpisodeSummary[] | null>(null);
   const [episodesLoading, setEpisodesLoading] = useState(true);
   const [cameras, setCameras] = useState<string[]>([]);
   const [selectedEpisode, setSelectedEpisode] = useState<number | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
+  const [deleteTarget, setDeleteTarget] = useState<EpisodeSummary | null>(null);
+  const [deleteHubStatus, setDeleteHubStatus] = useState<HubStatus | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [pendingDatasetDelete, setPendingDatasetDelete] = useState(false);
 
   useEffect(() => {
     if (!repoId || !open) return;
@@ -474,7 +536,103 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
     return () => controller.abort();
   }, [repoId, open, baseUrl, fetchWithHeaders, reloadKey]);
 
+  useEffect(() => {
+    if (!(deleteTarget || pendingDatasetDelete) || !repoId) {
+      setDeleteHubStatus(null);
+      return;
+    }
+    const controller = new AbortController();
+    getDatasetHubStatus(baseUrl, fetchWithHeaders, repoId, controller.signal)
+      .then(setDeleteHubStatus)
+      // Fall back to a definitive (not null) status so the whole-dataset
+      // confirm dialog below can still open on a fetch failure instead of
+      // staying stuck forever — see the `deleteHubStatus !== null` gate.
+      .catch(() =>
+        setDeleteHubStatus({ repo_id: repoId, status: "local_only", url: null }),
+      );
+    return () => controller.abort();
+  }, [deleteTarget, pendingDatasetDelete, repoId, baseUrl, fetchWithHeaders]);
+
   if (!repoId) return null;
+
+  const isLastEpisode = episodes !== null && episodes.length === 1;
+
+  const openDeleteConfirm = (ep: EpisodeSummary) => {
+    setDeleteError(null);
+    setDeleteTarget(ep);
+  };
+
+  const handleConfirmDelete = async () => {
+    if (!deleteTarget) return;
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      if (isLastEpisode) {
+        const result = await deleteDataset(baseUrl, fetchWithHeaders, repoId);
+        if (!result.success) {
+          setDeleteError(result.message ?? "Something went wrong");
+          return;
+        }
+        setDeleteTarget(null);
+        onOpenChange(false);
+        onDeleted?.();
+        finalize?.onDiscarded();
+        return;
+      }
+      await deleteEpisode(
+        baseUrl,
+        fetchWithHeaders,
+        repoId,
+        deleteTarget.episode_index,
+      );
+      setDeleteTarget(null);
+      // Re-fetch rather than filtering the deleted row out of local state:
+      // lerobot's delete_episodes renumbers every surviving episode to stay
+      // contiguous from 0 (old episode 2 of [0,1,2] becomes episode 1 of
+      // [0,1]), so carrying forward the OLD episode_index values on the
+      // remaining rows would show one episode's data under another's label.
+      // This also remounts DatasetInfoCard (its key includes reloadKey), so
+      // it re-reads the now-stale episode/frame counts.
+      setReloadKey((k) => k + 1);
+    } catch (err) {
+      setDeleteError(
+        err instanceof ApiError ? (err.detail ?? err.message) : "Something went wrong",
+      );
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  const confirmDatasetDelete = async (resolution: DeleteResolution) => {
+    if (!repoId) return;
+    try {
+      const result = await deleteDataset(baseUrl, fetchWithHeaders, repoId);
+      if (!result.success) {
+        setPendingDatasetDelete(false);
+        toast({
+          title: "Delete failed",
+          description: result.message ?? "Something went wrong",
+          variant: "destructive",
+        });
+        return;
+      }
+      setPendingDatasetDelete(false);
+      if (resolution.clearsSelection) {
+        onOpenChange(false);
+        onDeleted?.();
+        finalize?.onDiscarded();
+      } else {
+        setReloadKey((k) => k + 1);
+      }
+    } catch (e) {
+      setPendingDatasetDelete(false);
+      toast({
+        title: "Delete failed",
+        description: e instanceof Error ? e.message : String(e),
+        variant: "destructive",
+      });
+    }
+  };
 
   const handleTrain = () => {
     setSelectedDataset(repoId);
@@ -485,12 +643,25 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="flex h-[85vh] max-w-6xl flex-col gap-0 overflow-hidden p-0">
+      <DialogContent
+        hideClose={!!finalize}
+        onEscapeKeyDown={finalize ? (e) => e.preventDefault() : undefined}
+        onPointerDownOutside={finalize ? (e) => e.preventDefault() : undefined}
+        onInteractOutside={finalize ? (e) => e.preventDefault() : undefined}
+        className="flex h-[85vh] max-w-6xl flex-col gap-0 overflow-hidden p-0"
+      >
         <DialogHeader className="shrink-0 space-y-0 border-b border-border px-6 py-4 text-left">
           <p className="eyebrow">MakerMods Lab Dataset Viewer</p>
           <DialogTitle className="break-all pt-1 font-mono text-base font-semibold">
             {repoId}
           </DialogTitle>
+          {finalize && (
+            <p className="pt-1 text-sm text-muted-foreground">
+              Review your recording — delete any bad episodes, then finalize.
+              {finalize.willUploadToHub &&
+                " Finalizing will publish this dataset to the Hugging Face Hub."}
+            </p>
+          )}
         </DialogHeader>
 
         <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_300px]">
@@ -531,26 +702,51 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
                 {episodes && episodes.length > 0 ? (
                   <div className="space-y-0.5">
                     {episodes.map((ep) => (
-                      <button
-                        key={ep.episode_index}
-                        type="button"
-                        onClick={() => setSelectedEpisode(ep.episode_index)}
-                        className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors hover:bg-accent ${
-                          selectedEpisode === ep.episode_index
-                            ? "border border-border bg-accent"
-                            : "border border-transparent"
-                        }`}
-                      >
-                        <span className="w-6 shrink-0 font-mono text-[11px] text-muted-foreground">
-                          {String(ep.episode_index).padStart(2, "0")}
-                        </span>
-                        <span className="min-w-0 flex-1 truncate">
-                          Episode {ep.episode_index}
-                        </span>
-                        <span className="shrink-0 font-mono text-[10.5px] tabular-nums text-muted-foreground">
-                          {ep.duration.toFixed(1)}s
-                        </span>
-                      </button>
+                      <ContextMenu key={ep.episode_index}>
+                        <ContextMenuTrigger asChild>
+                          <div
+                            className={`group flex w-full items-center gap-1 rounded-md px-2 py-1.5 text-xs transition-colors hover:bg-accent ${
+                              selectedEpisode === ep.episode_index
+                                ? "border border-border bg-accent"
+                                : "border border-transparent"
+                            }`}
+                          >
+                            <button
+                              type="button"
+                              onClick={() => setSelectedEpisode(ep.episode_index)}
+                              className="flex min-w-0 flex-1 items-center gap-2 text-left"
+                            >
+                              <span className="w-6 shrink-0 font-mono text-[11px] text-muted-foreground">
+                                {String(ep.episode_index).padStart(2, "0")}
+                              </span>
+                              <span className="min-w-0 flex-1 truncate">
+                                Episode {ep.episode_index}
+                              </span>
+                              <span className="shrink-0 font-mono text-[10.5px] tabular-nums text-muted-foreground">
+                                {ep.duration.toFixed(1)}s
+                              </span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                openDeleteConfirm(ep);
+                              }}
+                              aria-label={`Delete episode ${ep.episode_index}`}
+                              title="Delete episode"
+                              className="shrink-0 rounded p-1 text-muted-foreground opacity-0 hover:text-destructive group-hover:opacity-100"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
+                        </ContextMenuTrigger>
+                        <ContextMenuContent>
+                          <ContextMenuItem onSelect={() => openDeleteConfirm(ep)}>
+                            <Trash2 className="mr-2 h-3.5 w-3.5" />
+                            Delete episode
+                          </ContextMenuItem>
+                        </ContextMenuContent>
+                      </ContextMenu>
                     ))}
                   </div>
                 ) : (
@@ -564,19 +760,124 @@ const DatasetDetailDialog: React.FC<DatasetDetailDialogProps> = ({
 
             <div className="p-3">
               <DatasetInfoCard
+                key={reloadKey}
                 repoId={repoId}
+                canDelete
+                onDelete={() => setPendingDatasetDelete(true)}
                 onDownloaded={() => setReloadKey((k) => k + 1)}
               />
             </div>
 
             <div className="p-3">
-              <Button onClick={handleTrain} className="w-full gap-2">
-                <Boxes className="h-4 w-4" />
-                Train a skill from this
-              </Button>
+              {finalize ? (
+                <Button onClick={finalize.onFinalize} className="w-full gap-2">
+                  <Check className="h-4 w-4" />
+                  {finalize.willUploadToHub
+                    ? "Finalize & Upload to Hub"
+                    : "Finalize"}
+                </Button>
+              ) : (
+                <Button onClick={handleTrain} className="w-full gap-2">
+                  <Boxes className="h-4 w-4" />
+                  Train a skill from this
+                </Button>
+              )}
             </div>
           </div>
         </div>
+
+        <AlertDialog
+          open={deleteTarget !== null}
+          onOpenChange={(next) => {
+            if (!next && !deleting) {
+              setDeleteTarget(null);
+              setDeleteError(null);
+            }
+          }}
+        >
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>
+                {isLastEpisode
+                  ? "Delete the whole dataset?"
+                  : `Delete episode ${deleteTarget?.episode_index}?`}
+              </AlertDialogTitle>
+              <AlertDialogDescription>
+                {isLastEpisode ? (
+                  <>
+                    Episode {deleteTarget?.episode_index} is the only episode
+                    in <span className="font-mono text-foreground">{repoId}</span>.
+                    Deleting it deletes the whole dataset. This can't be undone.
+                    {deleteHubStatus?.status === "on_hub" && (
+                      <>
+                        {" "}
+                        This dataset is on the Hugging Face Hub — the Hub copy
+                        will be unaffected and will still exist there.
+                      </>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    This removes episode {deleteTarget?.episode_index} from{" "}
+                    <span className="font-mono text-foreground">{repoId}</span>{" "}
+                    and can't be undone.
+                    {deleteHubStatus?.status === "on_hub" && (
+                      <>
+                        {" "}
+                        This dataset is on the Hugging Face Hub — the Hub
+                        copy will NOT be updated. Use "Upload to Hub" to push
+                        the edited version.
+                      </>
+                    )}
+                  </>
+                )}
+                {deleteError && (
+                  <span className="mt-2 block text-destructive">{deleteError}</span>
+                )}
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel disabled={deleting}>Cancel</AlertDialogCancel>
+              <AlertDialogAction
+                disabled={deleting}
+                onClick={(e) => {
+                  e.preventDefault();
+                  handleConfirmDelete();
+                }}
+                className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              >
+                {deleting ? (
+                  <Loader2 className="mr-1 h-4 w-4 animate-spin" />
+                ) : (
+                  <Trash2 className="mr-1 h-4 w-4" />
+                )}
+                {deleting
+                  ? "Deleting…"
+                  : isLastEpisode
+                    ? "Delete dataset"
+                    : "Delete episode"}
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+
+        <DeleteConfirmDialog
+          kind="dataset"
+          // Wait for deleteHubStatus to resolve before opening: it starts
+          // null the instant pendingDatasetDelete flips true, and treating
+          // that as "local" would briefly show the permanent-delete framing
+          // for a dataset that's actually on the Hub (only its local copy
+          // would go) — the opposite of LibrarySheet's version of this same
+          // dialog, which has the real source synchronously and never races.
+          item={
+            pendingDatasetDelete && deleteHubStatus !== null
+              ? { source: deleteHubStatus.status === "on_hub" ? "both" : "local" }
+              : null
+          }
+          label={repoId ?? undefined}
+          onOpenChange={(o) => !o && setPendingDatasetDelete(false)}
+          onConfirm={confirmDatasetDelete}
+        />
       </DialogContent>
     </Dialog>
   );
