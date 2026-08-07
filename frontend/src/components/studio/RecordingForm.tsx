@@ -3,9 +3,7 @@ import { Input } from "@/components/ui/input";
 import { NumberInput } from "@/components/ui/number-input";
 import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
-import CameraConfiguration, {
-  CameraConfig,
-} from "@/components/recording/CameraConfiguration";
+import { SessionCameraList } from "@/components/recording/CameraConfiguration";
 import {
   AdvancedSection,
   RobotStatus,
@@ -30,15 +28,16 @@ interface RecordingFormProps {
   setStreamingEncoding: (value: boolean) => void;
   pushToHub: boolean;
   setPushToHub: (value: boolean) => void;
-  cameras: CameraConfig[];
-  setCameras: (cameras: CameraConfig[]) => void;
   releaseStreamsRef?: React.MutableRefObject<(() => void) | null>;
 }
 
 /**
  * The recording configuration form — ported from the old landing
  * RecordingModal (its logic is preserved verbatim: name validation +
- * namespace-prefix hint, camera config, streaming-encoding toggle). Lifted
+ * namespace-prefix hint, streaming-encoding toggle). Cameras are no longer
+ * part of the form: the session records the selected robot's cameras, resolved
+ * server-side from the robot record, so they are shown read-only here and
+ * edited only in the robot settings dialog. Lifted
  * out of the dialog into the studio Collect panel and restyled to Layout D
  * tokens. Every session records a NEW dataset — appending to an existing one
  * was removed in favor of merging datasets. The Start button lives in
@@ -60,8 +59,6 @@ const RecordingForm: React.FC<RecordingFormProps> = ({
   setStreamingEncoding,
   pushToHub,
   setPushToHub,
-  cameras,
-  setCameras,
   releaseStreamsRef,
 }) => {
   const { auth } = useHfAuth();
@@ -181,11 +178,17 @@ const RecordingForm: React.FC<RecordingFormProps> = ({
         </div>
       </div>
 
-      {/* Cameras */}
-      <CameraConfiguration
-        cameras={cameras}
-        onCamerasChange={setCameras}
+      {/* Cameras — read-only. The session records the SELECTED ROBOT's
+          cameras (the backend resolves them from the robot record), so this
+          confirms what will be captured; editing happens in Robot settings. */}
+      <SessionCameraList
+        cameras={robot?.cameras ?? []}
         releaseStreamsRef={releaseStreamsRef}
+        emptyLabel={
+          robot
+            ? "This robot has no cameras. Add them in Robot settings to record video."
+            : "Select a robot to see its cameras."
+        }
       />
 
       {/* Advanced */}

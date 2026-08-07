@@ -5,14 +5,21 @@ export interface StartInferenceRequest {
   follower_config: string;
   policy_ref: string;
   task: string;
-  cameras: Record<string, {
-    type: string;
-    camera_index?: number;
-    width: number;
-    height: number;
-    fps?: number;
-    fourcc?: string;
-  }>;
+  // Which of the ROBOT RECORD's cameras plays each camera role the checkpoint
+  // was trained with: { policy-expected camera name: robot-record camera name }.
+  // Only the name pairing is sent — which device, and how it's opened (index,
+  // unique_id, fps, fourcc, backend), is read out of the record named by
+  // `robot_name`, so a run can never open a camera set the saved robot doesn't
+  // have. (Capture resolution is the exception — see `camera_dims`.) A binding
+  // naming a camera the record lacks is a 400.
+  camera_bindings: Record<string, string>;
+  // Capture resolution per policy-expected camera name, read off the
+  // checkpoint's `image_features` (same forward-the-checkpoint's-own-metadata
+  // pattern as `checkpoint_state_dim`). The ONE camera setting not taken from
+  // the robot record: lerobot's rollout does not resize frames to the policy's
+  // input shape, so a camera must capture at the resolution the policy was
+  // trained on. Omitted entries fall back to the record's own width/height.
+  camera_dims?: Record<string, { width: number; height: number }>;
   duration_s: number;
   // Bimanual: "single" (default) drives one follower; "bimanual" drives two.
   // In bimanual mode follower_port/follower_config above is the LEFT arm and
@@ -20,7 +27,9 @@ export interface StartInferenceRequest {
   mode?: "single" | "bimanual";
   right_follower_port?: string;
   right_follower_config?: string;
-  // Robot record name — the BiSO calibration-staging base id (bimanual only).
+  // Robot record name. Names the record `camera_bindings` resolve against
+  // (required whenever any binding is set), and — bimanual only — the BiSO
+  // calibration-staging base id.
   robot_name?: string;
   // Checkpoint's flat state width (6 = single arm, 12 = bimanual). Lets the
   // server reject an arm-count mismatch before spawning the rollout subprocess.
