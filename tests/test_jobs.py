@@ -552,23 +552,58 @@ def test_tailing_runner_returncode_unconfirmed_when_status_file_malformed(tmp_pa
     assert runner.returncode() is None
 
 
-def test_tailing_runner_stop_signalled_tracks_stop_calls(tmp_path) -> None:
+def test_tailing_runner_stop_signalled_after_term_reaches_the_group(tmp_path, monkeypatch) -> None:
     """stop_signalled() is JobRegistry._tick()'s way of telling a
     user-requested stop apart from an unconfirmed crash/restart when
     returncode() comes back None (see test_tick_uses_stop_message_when_stop_was_signalled).
-    It must be False before stop() and True after, regardless of whether the
-    signalled pid was still alive to receive it."""
+    False before stop(), and True once killpg has actually put a SIGTERM into
+    the run's process group."""
+    import signal
+
+    from makermodslab import jobs
     from makermodslab.jobs import TailingJobRunner, TrainingMetrics
+
+    delivered: list[tuple[int, int]] = []
+    monkeypatch.setattr(jobs.os, "killpg", lambda pid, sig: delivered.append((pid, sig)))
 
     log_path = tmp_path / "log.jsonl"
     status_path = tmp_path / "exit_status"
 
-    runner = TailingJobRunner(TrainingMetrics(), log_path, pid=999999999, status_path=status_path)
+    runner = TailingJobRunner(TrainingMetrics(), log_path, pid=4242, status_path=status_path)
     assert runner.stop_signalled() is False
 
     runner.stop()
 
+    assert delivered == [(4242, signal.SIGTERM)]
     assert runner.stop_signalled() is True
+
+
+def test_tailing_runner_stop_signalled_false_when_group_already_gone(tmp_path, monkeypatch) -> None:
+    """The fact stop_signalled() reports is "we delivered a SIGTERM to a live
+    process group", not "someone called stop()". A run that crashed (or died
+    to a restart) before the user clicked Stop reaches killpg with nothing
+    left to signal — ProcessLookupError — and must stay False, or _tick()
+    would launder that crash into "stopped at your request" and tell the user
+    we stopped a run that had already ended on its own.
+
+    stop()'s own bookkeeping still runs: _stop_event winds the tail loop
+    down either way."""
+    from makermodslab import jobs
+    from makermodslab.jobs import TailingJobRunner, TrainingMetrics
+
+    def _already_gone(pid: int, sig: int) -> None:
+        raise ProcessLookupError(3, "No such process")
+
+    monkeypatch.setattr(jobs.os, "killpg", _already_gone)
+
+    log_path = tmp_path / "log.jsonl"
+    status_path = tmp_path / "exit_status"
+
+    runner = TailingJobRunner(TrainingMetrics(), log_path, pid=4242, status_path=status_path)
+    runner.stop()
+
+    assert runner.stop_signalled() is False
+    assert runner._stop_event.is_set()
 
 
 def test_tailing_runner_returncode_unconfirmed_while_pid_alive(tmp_path) -> None:
@@ -677,6 +712,36 @@ def test_tick_uses_stop_message_when_stop_was_signalled(tmp_path) -> None:
     assert finalized.error_message is not None
     assert "stopped at your request" in finalized.error_message
     assert "restarted" not in finalized.error_message
+
+
+def test_tick_does_not_claim_a_stop_that_never_reached_the_run(tmp_path) -> None:
+    """End-to-end counterpart to the test above, with the real
+    TailingJobRunner rather than a fake: the run is already dead (crash, or a
+    restart that killed it) when the user's Stop arrives, so stop()'s killpg
+    finds nothing to signal. _tick() must fall back to the restart message —
+    telling the user we stopped a run that had already ended on its own is the
+    same false story in the opposite direction."""
+    from makermodslab.jobs import JobRegistry, TailingJobRunner, TrainingMetrics
+
+    runner = TailingJobRunner(
+        TrainingMetrics(),
+        tmp_path / "log.jsonl",
+        pid=999999999,  # long dead; killpg raises ProcessLookupError
+        status_path=tmp_path / "exit_status",  # never written
+    )
+    runner.stop()
+
+    reg = JobRegistry(tmp_path / "root")
+    record = _inject_running_job(reg, tmp_path, rc=None, runner=runner)
+
+    reg._tick()
+
+    finalized = reg._records[record.id]
+    assert finalized.state == "interrupted"
+    assert finalized.exit_code is None
+    assert finalized.error_message is not None
+    assert "restarted" in finalized.error_message
+    assert "stopped at your request" not in finalized.error_message
 
 
 def test_tick_marks_done_when_runner_confirms_zero_exit(tmp_path) -> None:

@@ -567,6 +567,9 @@ class TailingJobRunner:
         self._log_queue: Queue[LogLine] = Queue()
         self._tail_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
+        # Set only when stop() actually got a SIGTERM into a live process
+        # group — see stop_signalled().
+        self._stop_delivered = threading.Event()
         # Replay everything that's already on disk so the parser catches up
         # on metrics, then tail from the current EOF.
         self._tail_offset = 0
@@ -590,17 +593,29 @@ class TailingJobRunner:
         # (start_new_session made it its own pgid too); the trainer is its
         # child in the same group, so signal the whole group rather than just
         # the wrapper.
-        with contextlib.suppress(ProcessLookupError):
+        try:
             os.killpg(self._pid, signal.SIGTERM)
+        except ProcessLookupError:
+            # The group was already gone, so whatever ended this run, it
+            # wasn't us — leave _stop_delivered clear so stop_signalled()
+            # can't claim credit for a crash that beat the user's click.
+            pass
+        else:
+            self._stop_delivered.set()
         self._stop_event.set()
 
     def stop_signalled(self) -> bool:
-        """True once stop() has been called on this runner. Consulted by
-        JobRegistry._tick() when returncode() comes back None: the group TERM
-        in stop() kills the wrapper before it can write an exit status, so a
-        user-requested stop looks identical to an unconfirmed crash/restart
-        unless this is checked."""
-        return self._stop_event.is_set()
+        """True once stop() verifiably delivered a SIGTERM to a live process
+        group. Consulted by JobRegistry._tick() when returncode() comes back
+        None: the group TERM in stop() kills the wrapper before it can write
+        an exit status, so a user-requested stop looks identical to an
+        unconfirmed crash/restart unless this is checked.
+
+        Deliberately not just "stop() was called". A run that crashed (or died
+        to a restart) before the user clicked Stop reaches killpg with nothing
+        left to signal; reporting intent alone there would tell the user we
+        stopped a run that had already ended on its own."""
+        return self._stop_delivered.is_set()
 
     def is_running(self) -> bool:
         return _pid_alive(self._pid)
