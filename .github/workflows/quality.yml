@@ -14,21 +14,28 @@
 
 # This workflow handles linting, formatting, and static analysis checks for the codebase.
 #
-# Deliberately ADVISORY: the pre-commit step carries `continue-on-error`, so a
-# hook failure leaves the run green. Two reasons:
-#   1. GitHub emails the run's actor (the PR author) on every failed run. Quality
-#      is not a required status check — only `Build` from frontend.yml is — so a
-#      red X here was pure notification noise that blocked nothing. A run that
-#      concludes `success` sends no mail; because this is its own workflow run,
-#      silencing it does not touch Tests / Frontend / Lockfile alerts, which stay
-#      loud.
-#   2. Most failures here are auto-fixable formatting nits (end-of-file-fixer,
-#      trailing-whitespace, ruff-format) that `pre-commit install` catches locally
-#      anyway.
-# The failure is not swallowed: the "Report result" step below raises a warning
-# annotation and writes a job summary, so it is visible on the run and the PR
-# without going red. Note this covers the pre-commit step only — an infra failure
-# (checkout, setup-python) still fails the run and still emails, which is correct.
+# A hook failure FAILS the run — this job goes red, and that red is real signal.
+# It is deliberately NOT a required status check, so it does not block the merge.
+# Same shape as Tests/`Pytest`: honest conclusion, human decides what to do about
+# it. Reviewers can see a red Quality and merge anyway when the finding does not
+# warrant holding the PR.
+#
+# It carried `continue-on-error` for a while, which is a different and worse
+# thing: the run concluded `success` no matter what, so there was nothing to see.
+# That was a workaround for `main` itself not passing `pre-commit run --all-files`
+# — a permanently-red job nobody could act on.
+#
+# The baseline was fixed instead (formatters applied tree-wide, the handful of
+# real typos corrected, and each genuine false positive suppressed narrowly with
+# a written reason). `main` is green, so a red run here now means *this PR*
+# introduced something, and the notification it sends is worth reading.
+#
+# Keeping it green is cheap on the contributor's side: `pre-commit install` runs
+# the same hooks at commit time and auto-fixes most of what they'd catch, so this
+# job rarely has anything to report. CONTRIBUTING.md documents that.
+#
+# If this ever goes red on `main` for reasons unrelated to a PR, fix the baseline
+# again — do not reach for `continue-on-error`.
 name: Quality
 permissions:
   contents: read
@@ -64,34 +71,33 @@ jobs:
 
       - name: Run pre-commit hooks
         id: pre-commit
-        continue-on-error: true
         uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd  # v3.0.1
         with:
           extra_args: --all-files --show-diff-on-failure --color=always
 
-      # Surfaces a failure the run no longer reports through its conclusion.
-      # A warning annotation shows on the run page and the PR's checks tab; the
-      # summary block shows on the run's landing page. Neither turns the run red,
-      # so neither triggers the failure email.
+      # The run's own conclusion now carries the failure, so this step exists only
+      # to put the fix instructions somewhere the author will actually read them:
+      # the run's landing page, rather than buried in the hook step's log.
       - name: Report result
         if: always()
         env:
           OUTCOME: ${{ steps.pre-commit.outcome }}
         run: |
           if [ "$OUTCOME" = "failure" ]; then
-            echo "::warning title=Quality checks failed (advisory)::pre-commit reported problems. This job does not block the merge — open the 'Run pre-commit hooks' step for the diff, then run 'pre-commit run --all-files' locally."
             {
-              echo "### :warning: Quality checks failed (advisory)"
+              echo "### :x: Quality checks failed"
               echo
-              echo "\`pre-commit\` reported problems. This job is intentionally non-blocking, so the run stays green and no failure email is sent — but the code still needs fixing."
+              echo "\`pre-commit\` reported problems. \`main\` is kept green, so this is almost certainly something in **this PR**. This check is not a required one — it will not block the merge — but please fix it rather than merging past it."
               echo
-              echo "See the **Run pre-commit hooks** step above for the diff. To reproduce and fix locally:"
+              echo "The **Run pre-commit hooks** step above has the diff. To reproduce and fix locally:"
               echo
               echo '```bash'
-              echo 'pre-commit run --all-files'
+              echo 'pre-commit run --files $(git diff --name-only origin/main...HEAD)'
               echo '```'
               echo
-              echo "Install the hooks once with \`pre-commit install\` and these stop reaching CI."
+              echo "Most hooks fix the file in place — re-\`git add\` and commit. Run \`pre-commit install\` once and these stop reaching CI at all."
+              echo
+              echo "If a hook is genuinely wrong about your code, suppress it narrowly with a written reason (\`# nosec Bxxx — why\`, \`# zizmor: ignore[rule]\`, or a scoped \`extend-ignore-re\`) rather than widening a global skip list."
             } >> "$GITHUB_STEP_SUMMARY"
           else
             echo "### :white_check_mark: Quality checks passed" >> "$GITHUB_STEP_SUMMARY"
