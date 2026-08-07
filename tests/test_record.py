@@ -1585,9 +1585,7 @@ def test_upload_manager_qualifies_bare_repo_id_with_namespace(monkeypatch: pytes
     ds = _fake_dataset()
     monkeypatch.setattr("lerobot.datasets.LeRobotDataset", lambda repo_id: ds)
     monkeypatch.setattr("makermodslab.datasets._dataset_in_use", lambda repo_id: None)
-    monkeypatch.setattr(
-        "makermodslab.record.cached_whoami", lambda: {"name": "makermods", "orgs": []}
-    )
+    monkeypatch.setattr("makermodslab.record.cached_whoami", lambda: {"name": "makermods", "orgs": []})
 
     mgr = UploadManager()
     result = mgr.start(UploadRequest(dataset_repo_id="flat_local_dataset", tags=[], private=False))
