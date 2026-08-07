@@ -267,9 +267,7 @@ def test_parse_metrics_into_rebases_resumed_tqdm_to_global_step() -> None:
     from makermodslab.jobs import TrainingMetrics, parse_metrics_into
 
     m = TrainingMetrics()
-    parse_metrics_into(
-        "Training:  55%|█████| 55/100 [00:30<01:00, 2.0s/step]", m, resume_total=200
-    )
+    parse_metrics_into("Training:  55%|█████| 55/100 [00:30<01:00, 2.0s/step]", m, resume_total=200)
     assert m.current_step == 155  # 200 - 100 + 55
     assert m.total_steps == 200
 
@@ -414,14 +412,20 @@ def test_read_metrics_history_stitches_resume_lineage(tmp_path) -> None:
     write_log("A", ["INFO step:50 loss:1.5 grdn:1 lr:0.001", "INFO step:100 loss:1.2 grdn:1 lr:0.001"])
     write_log("B", ["INFO step:150 loss:1.1 grdn:1 lr:5e-4", "INFO step:200 loss:1.0 grdn:1 lr:2e-4"])
     reg._records["A"] = JobRecord(
-        id="A", name="a", state="done",
+        id="A",
+        name="a",
+        state="done",
         config=TrainingRequest(dataset_repo_id="d"),
-        output_dir=str(root / "A" / "run"), started_at=0.0,
+        output_dir=str(root / "A" / "run"),
+        started_at=0.0,
     )
     reg._records["B"] = JobRecord(
-        id="B", name="b", state="done",
+        id="B",
+        name="b",
+        state="done",
         config=TrainingRequest(dataset_repo_id="d", resume=True, resume_from_job_id="A", steps=200),
-        output_dir=str(root / "B" / "run"), started_at=0.0,
+        output_dir=str(root / "B" / "run"),
+        started_at=0.0,
     )
 
     assert [p.step for p in reg.read_metrics_history("B")] == [50, 100, 150, 200]
@@ -1224,8 +1228,6 @@ def test_legacy_imported_name_is_re_derived_on_load(monkeypatch, tmp_path) -> No
     assert reg.get(legacy.id).name == "orange_box"
     # Persisted, not just fixed in memory.
     assert _json.loads((job_dir / "job.json").read_text())["name"] == "orange_box"
-
-
 
 
 def _typed_hub_reg(monkeypatch, tmp_path, policy_by_repo, root="root"):
