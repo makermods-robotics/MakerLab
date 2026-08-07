@@ -67,21 +67,97 @@ export async function getModelInfo(
   );
 }
 
-/** POST /models/upload — push a local run's final checkpoint to the Hub as a
- * PUBLIC, MakerModsLab-tagged model repo. `id` is the local run id; `repoId` optionally
- * overrides the default namespaced repo id. MUTATES the Hub. Throws ApiError
- * (400 offline, 403 no write access, 404 no checkpoint, 502 Hub failure) with
- * the backend message in `.detail`. Returns {repo_id, url, tags}. */
+/** One of a local run's saved checkpoints as the publish picker sees it.
+ * `published` is true when that step is already in the target Hub repo — the
+ * picker leaves those unselected so a re-publish reads as "add the new ones". */
+export interface RunCheckpoint {
+  step: number;
+  path: string;
+  published: boolean;
+}
+
+/** GET /models/checkpoints?id=… — everything the publish picker needs for one
+ * run in a single call. `hf_repo_id` is set only once the run has actually been
+ * published (so the UI can say "add more" instead of "publish");
+ * `default_repo_id` is the target an upload with no explicit repo would pick,
+ * shown as the input's placeholder. `legacy_root_checkpoint` flags a repo whose
+ * first upload predates the step-addressed layout. */
+export interface RunCheckpoints {
+  id: string;
+  default_repo_id: string;
+  hf_repo_id: string | null;
+  legacy_root_checkpoint: boolean;
+  checkpoints: RunCheckpoint[];
+}
+
+export async function listRunCheckpoints(
+  baseUrl: string,
+  fetcher: Fetcher,
+  id: string,
+  signal?: AbortSignal,
+): Promise<RunCheckpoints> {
+  return apiRequest<RunCheckpoints>(
+    baseUrl,
+    fetcher,
+    `/models/checkpoints?id=${encodeURIComponent(id)}`,
+    { signal, action: "List run checkpoints" },
+  );
+}
+
+/** POST /models/upload — START publishing a local run's checkpoints to the Hub
+ * as ONE public, MakerModsLab-tagged model repo. `id` is the local run id;
+ * `repoId` optionally overrides the default namespaced repo id; `steps` names
+ * the checkpoints to publish (omitted ⇒ the final one only). Every step lands
+ * in the SAME repo, so a later call adds to the same model card.
+ *
+ * MUTATES the Hub, and returns as soon as the queue is accepted — the upload
+ * itself runs in the background; poll getModelUploadStatus for progress and for
+ * the failures (offline / permission / Hub) that surface there. Throws ApiError
+ * 409 when a publish is already running. */
 export async function uploadModel(
   baseUrl: string,
   fetcher: Fetcher,
   id: string,
   repoId?: string,
-): Promise<{ repo_id: string; url: string; tags: string[] }> {
+  steps?: number[],
+): Promise<{ started: boolean; model_id: string; message: string }> {
   return apiRequest(baseUrl, fetcher, "/models/upload", {
     method: "POST",
-    body: { id, ...(repoId ? { repo_id: repoId } : {}) },
+    body: {
+      id,
+      ...(repoId ? { repo_id: repoId } : {}),
+      ...(steps ? { steps } : {}),
+    },
     action: "Upload model",
+  });
+}
+
+/** Progress of the single background publish. `done`/`total` are queue
+ * position, `current_step` the checkpoint in flight, and `done_steps` the ones
+ * already on the Hub — which stay meaningful on `error`, because a queue that
+ * fails part-way keeps everything it published before it died. */
+export interface ModelUploadStatus {
+  state: "idle" | "running" | "done" | "error";
+  model_id: string | null;
+  repo_id: string | null;
+  url: string | null;
+  message: string | null;
+  error: string | null;
+  total: number;
+  done: number;
+  current_step: number | null;
+  done_steps: number[];
+}
+
+/** GET /models/upload-status — poll the background publish. */
+export async function getModelUploadStatus(
+  baseUrl: string,
+  fetcher: Fetcher,
+  signal?: AbortSignal,
+): Promise<ModelUploadStatus> {
+  return apiRequest<ModelUploadStatus>(baseUrl, fetcher, "/models/upload-status", {
+    signal,
+    action: "Model upload status",
   });
 }
 

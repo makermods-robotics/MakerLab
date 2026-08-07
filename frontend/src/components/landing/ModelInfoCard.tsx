@@ -11,9 +11,10 @@ import { useToast } from "@/hooks/use-toast";
 import { useApi } from "@/contexts/ApiContext";
 import { ApiError } from "@/lib/apiClient";
 import { policyTypeDisplayName } from "@/components/training/types";
-import { ModelInfo, getModelInfo, uploadModel } from "@/lib/modelsApi";
+import { ModelInfo, getModelInfo } from "@/lib/modelsApi";
 import { useModelDownload } from "@/hooks/useModelDownload";
 import { useCanUpload } from "@/hooks/useCanUpload";
+import { useModelPublish } from "@/hooks/useModelPublish";
 
 /** 16000 -> "16k", 950 -> "950". Steps get a compact form like the dataset
  * card's frame counts. */
@@ -156,7 +157,6 @@ const ModelInfoCard: React.FC<ModelInfoCardProps> = ({
   const [info, setInfo] = useState<ModelInfo | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<{ notFound: boolean } | null>(null);
-  const [uploading, setUploading] = useState(false);
   // Bumped when a Hub model's checkpoint finishes downloading, to re-run the
   // info fetch (now local: /models/info picks up the path + on-disk size).
   const [infoRefreshKey, setInfoRefreshKey] = useState(0);
@@ -180,40 +180,51 @@ const ModelInfoCard: React.FC<ModelInfoCardProps> = ({
     return () => controller.abort();
   }, [baseUrl, fetchWithHeaders, id, infoRefreshKey]);
 
-  const doUpload = async () => {
-    setUploading(true);
-    try {
-      const res = await uploadModel(baseUrl, fetchWithHeaders, id);
+  // The card publishes the run's FINAL checkpoint (steps omitted). Picking a
+  // subset is the training dialog's job — it is the surface that already knows
+  // about a run's checkpoints; here the model is a single library row. Both go
+  // through the same background queue, so a publish started in either place is
+  // visible from the other.
+  const { publishing, publish } = useModelPublish({
+    modelId: id,
+    onDone: (s) => {
       toast({
         title: "Uploaded to Hub",
         description: (
           <span>
-            {res.repo_id} is now on the Hub.{" "}
-            <a
-              href={res.url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="underline font-medium"
-            >
-              View model
-            </a>
+            {s.repo_id} is now on the Hub.{" "}
+            {s.url && (
+              <a
+                href={s.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="underline font-medium"
+              >
+                View model
+              </a>
+            )}
           </span>
         ),
       });
       onUploaded?.();
-    } catch (e) {
+    },
+    onError: (message) => {
       toast({
         title: "Upload failed",
-        description:
-          e instanceof ApiError && e.detail
-            ? e.detail
-            : e instanceof Error
-              ? e.message
-              : String(e),
+        description: message,
         variant: "destructive",
       });
-    } finally {
-      setUploading(false);
+    },
+  });
+
+  const doUpload = async () => {
+    const err = await publish();
+    if (err) {
+      toast({
+        title: "Upload failed",
+        description: err,
+        variant: "destructive",
+      });
     }
   };
 
@@ -334,10 +345,10 @@ const ModelInfoCard: React.FC<ModelInfoCardProps> = ({
                 size="sm"
                 variant="outline"
                 onClick={doUpload}
-                disabled={uploading}
+                disabled={publishing}
                 className="h-6 gap-1 border-teal-500/50 px-2 text-xs text-teal-700 dark:text-teal-300 hover:bg-teal-500/10"
               >
-                {uploading ? (
+                {publishing ? (
                   <>
                     <Loader2 className="h-3 w-3 animate-spin" />
                     Uploading…
