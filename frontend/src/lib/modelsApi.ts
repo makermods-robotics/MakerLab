@@ -29,6 +29,11 @@ export interface ModelItem {
   /** Whether the Hub repo is private (hub-derived rows only). Mirrors
    * DatasetItem.private; drives the picker's amber "private" badge. */
   private?: boolean;
+  /** What the local side of this row is — a training run or a copy pulled from
+   * the Hub / imported from disk. Absent on hub-only rows. Read by
+   * resolveDeleteAction, because deleting a run costs its unpublished
+   * checkpoints while deleting a copy costs nothing irreplaceable. */
+  local_kind?: "run" | "downloaded";
 }
 
 /** GET /models — merged local + Hub listing, each with a `source`. Mirrors
@@ -87,6 +92,11 @@ export interface RunCheckpoints {
   default_repo_id: string;
   hf_repo_id: string | null;
   legacy_root_checkpoint: boolean;
+  /** False when the Hub couldn't be asked (offline, or the call failed). Every
+   * `published` flag is then `false` by default and means "unknown", not "not
+   * published" — present it that way, or a user re-queues gigabytes they
+   * already sent. */
+  hub_readable: boolean;
   checkpoints: RunCheckpoint[];
 }
 

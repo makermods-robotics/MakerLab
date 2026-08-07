@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useApi } from "@/contexts/ApiContext";
 import { useToast } from "@/hooks/use-toast";
 import { useHfAuth } from "@/contexts/HfAuthContext";
@@ -51,6 +51,7 @@ const PublishToHubRow: React.FC<{
   const [repoId, setRepoId] = useState("");
   const [selected, setSelected] = useState<number[]>([]);
   const [open, setOpen] = useState(false);
+  const submittingRef = useRef(false);
 
   const refresh = useCallback(
     (signal?: AbortSignal) =>
@@ -114,19 +115,34 @@ const PublishToHubRow: React.FC<{
   const unpublished = checkpoints.filter((c) => !c.published);
   const publishedCount = checkpoints.length - unpublished.length;
 
-  // Default selection: the newest checkpoint that isn't on the Hub yet. Keeps
-  // the common case one click, and never silently queues a whole run's worth of
-  // weights (which "select all" makes an explicit, counted choice instead).
+  // Default selection, applied only on the OPEN transition: the newest
+  // checkpoint that isn't on the Hub yet. Keeps the common case one click, and
+  // never silently queues a whole run's worth of weights ("select all" makes
+  // that an explicit, counted choice). Gated on a ref rather than on
+  // `selected.length === 0` so that clearing the list stays cleared.
+  const wasOpen = useRef(false);
   useEffect(() => {
-    if (!open) return;
-    setSelected((prev) => {
-      if (prev.length > 0) return prev;
+    if (open && !wasOpen.current) {
       const newest = unpublished[unpublished.length - 1];
-      return newest ? [newest.step] : [];
+      setSelected(newest ? [newest.step] : []);
+    }
+    wasOpen.current = open;
+  }, [open, unpublished]);
+
+  // Drop steps that have since been published (or vanished) from the selection.
+  // After a partial failure this turns the stale selection into exactly "the
+  // rest", which is what the failure toast tells the user to retry — leaving
+  // the landed steps selected would re-upload gigabytes to no effect.
+  useEffect(() => {
+    if (!data) return;
+    const publishable = new Set(
+      data.checkpoints.filter((c) => !c.published).map((c) => c.step),
+    );
+    setSelected((prev) => {
+      const next = prev.filter((s) => publishable.has(s));
+      return next.length === prev.length ? prev : next;
     });
-    // `unpublished` is derived from `data`; keying on data avoids re-running on
-    // every render while still refreshing the default after a publish.
-  }, [open, data]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [data]);
 
   if (!canUpload || checkpoints.length === 0) return null;
 
@@ -140,30 +156,48 @@ const PublishToHubRow: React.FC<{
       prev.includes(step) ? prev.filter((s) => s !== step) : [...prev, step],
     );
 
-  const allSelected = selected.length === checkpoints.length;
+  // "Select all" means all the checkpoints that AREN'T up there yet — the
+  // published ones are exactly what the user doesn't need to send again.
+  const allSelected =
+    unpublished.length > 0 && unpublished.every((c) => selected.includes(c.step));
   const selectAll = () =>
-    setSelected(allSelected ? [] : checkpoints.map((c) => c.step));
+    setSelected(allSelected ? [] : unpublished.map((c) => c.step));
 
   const onConfirm = async () => {
-    if (selected.length === 0) return;
+    // `publishing` only flips once the POST resolves, so a fast second click
+    // would fire a second POST and collect a 409 toast. This guard is
+    // synchronous.
+    if (selected.length === 0 || submittingRef.current) return;
+    submittingRef.current = true;
     setOpen(false);
-    const err = await publish(
-      pinnedRepo ?? (repoId.trim() || undefined),
-      [...selected].sort((a, b) => a - b),
-    );
-    if (err) {
-      toast({
-        title: "Publish failed",
-        description: err,
-        variant: "destructive",
-      });
+    try {
+      const err = await publish(
+        pinnedRepo ?? (repoId.trim() || undefined),
+        [...selected].sort((a, b) => a - b),
+      );
+      if (err) {
+        toast({
+          title: "Publish failed",
+          description: err,
+          variant: "destructive",
+        });
+      }
+    } finally {
+      submittingRef.current = false;
     }
   };
 
-  const progressPct =
-    status && status.total > 0
-      ? Math.round((status.done / status.total) * 100)
-      : 0;
+  const hubUnknown = data != null && !data.hub_readable;
+
+  const total = status?.total ?? 0;
+  const progressPct = total > 0 ? Math.round((status!.done / total) * 100) : 0;
+  // One checkpoint has no meaningful intermediate progress — see the bar below.
+  const indeterminate = total <= 1;
+  const progressLabel =
+    (total > 1
+      ? `Uploading ${Math.min((status?.done ?? 0) + 1, total)} of ${total}`
+      : "Uploading") +
+    (status?.current_step != null ? ` · ${stepLabel(status.current_step)}` : "");
 
   return (
     <div className="rounded-md border border-border bg-card p-4">
@@ -180,7 +214,9 @@ const PublishToHubRow: React.FC<{
               >
                 {pinnedRepo}
               </a>{" "}
-              · {publishedCount} of {checkpoints.length} checkpoints published
+              {hubUnknown
+                ? "· couldn't check which checkpoints are published"
+                : `· ${publishedCount} of ${checkpoints.length} checkpoints published`}
             </p>
           ) : (
             <p className="mt-0.5 text-xs text-muted-foreground">
@@ -192,21 +228,31 @@ const PublishToHubRow: React.FC<{
 
         {publishing ? (
           <div className="w-52 shrink-0">
-            <div className="flex items-center justify-between text-[11px] text-muted-foreground">
-              <span>
-                {status && status.total > 1
-                  ? `Uploading ${Math.min(status.done + 1, status.total)} of ${status.total}`
-                  : "Uploading"}
-                {status?.current_step != null
-                  ? ` · ${stepLabel(status.current_step)}`
-                  : ""}
-              </span>
+            <div
+              className="flex items-center justify-between text-[11px] text-muted-foreground"
+              aria-live="polite"
+            >
+              <span>{progressLabel}</span>
               <Loader2 className="h-3 w-3 animate-spin" />
             </div>
-            <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-muted">
+            <div
+              className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-muted"
+              role="progressbar"
+              aria-label="Publishing checkpoints"
+              aria-valuemin={0}
+              aria-valuemax={status?.total ?? 1}
+              // Omitted for a single checkpoint: with no byte-level progress
+              // from the Hub the bar would sit at 0% for the whole upload, so
+              // it runs indeterminate instead of lying about being stalled.
+              aria-valuenow={indeterminate ? undefined : status?.done}
+            >
               <div
-                className="h-full rounded-full bg-teal-500 transition-all"
-                style={{ width: `${progressPct}%` }}
+                className={
+                  indeterminate
+                    ? "h-full w-1/3 animate-pulse rounded-full bg-teal-500"
+                    : "h-full rounded-full bg-teal-500 transition-all"
+                }
+                style={indeterminate ? undefined : { width: `${progressPct}%` }}
               />
             </div>
           </div>
@@ -261,14 +307,24 @@ const PublishToHubRow: React.FC<{
                     <Label className="font-normal text-muted-foreground">
                       Checkpoints
                     </Label>
-                    <button
-                      type="button"
-                      onClick={selectAll}
-                      className="text-[11px] text-primary hover:underline"
-                    >
-                      {allSelected ? "Clear all" : `Select all (${checkpoints.length})`}
-                    </button>
+                    {unpublished.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={selectAll}
+                        className="text-[11px] text-primary hover:underline"
+                      >
+                        {allSelected
+                          ? "Clear all"
+                          : `Select all (${unpublished.length})`}
+                      </button>
+                    )}
                   </div>
+                  {hubUnknown && (
+                    <p className="leading-snug text-muted-foreground">
+                      Couldn't reach the Hub to check which checkpoints are
+                      already published — the badges below may be incomplete.
+                    </p>
+                  )}
                   <div className="max-h-44 space-y-0.5 overflow-y-auto rounded border border-border p-1">
                     {checkpoints.map((c) => (
                       <label

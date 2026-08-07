@@ -94,7 +94,15 @@ export function useModelPublish({
     const id = setInterval(async () => {
       try {
         const s = await getModelUploadStatus(baseUrl, fetchWithHeaders);
-        if (s.model_id !== modelId) return; // another run's publish took over
+        if (s.model_id !== modelId) {
+          // The global slot moved on without us ever seeing our own terminal
+          // state — another run took over, or the server restarted and reset
+          // the manager to idle. Either way this publish is no longer
+          // observable, so stop claiming it is running rather than spinning
+          // forever on a status that will never mention us again.
+          setStatus(null);
+          return;
+        }
         setStatus(s);
         if (s.state === "done" && !notified.current) {
           notified.current = true;
