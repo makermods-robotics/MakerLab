@@ -741,26 +741,21 @@ const DeployPanel: React.FC = () => {
             Run this skill on your robot, then start inference.
           </p>
 
-          {/* Robot readiness — a status line, not a parameter, so no eyebrow. */}
+          {/* Robot readiness — a warning, not a parameter, so no eyebrow. A
+              ready robot renders nothing: the robot menu already names the
+              selection and its arm layout. */}
           <RobotStatus ready={!!robot && robot.follower_ready}>
             {!robot ? (
               <>
                 Select a robot to run on — use the robot menu in the top-right
                 corner of this window.
               </>
-            ) : !robot.follower_ready ? (
+            ) : (
               <>
                 <strong>{robot.name}</strong> {robotSetupGap(robot, "follower")}.
                 Open Robot settings before running inference. (Inference only
                 uses the follower arm{isBimanual ? "s" : ""} — leader setup
                 isn't needed.)
-              </>
-            ) : (
-              <>
-                <span className="text-foreground">{robot.name}</span>
-                <span className="rounded border border-border px-1.5 py-0.5 text-[11px] text-muted-foreground">
-                  {isBimanual ? "bimanual — both followers" : "single arm"}
-                </span>
               </>
             )}
           </RobotStatus>

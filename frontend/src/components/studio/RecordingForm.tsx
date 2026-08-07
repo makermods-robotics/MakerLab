@@ -74,22 +74,19 @@ const RecordingForm: React.FC<RecordingFormProps> = ({
         on the selected robot.
       </p>
 
-      {/* Robot readiness — a status line, not a parameter, so no eyebrow. */}
+      {/* Robot readiness — a warning, not a parameter, so no eyebrow. A ready
+          robot renders nothing: the robot menu already names the selection. */}
       <RobotStatus ready={!!robot && robot.is_clean}>
         {!robot ? (
           <>
             Select or create a robot before recording — use the robot menu in
             the top-right corner of this window.
           </>
-        ) : !robot.is_clean ? (
+        ) : (
           <>
             <strong>{robot.name}</strong> {robotSetupGap(robot)}. Open Robot
             settings before recording.
           </>
-        ) : (
-          <span className="text-foreground">
-            Recording with <strong>{robot.name}</strong>
-          </span>
         )}
       </RobotStatus>
 
