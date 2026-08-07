@@ -3170,3 +3170,98 @@ def test_start_allows_matching_feature_space(tmp_path) -> None:
     ):
         record = reg.start(cfg, JobTarget(runner="local"))
     assert record.state == "running"
+
+
+def _write_running_job_json(job_dir: Path, output_dir: Path) -> None:
+    """Lay out an on-disk 'running' job.json the way a crash mid-training
+    would leave it: state still 'running', a process_pid that (the caller
+    arranges to) no longer exists by the time the registry boots and reads
+    it back — the exact shape _load_from_disk() sees on a full server
+    restart, as opposed to _tick()'s in-memory finalisation of a job that
+    died while the server stayed up."""
+    job_dir.mkdir(parents=True, exist_ok=True)
+    meta = {
+        "id": "job-1",
+        "name": "run",
+        "state": "running",
+        "config": {"dataset_repo_id": "user/ds"},
+        "output_dir": str(output_dir),
+        "started_at": 0.0,
+        "runner": "local",
+        "process_pid": 999999999,  # long dead, see test_pid_alive_returns_false_for_unlikely_pid
+    }
+    (job_dir / "job.json").write_text(_json.dumps(meta))
+
+
+def test_boot_reattach_reads_exit_status_when_pid_already_dead_and_failed(tmp_path) -> None:
+    """IsaacSinn's PR #34 follow-up: a run that crashed while the server was
+    down (server killed/crashed, trainer keeps going per the whole point of
+    the wrapper, then dies and writes its real nonzero exit code to
+    <output_dir>/exit_status) must NOT be silently reported as 'interrupted'
+    once the server comes back — that status file is exactly the evidence
+    TailingJobRunner.returncode() already trusts when the server stays up
+    (see test_tick_marks_interrupted_when_runner_cannot_confirm_exit and
+    friends). _load_from_disk() must consult the same file before giving up
+    and asserting 'interrupted' for a pid that's merely gone."""
+    from makermodslab.jobs import _EXIT_STATUS_FILENAME, JobRegistry
+
+    root = tmp_path / "root"
+    job_dir = root / "job-1"
+    output_dir = tmp_path / "output"
+    output_dir.mkdir(parents=True)
+    (output_dir / _EXIT_STATUS_FILENAME).write_text("1")
+    _write_running_job_json(job_dir, output_dir)
+
+    reg = JobRegistry(root)
+
+    record = reg.get("job-1")
+    assert record.state == "failed"
+    assert record.exit_code == 1
+    assert record.error_message is not None
+    assert "exited with code 1" in record.error_message
+    # Persisted, not just fixed in memory.
+    meta = _json.loads((job_dir / "job.json").read_text())
+    assert meta["state"] == "failed"
+
+
+def test_boot_reattach_reads_exit_status_when_pid_already_dead_and_done(tmp_path) -> None:
+    """Mirror of the failed case above: a run that actually finished
+    successfully while the server was down must be recognised as 'done', not
+    downgraded to 'interrupted' just because nobody was watching when it
+    exited."""
+    from makermodslab.jobs import _EXIT_STATUS_FILENAME, JobRegistry
+
+    root = tmp_path / "root"
+    job_dir = root / "job-1"
+    output_dir = tmp_path / "output"
+    output_dir.mkdir(parents=True)
+    (output_dir / _EXIT_STATUS_FILENAME).write_text("0")
+    _write_running_job_json(job_dir, output_dir)
+
+    reg = JobRegistry(root)
+
+    record = reg.get("job-1")
+    assert record.state == "done"
+    assert record.exit_code == 0
+    meta = _json.loads((job_dir / "job.json").read_text())
+    assert meta["state"] == "done"
+
+
+def test_boot_reattach_stays_interrupted_when_no_exit_status_file(tmp_path) -> None:
+    """Regression guard for the existing, still-correct case: a pid that's
+    dead AND left no exit_status file at all (SIGKILL, a reboot that cut off
+    the wrapper before it could write) is genuinely unconfirmed and must stay
+    'interrupted', same as before this fix."""
+    from makermodslab.jobs import JobRegistry
+
+    root = tmp_path / "root"
+    job_dir = root / "job-1"
+    output_dir = tmp_path / "output"
+    output_dir.mkdir(parents=True)  # no exit_status written
+    _write_running_job_json(job_dir, output_dir)
+
+    reg = JobRegistry(root)
+
+    record = reg.get("job-1")
+    assert record.state == "interrupted"
+    assert record.exit_code is None

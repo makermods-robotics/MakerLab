@@ -3140,7 +3140,34 @@ class JobRegistry:
                         runner.start_tailing()
                         self._runners[record.id] = runner
                     else:
-                        record.state = "interrupted"
+                        # The pid is gone, but that alone doesn't mean the
+                        # outcome is unconfirmed: the wrapper LocalJobRunner.start()
+                        # launched writes the trainer's real exit status to
+                        # <output_dir>/exit_status before it exits, and that
+                        # file survives a full server restart same as it
+                        # survives the reattach case above (see
+                        # TailingJobRunner.returncode()). Read it before
+                        # falling back to 'interrupted', so a run that
+                        # finished (or crashed) while the server was down
+                        # isn't reported as merely unconfirmed when the
+                        # evidence is sitting right there on disk.
+                        rc: int | None = None
+                        status_path = Path(record.output_dir) / _EXIT_STATUS_FILENAME
+                        with contextlib.suppress(FileNotFoundError, ValueError):
+                            rc = int(status_path.read_text().strip())
+                        if rc is None:
+                            record.state = "interrupted"
+                            if record.error_message is None:
+                                record.error_message = (
+                                    "MakerMods Lab restarted while this run was training; "
+                                    "its outcome could not be confirmed. Any checkpoints on "
+                                    "disk are intact."
+                                )
+                        else:
+                            record.state = "done" if rc == 0 else "failed"
+                            record.exit_code = rc
+                            if rc != 0 and record.error_message is None:
+                                record.error_message = f"Subprocess exited with code {rc}"
                         if record.ended_at is None:
                             record.ended_at = time.time()
                         self._write_meta(record)
