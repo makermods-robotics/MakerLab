@@ -76,6 +76,9 @@ import BackendCameraStream from "@/components/BackendCameraStream";
 
 const DEFAULT_FPS = 30;
 const JOB_SCAN_LIMIT = 200;
+// Mirrors rollout.MAX_EVAL_EPISODES — the server clamps to the same bound, this
+// just stops the stepper from offering a number that would be silently reduced.
+const MAX_EVAL_EPISODES = 200;
 
 const cameraKey = (cam: AvailableCamera) => String(cam.index);
 
@@ -187,6 +190,13 @@ const DeployPanel: React.FC = () => {
   const [selectedStep, setSelectedStep] = useState<number | null>(null);
   const [task, setTask] = useState("");
   const [durationS, setDurationS] = useState(60);
+  // Multi-episode evaluation. 1 (the default) is the plain single rollout; >1
+  // switches the session dialog into eval mode — N scored episodes with a reset
+  // between each and an accuracy at the end. Clamped again server-side.
+  const [evalEpisodes, setEvalEpisodes] = useState(1);
+  // Inference engine A/B. "sync" is the server default and the historical
+  // behaviour; "rtc" is experimental (see StartInferenceRequest).
+  const [inferenceEngine, setInferenceEngine] = useState<"sync" | "rtc">("sync");
   const [submitting, setSubmitting] = useState(false);
 
   const [policyConfig, setPolicyConfig] = useState<PolicyConfigSummary | null>(
@@ -578,6 +588,8 @@ const DeployPanel: React.FC = () => {
         right_follower_config: robot.right_follower_config,
         robot_name: robot.name,
         checkpoint_state_dim: policyConfig.state_dim ?? undefined,
+        eval_episodes: evalEpisodes,
+        inference_engine: inferenceEngine,
       });
       // The run surfaces as the InferenceSessionDialog over this panel —
       // closing it lands back here (the studio stays open underneath).
@@ -831,6 +843,49 @@ const DeployPanel: React.FC = () => {
                     if (v !== undefined) setDurationS(v);
                   }}
                 />
+                <p className="text-xs text-muted-foreground">
+                  Per episode. An episode that runs this long without you
+                  calling it a success counts as a failure.
+                </p>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="deploy-episodes">Episodes</Label>
+                <NumberInput
+                  id="deploy-episodes"
+                  min={1}
+                  max={MAX_EVAL_EPISODES}
+                  value={evalEpisodes}
+                  onChange={(v) => {
+                    if (v !== undefined) setEvalEpisodes(v);
+                  }}
+                />
+                <p className="text-xs text-muted-foreground">
+                  {evalEpisodes > 1
+                    ? `Evaluation run: ${evalEpisodes} episodes with a reset between each, scored into an accuracy.`
+                    : "Leave at 1 for a single run. More than 1 starts a scored evaluation."}
+                </p>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="deploy-engine">Inference engine</Label>
+                <Select
+                  value={inferenceEngine}
+                  onValueChange={(v) => setInferenceEngine(v as "sync" | "rtc")}
+                >
+                  <SelectTrigger id="deploy-engine">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="sync">Sync (default)</SelectItem>
+                    <SelectItem value="rtc">
+                      RTC — experimental, smoother control
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  {inferenceEngine === "rtc"
+                    ? "Real-Time Chunking overlaps inference with motion, removing the pause between action chunks. It also changes how actions are generated — compare against Sync before trusting a result."
+                    : "One policy forward per control step. The arm pauses briefly between action chunks."}
+                </p>
               </div>
             </>
           ) : null}
@@ -918,7 +973,11 @@ const DeployPanel: React.FC = () => {
           className="flex-1 gap-2"
         >
           <Play className="h-4 w-4" />
-          {submitting ? "Starting…" : "Start inference"}
+          {submitting
+            ? "Starting…"
+            : evalEpisodes > 1
+              ? `Start evaluation (${evalEpisodes})`
+              : "Start inference"}
         </Button>
         <Button
           onClick={handleStop}
