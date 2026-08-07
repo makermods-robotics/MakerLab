@@ -904,6 +904,71 @@ def test_upload_local_model_maps_auth_error(registry) -> None:
     assert ei.value.status == 403
 
 
+def test_upload_local_model_succeeds_for_failed_run_with_checkpoint(registry) -> None:
+    from makermodslab.models import upload_local_model
+
+    pretrained = _seed_run(registry, "failed_run", state="failed", steps=50)
+
+    fake_api = MagicMock()
+    with (
+        patch("makermodslab.models.hf_hub_offline", return_value=False),
+        patch("makermodslab.models.cached_whoami", return_value={"name": "user", "orgs": []}),
+        patch("makermodslab.models.shared_hf_api", return_value=fake_api),
+        patch("makermodslab.models.metadata_update"),
+    ):
+        result = upload_local_model("failed_run")
+
+    _, ukw = fake_api.upload_folder.call_args
+    assert ukw["folder_path"] == str(pretrained)
+    assert result["repo_id"]
+
+
+def test_upload_local_model_succeeds_for_interrupted_run_with_checkpoint(registry) -> None:
+    from makermodslab.models import upload_local_model
+
+    pretrained = _seed_run(registry, "interrupted_run", state="interrupted", steps=50)
+
+    fake_api = MagicMock()
+    with (
+        patch("makermodslab.models.hf_hub_offline", return_value=False),
+        patch("makermodslab.models.cached_whoami", return_value={"name": "user", "orgs": []}),
+        patch("makermodslab.models.shared_hf_api", return_value=fake_api),
+        patch("makermodslab.models.metadata_update"),
+    ):
+        result = upload_local_model("interrupted_run")
+
+    _, ukw = fake_api.upload_folder.call_args
+    assert ukw["folder_path"] == str(pretrained)
+    assert result["repo_id"]
+
+
+def test_upload_local_model_404_when_still_running(registry) -> None:
+    from makermodslab.models import ModelError, upload_local_model
+
+    _seed_run(registry, "running_run", state="running")
+    with patch("makermodslab.models.hf_hub_offline", return_value=False), pytest.raises(ModelError) as ei:
+        upload_local_model("running_run")
+    assert ei.value.status == 404
+
+
+def test_upload_local_model_404_for_failed_run_without_checkpoint(registry) -> None:
+    from makermodslab.models import ModelError, upload_local_model
+
+    _seed_run(registry, "dead_run", state="failed", with_checkpoint=False)
+    with patch("makermodslab.models.hf_hub_offline", return_value=False), pytest.raises(ModelError) as ei:
+        upload_local_model("dead_run")
+    assert ei.value.status == 404
+
+
+def test_get_model_info_still_none_for_failed_run(registry) -> None:
+    """get_model_info stays done-only — the relaxed gate is upload-only."""
+    from makermodslab.models import get_model_info
+
+    _seed_run(registry, "failed_info_run", state="failed", steps=50)
+    with patch("makermodslab.models.hf_hub_offline", return_value=True):
+        assert get_model_info("failed_info_run") is None
+
+
 # ---------------------------------------------------------------------------
 # delete_local_model — sandboxed under outputs/train/.
 # ---------------------------------------------------------------------------

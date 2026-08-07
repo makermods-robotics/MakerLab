@@ -9,11 +9,11 @@ import {
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
 import { useApi } from "@/contexts/ApiContext";
-import { useHfAuth } from "@/contexts/HfAuthContext";
 import { ApiError } from "@/lib/apiClient";
 import { policyTypeDisplayName } from "@/components/training/types";
 import { ModelInfo, getModelInfo, uploadModel } from "@/lib/modelsApi";
 import { useModelDownload } from "@/hooks/useModelDownload";
+import { useCanUpload } from "@/hooks/useCanUpload";
 
 /** 16000 -> "16k", 950 -> "950". Steps get a compact form like the dataset
  * card's frame counts. */
@@ -42,15 +42,6 @@ const Row: React.FC<{ label: string; children: React.ReactNode }> = ({
     <span className="min-w-0 flex-1 break-all text-foreground">{children}</span>
   </div>
 );
-
-/** True when the logged-in user can push to their own namespace — the gate for
- * offering Upload on a local model. Mirrors DatasetInfoCard's useCanEditHub for
- * a bare (own-namespace) target: false while loading / unauthenticated. */
-const useCanUpload = (): boolean => {
-  const { auth } = useHfAuth();
-  if (auth.status !== "authenticated") return false;
-  return auth.username != null && auth.writableNamespaces.length > 0;
-};
 
 /**
  * "Download to this machine" affordance for a model with no local checkpoint
