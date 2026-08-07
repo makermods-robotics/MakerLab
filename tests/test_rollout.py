@@ -100,7 +100,8 @@ def test_inference_request_has_expected_defaults() -> None:
         policy_ref="user/repo@checkpoints/000050",
     )
     assert req.task == ""
-    assert req.cameras == {}
+    assert req.camera_bindings == {}
+    assert req.camera_dims == {}
     assert req.duration_s == 60
 
 
@@ -768,8 +769,42 @@ def test_rollout_cli_args_forwards_the_engine_to_both_front_ends() -> None:
 
 
 # ---------------------------------------------------------------------------
-# --robot.* arg construction — single vs bimanual (pure, no I/O)
+# --robot.* arg construction — single vs bimanual
+#
+# Cameras are no longer carried on the request: it names a robot record and
+# binds each policy-expected camera name to one of that record's cameras, so
+# the camera-bearing cases need a record on disk (via `_robot_record_with_cam`).
 # ---------------------------------------------------------------------------
+
+
+def _robot_record_with_cam(tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+    """Write a one-camera robot record into a redirected ROBOTS_PATH.
+
+    ROBOTS_PATH is a module-level constant not covered by `tmp_lerobot_home`
+    (same pattern as tests/test_utils_config.py's autouse fixture)."""
+    from makermodslab.utils import config as cfg
+
+    robots_dir = tmp_lerobot_home / "robots"
+    robots_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(cfg, "ROBOTS_PATH", str(robots_dir))
+    cfg.save_robot_record(
+        name,
+        {
+            "cameras": [
+                {
+                    "id": "camera_1",
+                    "name": "wrist",
+                    "type": "opencv",
+                    "camera_index": 0,
+                    "device_id": "browser-device-id",
+                    "width": 640,
+                    "height": 480,
+                    "fps": 30,
+                }
+            ]
+        },
+        allow_create=True,
+    )
 
 
 def _bimanual_request():
@@ -797,18 +832,56 @@ def test_single_robot_args_uses_so101_follower_type() -> None:
     assert not any(a.startswith("--robot.cameras=") for a in args)
 
 
-def test_single_robot_args_appends_cameras_when_present() -> None:
+def test_single_robot_args_appends_bound_record_cameras(
+    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The binding names a RECORD camera ("wrist"); the CLI arg is keyed by the
+    POLICY-expected name ("front") and carries the record's own settings."""
     from makermodslab.rollout import InferenceRequest, _single_robot_args
 
+    _robot_record_with_cam(tmp_lerobot_home, monkeypatch, "solo")
     req = InferenceRequest(
         follower_port="/dev/ttyUSB0",
         follower_config="robot_a",
         policy_ref="user/repo@checkpoints/000050",
-        cameras={"front": {"type": "opencv", "camera_index": 0, "width": 640, "height": 480}},
+        robot_name="solo",
+        camera_bindings={"front": "wrist"},
     )
     args = _single_robot_args(req, "robot_a")
     cam_arg = next(a for a in args if a.startswith("--robot.cameras="))
     assert "front:" in cam_arg
+    assert "wrist" not in cam_arg
+    assert "index_or_path: 0" in cam_arg
+    assert "width: 640" in cam_arg
+    # Record-keeping keys never reach lerobot's config parser, and neither does
+    # the record's own device identity (lerobot has no `unique_id` field).
+    assert "device_id" not in cam_arg
+    assert "id:" not in cam_arg
+    assert "unique_id" not in cam_arg
+
+
+def test_single_robot_args_captures_at_the_checkpoints_resolution(
+    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rollout pipeline doesn't resize frames to the policy's input shape,
+    so `camera_dims` (from the checkpoint) must win over the record's own
+    configured size — while identity still comes from the record."""
+    from makermodslab.rollout import InferenceRequest, _single_robot_args
+
+    _robot_record_with_cam(tmp_lerobot_home, monkeypatch, "solo")
+    req = InferenceRequest(
+        follower_port="/dev/ttyUSB0",
+        follower_config="robot_a",
+        policy_ref="user/repo@checkpoints/000050",
+        robot_name="solo",
+        camera_bindings={"front": "wrist"},
+        camera_dims={"front": {"width": 320, "height": 240}},
+    )
+    cam_arg = next(a for a in _single_robot_args(req, "robot_a") if a.startswith("--robot.cameras="))
+
+    assert "width: 320" in cam_arg
+    assert "height: 240" in cam_arg
+    assert "width: 640" not in cam_arg
     assert "index_or_path: 0" in cam_arg
 
 
@@ -823,9 +896,12 @@ def test_bimanual_robot_args_uses_bi_so_follower_with_both_ports() -> None:
     assert "--robot.right_arm_config.port=/dev/right" in args
 
 
-def test_bimanual_robot_args_puts_cameras_on_left_arm_only() -> None:
+def test_bimanual_robot_args_puts_cameras_on_left_arm_only(
+    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from makermodslab.rollout import InferenceRequest, _bimanual_robot_args
 
+    _robot_record_with_cam(tmp_lerobot_home, monkeypatch, "dual_arm")
     req = InferenceRequest(
         follower_port="/dev/left",
         follower_config="left_cal",
@@ -833,7 +909,8 @@ def test_bimanual_robot_args_puts_cameras_on_left_arm_only() -> None:
         mode="bimanual",
         right_follower_port="/dev/right",
         right_follower_config="right_cal",
-        cameras={"front": {"type": "opencv", "camera_index": 0, "width": 640, "height": 480}},
+        robot_name="dual_arm",
+        camera_bindings={"front": "wrist"},
     )
     args = _bimanual_robot_args(req, "dual_arm", "/staging/follower")
     assert any(a.startswith("--robot.left_arm_config.cameras=") for a in args)
@@ -908,6 +985,73 @@ def test_handle_start_inference_arm_count_guard_releases_slot() -> None:
     )
     rollout.handle_start_inference(req)
     assert rollout.inference_active is False
+
+
+# ---------------------------------------------------------------------------
+# handle_start_inference — camera bindings resolve against the ROBOT RECORD
+# (cheap: one JSON read, no hardware, no subprocess). The pure resolution
+# helpers are covered in tests/test_utils_config.py.
+# ---------------------------------------------------------------------------
+
+
+def test_handle_start_inference_rejects_a_binding_with_no_robot() -> None:
+    """Bindings name a record camera, so they're meaningless without a record."""
+    from makermodslab import rollout
+
+    req = rollout.InferenceRequest(
+        follower_port="/dev/ttyUSB0",
+        follower_config="robot_a",
+        policy_ref="user/repo@checkpoints/000050",
+        camera_bindings={"front": "wrist"},
+    )
+    result = rollout.handle_start_inference(req)
+
+    assert result["success"] is False
+    assert result["status_code"] == 400
+    assert "No robot selected" in result["message"]
+    # A rejected start must not wedge the slot.
+    assert rollout.inference_active is False
+
+
+def test_handle_start_inference_rejects_a_binding_to_an_unknown_camera(
+    tmp_lerobot_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The 400 names what the robot actually has, so the panel can say which
+    camera to pick — this is the whole point of resolving server-side."""
+    from makermodslab import rollout
+
+    _robot_record_with_cam(tmp_lerobot_home, monkeypatch, "solo")
+    req = rollout.InferenceRequest(
+        follower_port="/dev/ttyUSB0",
+        follower_config="robot_a",
+        policy_ref="user/repo@checkpoints/000050",
+        robot_name="solo",
+        camera_bindings={"front": "gone"},
+    )
+    result = rollout.handle_start_inference(req)
+
+    assert result["success"] is False
+    assert result["status_code"] == 400
+    assert "'gone'" in result["message"]
+    assert "wrist" in result["message"]
+    assert rollout.inference_active is False
+
+
+def test_handle_start_inference_ignores_a_stale_cameras_payload() -> None:
+    """An older frontend still posts full `cameras` configs. The field is gone
+    from the model, so pydantic drops them rather than letting a request-side
+    camera set drive the run."""
+    from makermodslab import rollout
+
+    req = rollout.InferenceRequest(
+        follower_port="/dev/ttyUSB0",
+        follower_config="robot_a",
+        policy_ref="user/repo@checkpoints/000050",
+        cameras={"front": {"type": "opencv", "camera_index": 0, "width": 640, "height": 480}},
+    )
+
+    assert not hasattr(req, "cameras")
+    assert req.camera_bindings == {}
 
 
 def test_handle_start_inference_bimanual_builds_bi_so_follower_command(monkeypatch, tmp_path) -> None:

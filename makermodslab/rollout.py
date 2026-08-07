@@ -80,7 +80,9 @@ from .models import (
 from .motor_power import clear_goal_velocity, reset_torque_limit
 from .record import _DEFAULT_FOURCC
 from .utils.config import (
+    CameraResolutionError,
     bimanual_base_id,
+    bind_robot_cameras,
     list_robot_records,
     setup_follower_calibration_file,
     stage_bimanual_follower_calibrations,
@@ -97,12 +99,43 @@ logger = logging.getLogger(__name__)
 _SINGLE_ARM_STATE_DIM = 6
 
 
+class PolicyCameraDims(BaseModel):
+    """The frame size one of the checkpoint's cameras was trained on.
+
+    Forwarded from /policy-config's `image_features` by the launch UI, in the
+    same spirit as `checkpoint_state_dim` below: the client already has the
+    checkpoint's metadata, and echoing it lets the server apply it
+    authoritatively instead of guessing. See bind_robot_cameras for why capture
+    resolution must come from the checkpoint rather than the robot record.
+    """
+
+    width: int
+    height: int
+
+
 class InferenceRequest(BaseModel):
     follower_port: str
     follower_config: str
     policy_ref: str  # opaque ref returned by /jobs/{id}/checkpoints
     task: str = ""
-    cameras: dict[str, dict[str, Any]] = {}
+    # Which of the ROBOT RECORD's cameras plays each camera role the checkpoint
+    # was trained with: {policy-expected camera name: robot-record camera name}.
+    # Only the name pairing travels in the request — which device, and how it's
+    # opened (index, unique_id, fps, fourcc, backend), is read server-side from
+    # the record, so a run can never open a camera set the saved robot doesn't
+    # have. (Capture resolution is the one exception: see `camera_dims` below.)
+    # Empty ⇒ a camera-less policy. Replaces the former `cameras`
+    # dict of full per-camera configs; pydantic ignores unknown fields, so an
+    # older frontend's payload parses and its camera configs are ignored.
+    camera_bindings: dict[str, str] = {}
+    # Capture resolution per policy-expected camera name, from the checkpoint's
+    # image_features. The one camera setting NOT taken from the robot record:
+    # lerobot's standard rollout does not resize frames to the policy's input
+    # shape, so capturing at the record's configured size would silently feed
+    # the policy frames it was never trained on. Keyed to match camera_bindings;
+    # a camera with no entry here (older client, or a checkpoint that doesn't
+    # expose image dims) falls back to the record's own width/height.
+    camera_dims: dict[str, PolicyCameraDims] = {}
     duration_s: int = 60
     # Bimanual: the follower_port/follower_config above is the LEFT arm; these
     # add the RIGHT arm. Inference has no leader arms — only the two followers
@@ -110,9 +143,12 @@ class InferenceRequest(BaseModel):
     mode: str = "single"
     right_follower_port: str = ""
     right_follower_config: str = ""
-    # Robot record name — used only as the BiSO staging base id (bimanual). It
-    # decides the on-disk staging dir, not which calibration drives which arm.
-    # Blank/invalid falls back to DEFAULT_BIMANUAL_BASE.
+    # Robot record name. Two jobs:
+    #   1. It names the record `camera_bindings` resolve against (required
+    #      whenever any binding is set — a missing record is a 400).
+    #   2. Bimanual only: the BiSO staging base id — it decides the on-disk
+    #      staging dir, not which calibration drives which arm. Blank/invalid
+    #      falls back to DEFAULT_BIMANUAL_BASE.
     robot_name: str = ""
     # Flat state width of the selected checkpoint (6 = single SO-101 arm, 12 =
     # bimanual), forwarded from /policy-config so the server can reject an
@@ -953,19 +989,25 @@ def _preflight_motor_registers(port: str, follower_id: str) -> list[str]:
 
 def _format_cameras_arg(cameras: dict[str, dict[str, Any]]) -> str:
     """Convert {name: {type, camera_index, width, height, fps}} into
-    lerobot's CLI dict syntax. The frontend key `camera_index` is
-    remapped to lerobot's `index_or_path`.
+    lerobot's CLI dict syntax. `cameras` is the record-resolved session dict
+    (see _session_cameras), keyed by the POLICY-expected camera names. The
+    stored key `camera_index` is remapped to lerobot's `index_or_path`; the
+    identity key `unique_id` is dropped — it is the robot record's own handle
+    on the physical device (see makermodslab/camera_identity.py), and lerobot's
+    OpenCVCameraConfig would reject it as an unknown field.
 
     Like recording (`record._build_camera_configs`), opencv cameras default to
-    MJPG when the request doesn't pin a fourcc: without it, Linux/V4L2
+    MJPG when the record doesn't pin a fourcc: without it, Linux/V4L2
     negotiates raw YUYV and a 3-camera rig exhausts the USB bus at STREAMON —
     the third camera fails during inference only, since recording already
-    defaults to MJPG. An explicit fourcc from the UI still wins.
+    defaults to MJPG. An explicit fourcc from the record still wins.
     """
     parts = []
     for name, cfg in cameras.items():
         remapped = {
-            ("index_or_path" if k == "camera_index" else k): v for k, v in cfg.items() if v is not None
+            ("index_or_path" if k == "camera_index" else k): v
+            for k, v in cfg.items()
+            if v is not None and k != "unique_id"
         }
         if cfg.get("type") == "opencv" and not cfg.get("fourcc"):
             remapped["fourcc"] = _DEFAULT_FOURCC
@@ -1103,6 +1145,22 @@ def _build_eval_runner_cmd(request: InferenceRequest, policy_path: str, robot_ar
     ]
 
 
+def _session_cameras(request: InferenceRequest) -> dict[str, dict[str, Any]]:
+    """This run's cameras, keyed by the policy-expected name.
+
+    Camera identity and transport settings are resolved from the robot record
+    every time they're needed rather than carried on the request: the record is
+    the only place they live, and the lookup is one small JSON read. Capture
+    resolution is overlaid from the checkpoint (see PolicyCameraDims /
+    bind_robot_cameras). Raises CameraResolutionError, which
+    handle_start_inference turns into a 400 before the session starts."""
+    return bind_robot_cameras(
+        request.robot_name,
+        request.camera_bindings,
+        dims={name: dims.model_dump() for name, dims in request.camera_dims.items()},
+    )
+
+
 def _single_robot_args(request: InferenceRequest, follower_id: str) -> list[str]:
     """`--robot.*` args for a single SO-101 follower."""
     args = [
@@ -1110,8 +1168,9 @@ def _single_robot_args(request: InferenceRequest, follower_id: str) -> list[str]
         f"--robot.port={request.follower_port}",
         f"--robot.id={follower_id}",
     ]
-    if request.cameras:
-        args.append(f"--robot.cameras={_format_cameras_arg(request.cameras)}")
+    cameras = _session_cameras(request)
+    if cameras:
+        args.append(f"--robot.cameras={_format_cameras_arg(cameras)}")
     return args
 
 
@@ -1133,8 +1192,9 @@ def _bimanual_robot_args(request: InferenceRequest, base: str, follower_staging:
         f"--robot.left_arm_config.port={request.follower_port}",
         f"--robot.right_arm_config.port={request.right_follower_port}",
     ]
-    if request.cameras:
-        args.append(f"--robot.left_arm_config.cameras={_format_cameras_arg(request.cameras)}")
+    cameras = _session_cameras(request)
+    if cameras:
+        args.append(f"--robot.left_arm_config.cameras={_format_cameras_arg(cameras)}")
     return args
 
 
@@ -1673,6 +1733,17 @@ def handle_start_inference(request: InferenceRequest) -> dict[str, Any]:
             "status_code": 400,
             "message": f"Unrecognised policy ref: {request.policy_ref!r}",
         }
+
+    # Resolve the camera bindings against the robot record now (one small JSON
+    # read, no hardware). A binding that names a camera the record doesn't have
+    # must 4xx in the panel; deferring it to the startup worker would surface
+    # the same mistake as a mid-startup failure after the model download.
+    try:
+        _session_cameras(request)
+    except CameraResolutionError as exc:
+        _release_slot()
+        logger.warning("Rejected inference start: %s", exc)
+        return {"success": False, "status_code": 400, "message": str(exc)}
 
     # Backend camera previews hold the cv2 devices the rollout subprocess is about
     # to open. Released here — after the cheap guards above, so a rejected request

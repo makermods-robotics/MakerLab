@@ -53,11 +53,10 @@ import {
   RobotStatus,
 } from "@/components/studio/panel/primitives";
 import { cn } from "@/lib/utils";
-import {
-  AvailableCamera,
-  useAvailableCameras,
-} from "@/hooks/useAvailableCameras";
+import { useAvailableCameras } from "@/hooks/useAvailableCameras";
 import BackendCameraStream from "@/components/BackendCameraStream";
+import type { CameraConfig } from "@/components/recording/CameraConfiguration";
+import { isCameraConnected, resolveCameraIndex } from "@/lib/cameraResolve";
 
 /**
  * Studio panel 3 · Deploy — run a skill (local trained checkpoint or an
@@ -74,13 +73,10 @@ import BackendCameraStream from "@/components/BackendCameraStream";
  * the husk-repo messaging is identical, not re-implemented.
  */
 
-const DEFAULT_FPS = 30;
 const JOB_SCAN_LIMIT = 200;
 // Mirrors rollout.MAX_EVAL_EPISODES — the server clamps to the same bound, this
 // just stops the stepper from offering a number that would be silently reduced.
 const MAX_EVAL_EPISODES = 200;
-
-const cameraKey = (cam: AvailableCamera) => String(cam.index);
 
 /** Small preview for verifying which physical camera a role binds to.
  *
@@ -207,8 +203,14 @@ const DeployPanel: React.FC = () => {
     null,
   );
 
-  // Per camera DISPLAY name → user-selected physical camera key (raw cv2 index
-  // string). Keyed by the stripped display name (== requestKey).
+  // Per camera DISPLAY name → the NAME of one of the selected robot's cameras.
+  // Keyed by the stripped display name (== requestKey), and sent verbatim as
+  // the request's `camera_bindings`. The binding is a name pairing only: the
+  // server reads which device and how to open it (index, unique_id, fps,
+  // fourcc, backend) out of the robot record, so a run can never open a camera
+  // set the saved robot doesn't have. Capture resolution is the exception —
+  // it's forwarded from the checkpoint as `camera_dims`, because the rollout
+  // doesn't resize frames. Cameras are edited in Robot settings.
   const [cameraBindings, setCameraBindings] = useState<
     Record<string, string | null>
   >({});
@@ -231,12 +233,30 @@ const DeployPanel: React.FC = () => {
     [policyConfig, isBimanual],
   );
 
-  const liveCameraByKey = useCallback(
-    (key: string | null | undefined) =>
-      key == null
-        ? undefined
-        : availableCameras.find((cam) => cameraKey(cam) === key),
-    [availableCameras],
+  const robotCameras: CameraConfig[] = useMemo(
+    () => robot?.cameras ?? [],
+    [robot],
+  );
+
+  /** The robot's camera a binding names, or undefined once the record no
+   * longer has it (camera removed in Robot settings, or another robot
+   * selected). */
+  const recordCameraByName = useCallback(
+    (name: string | null | undefined) =>
+      name == null ? undefined : robotCameras.find((cam) => cam.name === name),
+    [robotCameras],
+  );
+
+  /** Bound AND physically present. A stored camera_index goes stale on replug,
+   * so presence is judged by unique_id against the live enumeration — the same
+   * check the preview tiles use, and the same strictness Start had when
+   * bindings pointed straight at an enumerated device. */
+  const cameraIsReady = useCallback(
+    (name: string | null | undefined) => {
+      const cam = recordCameraByName(name);
+      return cam != null && isCameraConnected(cam, availableCameras);
+    },
+    [recordCameraByName, availableCameras],
   );
 
   // Load the skill listing (local runs + Hub models) when the studio opens.
@@ -421,58 +441,48 @@ const DeployPanel: React.FC = () => {
     };
   }, [open, baseUrl, fetchWithHeaders, jobId, selectedStep, isBimanual]);
 
-  // Auto-bind robot cameras whose names match a policy-expected camera. Match
-  // against the DISPLAY name (bare name), preferring stored device_id then
-  // camera_index. (Ported verbatim.)
+  // Auto-bind robot cameras whose names match a policy-expected camera, by
+  // name against the DISPLAY name (the bare name the user chose at record
+  // time — that's what the robot record stores). No device enumeration is
+  // involved any more: the binding names a RECORD camera, and the record is
+  // what the server resolves against.
   useEffect(() => {
-    if (!policyConfig) return;
-    const robotCams = robot?.cameras ?? [];
-    if (robotCams.length === 0 || availableCameras.length === 0) return;
+    if (!policyConfig || robotCameras.length === 0) return;
     setCameraBindings((prev) => {
       let changed = false;
       const next = { ...prev };
       for (const m of cameraMap) {
         if (next[m.requestKey] != null) continue;
-        const robotCam = robotCams.find(
+        const robotCam = robotCameras.find(
           (c) => c.name.toLowerCase() === m.display.toLowerCase(),
         );
-        if (!robotCam) continue;
-        // Resolve by unique_id first: it names the physical device exactly.
-        // device_id is a coin flip when two cameras share a name (the browser
-        // match is by localizedName), and camera_index goes stale on replug —
-        // both are fallbacks for records saved before unique_id was stored.
-        const live =
-          (robotCam.unique_id
-            ? availableCameras.find((c) => c.uniqueId === robotCam.unique_id)
-            : undefined) ??
-          (robotCam.device_id
-            ? availableCameras.find((c) => c.deviceId === robotCam.device_id)
-            : undefined) ??
-          availableCameras.find((c) => c.index === robotCam.camera_index);
-        if (live) {
-          next[m.requestKey] = cameraKey(live);
+        if (robotCam) {
+          next[m.requestKey] = robotCam.name;
           changed = true;
         }
       }
       return changed ? next : prev;
     });
-  }, [policyConfig, robot, availableCameras, cameraMap]);
+  }, [policyConfig, robotCameras, cameraMap]);
 
-  // Drop a binding whose physical camera has vanished. (Ported verbatim.)
+  // Drop a binding the robot record no longer backs — the camera was removed
+  // in Robot settings, or another robot was selected. (A binding to a camera
+  // that is merely UNPLUGGED is kept: the tile says "disconnected" and Start
+  // stays disabled, so reconnecting it doesn't cost the user the binding.)
   useEffect(() => {
-    if (!policyConfig || availableCameras.length === 0) return;
+    if (!policyConfig) return;
     setCameraBindings((prev) => {
       let changed = false;
       const next = { ...prev };
-      for (const [name, key] of Object.entries(prev)) {
-        if (key != null && !liveCameraByKey(key)) {
+      for (const [name, boundTo] of Object.entries(prev)) {
+        if (boundTo != null && !recordCameraByName(boundTo)) {
           next[name] = null;
           changed = true;
         }
       }
       return changed ? next : prev;
     });
-  }, [policyConfig, availableCameras, liveCameraByKey]);
+  }, [policyConfig, recordCameraByName]);
 
   // Poll inference status while visible so ⏹ Stop reflects a live rollout.
   useEffect(() => {
@@ -515,8 +525,8 @@ const DeployPanel: React.FC = () => {
     checkpointArms != null &&
     checkpointIsBimanual !== isBimanual;
 
-  const allCamerasBound = cameraMap.every(
-    (m) => liveCameraByKey(cameraBindings[m.requestKey]) != null,
+  const allCamerasBound = cameraMap.every((m) =>
+    cameraIsReady(cameraBindings[m.requestKey]),
   );
 
   const inferenceActive = status?.inference_active === true;
@@ -546,34 +556,30 @@ const DeployPanel: React.FC = () => {
     // open the same camera index via OpenCV without colliding on the device.
     setSubmitting(true);
     await new Promise((r) => setTimeout(r, 300));
-    // Emit camera dict keys under the DISPLAY/request name (bare in bimanual
-    // mode). The rollout hands these to the BiSO left_arm_config, which
-    // re-prefixes with `left_` — reconstructing the checkpoint's `left_<name>`
-    // feature. Resolution comes from the checkpoint feature's dims.
-    const cameraDict: Record<
-      string,
-      {
-        type: string;
-        camera_index?: number;
-        width: number;
-        height: number;
-        fps?: number;
-        fourcc?: string;
-      }
-    > = {};
+    // Emit binding keys under the DISPLAY/request name (bare in bimanual
+    // mode). The rollout hands the resolved cameras to the BiSO
+    // left_arm_config, which re-prefixes with `left_` — reconstructing the
+    // checkpoint's `left_<name>` feature. The VALUES are robot-record camera
+    // names; every setting behind them is read server-side from the record.
+    const cameraBindingPayload: Record<string, string> = {};
+    // ...except capture RESOLUTION, which comes from the checkpoint: lerobot's
+    // rollout doesn't resize frames to the policy's input shape, so the camera
+    // must capture at the size the policy was trained on. Forwarded the same
+    // way `checkpoint_state_dim` is — the client already read these dims off
+    // /policy-config, the server applies them.
+    const cameraDimsPayload: Record<string, { width: number; height: number }> =
+      {};
     for (const m of cameraMap) {
-      const key = cameraBindings[m.requestKey];
-      if (key == null) continue;
-      const live = liveCameraByKey(key);
-      if (!live) continue;
+      const boundTo = cameraBindings[m.requestKey];
+      if (boundTo == null || !recordCameraByName(boundTo)) continue;
+      cameraBindingPayload[m.requestKey] = boundTo;
       const dims = policyConfig.image_features[m.feature];
-      cameraDict[m.requestKey] = {
-        type: "opencv",
-        camera_index: live.index,
-        width: dims.width,
-        height: dims.height,
-        fps: DEFAULT_FPS,
-      };
+      if (dims?.width && dims?.height) {
+        cameraDimsPayload[m.requestKey] = {
+          width: dims.width,
+          height: dims.height,
+        };
+      }
     }
     try {
       await startInference(baseUrl, fetchWithHeaders, {
@@ -581,7 +587,8 @@ const DeployPanel: React.FC = () => {
         follower_config: robot.follower_config,
         policy_ref: selectedRef,
         task,
-        cameras: cameraDict,
+        camera_bindings: cameraBindingPayload,
+        camera_dims: cameraDimsPayload,
         duration_s: durationS,
         mode: robot.mode,
         right_follower_port: robot.right_follower_port,
@@ -746,26 +753,21 @@ const DeployPanel: React.FC = () => {
             Run this skill on your robot, then start inference.
           </p>
 
-          {/* Robot readiness — a status line, not a parameter, so no eyebrow. */}
+          {/* Robot readiness — a warning, not a parameter, so no eyebrow. A
+              ready robot renders nothing: the robot menu already names the
+              selection and its arm layout. */}
           <RobotStatus ready={!!robot && robot.follower_ready}>
             {!robot ? (
               <>
                 Select a robot to run on — use the robot menu in the top-right
                 corner of this window.
               </>
-            ) : !robot.follower_ready ? (
+            ) : (
               <>
                 <strong>{robot.name}</strong> {robotSetupGap(robot, "follower")}.
                 Open Robot settings before running inference. (Inference only
                 uses the follower arm{isBimanual ? "s" : ""} — leader setup
                 isn't needed.)
-              </>
-            ) : (
-              <>
-                <span className="text-foreground">{robot.name}</span>
-                <span className="rounded border border-border px-1.5 py-0.5 text-[11px] text-muted-foreground">
-                  {isBimanual ? "bimanual — both followers" : "single arm"}
-                </span>
               </>
             )}
           </RobotStatus>
@@ -911,20 +913,39 @@ const DeployPanel: React.FC = () => {
               ) : (
                 <div className="space-y-3">
                   <p className="text-xs text-muted-foreground">
-                    Bind a physical camera to each name the policy was trained with.
-                    Resolution comes from the checkpoint.
+                    Bind one of this robot's cameras to each name the policy was
+                    trained with. Which camera and how it's opened come from the
+                    robot (edit in Robot settings); the capture resolution comes
+                    from the checkpoint.
                   </p>
                   {cameraMap.map((m) => {
                     const dims = policyConfig.image_features[m.feature];
                     const value = cameraBindings[m.requestKey];
-                    const selectedCamera = liveCameraByKey(value);
+                    const boundCamera = recordCameraByName(value);
+                    const connected =
+                      boundCamera != null &&
+                      isCameraConnected(boundCamera, availableCameras);
                     return (
                       <div key={m.requestKey} className="flex items-center gap-3">
                         <div className="flex-1">
                           <Label className="text-sm font-medium">{m.display}</Label>
                           <p className="text-xs text-muted-foreground">
-                            {dims.width}×{dims.height}
+                            Captures at {dims.width}×{dims.height} — the
+                            policy's resolution
                           </p>
+                          {boundCamera &&
+                          (boundCamera.width !== dims.width ||
+                            boundCamera.height !== dims.height) ? (
+                            <p className="text-xs text-muted-foreground">
+                              ({boundCamera.name} is set to {boundCamera.width}×
+                              {boundCamera.height} in Robot settings)
+                            </p>
+                          ) : null}
+                          {boundCamera && !connected ? (
+                            <p className="text-xs text-destructive">
+                              Disconnected — reconnect it before starting
+                            </p>
+                          ) : null}
                         </div>
                         <Select
                           value={value ?? undefined}
@@ -934,25 +955,27 @@ const DeployPanel: React.FC = () => {
                             <SelectValue placeholder="Select a camera" />
                           </SelectTrigger>
                           <SelectContent>
-                            {availableCameras.length === 0 ? (
+                            {robotCameras.length === 0 ? (
                               <div className="px-2 py-1.5 text-xs text-muted-foreground">
-                                No cameras detected
+                                This robot has no cameras — add them in Robot
+                                settings
                               </div>
                             ) : (
-                              availableCameras.map((cam) => (
-                                <SelectItem
-                                  key={cameraKey(cam)}
-                                  value={cameraKey(cam)}
-                                >
-                                  #{cam.index} — {cam.name}
+                              robotCameras.map((cam) => (
+                                <SelectItem key={cam.name} value={cam.name}>
+                                  {cam.name} — {cam.width}×{cam.height}
                                 </SelectItem>
                               ))
                             )}
                           </SelectContent>
                         </Select>
                         <CameraThumbnail
-                          cameraIndex={selectedCamera?.index}
-                          uniqueId={selectedCamera?.uniqueId}
+                          cameraIndex={
+                            boundCamera && connected
+                              ? resolveCameraIndex(boundCamera, availableCameras)
+                              : undefined
+                          }
+                          uniqueId={boundCamera?.unique_id}
                           paused={submitting || inferenceActive}
                         />
                       </div>
