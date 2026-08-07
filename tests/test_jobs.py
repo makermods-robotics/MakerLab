@@ -552,6 +552,25 @@ def test_tailing_runner_returncode_unconfirmed_when_status_file_malformed(tmp_pa
     assert runner.returncode() is None
 
 
+def test_tailing_runner_stop_signalled_tracks_stop_calls(tmp_path) -> None:
+    """stop_signalled() is JobRegistry._tick()'s way of telling a
+    user-requested stop apart from an unconfirmed crash/restart when
+    returncode() comes back None (see test_tick_uses_stop_message_when_stop_was_signalled).
+    It must be False before stop() and True after, regardless of whether the
+    signalled pid was still alive to receive it."""
+    from makermodslab.jobs import TailingJobRunner, TrainingMetrics
+
+    log_path = tmp_path / "log.jsonl"
+    status_path = tmp_path / "exit_status"
+
+    runner = TailingJobRunner(TrainingMetrics(), log_path, pid=999999999, status_path=status_path)
+    assert runner.stop_signalled() is False
+
+    runner.stop()
+
+    assert runner.stop_signalled() is True
+
+
 def test_tailing_runner_returncode_unconfirmed_while_pid_alive(tmp_path) -> None:
     """Even with a written exit_status on disk (e.g. left over from state we
     shouldn't trust yet), a live pid always means 'still running' — returncode()
@@ -585,11 +604,21 @@ class _FakeRunner:
         return None
 
 
-def _inject_running_job(reg, tmp_path: Path, rc: int | None):
+class _FakeStopSignalledRunner(_FakeRunner):
+    """Like _FakeRunner, but also reports stop_signalled() == True — the
+    shape of a TailingJobRunner whose stop() group-TERMed the wrapper before
+    it could write an exit status."""
+
+    def stop_signalled(self) -> bool:
+        return True
+
+
+def _inject_running_job(reg, tmp_path: Path, rc: int | None, runner=None):
     """Stop the registry's own watchdog thread (so our manual _tick() call
     below is deterministic, not racing a background tick), then splice a
-    'running' record backed by a _FakeRunner(rc) straight into the registry's
-    internal maps — the same shape _load_from_disk / start() would produce."""
+    'running' record backed by `runner` (default: _FakeRunner(rc)) straight
+    into the registry's internal maps — the same shape _load_from_disk /
+    start() would produce."""
     reg.shutdown()
     if reg._watchdog_thread is not None:
         reg._watchdog_thread.join(timeout=2)
@@ -598,7 +627,7 @@ def _inject_running_job(reg, tmp_path: Path, rc: int | None):
     record.state = "running"
     with reg._lock:
         reg._records[record.id] = record
-        reg._runners[record.id] = _FakeRunner(rc)
+        reg._runners[record.id] = runner if runner is not None else _FakeRunner(rc)
     return record
 
 
@@ -624,6 +653,30 @@ def test_tick_marks_interrupted_when_runner_cannot_confirm_exit(tmp_path) -> Non
     assert finalized.state == "interrupted"
     assert finalized.exit_code is None
     assert finalized.error_message is not None
+    assert "restarted" in finalized.error_message
+
+
+def test_tick_uses_stop_message_when_stop_was_signalled(tmp_path) -> None:
+    """A user-requested stop of a reattached run also lands in the
+    'returncode() is None' branch above — stop() group-TERMs the wrapper
+    before it can write an exit status, so the pid disappears with no
+    evidence just like an unconfirmed crash/restart. Without consulting the
+    runner, that stop would be blamed on a restart that never happened. When
+    the runner reports stop_signalled() == True, _tick() must say the run was
+    stopped at the user's request instead."""
+    from makermodslab.jobs import JobRegistry
+
+    reg = JobRegistry(tmp_path / "root")
+    record = _inject_running_job(reg, tmp_path, rc=None, runner=_FakeStopSignalledRunner(None))
+
+    reg._tick()
+
+    finalized = reg._records[record.id]
+    assert finalized.state == "interrupted"
+    assert finalized.exit_code is None
+    assert finalized.error_message is not None
+    assert "stopped at your request" in finalized.error_message
+    assert "restarted" not in finalized.error_message
 
 
 def test_tick_marks_done_when_runner_confirms_zero_exit(tmp_path) -> None:

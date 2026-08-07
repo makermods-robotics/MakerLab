@@ -435,7 +435,7 @@ class LocalJobRunner:
             *cmd,
         ]
 
-        # start_new_session=True puts the wrapper (and the trainer it execs)
+        # start_new_session=True puts the wrapper (and the trainer it forks)
         # in their own session/process group. Without it, signals sent to the
         # uvicorn worker (e.g. when --reload restarts it on a .py file change)
         # cascade to the child and kill the training. With it, the child
@@ -593,6 +593,14 @@ class TailingJobRunner:
         with contextlib.suppress(ProcessLookupError):
             os.killpg(self._pid, signal.SIGTERM)
         self._stop_event.set()
+
+    def stop_signalled(self) -> bool:
+        """True once stop() has been called on this runner. Consulted by
+        JobRegistry._tick() when returncode() comes back None: the group TERM
+        in stop() kills the wrapper before it can write an exit status, so a
+        user-requested stop looks identical to an unconfirmed crash/restart
+        unless this is checked."""
+        return self._stop_event.is_set()
 
     def is_running(self) -> bool:
         return _pid_alive(self._pid)
@@ -3329,10 +3337,24 @@ class JobRegistry:
                     # already gets.
                     record.state = "interrupted"
                     if record.error_message is None:
-                        record.error_message = (
-                            "MakerMods Lab restarted while this run was training; its "
-                            "outcome could not be confirmed. Checkpoints on disk are intact."
-                        )
+                        # A user-requested stop of a reattached run also lands
+                        # here with no exit status: stop() group-TERMs the
+                        # wrapper before it can write one. Consult the runner
+                        # so that case doesn't get blamed on a restart that
+                        # never happened.
+                        stop_signalled = getattr(runner, "stop_signalled", None)
+                        if callable(stop_signalled) and stop_signalled():
+                            record.error_message = (
+                                "This run was stopped at your request; its exact exit "
+                                "status could not be confirmed. Any checkpoints on disk "
+                                "are intact."
+                            )
+                        else:
+                            record.error_message = (
+                                "MakerMods Lab restarted while this run was training; its "
+                                "outcome could not be confirmed. Any checkpoints on disk "
+                                "are intact."
+                            )
                 else:
                     record.state = "done" if rc == 0 else "failed"
                 record.ended_at = time.time()
