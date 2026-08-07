@@ -13,6 +13,22 @@
 # limitations under the License.
 
 # This workflow handles linting, formatting, and static analysis checks for the codebase.
+#
+# Deliberately ADVISORY: the pre-commit step carries `continue-on-error`, so a
+# hook failure leaves the run green. Two reasons:
+#   1. GitHub emails the run's actor (the PR author) on every failed run. Quality
+#      is not a required status check — only `Build` from frontend.yml is — so a
+#      red X here was pure notification noise that blocked nothing. A run that
+#      concludes `success` sends no mail; because this is its own workflow run,
+#      silencing it does not touch Tests / Frontend / Lockfile alerts, which stay
+#      loud.
+#   2. Most failures here are auto-fixable formatting nits (end-of-file-fixer,
+#      trailing-whitespace, ruff-format) that `pre-commit install` catches locally
+#      anyway.
+# The failure is not swallowed: the "Report result" step below raises a warning
+# annotation and writes a job summary, so it is visible on the run and the PR
+# without going red. Note this covers the pre-commit step only — an infra failure
+# (checkout, setup-python) still fails the run and still emails, which is correct.
 name: Quality
 permissions:
   contents: read
@@ -47,6 +63,36 @@ jobs:
           python-version: '3.12'
 
       - name: Run pre-commit hooks
+        id: pre-commit
+        continue-on-error: true
         uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd  # v3.0.1
         with:
           extra_args: --all-files --show-diff-on-failure --color=always
+
+      # Surfaces a failure the run no longer reports through its conclusion.
+      # A warning annotation shows on the run page and the PR's checks tab; the
+      # summary block shows on the run's landing page. Neither turns the run red,
+      # so neither triggers the failure email.
+      - name: Report result
+        if: always()
+        env:
+          OUTCOME: ${{ steps.pre-commit.outcome }}
+        run: |
+          if [ "$OUTCOME" = "failure" ]; then
+            echo "::warning title=Quality checks failed (advisory)::pre-commit reported problems. This job does not block the merge — open the 'Run pre-commit hooks' step for the diff, then run 'pre-commit run --all-files' locally."
+            {
+              echo "### :warning: Quality checks failed (advisory)"
+              echo
+              echo "\`pre-commit\` reported problems. This job is intentionally non-blocking, so the run stays green and no failure email is sent — but the code still needs fixing."
+              echo
+              echo "See the **Run pre-commit hooks** step above for the diff. To reproduce and fix locally:"
+              echo
+              echo '```bash'
+              echo 'pre-commit run --all-files'
+              echo '```'
+              echo
+              echo "Install the hooks once with \`pre-commit install\` and these stop reaching CI."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### :white_check_mark: Quality checks passed" >> "$GITHUB_STEP_SUMMARY"
+          fi
