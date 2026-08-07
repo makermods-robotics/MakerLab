@@ -435,6 +435,41 @@ def _build_camera_configs(cameras: dict, default_backend) -> dict:
     return camera_configs
 
 
+def _is_transient_camera_error(msg: str) -> bool:
+    """True when a robot-connect failure is transient camera-session
+    turbulence, curable by a clean re-connect, rather than a real failure.
+
+    An AVCaptureSession opened into another session's asynchronous teardown
+    (e.g. right after a hot-unplug) intermittently comes up wrong —
+    forensically established 2026-07-09:
+      * "failed to set fps=30 (actual_fps=5.0)" — cold-open fps read-back
+      * "do not match configured" — session landed the neighboring native
+        format (e.g. 640x360 instead of 640x480), caught on the later
+        frame-size check
+      * "timed out waiting for frame" — session came up frame-dead (opens
+        fine, background reader never receives a frame)
+
+    NOT included: "failed to set capture_" (width/height mismatch). That
+    string is also produced when a camera simply doesn't support the
+    configured resolution — a permanent misconfiguration, not turbulence —
+    and `utils/errors.py::friendly_hint` already classifies it that way for
+    the operator. Folding it into this retryable set would make the two
+    classifiers disagree about the same string, and burn ~9s retrying a
+    failure that can't succeed (see PR #38 discussion) before showing the
+    operator the correct "click Auto" hint. Don't add it here without first
+    resolving that conflict in `friendly_hint` too.
+    """
+    low = msg.lower()
+    return any(
+        marker in low
+        for marker in (
+            "failed to set fps",
+            "do not match configured",
+            "timed out waiting for frame",
+        )
+    )
+
+
 def create_record_config(request: RecordingRequest) -> RecordConfig:
     """Create a RecordConfig from the recording request"""
     # Convert the frontend camera dict into OpenCVCameraConfig objects. Backend
@@ -1597,23 +1632,7 @@ def record_with_web_events(
             break
         except Exception as e:
             msg = str(e)
-            # Transient camera-session turbulence, all observed on this bench and
-            # all curable by a clean re-connect (an AVCaptureSession opened into
-            # another session's asynchronous teardown intermittently comes up
-            # wrong — forensically established 2026-07-09):
-            #   * "failed to set fps=30 (actual_fps=5.0)" — cold-open fps read-back
-            #   * "do not match configured"   — session landed the neighboring
-            #     native format (e.g. 640x360 instead of 640x480)
-            #   * "timed out waiting for frame" — session came up frame-dead
-            #     (opens fine, background reader never receives a frame)
-            transient_camera = any(
-                marker in msg.lower()
-                for marker in (
-                    "failed to set fps",
-                    "do not match configured",
-                    "timed out waiting for frame",
-                )
-            )
+            transient_camera = _is_transient_camera_error(msg)
             logger.error(f"❌ ROBOT CONNECTION: Failed to connect robot: {e}")
             # If robot connection fails due to camera conflict, provide clear error
             if (
