@@ -205,11 +205,13 @@ current_episode = 1  # Track current episode number
 saved_episodes = 0  # Track how many episodes have been saved
 current_phase = "preparing"  # Track current phase: "preparing", "recording", "resetting", "completed"
 phase_start_time = None  # Track when current phase started
-# Set only while current_phase == "reconnecting_robot" (the backoff sleep
-# between connect retries below); 0 otherwise. Lets the frontend show which
-# retry attempt is in flight ("Camera hiccup, retrying (2/3)…") instead of
-# one static "Connecting arm & cameras…" label for a window that can now run
-# past ten seconds across multiple component-wise teardowns and retries.
+# Set only while current_phase == "reconnecting_robot" (the teardown and
+# backoff sleep between connect retries below); 0 otherwise — including on a
+# successful connect and on the terminal failure, so a reader can treat
+# "connect_retry_attempt > 0" as "a retry is in flight right now". Lets the
+# frontend show which retry attempt that is ("Camera hiccup, retrying (2/3)…")
+# instead of one static "Connecting arm & cameras…" label for a window that
+# can run past ten seconds across multiple component-wise teardowns.
 connect_retry_attempt = 0
 # Total time spent paused during the CURRENT reset phase, credited on resume
 # (see handle_resume_recording). Reset to 0.0 at the start of every new reset
@@ -1685,23 +1687,17 @@ def record_with_web_events(
                 logger.error(
                     "💡 ROBOT CONNECTION: Make sure frontend camera streams are released before recording"
                 )
-            # Drop any half-open handles from this failed attempt so the retry
-            # starts from a clean device — and so a *terminal* failure doesn't
-            # leak the opened bus and camera read threads into the rest of the
-            # process. Must be the component-wise teardown, not
-            # robot.disconnect(): connect() dies with the later cameras still
-            # unopened, and lerobot's all-or-nothing is_connected guard makes
-            # disconnect() a no-op raise in exactly that state (see
-            # force_disconnect_partial).
-            force_disconnect_partial(robot, "robot")
-            if attempt < _CONNECT_ATTEMPTS and transient_camera:
-                # Distinguish the backoff substep from the connect substep so
-                # the UI can show "Camera hiccup, retrying (2/3)…" instead of
-                # one static "Connecting arm & cameras…" label for a window
-                # that (with the teardown above) can now run well past ten
-                # seconds. Logged at INFO through this module's own logger
-                # (already in _RECORD_LOG_LOGGER_NAMES) so it reaches the
-                # visible Record-page log panel, not just the server console.
+            will_retry = attempt < _CONNECT_ATTEMPTS and transient_camera
+            if will_retry:
+                # Enter the retry substep BEFORE the teardown, not after: the
+                # component-wise release below is the slow part (each wedged
+                # camera's disconnect joins a read thread that is waiting out
+                # a frame timeout), so bracketing only the 2s sleep would
+                # leave the operator staring at a static "Connecting arm &
+                # cameras…" for the window this substep exists to explain.
+                # Logged at INFO through this module's own logger (already in
+                # _RECORD_LOG_LOGGER_NAMES) so it reaches the visible
+                # Record-page log panel, not just the server console.
                 current_phase = "reconnecting_robot"
                 # The attempt about to run, not the one that just failed —
                 # same convention as the log line below, so the Record page's
@@ -1713,10 +1709,25 @@ def record_with_web_events(
                     attempt + 1,
                     _CONNECT_ATTEMPTS,
                 )
+            # Drop any half-open handles from this failed attempt so the retry
+            # starts from a clean device — and so a *terminal* failure doesn't
+            # leak the opened bus and camera read threads into the rest of the
+            # process. Must be the component-wise teardown, not
+            # robot.disconnect(): connect() dies with the later cameras still
+            # unopened, and lerobot's all-or-nothing is_connected guard makes
+            # disconnect() a no-op raise in exactly that state (see
+            # force_disconnect_partial).
+            force_disconnect_partial(robot, "robot")
+            if will_retry:
                 # Let the OS release settle past the turbulence window before
                 # re-rolling the connect.
                 time.sleep(2.0)
                 current_phase = "connecting_robot"
+                # Back to a plain connect attempt: keep the "0 unless we are
+                # in reconnecting_robot" contract this field documents, so a
+                # later reader can't mistake a healthy session for a retrying
+                # one.
+                connect_retry_attempt = 0
                 continue
             raise
 
