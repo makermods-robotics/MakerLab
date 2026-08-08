@@ -140,6 +140,28 @@ const useCanEditHub = (repoId: string): boolean => {
   );
 };
 
+/** True when Rename should be offered for `repoId`.
+ *
+ * Rename is an identity mutation the backend refuses outside a namespace the
+ * user can write to, so a downloaded third-party dataset (`lerobot/pusht`)
+ * shouldn't show the button at all — mirroring how the delete flow offers
+ * remove-local-copy for third-party content rather than an identity change.
+ *
+ * Unlike `useCanEditHub` this defaults to TRUE while loading or unauthenticated:
+ * with no Hub identity the namespace can't be judged, and the backend does a
+ * purely local rename in that case, so hiding the button would break renaming
+ * a never-uploaded dataset while logged out. A bare id has no namespace to
+ * disown — it lives under the user's own account. */
+const useCanRename = (repoId: string): boolean => {
+  const { auth } = useHfAuth();
+  if (auth.status !== "authenticated") return true;
+  if (!repoId.includes("/")) return true;
+  const ns = repoId.split("/")[0];
+  return auth.writableNamespaces.some(
+    (n) => n.toLowerCase() === ns.toLowerCase(),
+  );
+};
+
 /** Org/required tags the backend's `with_makermodslab_tag` always re-adds on save, so
  * they can't actually be dropped. Shown as locked, non-removable chips so the
  * UI never implies the user can remove them. Matched case-insensitively. */
@@ -915,6 +937,7 @@ const DatasetInfoCard: React.FC<DatasetInfoCardProps> = ({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<{ notLocal: boolean } | null>(null);
   const [renameOpen, setRenameOpen] = useState(false);
+  const canRename = useCanRename(repoId);
   // Bumped when a Hub-only dataset finishes downloading, to re-run the info
   // fetch (now that the dataset is local, /datasets/info succeeds and the card
   // flips from the Hub-only fallback to the full local detail view).
@@ -994,8 +1017,9 @@ const DatasetInfoCard: React.FC<DatasetInfoCardProps> = ({
                 </div>
                 <div className="-mr-1 -mt-0.5 flex shrink-0 items-center gap-0.5">
                   {/* Rename moves the local directory — meaningless for a
-                      hub-only summary. */}
-                  {!isHubOnly && (
+                      hub-only summary, and refused by the backend outside a
+                      namespace the user owns (see useCanRename). */}
+                  {!isHubOnly && canRename && (
                     <button
                       type="button"
                       onClick={() => setRenameOpen(true)}

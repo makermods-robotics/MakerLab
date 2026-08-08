@@ -21,7 +21,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -474,6 +474,23 @@ def test_hub_status_endpoint(client: TestClient) -> None:
 # --- Rename -----------------------------------------------------------------
 
 
+def _whoami(name: str, orgs: list[tuple[str, str]] | None = None) -> dict:
+    """A whoami payload. `orgs` entries are ``(name, roleInGroup)`` — the role
+    is what decides whether the org counts as a writable namespace."""
+    return {"name": name, "orgs": [{"name": n, "roleInGroup": r} for n, r in (orgs or [])]}
+
+
+def _signed_in_as(name: str = "makermods", orgs: list[tuple[str, str]] | None = None):
+    """Pin the Hub identity the rename path resolves ownership against.
+
+    Rename gates on cached_whoami, so every rename test states its identity
+    rather than inheriting whatever HF token the machine running the suite
+    happens to have — otherwise the ownership branch taken would vary by
+    developer laptop.
+    """
+    return patch("makermodslab.datasets.cached_whoami", return_value=_whoami(name, orgs))
+
+
 def test_rename_local_dataset_moves_directory(tmp_lerobot_home: Path) -> None:
     """Happy path: the directory moves, only the name segment changes, and the
     returned repo id carries the fixed namespace prefix. Not on the Hub, so no
@@ -484,7 +501,10 @@ def test_rename_local_dataset_moves_directory(tmp_lerobot_home: Path) -> None:
 
     fake_api = MagicMock()
     fake_api.repo_exists.return_value = False
-    with patch("makermodslab.datasets.shared_hf_api", return_value=fake_api):
+    with (
+        _signed_in_as(),
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+    ):
         new_id = rename_local_dataset("makermods/old_name", "new_name")
 
     assert new_id == "makermods/new_name"
@@ -504,7 +524,10 @@ def test_rename_endpoint_old_id_404s_new_id_resolves(client: TestClient, tmp_ler
 
     fake_api = MagicMock()
     fake_api.repo_exists.return_value = False
-    with patch("makermodslab.datasets.shared_hf_api", return_value=fake_api):
+    with (
+        _signed_in_as(),
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+    ):
         resp = client.post(
             "/datasets/rename",
             json={"repo_id": "makermods/pick", "new_name": "place"},
@@ -526,7 +549,10 @@ def test_rename_bare_dataset_keeps_no_namespace(tmp_lerobot_home: Path) -> None:
     _make_dataset(tmp_lerobot_home, "solo", episodes=1)
     fake_api = MagicMock()
     fake_api.repo_exists.return_value = False
-    with patch("makermodslab.datasets.shared_hf_api", return_value=fake_api):
+    with (
+        _signed_in_as(),
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+    ):
         assert rename_local_dataset("solo", "solo2") == "solo2"
     assert (tmp_lerobot_home / "solo2" / "meta" / "info.json").is_file()
 
@@ -674,6 +700,7 @@ def test_rename_invalidates_hub_status_for_both_ids(tmp_lerobot_home: Path) -> N
     fake_api = MagicMock()
     fake_api.repo_exists.return_value = False
     with (
+        _signed_in_as(),
         patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
         patch("makermodslab.datasets.invalidate_hub_status") as inval,
     ):
@@ -695,7 +722,10 @@ def test_rename_moves_hub_repo_when_dataset_is_on_hub(tmp_lerobot_home: Path) ->
 
     fake_api = MagicMock()
     fake_api.repo_exists.side_effect = lambda repo_id, repo_type: repo_id == "makermods/old_name"
-    with patch("makermodslab.datasets.shared_hf_api", return_value=fake_api):
+    with (
+        _signed_in_as(),
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+    ):
         new_id = rename_local_dataset("makermods/old_name", "new_name")
 
     assert new_id == "makermods/new_name"
@@ -716,6 +746,7 @@ def test_rename_new_name_taken_on_hub_409s_before_any_move(tmp_lerobot_home: Pat
     fake_api = MagicMock()
     fake_api.repo_exists.return_value = True  # both old and new names exist on the Hub
     with (
+        _signed_in_as(),
         patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
         pytest.raises(DatasetRenameError) as exc,
     ):
@@ -738,6 +769,7 @@ def test_rename_hub_failure_blocks_local_rename(tmp_lerobot_home: Path) -> None:
     fake_api.repo_exists.side_effect = lambda repo_id, repo_type: repo_id == "makermods/old_name"
     fake_api.move_repo.side_effect = Exception("403 Forbidden: no write access")
     with (
+        _signed_in_as(),
         patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
         pytest.raises(DatasetRenameError) as exc,
     ):
@@ -757,6 +789,7 @@ def test_rename_skips_hub_check_when_offline(tmp_lerobot_home: Path) -> None:
 
     fake_api = MagicMock()
     with (
+        _signed_in_as(),
         patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
         patch("makermodslab.datasets.hf_hub_offline", return_value=True),
     ):
@@ -778,6 +811,7 @@ def test_rename_hub_status_check_failure_502s(tmp_lerobot_home: Path) -> None:
     fake_api = MagicMock()
     fake_api.repo_exists.side_effect = OSError("no network")
     with (
+        _signed_in_as(),
         patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
         pytest.raises(DatasetRenameError) as exc,
     ):
@@ -785,6 +819,199 @@ def test_rename_hub_status_check_failure_502s(tmp_lerobot_home: Path) -> None:
 
     assert exc.value.status == 502
     assert (tmp_lerobot_home / "makermods" / "old_name").exists()
+    # The escape hatch has to be discoverable from the error itself — a user in
+    # the field with a flaky connection can't act on "try again" alone.
+    assert "HF_HUB_OFFLINE" in exc.value.message
+
+
+# --- Rename: ownership gate ---------------------------------------------
+
+
+def test_rename_third_party_dataset_403s_without_touching_the_hub(
+    tmp_lerobot_home: Path,
+) -> None:
+    """THE REGRESSION TEST for the case the Hub-sync change let through: a
+    downloaded third-party dataset (`lerobot/pusht`) has a local copy, so the
+    card offers Rename, and repo_exists would say True — but move_repo in
+    someone else's namespace can never succeed. Refuse it up front with a clean
+    403 and no Hub round-trips at all, rather than dying on the Hub's own 403.
+    """
+    from makermodslab.datasets import DatasetRenameError, rename_local_dataset
+
+    _make_dataset(tmp_lerobot_home, "lerobot/pusht", episodes=1)
+
+    fake_api = MagicMock()
+    with (
+        _signed_in_as("makermods"),
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+        pytest.raises(DatasetRenameError) as exc,
+    ):
+        rename_local_dataset("lerobot/pusht", "mine")
+
+    assert exc.value.status == 403
+    assert "lerobot" in exc.value.message
+    fake_api.repo_exists.assert_not_called()
+    fake_api.move_repo.assert_not_called()
+    assert (tmp_lerobot_home / "lerobot" / "pusht").exists()
+    assert not (tmp_lerobot_home / "lerobot" / "mine").exists()
+
+
+def test_rename_allows_write_role_org_namespace(tmp_lerobot_home: Path) -> None:
+    """Ownership isn't just the username: an org the user has write access to
+    is renameable, and its Hub copy moves like any other."""
+    from makermodslab.datasets import rename_local_dataset
+
+    _make_dataset(tmp_lerobot_home, "myorg/pick", episodes=1)
+
+    fake_api = MagicMock()
+    fake_api.repo_exists.side_effect = lambda repo_id, repo_type: repo_id == "myorg/pick"
+    with (
+        _signed_in_as("makermods", orgs=[("myorg", "write")]),
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+    ):
+        assert rename_local_dataset("myorg/pick", "place") == "myorg/place"
+
+    fake_api.move_repo.assert_called_once_with("myorg/pick", "myorg/place", repo_type="dataset")
+
+
+def test_rename_refuses_read_only_org_namespace(tmp_lerobot_home: Path) -> None:
+    """A read-role org is NOT writable, so the Hub move would 403. Refuse it in
+    the same clean way as a third-party namespace — and refuse it identically
+    to how the frontend's writable-namespace gate hides the button, so the UI
+    and the backend can't disagree about what's renameable."""
+    from makermodslab.datasets import DatasetRenameError, rename_local_dataset
+
+    _make_dataset(tmp_lerobot_home, "readonlyorg/pick", episodes=1)
+
+    fake_api = MagicMock()
+    with (
+        _signed_in_as("makermods", orgs=[("readonlyorg", "read")]),
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+        pytest.raises(DatasetRenameError) as exc,
+    ):
+        rename_local_dataset("readonlyorg/pick", "place")
+
+    assert exc.value.status == 403
+    fake_api.repo_exists.assert_not_called()
+
+
+def test_rename_namespace_ownership_is_case_insensitive(tmp_lerobot_home: Path) -> None:
+    """The namespace comes from a local directory name, whoami's casing is the
+    Hub's — comparing them case-sensitively would refuse the user's own data."""
+    from makermodslab.datasets import rename_local_dataset
+
+    _make_dataset(tmp_lerobot_home, "MakerMods/pick", episodes=1)
+
+    fake_api = MagicMock()
+    fake_api.repo_exists.return_value = False
+    with (
+        _signed_in_as("makermods"),
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+    ):
+        assert rename_local_dataset("MakerMods/pick", "place") == "MakerMods/place"
+
+
+def test_rename_bare_id_syncs_hub_copy_under_the_users_namespace(
+    tmp_lerobot_home: Path,
+) -> None:
+    """A locally-RECORDED dataset has a bare id, but its uploaded Hub copy lives
+    at `<username>/<name>`. Qualifying the bare id for the Hub check and move is
+    what keeps the recorded-then-uploaded dataset — the common case — from
+    skipping Hub sync and recreating the stale-Hub-name bug. The local path and
+    the returned id stay bare."""
+    from makermodslab.datasets import rename_local_dataset
+
+    _make_dataset(tmp_lerobot_home, "pick", episodes=1)
+
+    fake_api = MagicMock()
+    fake_api.repo_exists.side_effect = lambda repo_id, repo_type: repo_id == "makermods/pick"
+    with (
+        _signed_in_as("makermods"),
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+    ):
+        assert rename_local_dataset("pick", "place") == "place"
+
+    fake_api.move_repo.assert_called_once_with("makermods/pick", "makermods/place", repo_type="dataset")
+    assert (tmp_lerobot_home / "place" / "meta" / "info.json").is_file()
+    assert not (tmp_lerobot_home / "pick").exists()
+
+
+def test_rename_without_a_token_skips_the_hub_and_renames_locally(
+    tmp_lerobot_home: Path,
+) -> None:
+    """No HF token: there's no identity to resolve ownership against and no
+    credential to move a repo with, so the Hub is skipped entirely and the
+    local rename still works — the logged-out, never-uploaded case must not
+    start failing on a Hub error it can do nothing about."""
+    from makermodslab.datasets import rename_local_dataset
+
+    _make_dataset(tmp_lerobot_home, "makermods/old_name", episodes=1)
+
+    fake_api = MagicMock()
+    with (
+        patch("makermodslab.datasets.cached_whoami", return_value=None),
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+    ):
+        assert rename_local_dataset("makermods/old_name", "new_name") == "makermods/new_name"
+
+    fake_api.repo_exists.assert_not_called()
+    fake_api.move_repo.assert_not_called()
+    assert (tmp_lerobot_home / "makermods" / "new_name" / "meta" / "info.json").is_file()
+
+
+# --- Rename: local-failure rollback -------------------------------------
+
+
+def test_rename_rolls_the_hub_back_when_the_local_move_fails(
+    tmp_lerobot_home: Path,
+) -> None:
+    """The Hub moves first, so a failing os.rename leaves the two copies
+    diverged. Undo the one step that landed: a best-effort reverse move_repo
+    restores sync instead of stranding the user mid-rename."""
+    from makermodslab.datasets import DatasetRenameError, rename_local_dataset
+
+    _make_dataset(tmp_lerobot_home, "makermods/old_name", episodes=1)
+
+    fake_api = MagicMock()
+    fake_api.repo_exists.side_effect = lambda repo_id, repo_type: repo_id == "makermods/old_name"
+    with (
+        _signed_in_as(),
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+        patch("makermodslab.datasets.os.rename", side_effect=OSError("disk full")),
+        pytest.raises(DatasetRenameError) as exc,
+    ):
+        rename_local_dataset("makermods/old_name", "new_name")
+
+    assert exc.value.status == 500
+    assert fake_api.move_repo.call_args_list == [
+        call("makermods/old_name", "makermods/new_name", repo_type="dataset"),
+        call("makermods/new_name", "makermods/old_name", repo_type="dataset"),
+    ]
+
+
+def test_rename_logs_divergence_when_the_hub_rollback_also_fails(
+    tmp_lerobot_home: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """When the rollback itself fails there's nothing left to try, so the
+    divergence has to be loud — someone has to reconcile it by hand."""
+    from makermodslab.datasets import DatasetRenameError, rename_local_dataset
+
+    _make_dataset(tmp_lerobot_home, "makermods/old_name", episodes=1)
+
+    fake_api = MagicMock()
+    fake_api.repo_exists.side_effect = lambda repo_id, repo_type: repo_id == "makermods/old_name"
+    fake_api.move_repo.side_effect = [None, Exception("hub down")]
+    with (
+        _signed_in_as(),
+        patch("makermodslab.datasets.shared_hf_api", return_value=fake_api),
+        patch("makermodslab.datasets.os.rename", side_effect=OSError("disk full")),
+        caplog.at_level(logging.ERROR, logger="makermodslab.datasets"),
+        pytest.raises(DatasetRenameError),
+    ):
+        rename_local_dataset("makermods/old_name", "new_name")
+
+    assert "out of sync" in caplog.text
 
 
 # --- Hub visibility / tags editing (post-upload) ----------------------------
