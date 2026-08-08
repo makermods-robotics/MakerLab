@@ -748,11 +748,13 @@ class DatasetRenameBody(BaseModel):
 
 @app.post("/datasets/rename")
 def datasets_rename(body: DatasetRenameBody):
-    """Rename a locally-cached dataset by moving its directory.
+    """Rename a locally-cached dataset by moving its directory, and its Hub
+    copy (if any) to match.
 
     `new_name` is the NAME PART ONLY — the namespace prefix stays fixed, so
     `ns/old` renamed to `new` becomes `ns/new`. Refuses (409) if the dataset is
-    being recorded, merged, or trained on locally. Returns the new repo_id.
+    being recorded, merged, or trained on locally, or if the new name is
+    already taken (locally or on the Hub). Returns the new repo_id.
     """
     try:
         new_repo_id = dataset_browser.rename_local_dataset(body.repo_id, body.new_name)

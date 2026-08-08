@@ -100,6 +100,26 @@ def invalidate_whoami_cache() -> None:
     _WHOAMI_API._whoami_cache.clear()
 
 
+def writable_namespaces(info: dict) -> list[str]:
+    """Namespaces the `whoami` payload's user can push a NEW repo to: their own
+    account plus every org whose role grants write access.
+
+    The single source of truth for that set. `/hf-auth-status` ships it to the
+    frontend to gate buttons, and the server-side ownership gates resolve
+    against the same helper — computing it twice is how a button that the
+    backend refuses ends up rendered anyway.
+    """
+    return [info["name"]] + [o["name"] for o in info.get("orgs", []) if o.get("roleInGroup") in WRITE_ROLES]
+
+
+def owns_namespace(info: dict, namespace: str) -> bool:
+    """True when `namespace` is one the user can write to. Case-insensitive:
+    Hub namespaces are compared case-insensitively, and the id a caller passes
+    in comes from a local directory name that may not match whoami's casing."""
+    ns = namespace.lower()
+    return any(n.lower() == ns for n in writable_namespaces(info))
+
+
 def handle_hf_auth_status() -> dict:
     try:
         info = whoami()
@@ -111,8 +131,7 @@ def handle_hf_auth_status() -> dict:
             # Namespaces the user can push a NEW dataset to: their own account
             # plus any org where their role grants write access. Consumed by the
             # frontend to gate each dataset row's "Upload to Hub" button.
-            "writable_namespaces": [info["name"]]
-            + [o["name"] for o in orgs if o.get("roleInGroup") in WRITE_ROLES],
+            "writable_namespaces": writable_namespaces(info),
             "login_command": LOGIN_COMMAND,
         }
     except (LocalTokenNotFoundError, HfHubHTTPError, OSError) as e:
