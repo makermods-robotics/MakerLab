@@ -1,5 +1,4 @@
 import React, { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -17,6 +16,7 @@ import {
   jobDisplayName,
   renameJob,
 } from "@/lib/jobsApi";
+import { runTaskTitle } from "@/lib/modelNames";
 import {
   Square,
   Trash2,
@@ -39,7 +39,12 @@ import DisplayName from "@/components/library/DisplayName";
 import { useApi } from "@/contexts/ApiContext";
 import { useStudio } from "@/contexts/StudioContext";
 import { useToast } from "@/hooks/use-toast";
-import { JobCheckpoint, listJobCheckpoints } from "@/lib/checkpointsApi";
+import {
+  JobCheckpoint,
+  dedupeCheckpointEntries,
+  listJobCheckpoints,
+} from "@/lib/checkpointsApi";
+import { buildResumeSeed } from "./resumeSeed";
 import CheckpointDropdown from "@/components/jobs/CheckpointDropdown";
 import PolicyExtraDialog from "@/components/training/PolicyExtraDialog";
 
@@ -97,7 +102,6 @@ const JobCard: React.FC<Props> = ({
   onRenamed,
   ancestors = [],
 }) => {
-  const navigate = useNavigate();
   const { baseUrl, fetchWithHeaders } = useApi();
   const { toast } = useToast();
   const { openStudio, openJobMonitor } = useStudio();
@@ -111,6 +115,13 @@ const JobCard: React.FC<Props> = ({
   // Alias-aware display name; the true identity (run id / hub repo id) stays
   // visible as muted subtext when an alias is set.
   const displayName = jobDisplayName(job);
+  // What the title line RENDERS: a generated run name peeled to the task it
+  // learned. The policy is already on the Policy meta row below and the dataset
+  // on its own, so the widest line stops repeating them. Everything else on
+  // this card keeps `displayName` — the rename dialog prefills and compares
+  // against what the run is really called, never the peeled label — and the
+  // title's hover reveals it too (DisplayName's `full`).
+  const taskTitle = runTaskTitle(displayName);
   const importedSource = job.hf_repo_id || job.output_dir;
   const stateLabel = isImported ? "Imported" : present.label;
   const isStarting = isRunning && job.metrics.total_steps === 0;
@@ -139,7 +150,9 @@ const JobCard: React.FC<Props> = ({
   const [lineageCheckpoints, setLineageCheckpoints] = useState<
     { job: JobRecord; ckpt: JobCheckpoint }[]
   >([]);
-  const [selectedStep, setSelectedStep] = useState<number | null>(null);
+  // Selection is keyed on the checkpoint `ref` (its unique identity), not the
+  // step — a lineage can hold two distinct checkpoints with the same step.
+  const [selectedRef, setSelectedRef] = useState<string | null>(null);
   // Set on a failed run whose policy needs a lerobot extra that's still missing
   // — the likely cause. Offers the same one-click install as the training form.
   const [missingExtra, setMissingExtra] = useState<{
@@ -202,7 +215,7 @@ const JobCard: React.FC<Props> = ({
     const lineage = [job, ...ancestors].filter((j) => j.checkpoint_count > 0);
     if (lineage.length === 0) {
       setLineageCheckpoints([]);
-      setSelectedStep(null);
+      setSelectedRef(null);
       return;
     }
     let cancelled = false;
@@ -214,12 +227,20 @@ const JobCard: React.FC<Props> = ({
       ),
     ).then((results) => {
       if (cancelled) return;
-      const combined = results.flat().sort((a, b) => b.ckpt.step - a.ckpt.step);
+      // Flat-merge, then collapse duplicates: a cloud resume reuses its
+      // parent's output repo, so parent and child both enumerate the same Hub
+      // checkpoint tree and every inherited step would otherwise appear
+      // twice. Lineage order puts this run's list before its ancestors' and
+      // the sort is stable for equal steps, so the surviving entry of a
+      // duplicate pair is tagged with the nearest (child) run.
+      const combined = dedupeCheckpointEntries(
+        results.flat().sort((a, b) => b.ckpt.step - a.ckpt.step),
+      );
       setLineageCheckpoints(combined);
-      setSelectedStep((prev) =>
-        prev != null && combined.some((c) => c.ckpt.step === prev)
+      setSelectedRef((prev) =>
+        prev != null && combined.some((c) => c.ckpt.ref === prev)
           ? prev
-          : (combined[0]?.ckpt.step ?? null),
+          : (combined[0]?.ckpt.ref ?? null),
       );
     });
     return () => {
@@ -304,10 +325,12 @@ const JobCard: React.FC<Props> = ({
   };
 
   // The selected checkpoint may belong to this run or an inherited source run;
-  // route inference/continue to whichever run owns it.
+  // route inference/continue to whichever run owns it. Resolved by ref, so
+  // same-step checkpoints from different runs can't be confused.
   const selected =
-    lineageCheckpoints.find((c) => c.ckpt.step === selectedStep) ?? null;
+    lineageCheckpoints.find((c) => c.ckpt.ref === selectedRef) ?? null;
   const selectedJob = selected?.job ?? job;
+  const selectedStep = selected?.ckpt.step ?? null;
   // Flat list for the dropdown (already newest-first).
   const checkpoints = lineageCheckpoints.map((c) => c.ckpt);
 
@@ -354,39 +377,40 @@ const JobCard: React.FC<Props> = ({
     selectedStep != null &&
     endedBeforeTarget;
 
+  // No dialog and no route jump: continuing opens the Train panel's
+  // "Start a new training" form in resume mode, seeded from this run and the
+  // dropdown's checkpoint — the same in-place flow Fine-tune already uses,
+  // rather than navigating away to /training and losing the studio.
+  //
   // The configurator PREFILLS from this seed, then renders read-only the
   // settings lerobot rebuilds from the checkpoint anyway (batch size, seed,
   // device, optimizer, AMP). Steps, the log/save cadence, the worker count,
   // the cloud flavor and the timeout stay editable — those a continuation can
-  // really change.
-  const goToResume = (runner: "local" | "hf_cloud") => {
+  // really change, and so is the runner it continues ON (F7's cross-runner
+  // resume).
+  //
+  // The payload itself comes from the ONE shared builder (buildResumeSeed), so
+  // this and the library's row-level quick-resume can no longer drift. The
+  // parent's runner is derived there from the job rather than passed in: local
+  // Continue is gated on canContinue and cloud Resume on canResumeCloud, both
+  // of which already require selectedJob.runner to match, so a caller-supplied
+  // runner could only ever disagree by mistake. Where the continuation RUNS is
+  // then the form's choice, not this call site's.
+  const goToResume = () => {
     if (selectedStep == null) return;
-    navigate("/training", {
-      state: {
-        resume: {
-          jobId: selectedJob.id,
-          step: selectedStep,
-          name: jobDisplayName(selectedJob),
-          datasetRepoId: selectedJob.config.dataset_repo_id,
-          policyType: selectedJob.config.policy_type,
-          sourceSteps: selectedJob.config.steps,
-          logFreq: selectedJob.config.log_freq,
-          saveFreq: selectedJob.config.save_freq,
-          runner,
-          flavor: runner === "hf_cloud" ? (selectedJob.hf_flavor ?? undefined) : undefined,
-        },
-      },
+    openStudio("train", {
+      train: { resume: buildResumeSeed(selectedJob, selectedStep) },
     });
   };
 
   const handleContinue = (e: React.MouseEvent) => {
     e.stopPropagation();
-    goToResume("local");
+    goToResume();
   };
 
   const handleResumeCloud = (e: React.MouseEvent) => {
     e.stopPropagation();
-    goToResume("hf_cloud");
+    goToResume();
   };
 
   // Fine-tune: start a FRESH run whose weights are initialized from this
@@ -580,7 +604,8 @@ const JobCard: React.FC<Props> = ({
         </div>
         <div>
           <DisplayName
-            name={displayName}
+            name={taskTitle}
+            full={displayName}
             className="text-foreground font-semibold"
           />
           {/* When aliased, keep the true identity visible: the run id for
@@ -629,8 +654,8 @@ const JobCard: React.FC<Props> = ({
               <div className="min-w-0 flex-1">
                 <CheckpointDropdown
                   checkpoints={checkpoints}
-                  selectedStep={selectedStep}
-                  onChange={setSelectedStep}
+                  selectedRef={selectedRef}
+                  onChange={(c) => setSelectedRef(c.ref)}
                   className="w-full min-w-0"
                 />
               </div>
