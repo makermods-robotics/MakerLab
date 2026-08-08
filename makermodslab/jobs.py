@@ -172,9 +172,23 @@ class JobRunner(Protocol):
 # tqdm progress: "Training:   1%|▏         | 125/10000 [02:02<2:36:10,  1.05step/s]"
 _TQDM_RE = re.compile(r"Training:\s*\d+%[^|]*\|[^|]*\|\s*(\d+)/(\d+)\s*\[(?:[\d:]+)<([\d:]+)")
 
-# Wandb prints something like "wandb: 🚀 View run at https://wandb.ai/<entity>/<project>/runs/<id>"
-# when it boots. We capture the first URL of that shape we see.
-_WANDB_URL_RE = re.compile(r"https://wandb\.ai/[^\s/]+/[^\s/]+/runs/[A-Za-z0-9]+")
+# The W&B run URL, as LEROBOT prints it — not as wandb does. lerobot's
+# WandBLogger sets WANDB_SILENT=True before importing wandb (wandb_utils.py),
+# which suppresses wandb's own "wandb: 🚀 View run at …" banner entirely, so
+# the only line carrying the URL is lerobot's own:
+#
+#   logging.info(f"Track this run --> {colored(wandb.run.get_url(), 'yellow', attrs=['bold'])}")
+#
+# `colored` wraps the URL in ANSI SGR codes when the stream looks colourable
+# ("Track this run --> \x1b[33m\x1b[1mhttps://…\x1b[0m") and leaves it bare
+# otherwise, so this matches the URL SHAPE anywhere in the line rather than the
+# sentence around it: the escape prefix sits before "https" and the reset is
+# excluded by the run-id character class, so one pattern covers both forms.
+#
+# wandb.ai only, deliberately. A self-hosted W&B prints a URL on some other
+# host and simply yields no link — which is the same "no URL" outcome as
+# offline/disabled mode, and is never treated as an error.
+_WANDB_URL_RE = re.compile(r"https://wandb\.ai/[^\s/]+/[^\s/]+/runs/[A-Za-z0-9_-]+")
 
 # Name of the file LocalJobRunner's subprocess wrapper writes the trainer's
 # real exit status to, relative to the run's output_dir. TailingJobRunner
@@ -2143,7 +2157,13 @@ class JobRegistry:
         return record
 
     def start(self, config: TrainingRequest, target: JobTarget | None = None) -> JobRecord:
-        from .runners.hf_cloud import HfCloudJobRunner  # lazy import to avoid circular import
+        # Lazy, and the ONE import site in this method: runners.hf_cloud imports
+        # from this module, so a module-level import would close the cycle.
+        from .runners.hf_cloud import (  # lazy import to avoid circular import
+            WANDB_KEY_MISSING_MESSAGE,
+            HfCloudJobRunner,
+            resolve_wandb_api_key,
+        )
 
         target = target or JobTarget()
         if target.runner == "hf_cloud" and not target.flavor:
@@ -2276,6 +2296,30 @@ class JobRegistry:
                             "continuation would train at the schedule's floor. Fine-tune from "
                             "its final checkpoint instead."
                         )
+                    # W&B state is INHERITED, never form-decided. lerobot
+                    # resumes with `wandb.init(resume="must")` using the run id
+                    # in the checkpoint's train_config.json (wandb_utils.py), so
+                    # a continuation always re-opens the PARENT's W&B run:
+                    # turning W&B on for a resume of a non-W&B parent is not a
+                    # thing lerobot can do, and turning it off for a W&B parent
+                    # is the only other lever. Copying the parent's settings
+                    # here — under the lock that resolved `source`, before the
+                    # record exists — makes the persisted config describe the
+                    # run's real shape and gives the credential preflight below
+                    # the true value to check.
+                    #
+                    # Runner-blind: a continuation that crosses runners in
+                    # either direction (F7) keeps logging to the parent's W&B
+                    # run, because that run is identified by the checkpoint, not
+                    # by where the trainer happens to execute.
+                    #
+                    # Only enable/project/entity. mode/notes/disable_artifact
+                    # are NOT copied because they are not sent either — the
+                    # resume branch emits no flags for them and lerobot rebuilds
+                    # them from the checkpoint's own train_config.json.
+                    config.wandb_enable = source.config.wandb_enable
+                    config.wandb_project = source.config.wandb_project
+                    config.wandb_entity = source.config.wandb_entity
                     # A resume may continue on EITHER runner (F7). What changes
                     # across the four combinations is only where the parent's
                     # checkpoint has to end up before the trainer can read it —
@@ -2345,6 +2389,33 @@ class JobRegistry:
                         '"Continue" on a local run that stopped short of its step '
                         "target rather than toggling resume manually."
                     )
+
+            # W&B credentials, THE authoritative preflight (MT40). Applies to
+            # BOTH runners: W&B needs a key wherever it runs, and neither runner
+            # can ask for one once it has started.
+            #
+            #   * cloud — the key is forwarded into the pod as a job secret;
+            #     without it the trainer dies inside a billed GPU container.
+            #   * local — the trainer is a subprocess with no tty, so
+            #     `wandb.init` cannot prompt for a login and simply fails,
+            #     AFTER the record already says `running`.
+            #
+            # Deliberately here: after the resume block, so it reads the
+            # INHERITED `wandb_enable` rather than whatever the form sent, and
+            # before the first line below that has a side effect — no job
+            # record, no output directory, no dataset push
+            # (HfCloudJobRunner._ensure_dataset_on_hub runs later still), no
+            # local subprocess, and crucially none of the deferred threads
+            # (_upload_resume_then_start / _materialize_then_start), which
+            # return 201 and would turn this refusal into a FAILED JOB the user
+            # has to go read logs for instead of a message on the button they
+            # just pressed.
+            #
+            # The original MT40 defect was exactly this check being absent on
+            # the resume path: a W&B-enabled parent resumed on the cloud with no
+            # key, and died inside a billed GPU container.
+            if config.wandb_enable and not resolve_wandb_api_key():
+                raise ValueError(WANDB_KEY_MISSING_MESSAGE)
 
             job_id = self._unique_job_id(config.policy_type, config.dataset_repo_id)
             job_dir = _job_dir(self._output_root, job_id)
